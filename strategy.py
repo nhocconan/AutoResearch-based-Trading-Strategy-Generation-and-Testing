@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 1D_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Daily breakouts above/below weekly Camarilla R1/S1 levels with weekly trend filter and volume confirmation.
-# Weekly trend avoids counter-trend trades; volume confirms breakout strength.
-# Works in bull (breakouts continue) and bear (fades at weekly resistance/support).
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_V2
+# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
+# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
+# Key improvements: Added volatility filter (ATR-based) to avoid choppy markets, tightened volume confirmation,
+# and improved exit logic to reduce whipsaw.
 
-name = "1D_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_V2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,69 +25,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly Camarilla levels: R1, S1 based on previous week
-    typical_price = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    camarilla_r1 = close_1w + (range_1w * 1.1 / 12)
-    camarilla_s1 = close_1w - (range_1w * 1.1 / 12)
+    # Calculate Camarilla levels for 1d: R1, S1 based on previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    # Camarilla R1 = close + (range * 1.1/12)
+    # Camarilla S1 = close - (range * 1.1/12)
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Weekly trend: EMA(34) on weekly close
-    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_1w > ema_34
+    # 1d trend: EMA(34) on close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema_34
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average (tightened from 1.5x)
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    volume_confirm = volume > (volume_avg * 2.0)
     
-    # Align weekly indicators to daily
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
+    # Volatility filter: Avoid trading when ATR is too low (choppy market)
+    # Calculate ATR(14) on 12h data
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Only trade when ATR is above its 50-period average (avoid low volatility)
+    atr_avg = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr > (atr_avg * 0.5)  # Trade only when volatility is at least 50% of average
+    
+    # Align 1d indicators to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    volatility_filter_aligned = align_htf_to_ltf(prices, df_1d, volatility_filter)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(trend_up_aligned[i]):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(trend_up_aligned[i]) or np.isnan(volatility_filter_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly Camarilla R1 + weekly uptrend + volume confirmation
-            if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation + volatility filter
+            if (close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and 
+                volume_confirm[i] and volatility_filter_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly Camarilla S1 + weekly downtrend + volume confirmation
-            elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation + volatility filter
+            elif (close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and 
+                  volume_confirm[i] and volatility_filter_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below weekly Camarilla S1 (reversal) or trend changes
-            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes or volatility drops
+            if (close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i] or 
+                not volatility_filter_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above weekly Camarilla R1 (reversal) or trend changes
-            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
+            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes or volatility drops
+            if (close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i] or 
+                not volatility_filter_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
