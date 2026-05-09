@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Triangular Moving Average (TMA) Crossover with Daily Volatility Filter and Volume Spike
-# Uses TMA(21) crossover for trend changes, daily ATR-based volatility filter to avoid low-volatility chop,
-# and volume spike for confirmation. Designed for 12-37 trades/year to avoid fee drag.
-# Works in trending markets via crossover signals and avoids false signals in low volatility.
-name = "12h_TMA_Crossover_DailyVol_Filter_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Volume-Weighted Average Price (VWAP) Deviation with Daily Trend Filter
+# Uses VWAP deviation for mean reversion in ranging markets, aligned with daily trend.
+# In bull/bear markets: follow daily trend when price deviates from VWAP with volume confirmation.
+# Designed for 20-50 trades/year to avoid fee drag. Works in all regimes.
+name = "4h_VWAP_Deviation_DailyTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,26 +21,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility filter (ATR)
+    # Get daily data for trend filter
     df_daily = get_htf_data(prices, '1d')
     if len(df_daily) < 30:
         return np.zeros(n)
     
-    # Daily ATR(14) for volatility filter
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
-    tr1 = high_daily - low_daily
-    tr2 = np.abs(high_daily - np.roll(close_daily, 1))
-    tr3 = np.abs(low_daily - np.roll(close_daily, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr14_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_12h = align_htf_to_ltf(prices, df_daily, atr14_daily)
+    # Daily EMA34 for trend filter
+    ema34_daily = pd.Series(df_daily['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_daily, ema34_daily)
     
-    # 12h TMA(21) for trend - Double SMOOTHED SMA
-    sma1 = pd.Series(close).rolling(window=21, min_periods=21).mean().values
-    tma21 = pd.Series(sma1).rolling(window=21, min_periods=21).mean().values
+    # Typical price for VWAP calculation
+    typical_price = (high + low + close) / 3.0
+    
+    # VWAP calculation (typical price * volume) / cumulative volume
+    pv = typical_price * volume
+    cum_pv = np.nancumsum(pv)
+    cum_vol = np.nancumsum(volume)
+    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
+    vwap_4h = align_htf_to_ltf(prices, pd.DataFrame({'vwap': vwap}, index=prices.index[:len(vwap)]), vwap)
+    
+    # VWAP deviation as percentage
+    vwap_dev = (close - vwap_4h) / vwap_4h * 100
+    
+    # 20-period standard deviation of VWAP deviation for volatility normalization
+    vwap_dev_ma = pd.Series(vwap_dev).rolling(window=20, min_periods=20).mean().values
+    vwap_dev_std = pd.Series(vwap_dev).rolling(window=20, min_periods=20).std().values
+    
+    # Z-score of VWAP deviation
+    vwap_zscore = np.divide((vwap_dev - vwap_dev_ma), vwap_dev_std, out=np.zeros_like(vwap_dev), where=vwap_dev_std!=0)
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -48,43 +56,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 41  # max(21+21-1, 14, 20)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tma21[i]) or np.isnan(atr14_12h[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema34_4h[i]) or np.isnan(vwap_zscore[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: only trade when volatility is above average
-        vol_filter = atr14_12h[i] > np.nanmedian(atr14_12h[max(0, i-100):i+1])
-        
-        # Volume condition: current volume > 2.0 x 20-period average
-        vol_spike = volume[i] > vol_avg[i] * 2.0
+        # Volume condition: current volume > 1.5 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 1.5
         
         if position == 0:
-            # Long: TMA turning up with volatility filter and volume spike
-            if tma21[i] > tma21[i-1] and vol_filter and vol_spike:
+            # Long: VWAP deviation < -1.5 (oversold) with daily uptrend and volume spike
+            if vwap_zscore[i] < -1.5 and close[i] > ema34_4h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: TMA turning down with volatility filter and volume spike
-            elif tma21[i] < tma21[i-1] and vol_filter and vol_spike:
+            # Short: VWAP deviation > 1.5 (overbought) with daily downtrend and volume spike
+            elif vwap_zscore[i] > 1.5 and close[i] < ema34_4h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TMA turning down OR volatility drops below average
-            if tma21[i] < tma21[i-1] or not vol_filter:
+            # Exit long: VWAP deviation > -0.5 (mean reversion) OR daily trend turns down
+            if vwap_zscore[i] > -0.5 or close[i] < ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TMA turning up OR volatility drops below average
-            if tma21[i] > tma21[i-1] or not vol_filter:
+            # Exit short: VWAP deviation < 0.5 (mean reversion) OR daily trend turns up
+            if vwap_zscore[i] < 0.5 or close[i] > ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
