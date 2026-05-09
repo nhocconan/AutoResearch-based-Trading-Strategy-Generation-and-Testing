@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h KAMA trend with 1d RSI momentum filter and volume confirmation. 
-# Uses KAMA (adaptive moving average) to capture trend direction while reducing whipsaw in choppy markets.
-# Enters long when KAMA turns up (bullish) AND 1d RSI > 55 (momentum) AND volume > 1.5x average.
-# Enters short when KAMA turns down (bearish) AND 1d RSI < 45 (weak momentum) AND volume > 1.5x average.
-# Exits when KAMA direction reverses or volume drops below average.
-# Target: 80-150 total trades over 4 years (20-38/year) with size 0.25.
+# Hypothesis: 12h timeframe with 1-day Chaikin Money Flow (CMF) > 0 for money flow confirmation and 1-week RSI < 30 for oversold conditions.
+# In oversold conditions (weekly RSI < 30) with positive money flow (daily CMF > 0), price tends to reverse upward.
+# Enters long when both conditions are met, exits when either condition fails.
+# Uses weekly RSI for oversold detection and daily CMF for institutional accumulation/distribution.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_KAMA_RSI_Volume_Filter"
-timeframe = "4h"
+name = "12h_CMF_WeeklyRSI_Oversold"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,108 +23,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (adaptive moving average) - trend indicator
-    def calculate_kama(close_array, er_length=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close_array, prepend=close_array[0]))
-        volatility = np.sum(np.abs(np.diff(close_array)), axis=0) if len(close_array.shape) > 0 else np.abs(np.diff(close_array))
-        # For 1D array: volatility over er_length period
-        volatility_rolling = np.zeros_like(close_array)
-        for i in range(len(close_array)):
-            if i < er_length:
-                volatility_rolling[i] = np.sum(np.abs(np.diff(close_array[max(0, i-er_length+1):i+1]))) if i > 0 else 0
-            else:
-                volatility_rolling[i] = np.sum(np.abs(np.diff(close_array[i-er_length+1:i+1])))
-        
-        er = np.where(volatility_rolling != 0, change / volatility_rolling, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(close_array)
-        kama[0] = close_array[0]
-        for i in range(1, len(close_array)):
-            kama[i] = kama[i-1] + sc[i] * (close_array[i] - kama[i-1])
-        return kama
-    
-    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
-    kama_up = kama > np.roll(kama, 1)  # KAMA rising
-    kama_down = kama < np.roll(kama, 1)  # KAMA falling
-    
-    # 1-day RSI for momentum filter
+    # Calculate 1-day Chaikin Money Flow (20-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
+    volume_1d = df_1d['volume']
     
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Money Flow Multiplier
+    mfm = ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d)
+    mfm = mfm.replace([np.inf, -np.inf], 0).fillna(0)  # Handle division by zero
     
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Money Flow Volume
+    mfv = mfm * volume_1d
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.where(avg_loss == 0, 100, rsi_1d)
-    rsi_1d = np.where(avg_gain == 0, 0, rsi_1d)
+    # CMF = 20-period sum of MFV / 20-period sum of volume
+    cmf = mfv.rolling(window=20, min_periods=20).sum() / volume_1d.rolling(window=20, min_periods=20).sum()
+    cmf_values = cmf.values
+    cmf_positive = cmf > 0
+    cmf_positive_values = cmf_positive.values
+    cmf_positive_aligned = align_htf_to_ltf(prices, df_1d, cmf_positive_values)
     
-    rsi_high = rsi_1d > 55  # bullish momentum
-    rsi_low = rsi_1d < 45   # bearish momentum
+    # Calculate 1-week RSI (14-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    rsi_high_aligned = align_htf_to_ltf(prices, df_1d, rsi_high)
-    rsi_low_aligned = align_htf_to_ltf(prices, df_1d, rsi_low)
+    close_1w = df_1w['close']
+    delta = close_1w.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
     
-    # Volume confirmation
-    volume_ma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            volume_ma[i] = np.mean(volume[max(0, i-19):i+1]) if i > 0 else volume[0]
-        else:
-            volume_ma[i] = np.mean(volume[i-19:i+1])
-    volume_high = volume > 1.5 * volume_ma
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_oversold = rsi < 30
+    rsi_oversold_values = rsi_oversold.values
+    rsi_oversold_aligned = align_htf_to_ltf(prices, df_1w, rsi_oversold_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_up[i]) or np.isnan(kama_down[i]) or
-            np.isnan(rsi_high_aligned[i]) or np.isnan(rsi_low_aligned[i]) or
-            np.isnan(volume_high[i])):
+        if (np.isnan(cmf_positive_aligned[i]) or
+            np.isnan(rsi_oversold_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA up + RSI > 55 + high volume
-            if kama_up[i] and rsi_high_aligned[i] and volume_high[i]:
+            # Enter long: daily CMF > 0 (accumulation) + weekly RSI < 30 (oversold)
+            if cmf_positive_aligned[i] and rsi_oversold_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA down + RSI < 45 + high volume
-            elif kama_down[i] and rsi_low_aligned[i] and volume_high[i]:
-                signals[i] = -0.25
-                position = -1
         
         elif position == 1:
-            # Exit long: KAMA turns down OR volume drops
-            if kama_down[i] or not volume_high[i]:
+            # Exit long: either condition fails
+            if not (cmf_positive_aligned[i] and rsi_oversold_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: KAMA turns up OR volume drops
-            if kama_up[i] or not volume_high[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
