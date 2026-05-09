@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyTrend_KAMA_Band_WithVolume"
-timeframe = "1d"
+name = "12h_Donchian20_TailRisk_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,63 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_period = 10
-    fast_sc = 2
-    slow_sc = 30
+    # Donchian channel (20-period) on 12h timeframe
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.zeros_like(close)
-    er[er_period:] = change[er_period:] / (volatility[er_period:] + 1e-10)
+    # Tail risk: price near extreme of range (top/bottom 10%)
+    range_size = highest_high - lowest_low
+    upper_zone = lowest_low + 0.9 * range_size  # top 10%
+    lower_zone = lowest_low + 0.1 * range_size  # bottom 10%
     
-    # Smoothing constants
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[er_period] = close[er_period]
-    for i in range(er_period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # ATR for stop loss
-    tr1 = high[1:] - low[1:]
+    # Daily volatility filter: ATR(14) > 20-period SMA of ATR
+    tr1 = high[1:] - low[:-1]
     tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros_like(close)
-    atr_period = 14
-    atr_sum = np.nansum(tr[:atr_period])
-    if not np.isnan(atr_sum):
-        atr[atr_period-1] = atr_sum / atr_period
-        for i in range(atr_period, n):
-            if not np.isnan(tr[i]):
-                atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-            else:
-                atr[i] = atr[i-1]
+    tr3 = np.abs(low[:-1] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
+    vol_filter = atr14 > 1.5 * atr_ma20  # elevated volatility regime
     
-    # Weekly trend filter: EMA50 on weekly data
+    # Weekly trend filter: EMA50 on 1w timeframe
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume confirmation: current > 1.5 * 20-period average
-    vol_ma20 = np.zeros_like(volume)
-    for i in range(20, n):
-        vol_ma20[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > 1.5 * vol_ma20
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(er_period, 50)  # Ensure enough data for KAMA and weekly EMA
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(kama[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(atr14[i]) or np.isnan(atr_ma20[i]) or np.isnan(ema50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,35 +59,37 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long conditions: Price above KAMA + Weekly uptrend + Volume spike
-            if (price > kama[i] and 
-                price > ema50_1w_aligned[i] and 
-                vol_spike[i]):
+            # Long: price breaks above upper Donchian band + in upper zone + elevated vol + weekly uptrend
+            if (price > highest_high[i] and  # Donchian breakout
+                price > upper_zone[i] and    # in top 10% of range
+                vol_filter[i] and            # volatility expansion
+                price > ema50_1w_aligned[i]): # weekly uptrend
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short conditions: Price below KAMA + Weekly downtrend + Volume spike
-            elif (price < kama[i] and 
-                  price < ema50_1w_aligned[i] and 
-                  vol_spike[i]):
+            # Short: price breaks below lower Donchian band + in lower zone + elevated vol + weekly downtrend
+            elif (price < lowest_low[i] and   # Donchian breakdown
+                  price < lower_zone[i] and   # in bottom 10% of range
+                  vol_filter[i] and           # volatility expansion
+                  price < ema50_1w_aligned[i]): # weekly downtrend
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: Price below KAMA or weekly trend turns down
-            if (price < kama[i] or 
-                price < ema50_1w_aligned[i]):
+            # Exit long: price retreats to middle of range or weekly trend fails
+            if (price < (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
+                price < ema50_1w_aligned[i]):                     # weekly trend fail
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price above KAMA or weekly trend turns up
-            if (price > kama[i] or 
-                price > ema50_1w_aligned[i]):
+            # Exit short: price rises to middle of range or weekly trend fails
+            if (price > (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
+                price > ema50_1w_aligned[i]):                     # weekly trend fail
                 signals[i] = 0.0
                 position = 0
             else:
