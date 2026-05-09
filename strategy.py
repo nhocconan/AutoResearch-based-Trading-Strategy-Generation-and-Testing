@@ -1,115 +1,98 @@
+# 6h Weekly Pivot Reversion with Volume Confirmation
+# Hypothesis: Weekly pivots act as strong support/resistance. Price tends to revert from weekly R3/S3 levels
+# back toward the weekly pivot point, especially on volume expansion. Works in both trending and ranging markets
+# as reversals at extremes. Weekly timeframe provides structural context for 6s entries.
+# Target: 12-37 trades/year (50-150 over 4 years) with size 0.25
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4d_Hybrid_Signal_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Reversion_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # Get 4h data for trend and volatility filters
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Get 1d data for session and volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    prev_weekly_high = df_weekly['high'].shift(1).values
+    prev_weekly_low = df_weekly['low'].shift(1).values
+    prev_weekly_close = df_weekly['close'].shift(1).values
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Weekly pivot point
+    pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
     
-    # 4h ATR(14) for volatility filter
-    tr_4h = np.maximum(df_4h['high'].values - df_4h['low'].values,
-                       np.maximum(np.abs(df_4h['high'].values - np.roll(df_4h['close'].values, 1)),
-                                  np.absolute(np.roll(df_4h['close'].values, 1) - df_4h['low'].values)))
-    tr_4h[0] = df_4h['high'].values[0] - df_4h['low'].values[0]
-    atr14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr14_4h)
+    # Weekly R3 and S3 levels
+    r3 = pivot + 2.0 * (prev_weekly_high - prev_weekly_low)
+    s3 = pivot - 2.0 * (prev_weekly_high - prev_weekly_low)
     
-    # 1d ATR(10) for volatility regime filter (high vol = trend following, low vol = mean reversion)
-    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                       np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
-                                  np.absolute(np.roll(df_1d['close'].values, 1) - df_1d['low'].values)))
-    tr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
-    atr10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
+    # Volume filter: current 6h volume > 1.8 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.8)
     
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    hours = pd.DatetimeIndex(open_time).hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
-    # Price position relative to 4h EMA50
-    price_vs_ema = close - ema50_4h_aligned
+    # Align weekly levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_weekly, pivot)
+    r3_6h = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_6h = align_htf_to_ltf(prices, df_weekly, s3)
+    volume_filter_6h = align_htf_to_ltf(prices, df_weekly, volume_filter)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 14, 10)  # Warmup for indicators
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(atr14_4h_aligned[i]) or
-            np.isnan(atr10_1d_aligned[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(r3_6h[i]) or 
+            np.isnan(s3_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip outside session
-        if not session_mask[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        atr_ratio = atr10_1d_aligned[i] / (atr14_4h_aligned[i] + 1e-10)
-        price_above_ema = price_vs_ema[i] > 0
+        pivot_val = pivot_6h[i]
+        r3_val = r3_6h[i]
+        s3_val = s3_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Trend following in high volatility regimes (ATR ratio > 1.2)
-            if atr_ratio > 1.2:
-                if price_above_ema and close[i] > close[i-1]:
-                    signals[i] = 0.20
-                    position = 1
-                elif not price_above_ema and close[i] < close[i-1]:
-                    signals[i] = -0.20
-                    position = -1
-            # Mean reversion in low volatility regimes (ATR ratio <= 1.2)
-            else:
-                if not price_above_ema and close[i] < close[i-1]:
-                    signals[i] = 0.20
-                    position = 1
-                elif price_above_ema and close[i] > close[i-1]:
-                    signals[i] = -0.20
-                    position = -1
+            # Enter long: price at or below S3 with volume expansion (mean reversion long)
+            if close[i] <= s3_val and vol_filter:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price at or above R3 with volume expansion (mean reversion short)
+            elif close[i] >= r3_val and vol_filter:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA or volatility regime shifts
-            if not price_above_ema or atr_ratio > 1.5:
+            # Exit long: price crosses above weekly pivot (mean reversion complete)
+            if close[i] > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA or volatility regime shifts
-            if price_above_ema or atr_ratio > 1.5:
+            # Exit short: price crosses below weekly pivot (mean reversion complete)
+            if close[i] < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
