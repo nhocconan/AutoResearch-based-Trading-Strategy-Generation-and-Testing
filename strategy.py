@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyDonchianBreakout_Trend_Volume_v2"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 20-period EMA for weekly trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Get daily data for Donchian channels
+    # Get 1d data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 20-period Donchian channels from previous daily bar
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Upper and lower bands from previous 20 days (excluding current)
-    donchian_high = high_1d.rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = low_1d.rolling(window=20, min_periods=20).min().shift(1).values
+    # Calculate 1d volume average (20-period)
+    vol_1d = pd.Series(df_1d['volume'].values)
+    vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Daily volume average for confirmation
+    # Current volume for confirmation (20-period MA)
     vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla levels from previous 1d bar (H, L, C)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_R1 = np.zeros(len(close_1d))
+    camarilla_S1 = np.zeros(len(close_1d))
+    
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]  # Previous day high
+        L = low_1d[i-1]   # Previous day low
+        C = close_1d[i-1] # Previous day close
+        camarilla_R1[i] = C + (H - L) * 1.1 / 12
+        camarilla_S1[i] = C - (H - L) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,36 +63,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or 
+            np.isnan(vol_ma20_current[i]) or np.isnan(camarilla_R1_aligned[i]) or 
+            np.isnan(camarilla_S1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20_current[i]
         
         if position == 0:
-            # Long: Break above Donchian high with volume and above weekly EMA trend
-            if close[i] > donchian_high[i] and vol_ok and close[i] > ema20_1w_aligned[i]:
+            # Long: Break above Camarilla R1 with volume and above 1d EMA trend
+            if close[i] > camarilla_R1_aligned[i] and vol_ok and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low with volume and below weekly EMA trend
-            elif close[i] < donchian_low[i] and vol_ok and close[i] < ema20_1w_aligned[i]:
+            # Short: Break below Camarilla S1 with volume and below 1d EMA trend
+            elif close[i] < camarilla_S1_aligned[i] and vol_ok and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below Donchian low or trend reversal
-            if close[i] < donchian_low[i] or close[i] < ema20_1w_aligned[i]:
+            # Exit long: Price falls below Camarilla S1 or trend reversal
+            if close[i] < camarilla_S1_aligned[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above Donchian high or trend reversal
-            if close[i] > donchian_high[i] or close[i] > ema20_1w_aligned[i]:
+            # Exit short: Price rises above Camarilla R1 or trend reversal
+            if close[i] > camarilla_R1_aligned[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
