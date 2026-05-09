@@ -1,12 +1,12 @@
-#!/usr/bin/env python3
-# 4H_1D_KAMA_Trend_With_Volume_Confirmation
-# Hypothesis: On 4h timeframe, enter long when KAMA direction is up and price crosses above 4h EMA(20) with volume confirmation.
-# Short when KAMA direction is down and price crosses below 4h EMA(20) with volume confirmation.
-# Uses 1d KAMA trend filter to avoid counter-trend trades and ensure alignment with higher timeframe momentum.
-# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+# 6h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+# Hypothesis: On 6h timeframe, enter long when price breaks above Camarilla R3 level from previous 12h candle with 12h uptrend and volume confirmation.
+# Short when price breaks below Camarilla S3 level with 12h downtrend and volume confirmation.
+# Uses 12h trend filter to avoid counter-trend trades and Camarilla levels from 12h for precise entries.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# Camarilla R3/S3 levels are stronger breakout levels than R1/S1, reducing false breakouts and improving win rate.
 
-name = "4H_1D_KAMA_Trend_With_Volume_Confirmation"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +23,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Camarilla levels and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d
-    # ER (Efficiency Ratio) = |change| / sum(|changes|)
-    change = np.abs(np.diff(close_1d))
-    volatility = np.sum(np.abs(np.diff(close_1d))[1:]) if len(close_1d) > 1 else 1
-    er = np.zeros_like(close_1d)
-    er[1:] = np.abs(np.diff(close_1d)) / (np.sum(np.abs(np.diff(close_1d))) + 1e-10)
-    # Smooth ER with smoothing constants
-    sc = (er * 0.0645 + 0.0645) ** 2  # where 0.0645 = 2/(2+1) for fast EMA(2)
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate Camarilla levels for 12h: R3, S3 based on previous period
+    # Typical price = (high + low + close) / 3
+    typical_price = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    # Camarilla R3 = close + (range * 1.1/4)
+    # Camarilla S3 = close - (range * 1.1/4)
+    camarilla_r3 = close_12h + (range_12h * 1.1 / 4)
+    camarilla_s3 = close_12h - (range_12h * 1.1 / 4)
     
-    # 1d trend: price above KAMA
-    trend_up = close_1d > kama
-    
-    # 4h EMA(20) for entry timing
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 12h trend: EMA(34) on close
+    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_12h > ema_34
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align 1d indicators to 4h
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    # Align 12h indicators to 6h
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,33 +62,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(trend_up_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(volume_confirm[i]):
+        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA uptrend + price crosses above EMA(20) + volume confirmation
-            if trend_up_aligned[i] and close[i] > ema_20[i] and close[i-1] <= ema_20[i-1] and volume_confirm[i]:
+            # Enter long: price breaks above Camarilla R3 + 12h uptrend + volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA downtrend + price crosses below EMA(20) + volume confirmation
-            elif not trend_up_aligned[i] and close[i] < ema_20[i] and close[i-1] >= ema_20[i-1] and volume_confirm[i]:
+            # Enter short: price breaks below Camarilla S3 + 12h downtrend + volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA(20) or trend changes
-            if close[i] < ema_20[i] and close[i-1] >= ema_20[i-1] or not trend_up_aligned[i]:
+            # Exit long: price breaks below Camarilla S3 (reversal) or trend changes
+            if close[i] < camarilla_s3_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA(20) or trend changes
-            if close[i] > ema_20[i] and close[i-1] <= ema_20[i-1] or trend_up_aligned[i]:
+            # Exit short: price breaks above Camarilla R3 (reversal) or trend changes
+            if close[i] > camarilla_r3_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
