@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_RVI_Signal_4hTrend_1dFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,89 +16,97 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
+    open_price = prices['open'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h close
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Get 1d data for Camarilla pivot levels
+    # Get 1d data for filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate previous day's Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate RVI on 1h timeframe
+    num = close - open_price
+    den = high - low
+    den = np.where(den == 0, 1e-10, den)
+    rvi_raw = num / den
     
-    # Camarilla R1 and S1 levels from previous day
-    # R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
-    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Smooth RVI with 10-period SMA
+    rvi_series = pd.Series(rvi_raw)
+    rvi = rvi_series.rolling(window=10, min_periods=10).mean().values
     
-    # Align Camarilla levels to 4h timeframe (previous day's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Signal line: EMA of RVI
+    rvi_ema = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
     
-    # Volume filter: above average
+    # 4h EMA50 for trend filter
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1d EMA200 for long-term filter
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(open_time).hour
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rvi[i]) or np.isnan(rvi_ema[i]) or 
+            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
-        in_session = 8 <= hours[i] <= 20
+        vol_ok = volume[i] > 1.5 * vol_ma[i]
+        in_session = (8 <= hours[i] <= 20)
         
         if position == 0:
-            # Long: Close breaks above R1 + above 12h EMA + volume
-            if (close[i] > R1_aligned[i] and 
-                close[i] > ema_12h_aligned[i] and 
+            # Long: RVI crosses above signal line + above 4h EMA + above 1d EMA200 + volume + session
+            if (rvi[i] > rvi_ema[i] and 
+                rvi[i-1] <= rvi_ema[i-1] and  # crossover
+                close[i] > ema_4h_aligned[i] and 
+                close[i] > ema_1d_aligned[i] and 
                 vol_ok and 
                 in_session):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Close breaks below S1 + below 12h EMA + volume
-            elif (close[i] < S1_aligned[i] and 
-                  close[i] < ema_12h_aligned[i] and 
+            # Short: RVI crosses below signal line + below 4h EMA + below 1d EMA200 + volume + session
+            elif (rvi[i] < rvi_ema[i] and 
+                  rvi[i-1] >= rvi_ema[i-1] and  # crossover
+                  close[i] < ema_4h_aligned[i] and 
+                  close[i] < ema_1d_aligned[i] and 
                   vol_ok and 
                   in_session):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Close breaks below S1
-            if close[i] < S1_aligned[i]:
+            # Exit long: RVI crosses below signal line or price below 4h EMA
+            if (rvi[i] < rvi_ema[i] and rvi[i-1] >= rvi_ema[i-1]) or close[i] < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Close breaks above R1
-            if close[i] > R1_aligned[i]:
+            # Exit short: RVI crosses above signal line or price above 4h EMA
+            if (rvi[i] > rvi_ema[i] and rvi[i-1] <= rvi_ema[i-1]) or close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
