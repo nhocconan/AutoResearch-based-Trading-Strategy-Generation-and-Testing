@@ -1,45 +1,23 @@
 #!/usr/bin/env python3
-"""
-6h_Ichimoku_Cloud_Kijun_Tenkan_Cross
-- Ichimoku cloud (Tenkan/Kijun/Senkou A/B) on 1d timeframe as trend filter
-- Entry on Tenkan-Kijun cross on 6h, only in direction of 1d cloud
-- Exit when price exits 1d cloud or opposite cross occurs
-- Volume confirmation: current volume > 1.5x 20-period average
-- Designed to capture trend continuation with Ichimoku structure, works in bull/bear via cloud filter
-"""
+# Hypothesis: 12h Williams Alligator with Elder Ray power and volume confirmation
+# Long when green line > red line (bullish alignment) + bull power > 0 + volume > 1.5x average
+# Short when red line > green line (bearish alignment) + bear power > 0 + volume > 1.5x average
+# Exit when alignment breaks or power becomes negative
+# Uses Williams Alligator for trend, Elder Ray for power, volume for confirmation
+# Designed to capture strong trends with controlled frequency in both bull and bear markets
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "6h_Ichimoku_Cloud_Kijun_Tenkan_Cross"
-timeframe = "6h"
+name = "12h_Williams_Alligator_ElderRay_PowerTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
-    """Calculate Ichimoku components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max() + 
-                  pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high).rolling(window=kijun, min_periods=kijun).max() + 
-                 pd.Series(low).rolling(window=kijun, min_periods=kijun).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high).rolling(window=senkou, min_periods=senkou).max() + 
-                      pd.Series(low).rolling(window=senkou, min_periods=senkou).min()) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind (not used for signals)
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_span_a.values, senkou_span_b.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -47,33 +25,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku calculation (called ONCE before loop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:  # Need enough data for Senkou B (52 periods)
-        return np.zeros(n)
+    # Calculate Williams Alligator lines (13,8,5 SMAs with future shifts)
+    # Jaw (blue): 13-period SMMA shifted 8 bars
+    # Teeth (red): 8-period SMMA shifted 5 bars
+    # Lips (green): 5-period SMMA shifted 3 bars
+    def smoothed_ma(arr, period):
+        # Smoothed Moving Average (SMMA) - similar to RMA/Wilder's smoothing
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is simple SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate Ichimoku on 1d data
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values
-    )
+    # Calculate SMMA for different periods
+    smma_5 = smoothed_ma(close, 5)
+    smma_8 = smoothed_ma(close, 8)
+    smma_13 = smoothed_ma(close, 13)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    # Apply shifts (Williams Alligator specific)
+    lips = np.roll(smma_5, 3)    # 5-period shifted 3 bars forward
+    teeth = np.roll(smma_8, 5)   # 8-period shifted 5 bars forward
+    jaw = np.roll(smma_13, 8)    # 13-period shifted 8 bars forward
     
-    # Determine cloud top and bottom (Senkou A and B)
-    cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
-    
-    # Calculate 6h Tenkan and Kijun for crossover signals
-    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-                 pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    # Calculate Elder Ray power
+    # Bull Power = High - EMA(13)
+    # Bear Power = EMA(13) - Low
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -82,48 +65,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for Ichimoku calculation
+    start_idx = 30  # Need enough data for SMMA and EMA calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend from 1d cloud: price above cloud = uptrend, below cloud = downtrend
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
-        
         if position == 0:
-            # Enter long: Tenkan crosses above Kijun on 6h, price above 1d cloud, volume confirmation
-            if (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1] and  # Cross up
-                price_above_cloud and vol_confirm[i]):
+            # Enter long: green > red (bullish alignment) + bull power > 0 + volume spike
+            if (lips[i] > teeth[i] and 
+                bull_power[i] > 0 and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Tenkan crosses below Kijun on 6h, price below 1d cloud, volume confirmation
-            elif (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1] and  # Cross down
-                  price_below_cloud and vol_confirm[i]):
+            # Enter short: red > green (bearish alignment) + bear power > 0 + volume spike
+            elif (teeth[i] > lips[i] and 
+                  bear_power[i] > 0 and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price exits cloud (below cloud bottom) or Tenkan crosses below Kijun
-            if (close[i] < cloud_bottom[i] or 
-                (tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1])):
+            # Exit long: alignment breaks or bull power becomes negative
+            if (lips[i] <= teeth[i]) or (bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price exits cloud (above cloud top) or Tenkan crosses above Kijun
-            if (close[i] > cloud_top[i] or 
-                (tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1])):
+            # Exit short: alignment breaks or bear power becomes negative
+            if (teeth[i] <= lips[i]) or (bear_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
