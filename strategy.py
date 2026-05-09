@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Donchian_Breakout_20_1dTrend_Volume
-# Hypothesis: Breakout above/below 6h Donchian(20) channels with volume >1.5x 20-bar average and trend filter from 1d EMA50.
-# Donchian channels provide dynamic support/resistance, while 1d EMA50 filters for higher timeframe trend.
-# Volume confirmation ensures breakouts have conviction. Designed for 15-30 trades/year on 6h timeframe.
-# Works in bull markets (breakouts continue trend) and bear markets (breakouts reverse false moves).
+# 4H_Multi_Timeframe_Momentum_Combo
+# Hypothesis: Combines momentum from multiple timeframes (4h price action, 1d RSI, and 12h trend) with volume confirmation.
+# Long when: 4h close > 4h open (bullish candle) AND 1d RSI > 50 (bullish momentum) AND 12h EMA20 trending up AND volume > 1.5x average.
+# Short when: 4h close < 4h open (bearish candle) AND 1d RSI < 50 (bearish momentum) AND 12h EMA20 trending down AND volume > 1.5x average.
+# Uses discrete position sizing (0.25) to minimize churn and targets 20-40 trades/year.
+# Designed to work in both bull and bear markets by requiring alignment across multiple timeframes.
 
-name = "6h_Donchian_Breakout_20_1dTrend_Volume"
-timeframe = "6h"
+name = "4H_Multi_Timeframe_Momentum_Combo"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,40 +16,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    # Calculate 12h EMA(20) with proper initialization
+    ema_20_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 20:
+        ema_20_12h[19] = np.mean(close_12h[0:20])
+        for i in range(20, len(close_12h)):
+            ema_20_12h[i] = (close_12h[i] * 2 + ema_20_12h[i-1] * 18) / 20
+    
+    # Align 12h EMA to 4h timeframe
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    
+    # Get daily data for RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate 1d EMA(50) with proper initialization
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
+    # Calculate daily RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 1d EMA to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 14:
+        avg_gain[13] = np.mean(gain[0:14])
+        avg_loss[13] = np.mean(loss[0:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (gain[i] + avg_gain[i-1] * 13) / 14
+            avg_loss[i] = (loss[i] + avg_loss[i-1] * 13) / 14
     
-    # Calculate 6h Donchian channels (20-period)
-    high_20 = np.full_like(high, np.nan)
-    low_20 = np.full_like(low, np.nan)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi_14_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
     
-    if len(high) >= 20:
-        for i in range(19, len(high)):
-            high_20[i] = np.max(high[i-19:i+1])
-            low_20[i] = np.min(low[i-19:i+1])
+    # Align daily RSI to 4h timeframe
+    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Volume filter: 6h volume / 20-period average volume
+    # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -66,33 +85,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_20_12h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine candle direction
+        bullish_candle = close[i] > open_price[i]
+        bearish_candle = close[i] < open_price[i]
+        
         if position == 0:
-            # Enter long: Price breaks above Donchian upper band AND volume confirmation AND bullish trend (close > EMA50)
-            if close[i] > high_20[i] and volume_ratio[i] > 1.5 and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: Bullish candle AND bullish RSI (>50) AND uptrend (price > EMA20) AND volume confirmation
+            if bullish_candle and rsi_14_1d_aligned[i] > 50 and close[i] > ema_20_12h_aligned[i] and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below Donchian lower band AND volume confirmation AND bearish trend (close < EMA50)
-            elif close[i] < low_20[i] and volume_ratio[i] > 1.5 and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: Bearish candle AND bearish RSI (<50) AND downtrend (price < EMA20) AND volume confirmation
+            elif bearish_candle and rsi_14_1d_aligned[i] < 50 and close[i] < ema_20_12h_aligned[i] and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below Donchian lower band (reversal) or trend turns bearish
-            if close[i] < low_20[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: Bearish candle OR RSI turns bearish (<50) OR trend turns down (price < EMA20)
+            if bearish_candle or rsi_14_1d_aligned[i] < 50 or close[i] < ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above Donchian upper band (reversal) or trend turns bullish
-            if close[i] > high_20[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: Bullish candle OR RSI turns bullish (>50) OR trend turns up (price > EMA20)
+            if bullish_candle or rsi_14_1d_aligned[i] > 50 or close[i] > ema_20_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
