@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Breakouts from daily Camarilla R1/S1 levels with daily EMA50 trend filter and volume spike confirmation.
-Daily EMA50 provides robust trend filter that adapts to bull/bear markets. Volume spike (>2x 24-period average)
-confirms breakout strength. Designed for low trade frequency (12-37/year) to minimize fee drift on 12h timeframe.
-"""
+# 2025-06-22 | 4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v2
+# Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
+# Daily EMA50 provides robust trend filter that adapts to bull/bear markets. Volume spike (>2x 24-period average)
+# confirms breakout strength. Designed for low trade frequency (19-50/year) to minimize fee drift.
+# Version 2: Reduced position size to 0.20 for better risk management and added minimum holding period of 4 bars.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -43,7 +41,7 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -56,7 +54,7 @@ def generate_signals(prices):
     
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 24:
         vol_ma[23] = np.mean(volume[0:24])
@@ -90,21 +88,21 @@ def generate_signals(prices):
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 bars_since_entry = 0
             # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 2 bars
-            if bars_since_entry < 2:
-                signals[i] = 0.25
+            # Minimum holding period: 4 bars
+            if bars_since_entry < 4:
+                signals[i] = 0.20
             else:
                 # Exit long: price breaks below S1 OR trend reversal (price < EMA50)
                 if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
@@ -112,12 +110,12 @@ def generate_signals(prices):
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
         
         elif position == -1:
-            # Minimum holding period: 2 bars
-            if bars_since_entry < 2:
-                signals[i] = -0.25
+            # Minimum holding period: 4 bars
+            if bars_since_entry < 4:
+                signals[i] = -0.20
             else:
                 # Exit short: price breaks above R1 OR trend reversal (price > EMA50)
                 if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
@@ -125,6 +123,6 @@ def generate_signals(prices):
                     position = 0
                     bars_since_entry = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
