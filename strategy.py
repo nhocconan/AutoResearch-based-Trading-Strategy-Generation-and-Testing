@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "12h_Camarilla_R3_S3_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dEMA34_Trend_Volume_Rev5"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,7 +32,7 @@ def generate_signals(prices):
     breakout_up = close > r3
     breakout_down = close < s3
     
-    # Get 1d data for trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
