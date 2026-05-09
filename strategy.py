@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "1d_WeeklyDonchian20_Breakout_WeekTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,26 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_d = get_htf_data(prices, '1d')
-    if len(d_d) < 50:
+    # Get weekly data for Donchian and trend
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 20:
         return np.zeros(n)
     
-    # Daily close for EMA trend filter
-    close_d = df_d['close'].values
-    close_series_d = pd.Series(close_d)
-    ema50_d = close_series_d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
+    # Weekly high and low for Donchian channel (20-period)
+    weekly_high = df_w['high'].values
+    weekly_low = df_w['low'].values
     
-    # 4h Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Donchian upper and lower bands (20-period)
+    high_series = pd.Series(weekly_high)
+    low_series = pd.Series(weekly_low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Weekly EMA(50) for trend filter
+    weekly_close = df_w['close'].values
+    close_w = pd.Series(weekly_close)
+    ema50_w = close_w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume confirmation: current volume > 2x 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Align to daily timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_w, donchian_lower)
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,28 +53,28 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema50_d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or 
+            np.isnan(ema50_w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above upper Donchian with volume and above daily EMA trend
-            if close[i] > upper[i] and vol_ok and close[i] > ema50_d_aligned[i]:
+            # Long: Price breaks above upper Donchian with volume and above weekly EMA trend
+            if close[i] > donchian_upper_aligned[i] and vol_ok and close[i] > ema50_w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Donchian with volume and below daily EMA trend
-            elif close[i] < lower[i] and vol_ok and close[i] < ema50_d_aligned[i]:
+            # Short: Price breaks below lower Donchian with volume and below weekly EMA trend
+            elif close[i] < donchian_lower_aligned[i] and vol_ok and close[i] < ema50_w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: Price crosses below lower Donchian (reversion to mean)
-            if close[i] < lower[i]:
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -74,7 +82,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: Price crosses above upper Donchian (reversion to mean)
-            if close[i] > upper[i]:
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
