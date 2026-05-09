@@ -3,12 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1H4D_Squeeze_Breakout_Volume - Bollinger Band squeeze on daily timeframe indicates low volatility,
-# followed by breakout on 1H with volume confirmation. Works in both bull/bear markets as volatility compression
-# precedes expansion regardless of direction. Uses 4H trend filter to avoid counter-trend entries.
-# Target: 15-35 trades/year by requiring squeeze condition + breakout + volume + trend alignment.
-name = "1H4D_Squeeze_Breakout_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Breakout_1dTrend_VolumeSurge"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,78 +17,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Bollinger Bands and trend filter
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Get daily data for trend and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily Bollinger Bands (20, 2.0)
-    close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2.0 * std_20
-    lower_bb = sma_20 - 2.0 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized width
+    # Previous week's high, low, close for weekly pivot calculation
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
     
-    # Bollinger Band squeeze: width below 20-period mean width
-    mean_width = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < mean_width
+    # Calculate weekly pivot point and R3/S3 levels
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    r3 = pivot + 2 * (prev_week_high - prev_week_low)
+    s3 = pivot - 2 * (prev_week_high - prev_week_low)
     
-    # 4H trend filter: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Volume filter: current 6h volume > 2.0 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 2.0)
     
-    # Align daily indicators to 1H
-    squeeze_1h = align_htf_to_ltf(prices, df_1d, squeeze)
-    ema_50_4h_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align all to 6h
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(40, 20)  # Need enough data for indicators
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(squeeze_1h[i]) or np.isnan(ema_50_4h_1h[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
+            np.isnan(ema50_1d_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        is_squeeze = squeeze_1h[i]
-        trend_4h = ema_50_4h_1h[i]
-        vol_ok = volume_filter[i]
+        r3_val = r3_6h[i]
+        s3_val = s3_6h[i]
+        trend = ema50_1d_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: break above upper BB with volume and above 4H trend
-            if close[i] > upper_bb[i//24] and close[i] > trend_4h and vol_ok and is_squeeze:
-                signals[i] = 0.20
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower BB with volume and below 4H trend
-            elif close[i] < lower_bb[i//24] and close[i] < trend_4h and vol_ok and is_squeeze:
-                signals[i] = -0.20
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below middle BB or trend breaks
-            if close[i] < sma_20[i//24] or close[i] < trend_4h:
+            # Exit long: close below pivot (mean reversion to center)
+            if close[i] < pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above middle BB or trend breaks
-            if close[i] > sma_20[i//24] or close[i] > trend_4h:
+            # Exit short: close above pivot (mean reversion to center)
+            if close[i] > pivot[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
