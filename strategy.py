@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 2025-06-22 | 4h_PivotReversal_Energy_1dTrend
-# Hypothesis: Daily pivot point reversals with 1d EMA100 trend filter and volume confirmation.
-# Uses standard pivot point calculation (PP, R1, S1) from previous day's OHLC.
-# Long when price crosses above S1 in uptrend (price > EMA100), short when crosses below R1 in downtrend (price < EMA100).
-# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
-# Designed for low trade frequency (15-30/year) with clear trend alignment to work in both bull and bear markets.
+# 6h_WeeklyPivot_RangeBreakout_1dTrend_VolumeFilter
+# Hypothesis: Weekly pivot points define key support/resistance. Breakouts above weekly R1 or below S1
+# with 1d trend filter (price > EMA50 for longs, price < EMA50 for shorts) and volume confirmation
+# (volume > 1.5x 20-period average) capture sustained moves. Weekly timeframe adapts to regime,
+# reducing whipsaws in ranging markets. Designed for low frequency (15-30 trades/year) to avoid fee drag.
 
-name = "4h_PivotReversal_Energy_1dTrend"
-timeframe = "4h"
+name = "6h_WeeklyPivot_RangeBreakout_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,40 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Previous week's values for weekly pivot calculation
+    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
+    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
+    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
+    
+    # Calculate weekly pivot and support/resistance levels
+    # Pivot = (H + L + C) / 3
+    pivot = (ph + pl + pc) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - pl
+    s1 = 2 * pivot - ph
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for pivot calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (ema_50_1d[i-1] * 49 + close_1d[i]) / 50
     
-    # Calculate daily pivot points (standard formula)
-    pp = (ph + pl + pc) / 3.0           # Pivot Point
-    r1 = 2 * pp - pl                    # Resistance 1
-    s1 = 2 * pp - ph                    # Support 1
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align daily pivot levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Calculate daily EMA100 for trend filter
-    ema_100_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 100:
-        ema_100_1d[99] = np.mean(close_1d[0:100])
-        for i in range(100, len(close_1d)):
-            ema_100_1d[i] = (ema_100_1d[i-1] * 99 + close_1d[i]) / 100
-    
-    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
-    
-    # Volume confirmation: current volume / 20-period average volume
+    # Volume filter: current volume / 20-period average volume (20*6h = 5 days)
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -71,43 +78,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 100)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_100_1d_aligned[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price crosses above S1 AND uptrend (price > EMA100) AND volume confirmation
-            if (close[i] > s1_aligned[i] and 
-                close[i] > ema_100_1d_aligned[i] and 
+            # Enter long: price breaks above weekly R1 AND uptrend (price > EMA50) AND volume confirmation
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below R1 AND downtrend (price < EMA100) AND volume confirmation
-            elif (close[i] < r1_aligned[i] and 
-                  close[i] < ema_100_1d_aligned[i] and 
+            # Enter short: price breaks below weekly S1 AND downtrend (price < EMA50) AND volume confirmation
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below pivot point OR trend reversal (price < EMA100)
-            if close[i] < pp_aligned[i] or close[i] < ema_100_1d_aligned[i]:
+            # Exit long: price breaks below weekly S1 OR trend reversal (price < EMA50)
+            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above pivot point OR trend reversal (price > EMA100)
-            if close[i] > pp_aligned[i] or close[i] > ema_100_1d_aligned[i]:
+            # Exit short: price breaks above weekly R1 OR trend reversal (price > EMA50)
+            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
