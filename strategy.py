@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_Spike_v2"
+name = "4h_KAMA_Trend_With_Volume_And_Chop_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,35 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for KAMA and Chop filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily
+    close_1d = df_1d['close'].values
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))  # |close(t) - close(t-10)|
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # sum of absolute daily changes
+    # Pad volatility array to match change length
+    volatility = np.concatenate([np.full(9, np.nan), volatility[9:]])
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # for EMA(2)
+    slow_sc = 2 / (30 + 1) # for EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # seed
+    for i in range(10, len(close_1d)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    # Calculate Choppiness Index on daily
+    def calculate_chop(high_arr, low_arr, close_arr, period=14):
+        atr = np.zeros_like(close_arr)
+        tr1 = np.abs(high_arr[1:] - low_arr[1:])
+        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
+        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr[1:] = tr
+        # Wilder's smoothing
+        atr_smoothed = np.zeros_like(atr)
+        if len(atr) >= period:
+            atr_smoothed[period-1] = np.mean(atr[1:period])
+            for i in range(period, len(atr)):
+                atr_smoothed[i] = (atr_smoothed[i-1] * (period-1) + atr[i]) / period
+        # Calculate Chop
+        max_high = np.zeros_like(close_arr)
+        min_low = np.zeros_like(close_arr)
+        for i in range(len(close_arr)):
+            if i >= period-1:
+                max_high[i] = np.max(high_arr[i-period+1:i+1])
+                min_low[i] = np.min(low_arr[i-period+1:i+1])
+            else:
+                max_high[i] = np.nan
+                min_low[i] = np.nan
+        chop = np.full_like(close_arr, np.nan)
+        for i in range(len(close_arr)):
+            if i >= period-1 and not np.isnan(atr_smoothed[i]) and max_high[i] > min_low[i]:
+                chop[i] = 100 * np.log10(atr_smoothed[i] * period / (max_high[i] - min_low[i])) / np.log10(period)
+        return chop
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    chop = calculate_chop(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
-        return np.zeros(n)
+    # Align KAMA and Chop to 4h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # 12h EMA20 for trend filter
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Volume spike detection (4h timeframe)
+    # Volume spike detection on 4h
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -56,36 +90,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Require strong volume spike
+        # Chop filter: only trade when market is trending (Chop < 38.2) or extreme chop (Chop > 61.8) for mean reversion
+        # But for trend following, we use Chop < 38.2 (trending market)
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike filter
         
         if position == 0:
-            # Long: Price breaks above R1 with 12h uptrend and volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_12h_aligned[i] and vol_ok:
+            # Long: Price above KAMA in trending market with volume
+            if close[i] > kama_aligned[i] and chop_aligned[i] < 38.2 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with 12h downtrend and volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_12h_aligned[i] and vol_ok:
+            # Short: Price below KAMA in trending market with volume
+            elif close[i] < kama_aligned[i] and chop_aligned[i] < 38.2 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below S1 or trend turns down
-            if close[i] < s1_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Exit: Price crosses below KAMA or market becomes choppy
+            if close[i] < kama_aligned[i] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above R1 or trend turns up
-            if close[i] > r1_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Exit: Price crosses above KAMA or market becomes choppy
+            if close[i] > kama_aligned[i] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
