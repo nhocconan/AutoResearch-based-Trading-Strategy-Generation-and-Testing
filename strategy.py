@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R (14) with 1-day ADX(14) trend filter and volume spike.
-# Williams %R identifies overbought/oversold conditions; ADX ensures trades only in trending markets.
-# Volume spike confirms breakout strength. Designed for low trade frequency (<15/year) to avoid fee drag.
-# Works in bull (buy oversold in uptrend) and bear (sell overbought in downtrend).
-name = "12h_WilliamsR14_1dADX14_VolumeSpike"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
+# Uses weekly ADX for strong trend filtering (reduces false signals), Donchian channels for breakout entries,
+# and volume surge for confirmation. Designed to capture strong trends while avoiding chop.
+# Weekly timeframe reduces noise, ADX > 25 ensures trend strength. Target: 20-40 trades/year.
+name = "4h_Donchian20_1wADX25_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,26 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 14-period ADX for weekly timeframe
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
@@ -69,23 +69,19 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Williams %R (14-period) for 12h timeframe
-    highest_high = np.maximum.accumulate(high)
-    lowest_low = np.minimum.accumulate(low)
-    williams_r = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if i < 13:  # Need 14 periods (0-13 inclusive)
-            williams_r[i] = np.nan
+    # Calculate Donchian channels (20-period) for 4h timeframe
+    upper_channel = np.full_like(high, np.nan)
+    lower_channel = np.full_like(low, np.nan)
+    for i in range(len(high)):
+        if i < 20:
+            upper_channel[i] = np.nan
+            lower_channel[i] = np.nan
         else:
-            hh = np.max(high[i-13:i+1])
-            ll = np.min(low[i-13:i+1])
-            if hh - ll != 0:
-                williams_r[i] = (hh - close[i]) / (hh - ll) * -100
-            else:
-                williams_r[i] = -50  # Avoid division by zero
+            upper_channel[i] = np.max(high[i-19:i+1])
+            lower_channel[i] = np.min(low[i-19:i+1])
     
-    # Align 1d ADX to 12h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1w ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Volume confirmation: volume > 1.8x 20-period EMA (balanced threshold)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -94,38 +90,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need sufficient data for all indicators
+    start_idx = 20  # Need 20 periods for Donchian channels
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx_aligned[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = close[i]
+        
         if position == 0:
-            # Enter long: Williams %R < -80 (oversold) + ADX > 14 + volume spike
-            if (williams_r[i] < -80 and adx_aligned[i] > 14 and vol_confirm[i]):
+            # Enter long: price breaks above upper channel + 1w ADX > 25 + volume confirmation
+            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R > -20 (overbought) + ADX > 14 + volume spike
-            elif (williams_r[i] > -20 and adx_aligned[i] > 14 and vol_confirm[i]):
+            # Enter short: price breaks below lower channel + 1w ADX > 25 + volume confirmation
+            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R > -20 (overbought) or ADX drops below 10
-            if williams_r[i] > -20 or adx_aligned[i] < 10:
+            # Exit long: price returns below upper channel or ADX drops below 20
+            if price < upper_channel[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R < -80 (oversold) or ADX drops below 10
-            if williams_r[i] < -80 or adx_aligned[i] < 10:
+            # Exit short: price returns above lower channel or ADX drops below 20
+            if price > lower_channel[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
