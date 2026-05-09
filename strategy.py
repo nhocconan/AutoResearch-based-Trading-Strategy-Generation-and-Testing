@@ -1,15 +1,20 @@
+# [Hypothesis] 6h timeframe with 12h/1d multi-timeframe confirmation: 
+# Strategy uses 12h Donchian breakout for trend direction and 1d volume confirmation for momentum.
+# Works in bull/bear markets by trading with higher timeframe trend. Volume filter reduces whipsaw.
+# Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyTrend_Camarilla_R3S3_Breakout_Volume"
-timeframe = "1d"
+name = "6h_DonchianBreakout_12hTrend_1dVolConfirm"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +22,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend (Donchian channel)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 12h Donchian channel (20-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
+    # Vectorized rolling max/min
+    high_series = pd.Series(high_12h)
+    low_series = pd.Series(low_12h)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    for i in range(1, n):
-        # Use previous day's OHLC to calculate today's levels
-        ph = high[i-1]
-        pl = low[i-1]
-        pc = close[i-1]
-        
-        # Camarilla calculations
-        range_ = ph - pl
-        camarilla_r3[i] = pc + range_ * 1.1 / 2
-        camarilla_s3[i] = pc - range_ * 1.1 / 2
+    # Align Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    # Calculate volume confirmation (20-period average)
-    vol_avg_20 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 19:
-            vol_avg_20[i] = np.mean(volume[i-19:i+1])
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_1d = df_1d['volume'].values
+    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    # Start after sufficient warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,32 +66,32 @@ def generate_signals(prices):
         
         price = close[i]
         vol_current = volume[i]
-        vol_avg_today = vol_avg_20[i]
+        vol_ma_today = vol_ma_aligned[i]
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = vol_current > 1.5 * vol_avg_today
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirmed = vol_current > 1.5 * vol_ma_today
         
         if position == 0:
-            # Long: price breaks above R3 with volume and weekly uptrend
-            if price > camarilla_r3[i] and vol_confirmed and price > ema50_1w_aligned[i]:
+            # Long entry: price breaks above 12h Donchian high with volume confirmation
+            if price > donchian_high_aligned[i] and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume and weekly downtrend
-            elif price < camarilla_s3[i] and vol_confirmed and price < ema50_1w_aligned[i]:
+            # Short entry: price breaks below 12h Donchian low with volume confirmation
+            elif price < donchian_low_aligned[i] and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 or trend changes
-            if price < camarilla_s3[i] or price < ema50_1w_aligned[i]:
+            # Exit long: price breaks below 12h Donchian low
+            if price < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3 or trend changes
-            if price > camarilla_r3[i] or price > ema50_1w_aligned[i]:
+            # Exit short: price breaks above 12h Donchian high
+            if price > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
