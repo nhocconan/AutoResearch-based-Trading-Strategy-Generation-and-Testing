@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w ADX25 trend filter and volume spike.
-# Uses weekly ADX for trend strength, daily Donchian channels for breakout signals,
-# and volume surge for confirmation. Designed to capture strong trends in both bull and bear markets.
-# Target: 15-25 trades/year to avoid excessive fee drag.
-name = "1d_Donchian20_1wADX25_VolumeSpike"
-timeframe = "1d"
+# Hypothesis: 4h 14-period RSI with 1d ADX25 trend filter and volume spike.
+# Uses daily ADX for trend strength, RSI for mean reversion in trend context,
+# and volume surge for confirmation. Designed to work in both bull (RSI < 30 in uptrend)
+# and bear (RSI > 70 in downtrend). Target: 20-50 trades/year to avoid fee drag.
+name = "4h_RSI14_1dADX25_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,26 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for weekly timeframe
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 14-period ADX for daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
@@ -69,19 +69,25 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Donchian channels (20-period) for daily timeframe
-    upper_channel = np.full_like(high, np.nan)
-    lower_channel = np.full_like(low, np.nan)
-    for i in range(len(high)):
-        if i < 20:
-            upper_channel[i] = np.nan
-            lower_channel[i] = np.nan
-        else:
-            upper_channel[i] = np.max(high[i-19:i+1])
-            lower_channel[i] = np.min(low[i-19:i+1])
+    # Calculate 14-period RSI for 4h timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 1w ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Wilder's smoothing for RSI
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+    
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -90,40 +96,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian channels
+    start_idx = 14  # Need 14 periods for RSI
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        
         if position == 0:
-            # Enter long: price breaks above upper channel + 1w ADX > 25 + volume spike
-            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter long: RSI < 30 (oversold) + 1d ADX > 25 (strong trend) + volume spike
+            if (rsi[i] < 30 and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + 1w ADX > 25 + volume spike
-            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter short: RSI > 70 (overbought) + 1d ADX > 25 (strong trend) + volume spike
+            elif (rsi[i] > 70 and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below upper channel or ADX drops below 20
-            if price < upper_channel[i] or adx_aligned[i] < 20:
+            # Exit long: RSI returns above 50 or ADX drops below 20
+            if rsi[i] > 50 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above lower channel or ADX drops below 20
-            if price > lower_channel[i] or adx_aligned[i] < 20:
+            # Exit short: RSI returns below 50 or ADX drops below 20
+            if rsi[i] < 50 or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
