@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Advanced_Camarilla_Pivot_Squeeze
-# Hypothesis: Combines Camarilla pivot levels with Bollinger Band squeeze detection and volume confirmation.
-# Uses 1d Camarilla R1/S1 for entry, Bollinger Band width percentile for regime filter (low volatility = squeeze),
-# and volume spike for confirmation. Designed to work in both trending and ranging markets by capturing
-# breakouts from low volatility phases. Target: 20-35 trades/year per symbol with disciplined risk.
+# 4h_Donchian_Breakout_Volume_Trend
+# Hypothesis: Combines 4h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above 20-period upper Donchian band, price > 1d EMA50, and volume > 2x average.
+# Short when price breaks below 20-period lower Donchian band, price < 1d EMA50, and volume > 2x average.
+# Exits on opposite Donchian band break or volume drop below average.
+# Designed to capture strong trends with volume confirmation, reducing false breakouts.
+# Target: 20-35 trades/year per symbol with disciplined risk to avoid overtrading.
 
-name = "4h_Advanced_Camarilla_Pivot_Squeeze"
+name = "4h_Donchian_Breakout_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,51 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and Bollinger Bands
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Bollinger Bands (20, 2) for squeeze detection
-    sma_20 = np.full_like(close_1d, np.nan)
-    std_20 = np.full_like(close_1d, np.nan)
+    # Calculate 1d EMA50
+    ema_50 = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * 0.0377) + (ema_50[i-1] * 0.9623)
     
-    if len(close_1d) >= 20:
-        sma_20[19] = np.mean(close_1d[0:20])
-        std_20[19] = np.std(close_1d[0:20])
-        for i in range(20, len(close_1d)):
-            sma_20[i] = (sma_20[i-1] * 19 + close_1d[i]) / 20
-            std_20[i] = np.sqrt((std_20[i-1]**2 * 19 + (close_1d[i] - sma_20[i])**2) / 20)
+    # Align daily EMA to 4h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = upper_bb - lower_bb
+    # Calculate 4h Donchian channels (20-period)
+    upper_donchian = np.full_like(high, np.nan)
+    lower_donchian = np.full_like(low, np.nan)
     
-    # Calculate Bollinger Band width percentile (20-period lookback)
-    bb_width_percentile = np.full_like(bb_width, np.nan)
-    if len(bb_width) >= 40:
-        for i in range(39, len(bb_width)):
-            window = bb_width[i-19:i+1]
-            valid_window = window[~np.isnan(window)]
-            if len(valid_window) >= 10:
-                current_val = bb_width[i]
-                if not np.isnan(current_val):
-                    percentile = np.sum(valid_window <= current_val) / len(valid_window) * 100
-                    bb_width_percentile[i] = percentile
-    
-    # Calculate daily Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    daily_range = high_1d - low_1d
-    camarilla_R1 = close_1d + daily_range * 1.1 / 12
-    camarilla_S1 = close_1d - daily_range * 1.1 / 12
-    
-    # Align daily indicators to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1d, bb_width_percentile)
+    if len(high) >= 20 and len(low) >= 20:
+        for i in range(19, len(high)):
+            upper_donchian[i] = np.max(high[i-19:i+1])
+            lower_donchian[i] = np.min(low[i-19:i+1])
     
     # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -87,37 +69,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or \
-           np.isnan(bb_width_percentile_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(upper_donchian[i]) or np.isnan(lower_donchian[i]) or \
+           np.isnan(ema_50_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Squeeze condition: low volatility (BB width in lowest 30% percentile)
-        squeeze_condition = bb_width_percentile_aligned[i] < 30
-        
         if position == 0:
-            # Enter long: Price breaks above Camarilla R1 AND volume confirmation AND volatility squeeze
-            if close[i] > camarilla_R1_aligned[i] and volume_ratio[i] > 2.0 and squeeze_condition:
+            # Enter long: Price breaks above upper Donchian + above 1d EMA50 + volume confirmation
+            if close[i] > upper_donchian[i] and close[i] > ema_50_aligned[i] and volume_ratio[i] > 2.0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below Camarilla S1 AND volume confirmation AND volatility squeeze
-            elif close[i] < camarilla_S1_aligned[i] and volume_ratio[i] > 2.0 and squeeze_condition:
+            # Enter short: Price breaks below lower Donchian + below 1d EMA50 + volume confirmation
+            elif close[i] < lower_donchian[i] and close[i] < ema_50_aligned[i] and volume_ratio[i] > 2.0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit conditions: Price breaks below Camarilla S1 OR volatility expansion (end of squeeze)
-            if close[i] < camarilla_S1_aligned[i] or bb_width_percentile_aligned[i] > 70:
+            # Exit: Price breaks below lower Donchian OR volume drops below average
+            if close[i] < lower_donchian[i] or volume_ratio[i] < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: Price breaks above Camarilla R1 OR volatility expansion (end of squeeze)
-            if close[i] > camarilla_R1_aligned[i] or bb_width_percentile_aligned[i] > 70:
+            # Exit: Price breaks above upper Donchian OR volume drops below average
+            if close[i] > upper_donchian[i] or volume_ratio[i] < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
