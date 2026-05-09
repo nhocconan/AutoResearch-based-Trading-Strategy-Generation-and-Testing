@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
 # Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
 # Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
-# Designed to work in both bull and bear markets via trend filtering and volatility-based position sizing.
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+# This version refines the previous version with stricter volume confirmation and clearer exit logic to reduce trade frequency.
 
-name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -34,8 +34,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for 1d: R1, S1 based on previous day
+    # Typical price = (high + low + close) / 3
     typical_price = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
+    # Camarilla R1 = close + (range * 1.1/12)
+    # Camarilla S1 = close - (range * 1.1/12)
     camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
     camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
@@ -47,7 +50,7 @@ def generate_signals(prices):
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
