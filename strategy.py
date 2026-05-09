@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# 4H_1D_RSIBreakout_TrendVolume
-# Hypothesis: On 4h timeframe, enter long when RSI(14) crosses above 30 from below with 1d uptrend and volume confirmation.
-# Enter short when RSI(14) crosses below 70 from above with 1d downtrend and volume confirmation.
-# Uses 1d trend filter (EMA34) to avoid counter-trend trades and RSI for mean-reversion entries.
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
+# Hypothesis: Use 4h timeframe with 1d Camarilla levels for entry and exit. Long when price breaks above R1 with 1d uptrend and volume confirmation. Short when price breaks below S1 with 1d downtrend and volume confirmation. Exit on opposite level break. Focus on high-probability setups with volume confirmation to reduce false signals and maintain low trade frequency (target: 20-30 trades/year).
 
-name = "4H_1D_RSIBreakout_TrendVolume"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,21 +20,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate RSI(14) on 4h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels for 1d: R1, S1 based on previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    # Camarilla R1 = close + (range * 1.1/12)
+    # Camarilla S1 = close - (range * 1.1/12)
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
     # 1d trend: EMA(34) on close
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -48,43 +47,45 @@ def generate_signals(prices):
     volume_confirm = volume > (volume_avg * 1.5)
     
     # Align 1d indicators to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(rsi[i]) or np.isnan(trend_up_aligned[i]) or np.isnan(volume_confirm[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: RSI crosses above 30 + 1d uptrend + volume confirmation
-            if rsi[i] > 30 and rsi[i-1] <= 30 and trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI crosses below 70 + 1d downtrend + volume confirmation
-            elif rsi[i] < 70 and rsi[i-1] >= 70 and not trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI crosses above 70 or trend changes to down
-            if rsi[i] >= 70 or not trend_up_aligned[i]:
+            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
+            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses below 30 or trend changes to up
-            if rsi[i] <= 30 or trend_up_aligned[i]:
+            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
+            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
