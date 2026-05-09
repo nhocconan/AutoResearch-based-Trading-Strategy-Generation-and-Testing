@@ -3,76 +3,71 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation.
-# Uses Williams Fractals to identify key support/resistance levels from 1d timeframe.
-# Breakouts above bearish fractals (resistance) or below bullish fractals (support) 
-# with volume confirmation and aligned with 1d EMA50 trend capture strong momentum.
-# Works in both bull and bear markets by following higher timeframe trend.
-name = "6h_WilliamsFractal_Breakout_1dEMA50_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Choppiness Index regime filter + 4h RSI mean reversion with 200 EMA filter.
+# Uses daily Choppiness Index to filter regimes: CHOP > 61.8 = range (mean revert), CHOP < 38.2 = trending (avoid).
+# In range regime, RSI < 30 = long, RSI > 70 = short, only when price > EMA200 (bull bias) or price < EMA200 (bear bias).
+# Designed to work in both bull and bear markets by avoiding trending regimes and fading extremes in ranges.
+name = "4h_ChopRSI_MeanReversion_EMA200"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for Williams Fractals and EMA50 trend
+    # Daily data for Choppiness Index (requires daily OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Williams Fractals on daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Daily Choppiness Index (14-period)
+    # True Range = max(high-low, abs(high-previous close), abs(low-previous close))
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14 = pd.Series(tr.values).rolling(window=14, min_periods=14).mean().values
     
-    bearish_fractal = np.full(len(high_1d), np.nan)
-    bullish_fractal = np.full(len(low_1d), np.nan)
+    # Sum of true ranges over 14 periods
+    sum_tr14 = pd.Series(tr.values).rolling(window=14, min_periods=14).sum().values
     
-    # Williams Fractal: need 5 points (2 left, 2 right)
-    for i in range(2, len(high_1d) - 2):
-        # Bearish fractal: high[i] is highest among 5 points
-        if (high_1d[i] > high_1d[i-2] and high_1d[i] > high_1d[i-1] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            bearish_fractal[i] = high_1d[i]
-        
-        # Bullish fractal: low[i] is lowest among 5 points
-        if (low_1d[i] < low_1d[i-2] and low_1d[i] < low_1d[i-1] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            bullish_fractal[i] = low_1d[i]
+    # Highest high and lowest low over 14 periods
+    hh14 = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    ll14 = df_1d['low'].rolling(window=14, min_periods=14).min().values
     
-    # Williams Fractals need 2-bar confirmation after the center bar
-    bearish_fractal_confirmed = np.roll(bearish_fractal, 2)
-    bullish_fractal_confirmed = np.roll(bullish_fractal, 2)
-    bearish_fractal_confirmed[:2] = np.nan
-    bullish_fractal_confirmed[:2] = np.nan
+    # Choppiness Index formula: 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
+    # Avoid division by zero
+    range14 = hh14 - ll14
+    chop = np.where(range14 > 0, 100 * np.log10(sum_tr14 / range14) / np.log10(14), 50)
     
-    # Align fractals to 6h timeframe
-    bearish_fractal_6h = align_htf_to_ltf(prices, df_1d, bearish_fractal_confirmed, additional_delay_bars=0)
-    bullish_fractal_6h = align_htf_to_ltf(prices, df_1d, bullish_fractal_confirmed, additional_delay_bars=0)
+    # Align Choppiness Index to 4h timeframe
+    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Daily EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 4h RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike filter: volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema20)
+    # 4h EMA200 trend filter
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200  # Need enough data for EMA200
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(bearish_fractal_6h[i]) or np.isnan(bullish_fractal_6h[i]) or
-            np.isnan(ema_50_6h[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(chop_4h[i]) or np.isnan(rsi[i]) or np.isnan(ema_200[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,26 +76,28 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above bearish fractal (resistance) with volume spike and above daily EMA50
-            if (price > bearish_fractal_6h[i] and vol_spike[i] and price > ema_50_6h[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below bullish fractal (support) with volume spike and below daily EMA50
-            elif (price < bullish_fractal_6h[i] and vol_spike[i] and price < ema_50_6h[i]):
-                signals[i] = -0.25
-                position = -1
+            # Range regime: Choppiness Index > 61.8
+            if chop_4h[i] > 61.8:
+                # Long: RSI oversold (<30) and price above EMA200 (bullish bias)
+                if rsi[i] < 30 and price > ema_200[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: RSI overbought (>70) and price below EMA200 (bearish bias)
+                elif rsi[i] > 70 and price < ema_200[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: price falls back below bullish fractal (support)
-            if price < bullish_fractal_6h[i]:
+            # Exit long: RSI returns to neutral (50) or chop regime ends
+            if rsi[i] >= 50 or chop_4h[i] < 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above bearish fractal (resistance)
-            if price > bearish_fractal_6h[i]:
+            # Exit short: RSI returns to neutral (50) or chop regime ends
+            if rsi[i] <= 50 or chop_4h[i] < 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
