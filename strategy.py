@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h KAMA trend + RSI(2) mean reversion + volume confirmation
-# Long when KAMA rising, RSI(2) < 10, and volume > 1.5x average
-# Short when KAMA falling, RSI(2) > 90, and volume > 1.5x average
-# Exit when RSI(2) crosses 50 (mean reversion complete)
-# Uses adaptive trend (KAMA) for direction, extreme short-term RSI for entry, volume for conviction
-# Designed to capture mean reversion within trending markets with controlled frequency
-# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
+# Hypothesis: 12h Donchian breakout with 1d EMA50 trend filter and volume spike
+# Long when price breaks above Donchian upper with EMA50 uptrend and volume > 2x average
+# Short when price breaks below Donchian lower with EMA50 downtrend and volume > 2x average
+# Exit when price retouches Donchian midline or reverses to opposite side
+# Uses Donchian for trend structure, EMA for trend filter, volume for conviction
+# Designed to capture breakouts in both trending and ranging markets with controlled frequency
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "4h_KAMA_RSI2_MeanReversion_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,80 +20,73 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 4h close
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[:20])  # placeholder, will compute properly below
+    # Calculate 1d Donchian channels (20-period high/low)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Proper KAMA calculation
-    close_series = pd.Series(close)
-    change = close_series.diff().abs()
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Previous day's Donchian channels (to avoid look-ahead)
+    donch_high = df_1d['high'].rolling(window=20, min_periods=20).max().shift(1)
+    donch_low = df_1d['low'].rolling(window=20, min_periods=20).min().shift(1)
+    donch_mid = (donch_high + donch_low) / 2
     
-    # Calculate RSI(2) on 4h close
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=2, min_periods=2).mean()
-    avg_loss = loss.rolling(window=2, min_periods=2).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align Donchian levels to 12h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high.values)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low.values)
+    donch_mid_aligned = align_htf_to_ltf(prices, df_1d, donch_mid.values)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    vol_confirm = volume > (2.0 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for RSI and volatility calculation
+    start_idx = 50  # Need enough data for EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or np.isnan(donch_mid_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA rising, RSI(2) < 10 (oversold), volume spike
-            if (kama[i] > kama[i-1] and 
-                rsi_values[i] < 10 and 
+            # Enter long: price breaks above Donchian high, EMA50 uptrend, volume spike
+            if (close[i] > donch_high_aligned[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling, RSI(2) > 90 (overbought), volume spike
-            elif (kama[i] < kama[i-1] and 
-                  rsi_values[i] > 90 and 
+            # Enter short: price breaks below Donchian low, EMA50 downtrend, volume spike
+            elif (close[i] < donch_low_aligned[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI(2) crosses above 50 (mean reversion complete)
-            if rsi_values[i] >= 50:
+            # Exit long: price retouches Donchian midline or reverses to lower band
+            if (close[i] <= donch_mid_aligned[i]) or (close[i] < donch_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI(2) crosses below 50 (mean reversion complete)
-            if rsi_values[i] <= 50:
+            # Exit short: price retouches Donchian midline or reverses to upper band
+            if (close[i] >= donch_mid_aligned[i]) or (close[i] > donch_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
