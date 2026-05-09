@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h KAMA + RSI with Choppiness Regime Filter
-# Uses KAMA(10) to filter market noise and RSI(14) for mean reversion in choppy regimes.
-# Long when: price > KAMA, RSI < 30, and Choppiness > 61.8 (choppy)
-# Short when: price < KAMA, RSI > 70, and Choppiness > 61.8 (choppy)
-# Exit when: price crosses KAMA OR Choppiness < 38.2 (trending regime)
-# Uses 1d trend filter: only take longs when 1d EMA(50) rising, shorts when falling.
-# Position size: 0.25 (25% of capital) to limit drawdown.
-# Designed to work in both bull (trend following via 1d filter) and bear (mean reversion in chop) markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume spike confirmation
+# Long when: price breaks above Donchian high(20), 1d EMA(50) rising, volume > 2.0x 20-period average
+# Short when: price breaks below Donchian low(20), 1d EMA(50) falling, volume > 2.0x 20-period average
+# Exit when: price crosses Donchian midpoint OR trend reverses
+# Position size: 0.28 to balance risk and return. Target: 15-30 trades/year.
+# Designed to work in both bull (breakouts) and bear (mean-reversion at extremes) markets.
 
-name = "6h_KAMA_RSI_Chop_Regime"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,45 +24,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA calculation (ER=10, fast=2, slow=30)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14)
-    atr = np.zeros_like(close)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    
-    # Get 1d data for trend filter
+    # Get daily data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA(50) for trend filter
-    close_1d = df_1d['close']
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_prev = np.roll(ema_50_1d, 1)
     ema_50_1d_prev[0] = ema_50_1d[0]
     ema_rising = ema_50_1d > ema_50_1d_prev
@@ -72,50 +39,60 @@ def generate_signals(prices):
     ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising)
     ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling)
     
+    # Calculate 12h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_high = high_max
+    donchian_low = low_min
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume spike: current volume > 2.0x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 20  # Need enough data for Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(donchian_mid[i]) or np.isnan(ema_rising_aligned[i]) or
+            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > KAMA, RSI < 30, choppy regime, 1d EMA rising
-            if (close[i] > kama[i] and 
-                rsi[i] < 30 and 
-                chop[i] > 61.8 and 
-                ema_rising_aligned[i]):
-                signals[i] = 0.25
+            # Enter long: price > Donchian high + 1d EMA rising + volume spike
+            if (close[i] > donchian_high[i] and 
+                ema_rising_aligned[i] and 
+                vol_spike[i]):
+                signals[i] = 0.28
                 position = 1
-            # Enter short: price < KAMA, RSI > 70, choppy regime, 1d EMA falling
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 70 and 
-                  chop[i] > 61.8 and 
-                  ema_falling_aligned[i]):
-                signals[i] = -0.25
+            # Enter short: price < Donchian low + 1d EMA falling + volume spike
+            elif (close[i] < donchian_low[i] and 
+                  ema_falling_aligned[i] and 
+                  vol_spike[i]):
+                signals[i] = -0.28
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA OR trending regime
-            if (close[i] < kama[i]) or (chop[i] < 38.2):
+            # Exit long: price crosses below Donchian midpoint OR trend turns down
+            if (close[i] < donchian_mid[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         
         elif position == -1:
-            # Exit short: price crosses above KAMA OR trending regime
-            if (close[i] > kama[i]) or (chop[i] < 38.2):
+            # Exit short: price crosses above Donchian midpoint OR trend turns up
+            if (close[i] > donchian_mid[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
