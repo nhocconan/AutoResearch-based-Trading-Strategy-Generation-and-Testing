@@ -1,20 +1,15 @@
-# This strategy uses 4-hour timeframe with a focus on the 123 reversal pattern, combined with 1-day trend filter and volume confirmation.
-# The 123 pattern is a swing-based reversal setup: point 1 (swing extreme), point 2 (pullback), point 3 (failure to exceed point 1).
-# It works in both bull and bear markets by trading with the higher timeframe trend.
-# Volume confirms momentum behind the breakout. Target: 25-40 trades/year.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_123Reversal_1dTrend_VolumeConfirm"
+name = "4h_KC_RSI20_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,44 +26,65 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate swing highs/lows for 123 pattern (using 5-bar window)
-    def find_swing_points(high, low, window=2):
-        """Find swing highs and lows"""
-        n = len(high)
-        swing_high = np.full(n, np.nan)
-        swing_low = np.full(n, np.nan)
-        
-        for i in range(window, n - window):
-            # Swing high: highest high in window
-            if high[i] == np.max(high[i-window:i+window+1]):
-                swing_high[i] = high[i]
-            # Swing low: lowest low in window
-            if low[i] == np.min(low[i-window:i+window+1]):
-                swing_low[i] = low[i]
-        return swing_high, swing_low
+    # Calculate Keltner Channel (KC) parameters
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])  # First TR is undefined
+    atr = np.full(n, np.nan)
+    for i in range(1, n):
+        if i < 11:
+            atr[i] = np.nan
+        else:
+            if np.isnan(atr[i-1]):
+                atr[i] = np.mean(tr[i-10:i+1])
+            else:
+                atr[i] = (atr[i-1] * 9 + tr[i]) / 10  # Wilder's smoothing
     
-    swing_high, swing_low = find_swing_points(high, low, 2)
-    
-    # Track last swing points
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
-    last_swing_high_idx = np.full(n, -1)
-    last_swing_low_idx = np.full(n, -1)
-    
+    # Calculate EMA20 for KC middle line
+    ema20 = np.full(n, np.nan)
+    ema20_val = np.nan
     for i in range(n):
-        if not np.isnan(swing_high[i]):
-            last_swing_high[i] = swing_high[i]
-            last_swing_high_idx[i] = i
-        elif i > 0:
-            last_swing_high[i] = last_swing_high[i-1]
-            last_swing_high_idx[i] = last_swing_high_idx[i-1]
-            
-        if not np.isnan(swing_low[i]):
-            last_swing_low[i] = swing_low[i]
-            last_swing_low_idx[i] = i
-        elif i > 0:
-            last_swing_low[i] = last_swing_low[i-1]
-            last_swing_low_idx[i] = last_swing_low_idx[i-1]
+        if np.isnan(ema20_val):
+            if not np.isnan(close[i]):
+                ema20_val = close[i]
+        else:
+            ema20_val = (close[i] * 2 + ema20_val * 18) / 20  # EMA(20)
+        ema20[i] = ema20_val
+    
+    # Calculate KC bands
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
+    
+    # Calculate RSI(20)
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    for i in range(1, n):
+        if i < 20:
+            if not np.isnan(gain[i]) and not np.isnan(loss[i]):
+                if i == 1:
+                    avg_gain[i] = gain[i]
+                    avg_loss[i] = loss[i]
+                else:
+                    avg_gain[i] = (avg_gain[i-1] * (i-1) + gain[i]) / i
+                    avg_loss[i] = (avg_loss[i-1] * (i-1) + loss[i]) / i
+            else:
+                avg_gain[i] = avg_gain[i-1]
+                avg_loss[i] = avg_loss[i-1]
+        else:
+            if np.isnan(avg_gain[i-1]):
+                avg_gain[i] = np.mean(gain[i-19:i+1])
+                avg_loss[i] = np.mean(loss[i-19:i+1])
+            else:
+                avg_gain[i] = (avg_gain[i-1] * 19 + gain[i]) / 20
+                avg_loss[i] = (avg_loss[i-1] * 19 + loss[i]) / 20
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    rsi = np.where(avg_gain == 0, 0, rsi)
     
     # Align daily trend to 4h
     ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
@@ -76,129 +92,50 @@ def generate_signals(prices):
     # Calculate volume confirmation (20-period average)
     vol_avg_20 = np.full(n, np.nan)
     for i in range(n):
-        if i >= 19:
+        if i < 19:
+            vol_avg_20[i] = np.nan
+        else:
             vol_avg_20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(ema20_1d_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get today's daily data for trend
-        idx_1d = 0
-        while idx_1d < len(df_1d) and df_1d.iloc[idx_1d]['open_time'] <= prices.iloc[i]['open_time']:
-            idx_1d += 1
-        idx_1d -= 1
-        
-        if idx_1d < 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        ema20_today = ema20_1d[idx_1d]
-        vol_avg_today = vol_avg_20[i]
-        vol_current = volume[i]
-        
-        # Volume confirmation: current volume > 1.3x average
-        vol_confirmed = vol_current > 1.3 * vol_avg_today
-        
+        vol_confirmed = volume[i] > 1.5 * vol_avg_20[i]
         price = close[i]
         
         if position == 0:
-            # Look for 123 reversal patterns
-            
-            # Check for long 123 pattern
-            # Need: swing low (point1), pullback to point2, failure at point3, break above point2
-            if last_swing_low_idx[i] >= 20:  # Ensure we have history
-                point1_idx = last_swing_low_idx[i]
-                point1 = last_swing_low[i]
-                
-                # Find point2: pullback high after point1
-                point2_idx = -1
-                point2 = -1
-                for j in range(point1_idx + 1, min(i, point1_idx + 20)):
-                    if high[j] > point1 and (point2 == -1 or high[j] < point2):
-                        point2 = high[j]
-                        point2_idx = j
-                
-                if point2_idx != -1 and point2 > point1:
-                    # Find point3: failure low after point2 (should not exceed point1)
-                    point3_idx = -1
-                    point3 = 1e10
-                    for j in range(point2_idx + 1, i):
-                        if low[j] < point2 and low[j] > point1 and low[j] < point3:
-                            point3 = low[j]
-                            point3_idx = j
-                    
-                    if point3_idx != -1 and point3 < point2:
-                        # Check for break above point2 (entry)
-                        if price > point2 and vol_confirmed and price > ema20_today:
-                            signals[i] = 0.25
-                            position = 1
-                            continue
-            
-            # Check for short 123 pattern
-            # Need: swing high (point1), pullback to point2, failure at point3, break below point2
-            if last_swing_high_idx[i] >= 20:
-                point1_idx = last_swing_high_idx[i]
-                point1 = last_swing_high[i]
-                
-                # Find point2: pullback low after point1
-                point2_idx = -1
-                point2 = 1e10
-                for j in range(point1_idx + 1, min(i, point1_idx + 20)):
-                    if low[j] < point1 and (point2 == 1e10 or low[j] > point2):
-                        point2 = low[j]
-                        point2_idx = j
-                
-                if point2_idx != -1 and point2 < point1:
-                    # Find point3: failure high after point2 (should not go below point1)
-                    point3_idx = -1
-                    point3 = -1
-                    for j in range(point2_idx + 1, i):
-                        if high[j] > point2 and high[j] < point1 and high[j] > point3:
-                            point3 = high[j]
-                            point3_idx = j
-                    
-                    if point3_idx != -1 and point3 > point2:
-                        # Check for break below point2 (entry)
-                        if price < point2 and vol_confirmed and price < ema20_today:
-                            signals[i] = -0.25
-                            position = -1
-                            continue
+            # Long entry: price touches KC lower + RSI oversold + daily uptrend
+            if price <= kc_lower[i] and rsi[i] < 30 and price > ema20_1d_aligned[i] and vol_confirmed:
+                signals[i] = 0.25
+                position = 1
+                continue
+            # Short entry: price touches KC upper + RSI overbought + daily downtrend
+            elif price >= kc_upper[i] and rsi[i] > 70 and price < ema20_1d_aligned[i] and vol_confirmed:
+                signals[i] = -0.25
+                position = -1
+                continue
         
         elif position == 1:
-            # Exit long: break below point2 of the pattern or trend change
-            exit_signal = False
-            if price < ema20_today:  # Trend change
-                exit_signal = True
-            elif not vol_confirmed:  # Volume confirmation lost
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit long: price crosses above KC middle or trend change
+            if price >= ema20[i] or price < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: break above point2 of the pattern or trend change
-            exit_signal = False
-            if price > ema20_today:  # Trend change
-                exit_signal = True
-            elif not vol_confirmed:  # Volume confirmation lost
-                exit_signal = True
-            
-            if exit_signal:
+            # Exit short: price crosses below KC middle or trend change
+            if price <= ema20[i] or price > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
