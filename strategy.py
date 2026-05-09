@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_ADX_Trend_Filter_with_Volume_Spike"
-timeframe = "4h"
+name = "1h_MultiTF_Trend_Momentum"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    Trend-following strategy using 1d ADX as primary filter with 4h volume spikes.
-    - Long when: ADX(1d) > 25 AND volume spike (>1.5x 20-period avg) AND price > EMA(50)
-    - Short when: ADX(1d) > 25 AND volume spike (>1.5x 20-period avg) AND price < EMA(50)
-    - Exit when: ADX drops below 20 OR no volume spike
-    - Uses discrete position sizing (0.25) to minimize fee churn
+    1h strategy using 4h trend (EMA21) and 1h momentum (RSI(14)) with volume filter.
+    - Long: Price > 4h EMA21 AND RSI(14) < 30 AND volume > 1.5x avg volume (20)
+    - Short: Price < 4h EMA21 AND RSI(14) > 70 AND volume > 1.5x avg volume (20)
+    - Exit: Opposite condition met (price crosses 4h EMA21 or RSI reverts)
+    - Session filter: 08:00-20:00 UTC only
+    - Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years)
     """
     n = len(prices)
     if n < 50:
@@ -24,128 +25,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 4h data
-    ema_period = 50
-    ema = np.full(n, np.nan)
-    if n >= ema_period:
-        multiplier = 2 / (ema_period + 1)
-        ema[ema_period-1] = np.mean(close[:ema_period])
-        for i in range(ema_period, n):
-            ema[i] = (close[i] - ema[i-1]) * multiplier + ema[i-1]
+    # Calculate EMA21 on 4h close
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 21:
+        ema_4h[20] = np.mean(close_4h[:21])
+        for i in range(21, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * 2/22) + (ema_4h[i-1] * 20/22)
     
-    # Calculate ADX(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align 4h EMA to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Calculate RSI(14) on 1h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Directional Movement
-    up_move = high_1d[1:] - high_1d[:-1]
-    down_move = low_1d[:-1] - low_1d[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    # Wilder smoothing
+    # Wilder smoothing for RSI
     period = 14
-    alpha = 1.0 / period
-    atr = np.full(len(tr), np.nan)
-    plus_dm_smooth = np.full(len(tr), np.nan)
-    minus_dm_smooth = np.full(len(tr), np.nan)
-    
-    if len(tr) >= period:
-        atr[period-1] = np.nanmean(tr[1:period])
-        plus_dm_smooth[period-1] = np.nanmean(plus_dm[1:period])
-        minus_dm_smooth[period-1] = np.nanmean(minus_dm[1:period])
+    if n >= period:
+        avg_gain[period-1] = np.mean(gain[1:period+1])
+        avg_loss[period-1] = np.mean(loss[1:period+1])
         
-        for i in range(period, len(tr)):
-            atr[i] = atr[i-1] - (atr[i-1] / period) + tr[i]
-            plus_dm_smooth[i] = plus_dm_smooth[i-1] - (plus_dm_smooth[i-1] / period) + plus_dm[i]
-            minus_dm_smooth[i] = minus_dm_smooth[i-1] - (minus_dm_smooth[i-1] / period) + minus_dm[i]
+        for i in range(period, n):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
     
-    # Calculate DI and DX
-    plus_di = np.full(len(tr), np.nan)
-    minus_di = np.full(len(tr), np.nan)
-    dx = np.full(len(tr), np.nan)
+    rs = np.full(n, np.nan)
+    rsi = np.full(n, 50.0)  # default neutral
     
-    for i in range(period, len(tr)):
-        if atr[i] > 0:
-            plus_di[i] = 100 * (plus_dm_smooth[i] / atr[i])
-            minus_di[i] = 100 * (minus_dm_smooth[i] / atr[i])
-            if plus_di[i] + minus_di[i] > 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    for i in range(period, n):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs[i]))
     
-    # ADX is smoothed DX
-    adx = np.full(len(tr), np.nan)
-    if len(dx) >= 2*period-1:
-        adx[2*period-2] = np.nanmean(dx[period:2*period-1])
-        for i in range(2*period-1, len(dx)):
-            adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
-    
-    # Align ADX to 4h
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume spike detection (20-period for 4h)
+    # Volume average (20-period)
     vol_avg = np.full(n, np.nan)
     for i in range(20, n):
         vol_avg[i] = np.mean(volume[i-20:i])
     
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, ema_period, 2*period)
+    start_idx = max(30, 20)  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema[i]) or np.isnan(adx_4h[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.5 x 20-period average
-        vol_spike = volume[i] > vol_avg[i] * 1.5
+        # Session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # ADX trend filter: strong trend (ADX > 25) or weak trend (ADX < 20)
-        strong_trend = adx_4h[i] > 25
-        weak_trend = adx_4h[i] < 20
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume condition: current volume > 1.5x 20-period average
+        vol_condition = volume[i] > vol_avg[i] * 1.5
         
         if position == 0:
-            # Long: Strong trend + volume spike + price above EMA
-            if strong_trend and vol_spike and close[i] > ema[i]:
-                signals[i] = 0.25
+            # Long: Price > 4h EMA21 AND RSI < 30 (oversold) AND volume spike
+            if (close[i] > ema_4h_aligned[i] and rsi[i] < 30 and vol_condition):
+                signals[i] = 0.20
                 position = 1
-            # Short: Strong trend + volume spike + price below EMA
-            elif strong_trend and vol_spike and close[i] < ema[i]:
-                signals[i] = -0.25
+            # Short: Price < 4h EMA21 AND RSI > 70 (overbought) AND volume spike
+            elif (close[i] < ema_4h_aligned[i] and rsi[i] > 70 and vol_condition):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Weak trend OR no volume spike OR price crosses below EMA
-            if weak_trend or not vol_spike or close[i] < ema[i]:
+            # Exit long: Price < 4h EMA21 OR RSI > 50 (momentum fade)
+            if close[i] < ema_4h_aligned[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Weak trend OR no volume spike OR price crosses above EMA
-            if weak_trend or not vol_spike or close[i] > ema[i]:
+            # Exit short: Price > 4h EMA21 OR RSI < 50 (momentum fade)
+            if close[i] > ema_4h_aligned[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
