@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Trend_Volume
-# Hypothesis: Uses daily Camarilla pivot levels (R1, S1) for entry signals and 12h EMA for trend filtering.
-# Enters long when price breaks above R1 with 12h EMA uptrend, short when breaks below S1 with 12h EMA downtrend.
-# Volume confirmation (2x average) filters false breakouts. ATR-based stop loss manages risk.
-# Designed for 12h timeframe with daily pivot levels as structure and trend filter to reduce whipsaw.
-# Target: 15-30 trades/year per symbol with disciplined risk management for both bull and bear markets.
+# 4h_Camarilla_Pullback_With_Volume
+# Hypothesis: Buys pullbacks to Camarilla R3/S3 levels during strong 1d trends, with volume confirmation.
+# Works in bull markets by buying dips in uptrends; works in bear markets by selling rallies in downtrends.
+# Uses 1d trend filter to avoid counter-trend trades, volume to confirm institutional interest, and ATR stops for risk control.
+# Target: 20-40 trades/year per symbol with disciplined risk management.
 
-name = "12h_Camarilla_Pivot_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_Pullback_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,7 +23,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for stop loss
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    
+    # Calculate Camarilla levels for each 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla R3, S3 levels: R3 = close + 1.1*(high-low)/6, S3 = close - 1.1*(high-low)/6
+    camarilla_r3_1d = close_1d + (1.1 * (high_1d - low_1d) / 6)
+    camarilla_s3_1d = close_1d - (1.1 * (high_1d - low_1d) / 6)
+    
+    # Align Camarilla levels and EMA to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # 4h ATR for stop loss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -33,39 +59,12 @@ def generate_signals(prices):
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = np.full_like(tr, np.nan)
-    if len(tr) >= 14:
-        atr[13] = np.mean(tr[0:14])
-        for i in range(14, len(tr)):
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    if len(tr) >= 10:
+        atr[9] = np.mean(tr[0:10])
+        for i in range(10, len(tr)):
+            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
     
-    # Get daily data for Camarilla pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels (R1, S1)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)
-    s1 = pivot - (range_1d * 1.1 / 12)
-    
-    # Align pivot levels to 12h timeframe (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Get 12h EMA for trend filter
-    ema_period = 20
-    ema_12h = np.full_like(close, np.nan)
-    if len(close) >= ema_period:
-        ema_12h[ema_period-1] = np.mean(close[0:ema_period])
-        for i in range(ema_period, len(close)):
-            ema_12h[i] = (close[i] * 2 + ema_12h[i-1] * (ema_period - 1)) / (ema_period + 1)
-    
-    # Volume filter: current volume vs 20-period average
+    # Volume ratio: current vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -79,41 +78,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, ema_period-1, 1)  # Need volume MA, EMA, and pivot data
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_12h[i]) or np.isnan(volume_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(volume_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend direction from 12h EMA
-        ema_uptrend = close[i] > ema_12h[i]
+        # Determine 1d trend direction
+        uptrend_1d = close[i] > ema_34_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 + EMA uptrend + volume confirmation
-            if close[i] > r1_aligned[i] and ema_uptrend and volume_ratio[i] > 2.0:
+            # Enter long: pullback to S3 in uptrend + volume confirmation
+            if uptrend_1d and close[i] <= camarilla_s3_aligned[i] * 1.001 and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + EMA downtrend + volume confirmation
-            elif close[i] < s1_aligned[i] and not ema_uptrend and volume_ratio[i] > 2.0:
+            # Enter short: pullback to R3 in downtrend + volume confirmation
+            elif not uptrend_1d and close[i] >= camarilla_r3_aligned[i] * 0.999 and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 or EMA turns downtrend or ATR stop
-            if close[i] < s1_aligned[i] or not ema_uptrend or close[i] < ema_12h[i] - 2.0 * atr[i]:
+            # Exit long: trend reversal or ATR stop
+            if not uptrend_1d or close[i] < camarilla_s3_aligned[i] or close[i] < close[i-1] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 or EMA turns uptrend or ATR stop
-            if close[i] > r1_aligned[i] or ema_uptrend or close[i] > ema_12h[i] + 2.0 * atr[i]:
+            # Exit short: trend reversal or ATR stop
+            if uptrend_1d or close[i] > camarilla_r3_aligned[i] or close[i] > close[i-1] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
