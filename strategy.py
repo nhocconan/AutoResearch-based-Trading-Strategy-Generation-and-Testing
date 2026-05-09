@@ -1,111 +1,87 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h ADX + Williams Alligator combination with price outside mouth
-# Long when price > Alligator lips (green line) and ADX > 25 (trending)
-# Short when price < Alligator jaws (red line) and ADX > 25 (trending)
-# Exit when price re-enters Alligator mouth (between jaws and lips) or ADX < 20
-# Uses Williams Alligator (SMMA of median price) for trend direction and ADX for trend strength
-# Designed to capture strong trends while avoiding choppy markets
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
+# Hypothesis: 4h Williams Alligator + Elder Ray Power Index with 1d trend filter
+# Long when green line > red line (bullish alignment) and bull power > 0 with 1d EMA50 uptrend
+# Short when red line > green line (bearish alignment) and bear power < 0 with 1d EMA50 downtrend
+# Uses Williams Alligator for trend identification and Elder Ray for bull/bear power
+# Designed to capture sustained trends with low frequency in both bull and bear markets
+# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
 
-name = "6h_ADX_Alligator_Trend"
-timeframe = "6h"
+name = "4h_Alligator_ElderRay_PowerTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(data, period):
-    """Smoothed Moving Average (SMMA)"""
-    if len(data) < period:
-        return np.full_like(data, np.nan, dtype=float)
-    result = np.full_like(data, np.nan, dtype=float)
-    # First value is SMA
-    result[period-1] = np.mean(data[:period])
-    # Subsequent values: SMMA = (prev_smma * (period-1) + current) / period
-    for i in range(period, len(data)):
-        result[i] = (result[i-1] * (period-1) + data[i]) / period
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate Williams Alligator (using median price)
+    # Calculate Williams Alligator (13,8,5 SMAs of median price)
     median_price = (high + low) / 2
-    jaw = smma(median_price, 13)  # Blue line (slowest)
-    teeth = smma(median_price, 8)  # Red line (middle)
-    lips = smma(median_price, 5)   # Green line (fastest)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().rolling(window=8, min_periods=8).mean().values  # Smoothed (13,8)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().rolling(window=5, min_periods=5).mean().values   # Smoothed (8,5)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().rolling(window=3, min_periods=3).mean().values  # Smoothed (5,3)
     
-    # Calculate ADX
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Calculate Elder Ray Power Index (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # Smoothed values
-    atr = smma(tr, 14)
-    plus_di = smma(dm_plus, 14)
-    minus_di = smma(dm_minus, 14)
-    
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) != 0, 
-                  np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = smma(dx, 14)
-    
-    # Align indicators to 6h timeframe (they're already calculated on 6h data)
-    # No need for HTF alignment since we're using same timeframe
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for ADX calculation
+    start_idx = 50  # Need enough data for indicator calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > lips (green) and ADX > 25 (strong trend)
-            if close[i] > lips[i] and adx[i] > 25:
+            # Enter long: bullish alignment (lips > teeth > jaw) and bull power > 0 with 1d EMA50 uptrend
+            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and
+                bull_power[i] > 0 and
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < jaw (blue) and ADX > 25 (strong trend)
-            elif close[i] < jaw[i] and adx[i] > 25:
+            # Enter short: bearish alignment (jaw > teeth > lips) and bear power < 0 with 1d EMA50 downtrend
+            elif (jaw[i] > teeth[i] and teeth[i] > lips[i] and
+                  bear_power[i] < 0 and
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price re-enters mouth (below lips) or ADX < 20 (weak trend)
-            if close[i] < lips[i] or adx[i] < 20:
+            # Exit long: bearish alignment or bull power <= 0
+            if (jaw[i] > teeth[i] or teeth[i] > lips[i] or bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price re-enters mouth (above jaw) or ADX < 20 (weak trend)
-            if close[i] > jaw[i] or adx[i] < 20:
+            # Exit short: bullish alignment or bear power >= 0
+            if (lips[i] > teeth[i] or teeth[i] > jaw[i] or bear_power[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
