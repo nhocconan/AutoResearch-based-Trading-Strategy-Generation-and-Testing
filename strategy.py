@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 
 # Hypothesis: 4h timeframe with daily pivot structure (from 1d) and 4h trend filter.
-# Uses daily Camarilla levels (R3/S3) for breakout entries and 4h EMA20 for trend filter.
+# Uses daily Camarilla levels (R1/S1) for breakout entries and 4h EMA20 for trend filter.
 # Daily pivot provides structural support/resistance that works in both bull and bear markets.
-# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
-# Daily data provides stable structure, reducing whipsaw and improving win rate in ranging markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Daily data changes slowly, reducing whipsaw and improving win rate in ranging markets.
+# Volume confirmation ensures breakouts have conviction.
 
-name = "4h_Camarilla_R3_S3_1dEMA20_Trend_Volume"
+name = "4h_Camarilla_R1_S1_4hEMA20_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,33 +25,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
+    # Calculate daily Camarilla levels (R1, S1) from previous day
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close[0] = np.nan  # First value invalid
     
     camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
+    r1 = prev_close + 1.1 * camarilla_range / 12
+    s1 = prev_close - 1.1 * camarilla_range / 12
     
     # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r3
-    breakout_down = close < s3
+    breakout_up = close > r1
+    breakout_down = close < s1
     
-    # Get daily data for EMA20 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for EMA20 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA20 trend filter
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate 4h EMA20 trend filter
+    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    trend_up = close > ema_20_1d_aligned
-    trend_down = close < ema_20_1d_aligned
+    trend_up = close > ema_20_4h_aligned
+    trend_down = close < ema_20_4h_aligned
     
-    # Volume filter: current volume > 1.5x 20-period average volume (balanced to avoid overtrading)
+    # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
@@ -70,11 +71,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 1d uptrend + volume spike
+            # Long: breakout above R1 + 4h uptrend + volume filter
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 1d downtrend + volume spike
+            # Short: breakout below S1 + 4h downtrend + volume filter
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
