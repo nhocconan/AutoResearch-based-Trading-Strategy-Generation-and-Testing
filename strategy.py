@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d price closes outside Bollinger Bands (20,2) with volume confirmation (>1.5x 20 EMA volume) and 1-week EMA10 trend filter.
-# Bollinger breakouts capture volatility expansion; volume confirms institutional interest; 1w EMA10 ensures alignment with higher timeframe trend.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Uses Bollinger Bands for volatility-based breakout detection, which adapts to changing market conditions.
-name = "1d_BollingerBreakout_1wEMA10_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams Alligator + 12h EMA trend filter + volume confirmation
+# Williams Alligator (Jaw, Teeth, Lips) identifies trends when lines are aligned and separated.
+# In uptrend: Lips > Teeth > Jaw; in downtrend: Lips < Teeth < Jaw.
+# 12h EMA ensures higher timeframe trend alignment.
+# Volume confirms participation. Works in both bull (Alligator up) and bear (Alligator down) markets.
+name = "6h_WilliamsAlligator_12hEMA_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,34 +22,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
+    # Williams Alligator parameters (13,8,5)
+    jaw_period = 13
+    teeth_period = 8
+    lips_period = 5
+    jaw_shift = 8
+    teeth_shift = 5
+    lips_shift = 3
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Jaw (blue line): 13-period SMMA shifted 8 bars
+    jaw = pd.Series(close).rolling(window=jaw_period, min_periods=jaw_period).mean()
+    jaw = jaw.shift(jaw_shift)
+    
+    # Teeth (red line): 8-period SMMA shifted 5 bars
+    teeth = pd.Series(close).rolling(window=teeth_period, min_periods=teeth_period).mean()
+    teeth = teeth.shift(teeth_shift)
+    
+    # Lips (green line): 5-period SMMA shifted 3 bars
+    lips = pd.Series(close).rolling(window=lips_period, min_periods=lips_period).mean()
+    lips = lips.shift(lips_shift)
+    
+    jaw_vals = jaw.values
+    teeth_vals = teeth.values
+    lips_vals = lips.values
+    
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1w EMA10 trend filter
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 12h EMA50 trend filter
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Volume confirmation: volume > 1.3x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
+    vol_confirm = volume > (1.3 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = max(jaw_period, teeth_period, lips_period) + max(jaw_shift, teeth_shift, lips_shift)
+    start_idx = max(start_idx, 50)  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(ema_1w_aligned[i]) or 
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(jaw_vals[i]) or np.isnan(teeth_vals[i]) or np.isnan(lips_vals[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,26 +77,28 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: close > upper Bollinger Band + volume confirmation + 1w EMA10 up
-            if (price > upper_band[i] and vol_confirm[i] and price > ema_1w_aligned[i]):
+            # Long: Lips > Teeth > Jaw (Alligator up) + price > 12h EMA50 + volume confirmation
+            if (lips_vals[i] > teeth_vals[i] and teeth_vals[i] > jaw_vals[i] and 
+                price > ema_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: close < lower Bollinger Band + volume confirmation + 1w EMA10 down
-            elif (price < lower_band[i] and vol_confirm[i] and price < ema_1w_aligned[i]):
+            # Short: Lips < Teeth < Jaw (Alligator down) + price < 12h EMA50 + volume confirmation
+            elif (lips_vals[i] < teeth_vals[i] and teeth_vals[i] < jaw_vals[i] and 
+                  price < ema_12h_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close crosses below middle Bollinger Band (SMA20)
-            if price < sma_20[i]:
+            # Exit long: Alligator convergence (Lips < Teeth) or price < 12h EMA50
+            if lips_vals[i] < teeth_vals[i] or price < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close crosses above middle Bollinger Band (SMA20)
-            if price > sma_20[i]:
+            # Exit short: Alligator convergence (Lips > Teeth) or price > 12h EMA50
+            if lips_vals[i] > teeth_vals[i] or price > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
