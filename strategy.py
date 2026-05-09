@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Vortex_Trend_Filter_Volume_Spike"
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume spike
+# Works in bull: breakouts capture momentum. Works in bear: EMA34 filter avoids shorts in strong downtrends,
+# only allowing longs when price > EMA34 (bullish bias) and shorts when price < EMA34 (bearish bias).
+# Volume spike confirms breakout legitimacy. Target: 20-40 trades/year to avoid fee drag.
+name = "4h_Donchian20_EMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +21,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Vortex and trend
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Vortex Indicator (VI) on 1d
-    # True Range
-    tr1 = np.abs(df_1d['high'].values[1:] - df_1d['low'].values[:-1])
-    tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
-    tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # +VM and -VM
-    vm_plus = np.abs(df_1d['high'].values[1:] - df_1d['low'].values[:-1])
-    vm_minus = np.abs(df_1d['low'].values[1:] - df_1d['high'].values[:-1])
-    vm_plus = np.concatenate([[0], vm_plus])
-    vm_minus = np.concatenate([[0], vm_minus])
-    
-    # Sum over 14 periods (standard VI period)
-    period = 14
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
-    
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Donchian channels (20-period) on 4h data
+    # Use pandas rolling for efficiency
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     # 1d volume average for volume filter
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 4h
-    vi_plus_4h = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_4h = align_htf_to_ltf(prices, df_1d, vi_minus)
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 1d indicators to 4h timeframe
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(vi_plus_4h[i]) or np.isnan(vi_minus_4h[i]) or 
-            np.isnan(ema50_12h_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(ema34_1d_4h[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_avg_1d_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vi_plus_val = vi_plus_4h[i]
-        vi_minus_val = vi_minus_4h[i]
-        trend = ema50_12h_4h[i]
-        vol_avg = vol_avg_1d_4h[i]
-        vol_ok = volume[i] > vol_avg * 2.0  # Higher threshold for fewer trades
+        # Volume confirmation: current volume > 1.5x 20-day average 1d volume
+        vol_ok = volume[i] > vol_avg_1d_4h[i] * 1.5
         
         if position == 0:
-            # Long: VI+ > VI- (bullish trend) + volume + price above trend
-            if vi_plus_val > vi_minus_val and vol_ok and close[i] > trend:
+            # Long entry: price breaks above Donchian high, above 1d EMA34, with volume
+            if close[i] > donchian_high[i] and close[i] > ema34_1d_4h[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ (bearish trend) + volume + price below trend
-            elif vi_minus_val > vi_plus_val and vol_ok and close[i] < trend:
+            # Short entry: price breaks below Donchian low, below 1d EMA34, with volume
+            elif close[i] < donchian_low[i] and close[i] < ema34_1d_4h[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or VI crossover
-            if close[i] < trend or vi_minus_val > vi_plus_val:
+            # Long exit: price breaks below Donchian low or closes below 1d EMA34
+            if close[i] < donchian_low[i] or close[i] < ema34_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or VI crossover
-            if close[i] > trend or vi_plus_val > vi_minus_val:
+            # Short exit: price breaks above Donchian high or closes above 1d EMA34
+            if close[i] > donchian_high[i] or close[i] > ema34_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
