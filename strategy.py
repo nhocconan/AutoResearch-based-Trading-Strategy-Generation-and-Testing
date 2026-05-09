@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6H_1W_1D_Donchian20_WeeklyTrend_Pullback
-# Hypothesis: On 6h timeframe, enter long when price pulls back to the 20-period Donchian middle during a weekly uptrend, with volume confirmation.
-# Short when price pulls back to the Donchian middle during a weekly downtrend.
-# Weekly trend filter avoids counter-trend trades, reducing whipsaw in bear markets.
-# Pullback to Donchian middle provides favorable risk-reward with confluence.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
+# 4H_1D_1W_Camarilla_R1S1_Breakout_VolumeSpike_TrendFilter
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level during a daily uptrend (EMA34) with volume confirmation (>1.5x 20-period average).
+# Enter short when price breaks below Camarilla S1 level during a daily downtrend with volume confirmation.
+# Use weekly trend filter to avoid counter-trend trades in strong weekly trends.
+# Weekly trend filter: price above/below weekly EMA34.
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 
-name = "6H_1W_1D_Donchian20_WeeklyTrend_Pullback"
-timeframe = "6h"
+name = "4H_1D_1W_Camarilla_R1S1_Breakout_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,41 +24,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (Donchian 20 on weekly close)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly Donchian 20: upper = max(high, 20), lower = min(low, 20), middle = (upper + lower)/2
-    # For trend, we use close-based Donchian: highest close and lowest close over 20 weeks
-    highest_close_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).max().values
-    lowest_close_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).min().values
-    middle_donchian_20 = (highest_close_20 + lowest_close_20) / 2
-    
-    # Get daily data for Donchian 20 (high/low based) for pullback levels
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    # Daily Donchian 20: based on high/low
-    highest_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    lowest_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    middle_donchian_20_1d = (highest_high_20 + lowest_low_20) / 2
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (R1, S1) from previous day
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    
+    # Get weekly data for trend filter (EMA34 on weekly close)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    weekly_ema34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Daily trend filter: EMA34 on daily close
+    daily_ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align weekly trend to 6h
-    weekly_trend_up = highest_close_20 > lowest_close_20  # uptrend if higher highs
-    weekly_trend_up_series = pd.Series(weekly_trend_up).values
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up_series)
+    # Align Camarilla levels to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align daily Donchian middle to 6h
-    daily_middle_aligned = align_htf_to_ltf(prices, df_1d, middle_donchian_20_1d)
+    # Align daily EMA34 to 4h
+    daily_ema34_aligned = align_htf_to_ltf(prices, df_1d, daily_ema34)
+    
+    # Align weekly EMA34 to 4h
+    weekly_ema34_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,39 +72,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(daily_middle_aligned[i]) or np.isnan(weekly_trend_up_aligned[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or \
+           np.isnan(daily_ema34_aligned[i]) or np.isnan(weekly_ema34_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price near daily Donchian middle (+/- 0.5%) + weekly uptrend + volume confirmation
-            price_to_middle_ratio = close[i] / daily_middle_aligned[i]
-            if 0.995 <= price_to_middle_ratio <= 1.005 and weekly_trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above Camarilla R1 + daily uptrend (price > EMA34) + weekly uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and close[i] > daily_ema34_aligned[i] and close[i] > weekly_ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price near daily Donchian middle (+/- 0.5%) + weekly downtrend + volume confirmation
-            elif 0.995 <= price_to_middle_ratio <= 1.005 and not weekly_trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below Camarilla S1 + daily downtrend (price < EMA34) + weekly downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < daily_ema34_aligned[i] and close[i] < weekly_ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks above weekly Donchian 20 upper (trend continuation)
-            # For exit, we need weekly Donchian upper aligned
-            weekly_upper = highest_close_20
-            weekly_upper_aligned = align_htf_to_ltf(prices, df_1w, weekly_upper)
-            if not np.isnan(weekly_upper_aligned[i]) and close[i] > weekly_upper_aligned[i]:
+            # Exit long: price breaks below Camarilla S1 or weekly downtrend
+            if close[i] < camarilla_s1_aligned[i] or close[i] < weekly_ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks below weekly Donchian 20 lower
-            weekly_lower = lowest_close_20
-            weekly_lower_aligned = align_htf_to_ltf(prices, df_1w, weekly_lower)
-            if not np.isnan(weekly_lower_aligned[i]) and close[i] < weekly_lower_aligned[i]:
+            # Exit short: price breaks above Camarilla R1 or weekly uptrend
+            if close[i] > camarilla_r1_aligned[i] or close[i] > weekly_ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
