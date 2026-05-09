@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_Volume_Confirmation
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to identify trend direction,
-# with volume confirmation and ATR-based stop loss. Designed to capture trends
-# while avoiding whipsaws in ranging markets. Target: 20-35 trades/year per symbol.
+# 1D_Weekly_Trend_With_Daily_Pullback
+# Hypothesis: Uses weekly trend filter (price above/below weekly SMA50) and enters on daily pullbacks
+# to the 21 EMA in the direction of the weekly trend. Works in bull markets (buy dips) and bear markets
+# (sell rallies) by following the higher timeframe trend. Weekly trend reduces whipsaw, daily EMA
+# provides precise entry. Target: 15-25 trades/year per symbol.
 
-name = "4h_KAMA_Trend_Volume_Confirmation"
-timeframe = "4h"
+name = "1D_Weekly_Trend_With_Daily_Pullback"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,122 +19,65 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate KAMA on daily close
-    def kama(close, period=10, fast=2, slow=30):
-        n = len(close)
-        kama = np.full(n, np.nan)
-        if n < period:
-            return kama
-        
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.zeros(n)
-        er[period-1:] = change / np.where(volatility[period-1:] == 0, 1, volatility[period-1:])
-        
-        # Smoothing Constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        
-        # Initialize KAMA
-        kama[period-1] = close[period-1]
-        
-        # Calculate KAMA
-        for i in range(period, n):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        
-        return kama
+    # Weekly SMA50 for trend filter
+    sma_50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        sma_50_1w[49] = np.mean(close_1w[0:50])
+        for i in range(50, len(close_1w)):
+            sma_50_1w[i] = (sma_50_1w[i-1] * 49 + close_1w[i]) / 50
     
-    kama_1d = kama(close_1d, 10, 2, 30)
-    kama_1d_prev = np.roll(kama_1d, 1)
-    kama_1d_prev[0] = np.nan
+    # Align weekly trend to daily
+    weekly_trend = align_htf_to_ltf(prices, df_1w, close_1w > sma_50_1w)
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    kama_prev_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_prev)
-    
-    # Calculate ATR for volatility filtering and stop loss
-    def atr(high, low, close, period=14):
-        n = len(high)
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr = np.zeros(n)
-        if n >= period:
-            atr[period-1] = np.mean(tr[0:period])
-            for i in range(period, n):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        else:
-            atr[:] = np.nan
-        return atr
-    
-    atr_14 = atr(high, low, close, 14)
-    
-    # Volume ratio: current volume / 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Daily EMA21 for pullback entries
+    close_s = pd.Series(close)
+    ema_21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = 50  # Wait for weekly SMA50
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(kama_aligned[i]) or np.isnan(kama_prev_aligned[i]) or \
-           np.isnan(atr_14[i]) or np.isnan(volume_ratio[i]):
+        # Skip if weekly trend not ready
+        if np.isnan(weekly_trend[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend condition: KAMA rising (bullish) or falling (bearish)
-        kama_rising = kama_aligned[i] > kama_prev_aligned[i]
-        kama_falling = kama_aligned[i] < kama_prev_aligned[i]
-        
-        # Volume confirmation: above average volume
-        volume_confirmed = volume_ratio[i] > 1.5
+        # Weekly trend: True = uptrend (price > SMA50), False = downtrend
+        is_uptrend = weekly_trend[i]
         
         if position == 0:
-            # Enter long: KAMA rising AND volume confirmation
-            if kama_rising and volume_confirmed:
+            # Enter long: weekly uptrend AND price pulls back to EMA21
+            if is_uptrend and close[i] <= ema_21[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling AND volume confirmation
-            elif kama_falling and volume_confirmed:
+            # Enter short: weekly downtrend AND price rallies to EMA21
+            elif not is_uptrend and close[i] >= ema_21[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: KAMA falling OR ATR-based stop loss
-            if kama_falling or close[i] < (high[i] - 2.0 * atr_14[i]):
+            # Exit long: weekly trend turns down OR price moves above EMA21 (pullback complete)
+            if not is_uptrend or close[i] > ema_21[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: KAMA rising OR ATR-based stop loss
-            if kama_rising or close[i] > (low[i] + 2.0 * atr_14[i]):
+            # Exit short: weekly trend turns up OR price moves below EMA21 (pullback complete)
+            if is_uptrend or close[i] < ema_21[i]:
                 signals[i] = 0.0
                 position = 0
             else:
