@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Breakout_1dTrend
-Hypothesis: Ichimoku cloud breakout with daily trend filter works in both bull and bear markets.
-The 1d Ichimoku cloud provides clear support/resistance zones, and breakouts above/below the cloud
-with TK cross confirmation capture strong trends. Using 6h timeframe for execution reduces noise
-while maintaining sufficient trade frequency. Daily trend filter (price vs Kumo) avoids counter-trend trades.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Breakout above daily Camarilla R1 or below S1 with daily trend filter and volume spike confirmation.
+Daily trend filter (price above/below EMA34) works in both bull and bear markets by aligning with the primary trend.
+Volume spike (>2x 24-period average) confirms breakout strength. Designed for 4h timeframe with target of 20-50 trades/year
+to minimize fee drag. Uses daily timeframe for trend and levels, 4h for execution.
 """
 
-name = "6h_Ichimoku_Cloud_Breakout_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,119 +17,115 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Ichimoku calculation
+    # Get daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = np.full_like(high_1d, np.nan)
-    period9_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 8:
-            period9_high[i] = np.max(high_1d[i-8:i+1])
-            period9_low[i] = np.min(low_1d[i-8:i+1])
-    tenkan_sen = (period9_high + period9_low) / 2
+    # Previous day's values for Camarilla calculation
+    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
+    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
+    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = np.full_like(high_1d, np.nan)
-    period26_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 25:
-            period26_high[i] = np.max(high_1d[i-25:i+1])
-            period26_low[i] = np.min(low_1d[i-25:i+1])
-    kijun_sen = (period26_high + period26_low) / 2
+    # Calculate daily Camarilla levels (R1, S1 are the key breakout levels)
+    rang = ph - pl
+    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
+    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    # Align daily Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = np.full_like(high_1d, np.nan)
-    period52_low = np.full_like(low_1d, np.nan)
-    for i in range(len(high_1d)):
-        if i >= 51:
-            period52_high[i] = np.max(high_1d[i-51:i+1])
-            period52_low[i] = np.min(low_1d[i-51:i+1])
-    senkou_span_b = (period52_high + period52_low) / 2
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward by 26 periods
-    # For trend filter, we use current cloud (Senkou Span A/B)
-    # Kumo top = max(Senkou Span A, Senkou Span B)
-    # Kumo bottom = min(Senkou Span A, Senkou Span B)
-    kumo_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    kumo_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 24:
+        vol_ma[23] = np.mean(volume[0:24])
+        for i in range(24, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
     
-    # TK Cross: Tenkan-sen crossing above/below Kijun-sen
-    tk_cross_up = np.zeros(len(tenkan_sen_aligned), dtype=bool)
-    tk_cross_down = np.zeros(len(tenkan_sen_aligned), dtype=bool)
-    for i in range(1, len(tenkan_sen_aligned)):
-        if (not np.isnan(tenkan_sen_aligned[i-1]) and not np.isnan(kijun_sen_aligned[i-1]) and
-            not np.isnan(tenkan_sen_aligned[i]) and not np.isnan(kijun_sen_aligned[i])):
-            if tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and tenkan_sen_aligned[i] > kijun_sen_aligned[i]:
-                tk_cross_up[i] = True
-            if tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and tenkan_sen_aligned[i] < kijun_sen_aligned[i]:
-                tk_cross_down[i] = True
+    volume_ratio = np.full_like(volume, np.nan)
+    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = 52  # Ensure Ichimoku is fully calculated
+    start_idx = max(24, 34)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
+        bars_since_entry += 1
+        
         if position == 0:
-            # Enter long: price breaks above Kumo AND TK cross up AND price > Kumo (uptrend)
-            if (close[i] > kumo_top[i] and 
-                tk_cross_up[i] and 
-                close[i] > kumo_bottom[i]):
+            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Kumo AND TK cross down AND price < Kumo (downtrend)
-            elif (close[i] < kumo_bottom[i] and 
-                  tk_cross_down[i] and 
-                  close[i] < kumo_top[i]):
+                bars_since_entry = 0
+            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: price breaks below Kumo bottom OR TK cross down
-            if close[i] < kumo_bottom[i] or tk_cross_down[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = 0.25
+            else:
+                # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
+                if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Kumo top OR TK cross up
-            if close[i] > kumo_top[i] or tk_cross_up[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = -0.25
+            else:
+                # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
+                if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
