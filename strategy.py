@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_Volume_Breakout"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Volume_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,12 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation (HTF)
+    # Get weekly data for pivot calculation
     df_w = get_htf_data(prices, '1w')
     if len(df_w) < 1:
         return np.zeros(n)
     
-    # Calculate weekly pivot points
+    # Calculate weekly pivot points (standard)
     high_w = df_w['high'].values
     low_w = df_w['low'].values
     close_w = df_w['close'].values
@@ -35,32 +35,22 @@ def generate_signals(prices):
     r2_w = pivot_w + (high_w - low_w)
     s2_w = pivot_w - (high_w - low_w)
     
-    # Align weekly pivot levels to 12h timeframe
+    # Align weekly pivot levels to 4h timeframe
     pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
     r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
     s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
     r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
     s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
     
-    # Get daily data for trend filter
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 20:
-        return np.zeros(n)
-    
-    # Calculate 20-period EMA on daily close
-    close_d = df_d['close'].values
-    ema_d = pd.Series(close_d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_d_aligned = align_htf_to_ltf(prices, df_d, ema_d)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for EMA and volume MA
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
@@ -69,7 +59,6 @@ def generate_signals(prices):
             np.isnan(s1_w_aligned[i]) or
             np.isnan(r2_w_aligned[i]) or
             np.isnan(s2_w_aligned[i]) or
-            np.isnan(ema_d_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -81,30 +70,29 @@ def generate_signals(prices):
         s1_w_val = s1_w_aligned[i]
         r2_w_val = r2_w_aligned[i]
         s2_w_val = s2_w_aligned[i]
-        ema_val = ema_d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price above R1 + price above daily EMA + volume filter
-            if close[i] > r1_w_val and close[i] > ema_val and vol_filter:
+            # Enter long: Price above R1 + volume filter
+            if close[i] > r1_w_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below S1 + price below daily EMA + volume filter
-            elif close[i] < s1_w_val and close[i] < ema_val and vol_filter:
+            # Enter short: Price below S1 + volume filter
+            elif close[i] < s1_w_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below pivot or below daily EMA
-            if close[i] < pivot_w_val or close[i] < ema_val:
+            # Exit long: Price falls below S1 or R2 break with weak volume
+            if close[i] < s1_w_val or (close[i] > r2_w_val and not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above pivot or above daily EMA
-            if close[i] > pivot_w_val or close[i] > ema_val:
+            # Exit short: Price rises above R1 or S2 break with weak volume
+            if close[i] > r1_w_val or (close[i] < s2_w_val and not vol_filter):
                 signals[i] = 0.0
                 position = 0
             else:
