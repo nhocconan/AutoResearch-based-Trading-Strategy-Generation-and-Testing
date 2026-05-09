@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,10 +34,10 @@ def generate_signals(prices):
     # Trend filter: 1d EMA34
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 4h volume > 1.5 * 20-period average
+    # Volume filter: current 4h volume > 1.3 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     # Align all to 4h (primary timeframe)
     r1_4h = align_htf_to_ltf(prices, df_1d, r1)
