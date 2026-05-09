@@ -1,15 +1,12 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-6h Williams Alligator + Elder Ray + Volume Spike
-- Uses Williams Alligator (Jaw/Teeth/Lips) from 12h to determine trend regime
-- Uses Elder Ray (Bull/Bear Power) from 6h for entry signals
-- Volume spike confirmation to filter false signals
-- Designed for 6h timeframe to work in both bull and bear markets via regime filtering
-"""
+# Hypothesis: 4h timeframe with daily pivot structure and weekly trend filter.
+# Uses daily Camarilla levels (R1/S1) for breakout entries and weekly EMA50 for trend filter.
+# Daily pivot provides robust intraday support/resistance that works in both bull and bear markets.
+# Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
+# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
 
-name = "6h_Alligator_ElderRay_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,46 +23,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Williams Alligator (trend regime)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 13:
+    # Calculate daily Camarilla levels (R1, S1) from previous day
+    prev_close = np.roll(close, 6)  # 6 bars = 1 day * 6 bars per day (4h timeframe)
+    prev_high = np.roll(high, 6)
+    prev_low = np.roll(low, 6)
+    prev_close[:6] = np.nan  # First values invalid
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * camarilla_range / 4
+    s1 = prev_close - 1.1 * camarilla_range / 4
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r1
+    breakout_down = close < s1
+    
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Williams Alligator: SMAs of median price
-    median_price_12h = (df_12h['high'].values + df_12h['low'].values) / 2
-    jaw = pd.Series(median_price_12h).rolling(window=13, min_periods=13).mean().values  # 13-bar SMA
-    teeth = pd.Series(median_price_12h).rolling(window=8, min_periods=8).mean().values   # 8-bar SMA
-    lips = pd.Series(median_price_12h).rolling(window=5, min_periods=5).mean().values    # 5-bar SMA
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align to 6t timeframe
-    jaw_6h = align_htf_to_ltf(prices, df_12h, jaw)
-    teeth_6h = align_htf_to_ltf(prices, df_12h, teeth)
-    lips_6h = align_htf_to_ltf(prices, df_12h, lips)
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # Alligator signals: 
-    # Bullish: Lips > Teeth > Jaw (green alignment)
-    # Bearish: Lips < Teeth < Jaw (red alignment)
-    alligator_bull = (lips_6h > teeth_6h) & (teeth_6h > jaw_6h)
-    alligator_bear = (lips_6h < teeth_6h) & (teeth_6h < jaw_6h)
-    
-    # Elder Ray from 6h data
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean()
-    bull_power = high - ema13.values
-    bear_power = low - ema13.values
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average volume (balanced to avoid overtrading)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.8 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(alligator_bull[i]) or np.isnan(alligator_bear[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -73,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Alligator bullish + Bull Power > 0 + Volume spike
-            if alligator_bull[i] and (bull_power[i] > 0) and volume_filter[i]:
+            # Long: breakout above R1 + 1w uptrend + volume spike
+            if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator bearish + Bear Power < 0 + Volume spike
-            elif alligator_bear[i] and (bear_power[i] < 0) and volume_filter[i]:
+            # Short: breakout below S1 + 1w downtrend + volume spike
+            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Bull Power turns negative
-            if not alligator_bull[i] or (bull_power[i] <= 0):
+            # Exit long: price returns to previous day's close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Bear Power turns positive
-            if not alligator_bear[i] or (bear_power[i] >= 0):
+            # Exit short: price returns to previous day's close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
