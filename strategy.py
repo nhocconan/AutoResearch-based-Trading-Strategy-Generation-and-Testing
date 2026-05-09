@@ -1,20 +1,15 @@
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts at R3/S3 levels (major sentiment extremes) with 1d trend filter and volume confirmation.
-# R3/S3 provides stronger breakouts with better risk/reward, fewer false signals. 1d trend ensures alignment with long-term bias.
-# Volume filters low-liquidity breakouts. Designed for 12-37 trades/year in both bull and bear markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Keltner_RSI_Trend_4h"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,72 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1h data for trend filter (more responsive than 12h)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 50:
+        return np.zeros(n)
+    
+    # Get 1d data for Keltner calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R3, S3)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Previous day's data for Keltner calculation
+    prev_high = df_1h['high'].shift(1).values
+    prev_low = df_1h['low'].shift(1).values
+    prev_close = df_1h['close'].shift(1).values
     
-    # Calculate Camarilla levels (R3, S3)
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4  # R3 = C + 1.1*(H-L)/4
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4  # S3 = C - 1.1*(H-L)/4
+    # Calculate ATR for Keltner (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[np.nan], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[np.nan], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Keltner Channels (14-period ATR, multiplier 2.0)
+    keltner_upper = prev_close + (atr * 2.0)
+    keltner_lower = prev_close - (atr * 2.0)
     
-    # Volume filter: current 12h volume > 1.5 * 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Trend filter: 1h EMA50
+    ema50_1h = pd.Series(df_1h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align all to 12h (primary timeframe)
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # RSI (14-period)
+    delta = np.diff(close, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / np.where(avg_loss == 0, np.nan, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align all to 4h (primary timeframe)
+    keltner_upper_4h = align_htf_to_ltf(prices, df_1h, keltner_upper)
+    keltner_lower_4h = align_htf_to_ltf(prices, df_1h, keltner_lower)
+    ema50_1h_4h = align_htf_to_ltf(prices, df_1h, ema50_1h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = max(50, 14)  # Need enough data for EMA50 and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(keltner_upper_4h[i]) or np.isnan(keltner_lower_4h[i]) or
+            np.isnan(ema50_1h_4h[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_12h[i]
-        s3_val = s3_12h[i]
-        trend = ema34_1d_12h[i]
-        vol_filter = volume_filter[i]
+        upper = keltner_upper_4h[i]
+        lower = keltner_lower_4h[i]
+        trend = ema50_1h_4h[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Enter long: break above R3 with volume and above trend
-            if close[i] > r3_val and close[i] > trend and vol_filter:
+            # Enter long: price above upper Keltner with bullish trend and RSI > 50
+            if close[i] > upper and close[i] > trend and rsi_val > 50:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with volume and below trend
-            elif close[i] < s3_val and close[i] < trend and vol_filter:
+            # Enter short: price below lower Keltner with bearish trend and RSI < 50
+            elif close[i] < lower and close[i] < trend and rsi_val < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 (mean reversion to center)
-            if close[i] < s3_val:
+            # Exit long: price below lower Keltner or RSI < 40
+            if close[i] < lower or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 (mean reversion to center)
-            if close[i] > r3_val:
+            # Exit short: price above upper Keltner or RSI > 60
+            if close[i] > upper or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
