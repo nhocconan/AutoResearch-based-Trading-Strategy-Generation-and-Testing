@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Choppiness Index regime filter to identify trending vs ranging markets.
-# In trending markets (CHOP < 38.2), trade Donchian(20) breakouts in the direction of 1d EMA50 trend.
-# In ranging markets (CHOP > 61.8), trade mean-reversion at Bollinger Bands (20,2) with RSI(14) extremes.
-# Volume confirmation required for all entries. Designed to work in both bull and bear markets by adapting to regime.
-# Target: 20-30 trades per year to minimize fee drag and improve generalization.
-name = "4h_RegimeAdaptive_Donchian_BB_MeanRev"
-timeframe = "4h"
+# Hypothesis: 6h strategy using 1d/1w timeframes for regime and structure.
+# Uses 1d Williams %R (14) for overbought/oversold conditions combined with 1w EMA50 trend filter.
+# Enters on reversals from extreme %R levels when price breaks recent 6h high/low with volume confirmation.
+# Designed to work in both bull and bear markets by requiring alignment with weekly trend.
+# Target: 15-30 trades per year to minimize fee drag and improve generalization.
+name = "6h_WilliamsR_1wEMA50_VolumeReversal"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,71 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for regime filter and trend filter
+    # Get 1d data for Williams %R
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Calculate 1d Choppiness Index (14-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d Williams %R (14)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
     close_1d = df_1d['close'].values
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align 1d Williams %R to 6h timeframe
+    williams_r_6h = align_htf_to_ltf(prices, df_1d, williams_r)
     
-    # Sum of true ranges over 14 periods
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Align 1w EMA50 to 6h timeframe
+    ema_50_6h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Choppiness Index = 100 * log(sum_tr / (atr_14 * 14)) / log(14)
-    choppiness = 100 * np.log(sum_tr / (atr_14 * 14)) / np.log(14)
-    choppiness_4h = align_htf_to_ltf(prices, df_1d, choppiness)
-    
-    # Donchian(20) channels on 4h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Bollinger Bands (20,2) on 4h
-    bb_middle = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    
-    # RSI(14) on 4h
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: spike above 2.0x 24-period average (1 day of 4h bars)
+    # Volume filter: spike above 2.0x 24-period average (1 day of 6h bars)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    
+    # 6-period high/low for breakout confirmation
+    high_6 = pd.Series(high).rolling(window=6, min_periods=6).max().values
+    low_6 = pd.Series(low).rolling(window=6, min_periods=6).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20, 24)  # Wait for EMA50, Donchian, BB, RSI, volume MA
+    start_idx = max(50, 24, 6)  # Wait for EMA50, volume MA, and 6-period high/low
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h[i]) or np.isnan(choppiness_4h[i]) or 
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(williams_r_6h[i]) or np.isnan(ema_50_6h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(high_6[i]) or np.isnan(low_6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,71 +77,37 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Trending market: CHOP < 38.2
-            if choppiness_4h[i] < 38.2:
-                # Long: Donchian breakout above, uptrend (close > EMA50), volume
-                if (close[i] > highest_20[i] and 
-                    close[i] > ema_50_4h[i] and 
-                    vol_ok and 
-                    in_session):
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Donchian breakdown below, downtrend (close < EMA50), volume
-                elif (close[i] < lowest_20[i] and 
-                      close[i] < ema_50_4h[i] and 
-                      vol_ok and 
-                      in_session):
-                    signals[i] = -0.25
-                    position = -1
-            # Ranging market: CHOP > 61.8
-            elif choppiness_4h[i] > 61.8:
-                # Long: mean reversion at lower BB, RSI oversold, volume
-                if (close[i] < bb_lower[i] and 
-                    rsi[i] < 30 and 
-                    vol_ok and 
-                    in_session):
-                    signals[i] = 0.25
-                    position = 1
-                # Short: mean reversion at upper BB, RSI overbought, volume
-                elif (close[i] > bb_upper[i] and 
-                      rsi[i] > 70 and 
-                      vol_ok and 
-                      in_session):
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Williams %R below -80 (oversold), price breaks above 6-period high, weekly uptrend
+            if (williams_r_6h[i] < -80 and 
+                close[i] > high_6[i] and 
+                close[i] > ema_50_6h[i] and 
+                vol_ok and 
+                in_session):
+                signals[i] = 0.25
+                position = 1
+            # Short: Williams %R above -20 (overbought), price breaks below 6-period low, weekly downtrend
+            elif (williams_r_6h[i] > -20 and 
+                  close[i] < low_6[i] and 
+                  close[i] < ema_50_6h[i] and 
+                  vol_ok and 
+                  in_session):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit conditions
-            if choppiness_4h[i] < 38.2:  # trending market
-                # Exit long: Donchian breakdown or trend reversal
-                if close[i] < lowest_20[i] or close[i] < ema_50_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # ranging market or transition
-                # Exit long: price at middle BB or RSI overbought
-                if close[i] > bb_middle[i] or rsi[i] > 70:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Exit long: Williams %R rises above -50 or trend reversal
+            if williams_r_6h[i] > -50 or close[i] < ema_50_6h[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions
-            if choppiness_4h[i] < 38.2:  # trending market
-                # Exit short: Donchian breakout or trend reversal
-                if close[i] > highest_20[i] or close[i] > ema_50_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # ranging market or transition
-                # Exit short: price at middle BB or RSI oversold
-                if close[i] < bb_middle[i] or rsi[i] < 30:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit short: Williams %R falls below -50 or trend reversal
+            if williams_r_6h[i] < -50 or close[i] > ema_50_6h[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
