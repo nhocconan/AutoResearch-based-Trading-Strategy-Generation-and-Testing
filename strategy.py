@@ -3,12 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe with daily Donchian breakout + weekly trend filter + volume confirmation
-# Donchian breakout captures trending moves, weekly filter ensures alignment with higher timeframe trend,
-# volume confirmation reduces false breakouts. Designed for low trade frequency to avoid fee drag.
-# Works in bull markets (breakouts) and bear markets (breakdowns with trend filter).
-name = "12h_Donchian20_Breakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSqueeze"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,80 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels (20-day high/low)
+    # Get 1d data for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-day Donchian channels on daily data
-    highest_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Previous 1d bar's OHLC (for Camarilla calculation)
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
     
-    # Align Donchian levels to 12h timeframe (wait for daily close)
-    highest_20_12h = align_htf_to_ltf(prices, df_1d, highest_20)
-    lowest_20_12h = align_htf_to_ltf(prices, df_1d, lowest_20)
+    # Calculate Camarilla levels
+    camarilla_pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range_1d = prev_high_1d - prev_low_1d
+    camarilla_r3_1d = camarilla_pivot_1d + camarilla_range_1d * 1.1 / 4
+    camarilla_s3_1d = camarilla_pivot_1d - camarilla_range_1d * 1.1 / 4
     
-    # Get 1w data for weekly trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Align Camarilla levels to 4h
+    camarilla_pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
+    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # Calculate weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly EMA to 12h timeframe
-    ema_34_1w_12h = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume filter: above 1.5x 24-period average (24*12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume squeeze filter: volume < 0.5 * 20-period average (low volatility)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Wait for volume MA
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_20_12h[i]) or np.isnan(lowest_20_12h[i]) or 
-            np.isnan(ema_34_1w_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        vol_squeeze = volume[i] < 0.5 * vol_ma[i]  # Low volatility condition
         
         # Session filter: 08-20 UTC (reduce noise trades)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above 20-day high with weekly uptrend
-            if (close[i] > highest_20_12h[i] and 
-                close[i] > ema_34_1w_12h[i] and  # Weekly uptrend
-                vol_ok and 
+            # Long breakout: price breaks above camarilla R3 with 1d uptrend
+            if (close[i] > camarilla_r3_4h[i] and 
+                close[i] > ema_34_4h[i] and  # 1d uptrend
+                vol_squeeze and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below 20-day low with weekly downtrend
-            elif (close[i] < lowest_20_12h[i] and 
-                  close[i] < ema_34_1w_12h[i] and  # Weekly downtrend
-                  vol_ok and 
+            # Short breakdown: price breaks below camarilla S3 with 1d downtrend
+            elif (close[i] < camarilla_s3_4h[i] and 
+                  close[i] < ema_34_4h[i] and  # 1d downtrend
+                  vol_squeeze and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 20-day low (mean reversion)
-            if close[i] < lowest_20_12h[i]:
+            # Exit long: price falls back below camarilla pivot (mean reversion)
+            if close[i] < camarilla_pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 20-day high (mean reversion)
-            if close[i] > highest_20_12h[i]:
+            # Exit short: price rises back above camarilla pivot (mean reversion)
+            if close[i] > camarilla_pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
