@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,9 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     # Get 1d data for Camarilla calculation
@@ -36,18 +36,18 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
     
-    # Trend filter: 12h EMA34
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Trend filter: 1w EMA34
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 4h volume > 1.3 * 30-period average
+    # Volume filter: current 1d volume > 1.3 * 30-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (vol_ma * 1.3)
     
-    # Align all to 4h (primary timeframe)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_12h_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Align all to 1d (primary timeframe)
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1w_1d = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     signals = np.zeros(n)
     position = 0
@@ -55,16 +55,16 @@ def generate_signals(prices):
     start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34_12h_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
+            np.isnan(ema34_1w_1d[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
-        trend = ema34_12h_4h[i]
+        r1_val = r1_1d[i]
+        s1_val = s1_1d[i]
+        trend = ema34_1w_1d[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
