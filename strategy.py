@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_Breakout_Momentum_v2"
-timeframe = "1d"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,100 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (standard)
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
-    
-    # Standard pivot: P = (H + L + C)/3
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    # Resistance/Support levels
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    
-    # Align weekly pivot levels to daily timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
-    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
-    
-    # Get daily data for momentum filter
+    # Get daily data for trend filter (1d EMA34)
     df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 14:
+    if len(df_d) < 34:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on daily close
+    # Calculate EMA34 on daily close
     close_d = df_d['close'].values
-    delta = np.diff(close_d, prepend=close_d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi_d = 100 - (100 / (1 + rs))
-    rsi_d_aligned = align_htf_to_ltf(prices, df_d, rsi_d)
+    ema34_d = pd.Series(close_d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_d_aligned = align_htf_to_ltf(prices, df_d, ema34_d)
     
-    # Volume filter: current volume > 1.2 * 20-period average
+    # Calculate Donchian(20) on 12h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.2)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Need enough data for volume MA and RSI
+    start_idx = max(20, 34)  # Need enough data for Donchian and EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(pivot_w_aligned[i]) or 
-            np.isnan(r1_w_aligned[i]) or
-            np.isnan(s1_w_aligned[i]) or
-            np.isnan(r2_w_aligned[i]) or
-            np.isnan(s2_w_aligned[i]) or
-            np.isnan(rsi_d_aligned[i]) or
+        if (np.isnan(upper[i]) or 
+            np.isnan(lower[i]) or
+            np.isnan(ema34_d_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot_w_val = pivot_w_aligned[i]
-        r1_w_val = r1_w_aligned[i]
-        s1_w_val = s1_w_aligned[i]
-        r2_w_val = r2_w_aligned[i]
-        s2_w_val = s2_w_aligned[i]
-        rsi_val = rsi_d_aligned[i]
+        upper_val = upper[i]
+        lower_val = lower[i]
+        ema34_val = ema34_d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price above R1 + RSI > 50 + volume filter
-            if close[i] > r1_w_val and rsi_val > 50 and vol_filter:
+            # Enter long: Price breaks above upper Donchian + above daily EMA34 + volume filter
+            if close[i] > upper_val and close[i] > ema34_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below S1 + RSI < 50 + volume filter
-            elif close[i] < s1_w_val and rsi_val < 50 and vol_filter:
+            # Enter short: Price breaks below lower Donchian + below daily EMA34 + volume filter
+            elif close[i] < lower_val and close[i] < ema34_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below pivot or RSI < 40
-            if close[i] < pivot_w_val or rsi_val < 40:
+            # Exit long: Price falls below lower Donchian
+            if close[i] < lower_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above pivot or RSI > 60
-            if close[i] > pivot_w_val or rsi_val > 60:
+            # Exit short: Price rises above upper Donchian
+            if close[i] > upper_val:
                 signals[i] = 0.0
                 position = 0
             else:
