@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
-# Hypothesis: Use 4h timeframe with 1d Camarilla levels for entry and exit. Long when price breaks above R1 with 1d uptrend and volume confirmation. Short when price breaks below S1 with 1d downtrend and volume confirmation. Exit on opposite level break. Focus on high-probability setups with volume confirmation to reduce false signals and maintain low trade frequency (target: 20-30 trades/year).
+# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
+# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 
-name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
-timeframe = "4h"
+name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +49,7 @@ def generate_signals(prices):
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align 1d indicators to 4h
+    # Align 1d indicators to 12h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
