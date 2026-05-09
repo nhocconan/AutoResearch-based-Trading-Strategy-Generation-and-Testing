@@ -3,12 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d trend and 12h momentum for entries.
-# Uses 1d EMA50 for trend filter and 12h RSI(14) for momentum confirmation.
-# Designed for low trade frequency (12-37/year) to avoid fee drag in 12h timeframe.
-# Works in both bull/bear markets by requiring alignment with 1d trend and momentum confirmation.
-name = "12h_RSI14_1dEMA50_Trend"
-timeframe = "12h"
+# Hypothesis: 4h Williams Alligator trend following with 1d trend filter
+# Uses 1d EMA50 for trend filter and Williams Alligator (Jaw/Teeth/Lips) on 4h for entry
+# Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs
+# Long when Lips > Teeth > Jaw and price > 1d EMA50
+# Short when Lips < Teeth < Jaw and price < 1d EMA50
+# Designed for low trade frequency (15-40/year) to avoid fee drag in 4h timeframe
+# Works in trending markets and avoids whipsaws in ranging markets via Alligator convergence/divergence
+name = "4h_WilliamsAlligator_1dEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,56 +31,65 @@ def generate_signals(prices):
     
     # Calculate 1d EMA50 trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 12h RSI(14) for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Williams Alligator on 4h data
+    # Jaw: 13-period SMMA, smoothed 8 periods ahead
+    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw_raw.rolling(window=8, min_periods=8).mean()
+    
+    # Teeth: 8-period SMMA, smoothed 5 periods ahead
+    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth_raw.rolling(window=5, min_periods=5).mean()
+    
+    # Lips: 5-period SMMA, smoothed 3 periods ahead
+    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips_raw.rolling(window=3, min_periods=3).mean()
+    
+    jaw_values = jaw.values
+    teeth_values = teeth.values
+    lips_values = lips.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = 20  # Wait for sufficient data for Alligator components
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_12h[i]) or np.isnan(rsi_values[i]):
+        if np.isnan(ema_50_4h[i]) or np.isnan(jaw_values[i]) or np.isnan(teeth_values[i]) or np.isnan(lips_values[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Momentum filters
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
+        # Williams Alligator signals
+        # Bullish alignment: Lips > Teeth > Jaw
+        bullish_alignment = lips_values[i] > teeth_values[i] and teeth_values[i] > jaw_values[i]
+        # Bearish alignment: Lips < Teeth < Jaw
+        bearish_alignment = lips_values[i] < teeth_values[i] and teeth_values[i] < jaw_values[i]
         
         if position == 0:
-            # Long: price above 1d EMA50 and RSI oversold
-            if close[i] > ema_50_12h[i] and rsi_oversold:
+            # Long: bullish alignment and price above 1d EMA50
+            if bullish_alignment and close[i] > ema_50_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 and RSI overbought
-            elif close[i] < ema_50_12h[i] and rsi_overbought:
+            # Short: bearish alignment and price below 1d EMA50
+            elif bearish_alignment and close[i] < ema_50_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below 1d EMA50 or RSI overbought
-            if close[i] < ema_50_12h[i] or rsi_values[i] > 70:
+            # Exit long: bearish alignment or price below 1d EMA50
+            if bearish_alignment or close[i] < ema_50_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 1d EMA50 or RSI oversold
-            if close[i] > ema_50_12h[i] or rsi_values[i] < 30:
+            # Exit short: bullish alignment or price above 1d EMA50
+            if bullish_alignment or close[i] > ema_50_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
