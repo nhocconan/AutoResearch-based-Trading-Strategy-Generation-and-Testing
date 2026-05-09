@@ -3,100 +3,80 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h KAMA trend following with 12h volatility regime filter.
-# Uses Kaufman Adaptive Moving Average (KAMA) to reduce whipsaw in sideways markets.
-# 12h ATR-based volatility filter ensures trades only occur in trending regimes.
-# Designed for low trade frequency (<30/year) to minimize fee drag while capturing major trends.
-# Works in both bull and bear markets by following the trend direction.
-name = "4h_KAMA_Trend_VolatilityFilter_12h"
-timeframe = "4h"
+# Hypothesis: 1h strategy using 4h Donchian breakout (20-period) with volume confirmation and 1d EMA200 trend filter.
+# Uses 4h for signal direction (trend), 1h for entry timing precision.
+# 1d EMA200 filters for long-term trend to avoid counter-trend entries.
+# Volume > 1.5x 20-period EMA ensures institutional participation.
+# Designed to work in both bull and bear markets by following higher timeframe trend.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+name = "1h_Donchian20_4hTrend_1dEMA200_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 12h data for volatility regime filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 4h data for Donchian channels (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA on 4h close
-    # Efficiency ratio: |close - close[10]| / sum(|close[i] - close[i-1]| for i in 1..10)
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = np.nan  # Not enough data for first 10 periods
+    # 1d data for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    volatility = np.zeros(n)
-    for i in range(10, n):
-        volatility[i] = np.nansum(np.abs(close[i-9:i+1] - np.roll(close[i-9:i+1], 1)))
+    # 4h Donchian channels: upper = max(high, 20), lower = min(low, 20)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Avoid division by zero
-    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
+    # Calculate rolling max/min with period=20
+    donchian_high = np.full_like(high_4h, np.nan)
+    donchian_low = np.full_like(low_4h, np.nan)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    for i in range(20, len(high_4h)):
+        donchian_high[i] = np.max(high_4h[i-20:i])
+        donchian_low[i] = np.min(low_4h[i-20:i])
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Shift by 1 to use only completed 4h bars (avoid look-ahead)
+    donchian_high_shifted = np.roll(donchian_high, 1)
+    donchian_low_shifted = np.roll(donchian_low, 1)
+    donchian_high_shifted[0] = np.nan
+    donchian_low_shifted[0] = np.nan
     
-    # Align KAMA to ensure no look-ahead (already calculated on past data)
-    kama_aligned = kama  # KAMA uses only past data, no alignment needed
+    # Align to 1h timeframe
+    donchian_high_1h = align_htf_to_ltf(prices, df_4h, donchian_high_shifted)
+    donchian_low_1h = align_htf_to_ltf(prices, df_4h, donchian_low_shifted)
     
-    # 12h ATR for volatility regime filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 1d EMA200 trend filter
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # True Range
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr1[0] = np.nan  # First period has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Volume spike filter: volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ema20)
     
-    # ATR(14)
-    atr_12h = np.full(len(tr), np.nan)
-    for i in range(14, len(tr)):
-        if i == 14:
-            atr_12h[i] = np.nanmean(tr[1:i+1])
-        else:
-            atr_12h[i] = (atr_12h[i-1] * 13 + tr[i]) / 14
-    
-    # Align ATR to 4h timeframe
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
-    
-    # Volatility regime: ATR > 20-period EMA of ATR (trending market)
-    atr_ema20 = np.full(len(atr_12h_aligned), np.nan)
-    for i in range(len(atr_12h_aligned)):
-        if i < 20:
-            atr_ema20[i] = np.nan
-        else:
-            atr_ema20[i] = np.nanmean(atr_12h_aligned[i-19:i+1])
-    
-    volatile = atr_12h_aligned > atr_ema20
+    # Session filter: 08-20 UTC (only trade during active hours)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 200  # wait for EMA200 to be ready
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(kama_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
-            np.isnan(atr_ema20[i])):
+        # Skip if required data unavailable or outside session
+        if (np.isnan(donchian_high_1h[i]) or np.isnan(donchian_low_1h[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ema20[i]) or
+            not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -105,29 +85,29 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price crosses above KAMA in volatile (trending) market
-            if price > kama_aligned[i] and volatile[i]:
-                signals[i] = 0.25
+            # Long: price breaks above 4h Donchian high with volume spike and above 1d EMA200
+            if (price > donchian_high_1h[i] and vol_spike[i] and price > ema_200_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price crosses below KAMA in volatile (trending) market
-            elif price < kama_aligned[i] and volatile[i]:
-                signals[i] = -0.25
+            # Short: price breaks below 4h Donchian low with volume spike and below 1d EMA200
+            elif (price < donchian_low_1h[i] and vol_spike[i] and price < ema_200_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if price < kama_aligned[i]:
+            # Exit long: price falls back below 4h Donchian low (mean reversion)
+            if price < donchian_low_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if price > kama_aligned[i]:
+            # Exit short: price rises back above 4h Donchian high (mean reversion)
+            if price > donchian_high_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
