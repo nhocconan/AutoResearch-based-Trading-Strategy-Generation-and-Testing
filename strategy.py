@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Turtle Soup Strategy with 1d Trend Filter
-# Turtle Soup is a reversal pattern where price briefly penetrates a recent high/low
-# then reverses, trapping breakout traders. Works in both trending and ranging markets.
-# 1d trend filter ensures we take reversals in the direction of higher timeframe trend.
-# Target: 20-40 trades/year (80-160 over 4 years) to avoid excessive trading.
-name = "6h_TurtleSoup_1dTrend_Filter"
-timeframe = "6h"
+# Hypothesis: 12h Williams %R + 1d Trend Filter + Volume Spike
+# Williams %R identifies overbought/oversold conditions, effective in ranging markets.
+# 1d trend filter ensures we trade with higher timeframe momentum.
+# Volume spike confirms institutional participation.
+# Target: 12-37 trades/year (50-150 over 4 years) to avoid fee drag.
+name = "12h_WilliamsR_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,15 +27,19 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 20-period high/low for Turtle Soup setup
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate 50-period EMA on 1d for trend filter
+    # 1d EMA50 for trend filter
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 1d EMA50 to 6h
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 20-period volume average for spike detection
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d EMA50 to 12h
+    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,38 +48,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema50_1d_6h[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_12h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume condition: current volume > 2.0 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
+        
         if position == 0:
-            # Turtle Soup Long: price briefly breaks below 20-period low then reverses
-            # Only take in uptrend (price above 1d EMA50)
-            if (low[i] < low_20[i] and close[i] > low_20[i] and 
-                close[i] > ema50_1d_6h[i]):
+            # Long: Williams %R oversold (< -80) + above 1d EMA50 + volume spike
+            if williams_r[i] < -80 and close[i] > ema50_1d_12h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Turtle Soup Short: price briefly breaks above 20-period high then reverses
-            # Only take in downtrend (price below 1d EMA50)
-            elif (high[i] > high_20[i] and close[i] < high_20[i] and 
-                  close[i] < ema50_1d_6h[i]):
+            # Short: Williams %R overbought (> -20) + below 1d EMA50 + volume spike
+            elif williams_r[i] > -20 and close[i] < ema50_1d_12h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 20-period low or trend changes
-            if low[i] < low_20[i] or close[i] < ema50_1d_6h[i]:
+            # Exit long: Williams %R overbought (> -20) OR price below 1d EMA50
+            if williams_r[i] > -20 or close[i] < ema50_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 20-period high or trend changes
-            if high[i] > high_20[i] or close[i] > ema50_1d_6h[i]:
+            # Exit short: Williams %R oversold (< -80) OR price above 1d EMA50
+            if williams_r[i] < -80 or close[i] > ema50_1d_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
