@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_1dTrend_Volume_3"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for trend filter (Williams Alligator on weekly)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Calculate EMA20 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Williams Alligator components on 1w close (13-period median)
+    close_1w = df_1w['close'].values
+    # Jaw (13-period SMMA shifted 8 bars)
+    jaw_raw = pd.Series(close_1w).rolling(window=13, min_periods=13).mean().values
+    jaw = np.roll(jaw_raw, 8)
+    jaw[:8] = np.nan
+    # Teeth (8-period SMMA shifted 5 bars)
+    teeth_raw = pd.Series(close_1w).rolling(window=8, min_periods=8).mean().values
+    teeth = np.roll(teeth_raw, 5)
+    teeth[:5] = np.nan
+    # Lips (5-period SMMA shifted 3 bars)
+    lips_raw = pd.Series(close_1w).rolling(window=5, min_periods=5).mean().values
+    lips = np.roll(lips_raw, 3)
+    lips[:3] = np.nan
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Align Alligator lines to daily timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
     
-    # Camarilla R3, S3 levels: (H-L)*1.1/4
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4
-    r3_level = close_1d_vals + camarilla_range
-    s3_level = close_1d_vals - camarilla_range
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
-    
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Volume spike filter: current volume > 1.5 * 20-day average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for EMA20 (1d) and volume MA
+    start_idx = 20  # Need volume MA and Alligator data
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema20_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema20_1d_val = ema20_1d_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above R3 + 1d uptrend + volume spike
-            if close[i] > r3 and close[i] > ema20_1d_val and vol_spike:
+            # Enter long: Lips > Teeth > Jaw (bullish alignment) + volume spike
+            if lips_val > teeth_val > jaw_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below S3 + 1d downtrend + volume spike
-            elif close[i] < s3 and close[i] < ema20_1d_val and vol_spike:
+            # Enter short: Lips < Teeth < Jaw (bearish alignment) + volume spike
+            elif lips_val < teeth_val < jaw_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below S3 or 1d trend turns down
-            if close[i] < s3 or close[i] < ema20_1d_val:
+            # Exit long: Lips < Jaw (alligator sleeping) or loss of bullish alignment
+            if lips_val < jaw_val or not (lips_val > teeth_val > jaw_val):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above R3 or 1d trend turns up
-            if close[i] > r3 or close[i] > ema20_1d_val:
+            # Exit short: Lips > Jaw (alligator sleeping) or loss of bearish alignment
+            if lips_val > jaw_val or not (lips_val < teeth_val < jaw_val):
                 signals[i] = 0.0
                 position = 0
             else:
