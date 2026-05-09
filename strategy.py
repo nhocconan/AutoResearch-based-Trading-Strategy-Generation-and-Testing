@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Stochastic_50_Cross_1dTrend_VolumeFilter
-# Hypothesis: 6s Stochastic(14,3,3) crossing above/below 50 with 1d EMA50 trend filter and volume confirmation.
-# Long when: 1d trend up (close > EMA50), %K crosses above 50, volume > 1.5x average.
-# Short when: 1d trend down (close < EMA50), %K crosses below 50, volume > 1.5x average.
-# Uses 6s timeframe for entry timing, 1d for trend filter. Designed for 15-30 trades/year to avoid fee drag.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slow
+# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume confirmation.
+# Designed for 12h timeframe to generate ~15-30 trades/year. Long when 1d trend up (close > EMA34),
+# price breaks above R1, volume > 1.8x average, and close > 1d VWAP. Short when 1d trend down,
+# price breaks below S1, volume > 1.8x average, and close < 1d VWAP. Uses conservative sizing (0.25)
+# to manage drawdown and avoid overtrading.
 
-name = "6h_Stochastic_50_Cross_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slow"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,58 +24,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = (close_1d[i] * 2 + ema50_1d[i-1] * 48) / 50
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align 1d EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 1d EMA34 to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Stochastic(14,3,3) on 6h data
-    lookback = 14
-    k_smooth = 3
-    d_smooth = 3
+    # Calculate Camarilla levels for each 1d bar: R1, S1
+    camarilla_r1_1d = np.full_like(close_1d, np.nan)
+    camarilla_s1_1d = np.full_like(close_1d, np.nan)
     
-    lowest_low = np.full_like(low, np.nan)
-    highest_high = np.full_like(high, np.nan)
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            camarilla_r1_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 4
+            camarilla_s1_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 4
     
-    for i in range(lookback - 1, n):
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    stoch_k_raw = np.full_like(close, np.nan)
-    valid_range = (highest_high != lowest_low) & ~np.isnan(highest_high) & ~np.isnan(lowest_low)
-    stoch_k_raw[valid_range] = (close[valid_range] - lowest_low[valid_range]) / (highest_high[valid_range] - lowest_low[valid_range]) * 100
+    # Calculate 1d VWAP for additional filter
+    vwap_1d = np.full_like(close_1d, np.nan)
+    cumulative_volume = np.full_like(close_1d, np.nan)
+    cumulative_price_volume = np.full_like(close_1d, np.nan)
     
-    # Smooth %K to get fast %K
-    stoch_k = np.full_like(close, np.nan)
-    if n >= k_smooth:
-        for i in range(k_smooth - 1, n):
-            start = i - k_smooth + 1
-            valid_k = stoch_k_raw[start:i+1]
-            valid_k = valid_k[~np.isnan(valid_k)]
-            if len(valid_k) > 0:
-                stoch_k[i] = np.mean(valid_k)
+    for i in range(len(df_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]) or np.isnan(volume_1d[i]):
+            if i > 0:
+                vwap_1d[i] = vwap_1d[i-1]
+                cumulative_volume[i] = cumulative_volume[i-1]
+                cumulative_price_volume[i] = cumulative_price_volume[i-1]
+            continue
+            
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+        price_volume = typical_price * volume_1d[i]
+        
+        if i == 0:
+            cumulative_volume[i] = volume_1d[i]
+            cumulative_price_volume[i] = price_volume
+        else:
+            cumulative_volume[i] = cumulative_volume[i-1] + volume_1d[i]
+            cumulative_price_volume[i] = cumulative_price_volume[i-1] + price_volume
+            
+        if cumulative_volume[i] != 0:
+            vwap_1d[i] = cumulative_price_volume[i] / cumulative_volume[i]
+        else:
+            vwap_1d[i] = vwap_1d[i-1] if i > 0 else typical_price
     
-    # Smooth to get %D (slow)
-    stoch_d = np.full_like(close, np.nan)
-    if n >= d_smooth:
-        for i in range(d_smooth - 1, n):
-            start = i - d_smooth + 1
-            valid_k = stoch_k[start:i+1]
-            valid_k = valid_k[~np.isnan(valid_k)]
-            if len(valid_k) > 0:
-                stoch_d[i] = np.mean(valid_k)
+    # Align 1d VWAP to 12h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -90,41 +102,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, k_smooth, d_smooth, 20, 50)
+    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_1d_aligned[i]) or 
+            np.isnan(camarilla_s1_1d_aligned[i]) or np.isnan(volume_ratio[i]) or
+            np.isnan(vwap_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close[i] > ema50_1d_aligned[i]
+        # Determine 1d trend and price relative to VWAP
+        trend_up = close[i] > ema34_1d_aligned[i]
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
         
         if position == 0:
-            # Enter long: 1d trend up + %K crosses above 50 + volume confirmation
-            if trend_up and stoch_k[i-1] < 50 and stoch_k[i] >= 50 and volume_ratio[i] > 1.5:
+            # Enter long: 1d trend up + price breaks above R1 + volume confirmation + price above VWAP
+            if trend_up and close[i] > camarilla_r1_1d_aligned[i] and volume_ratio[i] > 1.8 and price_above_vwap:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + %K crosses below 50 + volume confirmation
-            elif not trend_up and stoch_k[i-1] > 50 and stoch_k[i] <= 50 and volume_ratio[i] > 1.5:
+            # Enter short: 1d trend down + price breaks below S1 + volume confirmation + price below VWAP
+            elif not trend_up and close[i] < camarilla_s1_1d_aligned[i] and volume_ratio[i] > 1.8 and price_below_vwap:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 1d trend turns down or %K crosses below 50
-            if not trend_up or (stoch_k[i-1] >= 50 and stoch_k[i] < 50):
+            # Exit long: 1d trend turns down or price breaks below S1 or price falls below VWAP
+            if not trend_up or close[i] < camarilla_s1_1d_aligned[i] or not price_above_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 1d trend turns up or %K crosses above 50
-            if trend_up or (stoch_k[i-1] <= 50 and stoch_k[i] > 50):
+            # Exit short: 1d trend turns up or price breaks above R1 or price rises above VWAP
+            if trend_up or close[i] > camarilla_r1_1d_aligned[i] or not price_below_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
