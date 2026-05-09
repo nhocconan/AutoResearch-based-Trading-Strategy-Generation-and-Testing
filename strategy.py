@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h timeframe with weekly pivot structure (R2/S2) as trend filter,
-# daily RSI(14) for overbought/oversold conditions, and volume confirmation.
-# Weekly pivot provides structural support/resistance that works in both bull/bear markets.
-# RSI avoids chasing extremes, volume confirms institutional participation.
-# Target: 20-60 trades/year (80-240 over 4 years) to minimize fee drag.
-name = "6h_WeeklyPivot_R2S2_RSI14_Volume"
-timeframe = "6h"
+# Hypothesis: 12h timeframe with 1d HTF for trend filtering. Uses 1d Donchian breakout (20-period) 
+# with volume confirmation and volatility filter to avoid chop. Designed for fewer trades (target 50-150/4y) 
+# to reduce fee drag. Works in both bull/bear via trend filter and volatility regime filter.
+name = "12h_Donchian20_Breakout_1dTrend_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,48 +20,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation and daily data for RSI
-    df_weekly = get_htf_data(prices, '1w')
-    df_daily = get_htf_data(prices, '1d')
+    # Get 1d data for trend filter and Donchian channels
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_weekly) < 50 or len(df_daily) < 50:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly pivot points from previous week's OHLC
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    prev_weekly_high = np.roll(weekly_high, 1)
-    prev_weekly_low = np.roll(weekly_low, 1)
-    prev_weekly_close = np.roll(weekly_close, 1)
-    prev_weekly_high[0] = np.nan
-    prev_weekly_low[0] = np.nan
-    prev_weekly_close[0] = np.nan
+    # 1d Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    prev_weekly_range = prev_weekly_high - prev_weekly_low
-    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
-    r2 = weekly_pivot + (prev_weekly_high - prev_weekly_low)
-    s2 = weekly_pivot - (prev_weekly_high - prev_weekly_low)
+    # Calculate rolling max/min for Donchian channels
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Daily RSI(14)
-    close_daily = pd.Series(df_daily['close'].values)
-    delta = close_daily.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Align Donchian levels to 12h
+    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume average (24-period for 6h = 4 days)
-    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volatility filter: ATR(14) ratio to avoid choppy markets
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Avoid division by zero
+    atr_ratio = atr / (close + 1e-10)
+    atr_ma = pd.Series(atr_ratio).rolling(window=50, min_periods=50).mean().values
     
-    # Align weekly R2/S2 and daily RSI to 6h timeframe
-    r2_6h = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_6h = align_htf_to_ltf(prices, df_weekly, s2)
-    rsi_6h = align_htf_to_ltf(prices, df_daily, rsi_values)
+    # Volume confirmation: volume > 1.5 x 20-period average
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,37 +64,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(rsi_6h[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+            np.isnan(ema50_12h[i]) or np.isnan(atr_ma[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.0 x 24-period average
-        vol_spike = volume[i] > vol_avg[i] * 2.0
+        # Volatility filter: avoid extremely high or low volatility regimes
+        vol_filter = (atr_ratio[i] > atr_ma[i] * 0.5) & (atr_ratio[i] < atr_ma[i] * 2.0)
+        
+        # Volume condition: current volume > 1.5 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 1.5
         
         if position == 0:
-            # Long: Price above weekly R2 with RSI < 70 (not overbought) and volume spike
-            if close[i] > r2_6h[i] and rsi_6h[i] < 70 and vol_spike:
+            # Long: Break above Donchian high with uptrend, volume spike, and vol filter
+            if close[i] > donchian_high_12h[i] and close[i] > ema50_12h[i] and vol_spike and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below weekly S2 with RSI > 30 (not oversold) and volume spike
-            elif close[i] < s2_6h[i] and rsi_6h[i] > 30 and vol_spike:
+            # Short: Break below Donchian low with downtrend, volume spike, and vol filter
+            elif close[i] < donchian_low_12h[i] and close[i] < ema50_12h[i] and vol_spike and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below weekly S2 OR RSI > 70 (overbought)
-            if close[i] < s2_6h[i] or rsi_6h[i] > 70:
+            # Exit long: Price falls back below Donchian low OR trend turns down
+            if close[i] < donchian_low_12h[i] or close[i] < ema50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above weekly R2 OR RSI < 30 (oversold)
-            if close[i] > r2_6h[i] or rsi_6h[i] < 30:
+            # Exit short: Price rises back above Donchian high OR trend turns up
+            if close[i] > donchian_high_12h[i] or close[i] > ema50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
