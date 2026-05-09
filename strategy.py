@@ -1,10 +1,19 @@
+# 12h Weekly Pivot R4 S4 Breakout with Volume and Trend Filter
+# Strategy uses weekly pivot levels (R4/S4) as breakout levels on 12h timeframe.
+# Entry: Price breaks R4/S4 with volume > 2x 24-period average and price above/below weekly EMA(50) trend.
+# Exit: Price reverses back to opposite pivot level (S4 for longs, R4 for shorts).
+# Position size: 0.25 (25% of capital) to manage risk and reduce churn.
+# Timeframe: 12h, HTF: 1w for trend and pivot levels.
+# Designed to work in both bull and bear markets by following weekly trend and requiring volume confirmation.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI4_Div_Liquidity"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R4_S4_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,67 +26,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily RSI(4) for mean reversion signals
-    close_d = get_htf_data(prices, '1d')
-    if len(close_d) < 10:
+    # Get weekly data for trend filter and pivot levels
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 50:
         return np.zeros(n)
     
-    close_series = pd.Series(close_d['close'].values)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    avg_loss = loss.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi4 = 100 - (100 / (1 + rs))
-    rsi4_values = rsi4.fillna(50).values
-    rsi4_aligned = align_htf_to_ltf(prices, close_d, rsi4_values)
+    # Calculate weekly EMA(50) for trend filter
+    close_w = pd.Series(df_w['close'].values)
+    ema50_w = close_w.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
-    # Liquidity zones: intraday high/low of current 6h bar vs previous bar
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
+    # Calculate weekly pivot levels from previous week OHLC
+    H = df_w['high'].values
+    L = df_w['low'].values
+    C = df_w['close'].values
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Pivot point: P = (H + L + C) / 3
+    P = (H + L + C) / 3
+    
+    # Weekly R4 and S4 levels (breakout levels)
+    # R4 = C + (H - L) * 1.1
+    # S4 = C - (H - L) * 1.1
+    R4 = C + (H - L) * 1.1
+    S4 = C - (H - L) * 1.1
+    
+    # Align weekly levels to 12h timeframe (use previous week's levels)
+    R4_aligned = align_htf_to_ltf(prices, df_w, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_w, S4)
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
+    
+    # Volume confirmation: current volume > 2.0x 24-period average
     vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma24 = vol_series.rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi4_aligned[i]) or np.isnan(vol_ma20[i]):
+        # Skip if data not ready
+        if (np.isnan(ema50_w_aligned[i]) or np.isnan(R4_aligned[i]) or 
+            np.isnan(S4_aligned[i]) or np.isnan(vol_ma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 2.0 * vol_ma24[i]
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + price breaks above prior 6h high + volume
-            if rsi4_aligned[i] < 30 and close[i] > high_prev[i] and vol_ok:
+            # Long: Price breaks above R4 with volume and above weekly EMA trend
+            if close[i] > R4_aligned[i] and vol_ok and close[i] > ema50_w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + price breaks below prior 6h low + volume
-            elif rsi4_aligned[i] > 70 and close[i] < low_prev[i] and vol_ok:
+            # Short: Price breaks below S4 with volume and below weekly EMA trend
+            elif close[i] < S4_aligned[i] and vol_ok and close[i] < ema50_w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion) or stop below prior low
-            if rsi4_aligned[i] > 50 or close[i] < low_prev[i]:
+            # Exit long: Price crosses back below S4 (trend reversal)
+            if close[i] < S4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 or stop above prior high
-            if rsi4_aligned[i] < 50 or close[i] > high_prev[i]:
+            # Exit short: Price crosses back above R4
+            if close[i] > R4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
