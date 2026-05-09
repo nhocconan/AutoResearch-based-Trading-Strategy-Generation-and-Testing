@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Anchored_VWAP_Deviation_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for EMA trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate VWAP reset at each 1d boundary (start of day)
-    vwap = np.zeros(n)
-    vwap_sum = 0.0
-    vol_sum = 0.0
-    prev_date = None
+    # Get 1d data for Camarilla pivot levels (based on previous day's OHLC)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    for i in range(n):
-        current_date = pd.Timestamp(prices['open_time'].iloc[i]).date()
-        if prev_date is None or current_date != prev_date:
-            # Reset at start of new day
-            vwap_sum = 0.0
-            vol_sum = 0.0
-            prev_date = current_date
-        
-        typical_price = (high[i] + low[i] + close[i]) / 3.0
-        vwap_sum += typical_price * volume[i]
-        vol_sum += volume[i]
-        
-        if vol_sum > 0:
-            vwap[i] = vwap_sum / vol_sum
-        else:
-            vwap[i] = close[i]
+    # Calculate pivot and levels from previous day's OHLC
+    # Shift by 1 to use previous day's data
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # Set first value to NaN since no previous day exists
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # VWAP deviation as percentage
-    vwap_dev = (close - vwap) / vwap * 100.0
+    prev_daily_range = prev_high_1d - prev_low_1d
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1 = pivot + 1.1 * prev_daily_range / 6
+    s1 = pivot - 1.1 * prev_daily_range / 6
     
-    # Calculate 20-period standard deviation of VWAP deviation for dynamic bands
-    vwap_dev_ma = pd.Series(vwap_dev).rolling(window=20, min_periods=20).mean().values
-    vwap_dev_std = pd.Series(vwap_dev).rolling(window=20, min_periods=20).std().values
+    # Align Camarilla levels to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Dynamic bands: 2 standard deviations
-    upper_band = vwap_dev_ma + 2.0 * vwap_dev_std
-    lower_band = vwap_dev_ma - 2.0 * vwap_dev_std
+    # 10-period volume average for spike detection (adjusted for 12h timeframe)
+    vol_avg = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,37 +60,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema50_6h[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(vwap_dev[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema34_12h[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume condition: current volume > 2.5 x 10-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.5
+        
         if position == 0:
-            # Long: Price deviates significantly below VWAP (oversold) in uptrend
-            if vwap_dev[i] < lower_band[i] and close[i] > ema50_6h[i]:
-                signals[i] = 0.25
+            # Long: Break above Camarilla R1 with uptrend and volume spike
+            if close[i] > r1_12h[i] and close[i] > ema34_12h[i] and vol_spike:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price deviates significantly above VWAP (overbought) in downtrend
-            elif vwap_dev[i] > upper_band[i] and close[i] < ema50_6h[i]:
-                signals[i] = -0.25
+            # Short: Break below Camarilla S1 with downtrend and volume spike
+            elif close[i] < s1_12h[i] and close[i] < ema34_12h[i] and vol_spike:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: Price returns to VWAP or trend turns down
-            if vwap_dev[i] > vwap_dev_ma[i] or close[i] < ema50_6h[i]:
+            # Exit long: Price falls back below Camarilla S1 OR trend turns down
+            if close[i] < s1_12h[i] or close[i] < ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: Price returns to VWAP or trend turns up
-            if vwap_dev[i] < vwap_dev_ma[i] or close[i] > ema50_6h[i]:
+            # Exit short: Price rises back above Camarilla R1 OR trend turns up
+            if close[i] > r1_12h[i] or close[i] > ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
