@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h/1d trend filter and session filter (08-20 UTC)
-# RSI < 20/ > 80 for oversold/overbought entries with 4h trend alignment
-# 1d trend filter avoids counter-trend trades in strong trends
-# Session filter reduces noise during low-liquidity hours
-# Designed for mean reversion in ranging markets while avoiding strong trends
-name = "1h_RSI_MeanReversion_4hTrend_1dFilter_Session"
-timeframe = "1h"
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA13 trend filter and volume confirmation
+# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+# Long when Bull Power > 0 and Bear Power < 0 (bullish), with volume spike and above 1d EMA13
+# Short when Bear Power > 0 and Bull Power < 0 (bearish), with volume spike and below 1d EMA13
+# Uses 1d EMA13 for trend filter to avoid counter-trend trades
+# Volume > 1.3x 20-period EMA for institutional participation
+# Designed to work in both bull and bear markets by following daily trend
+# Target: 50-150 total trades over 4 years (12-37/year)
+name = "6h_ElderRay_1dEMA13_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,86 +23,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # 1d data for trend filter
+    # 1d data for EMA13 trend and Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # RSI calculation (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate EMA13 on 1d close
+    close_1d = df_1d['close'].values
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Elder Ray components on 1d: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    bull_power = high_1d - ema_13_1d
+    bear_power = ema_13_1d - low_1d
     
-    # 4h EMA20 trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Align 1d indicators to 6h timeframe
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume spike filter: volume > 1.3x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (1.3 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Skip if outside trading session
-        if not session_filter[i]:
+        if (np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        rsi_val = rsi[i]
         
         if position == 0:
-            # Long: RSI < 20 (oversold) and price above both 4h and 1d EMA (uptrend)
-            if rsi_val < 20 and price > ema_20_4h_aligned[i] and price > ema_50_1d_aligned[i]:
-                signals[i] = 0.20
+            # Long: Bull Power > 0, Bear Power < 0 (bullish), volume spike, price above EMA13
+            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] < 0 and 
+                vol_spike[i] and price > ema_13_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 80 (overbought) and price below both 4h and 1d EMA (downtrend)
-            elif rsi_val > 80 and price < ema_20_4h_aligned[i] and price < ema_50_1d_aligned[i]:
-                signals[i] = -0.20
+            # Short: Bear Power > 0, Bull Power < 0 (bearish), volume spike, price below EMA13
+            elif (bear_power_aligned[i] > 0 and bull_power_aligned[i] < 0 and 
+                  vol_spike[i] and price < ema_13_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion) or price below 4h EMA (trend change)
-            if rsi_val > 50 or price < ema_20_4h_aligned[i]:
+            # Exit long: Bear Power becomes positive (bearish shift) or price below EMA13
+            if bear_power_aligned[i] > 0 or price < ema_13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion) or price above 4h EMA (trend change)
-            if rsi_val < 50 or price > ema_20_4h_aligned[i]:
+            # Exit short: Bull Power becomes positive (bullish shift) or price above EMA13
+            if bull_power_aligned[i] > 0 or price > ema_13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
