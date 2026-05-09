@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_Ichimoku_Cloud_1dTrend_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,47 +9,13 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Get daily data for Ichimoku cloud and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate Ichimoku components
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Conversion Line + Base Line) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -58,66 +24,86 @@ def generate_signals(prices):
     
     close_1w = df_1w['close'].values
     
-    # Calculate 50-week EMA for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 1w EMA100 for trend filter
+    ema100_1w = pd.Series(close_1w).ewm(span=100, adjust=False, min_periods=100).mean().values
     
-    # Align weekly EMA50 to 6h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1w EMA100 to 12h timeframe
+    ema100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema100_1w)
+    
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Camarilla pivot levels from previous day
+    # H3 = C + 1.1*(H-L)/4, L3 = C - 1.1*(H-L)/4
+    camarilla_h3 = np.full_like(close_1d, np.nan)
+    camarilla_l3 = np.full_like(close_1d, np.nan)
+    
+    for i in range(1, len(close_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
+        camarilla_h3[i] = prev_close + 1.1 * range_ / 4
+        camarilla_l3[i] = prev_close - 1.1 * range_ / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Get 12h volume for volume confirmation
+    # Use 12h volume EMA20
+    volume_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data for all indicators
-    start_idx = max(52, 50)
+    start_idx = max(100, 30)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
-            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema100_1w_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
+            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Cloud top and bottom
-        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
-        
-        # Price above/below cloud
-        price_above_cloud = close[i] > cloud_top
-        price_below_cloud = close[i] < cloud_bottom
-        
-        # TK cross: Tenkan-sen crosses above/below Kijun-sen
-        tk_cross_above = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
-        tk_cross_below = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
-        
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema50_1w_aligned[i]
-        downtrend = close[i] < ema50_1w_aligned[i]
+        # Uptrend: price above 1w EMA100
+        uptrend = close[i] > ema100_1w_aligned[i]
+        # Downtrend: price below 1w EMA100
+        downtrend = close[i] < ema100_1w_aligned[i]
+        # Volume surge: current volume > 1.5x 12h volume EMA20
+        volume_surge = volume[i] > volume_ema20[i] * 1.5
         
         if position == 0:
-            # Enter long: Price above cloud + TK cross bullish + uptrend
-            if price_above_cloud and tk_cross_above and uptrend:
+            # Enter long: Uptrend + price breaks above Camarilla H3 + volume surge
+            if uptrend and close[i] > camarilla_h3_aligned[i] and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below cloud + TK cross bearish + downtrend
-            elif price_below_cloud and tk_cross_below and downtrend:
+            # Enter short: Downtrend + price breaks below Camarilla L3 + volume surge
+            elif downtrend and close[i] < camarilla_l3_aligned[i] and volume_surge:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price below cloud OR TK cross bearish
-            if price_below_cloud or not tk_cross_above:
+            # Exit long: Trend turns down OR price breaks below Camarilla L3
+            if not uptrend or close[i] < camarilla_l3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price above cloud OR TK cross bullish
-            if price_above_cloud or not tk_cross_below:
+            # Exit short: Trend turns up OR price breaks above Camarilla H3
+            if not downtrend or close[i] > camarilla_h3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
