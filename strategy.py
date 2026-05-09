@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_Fibonacci_Breakout_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,77 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter (only close needed)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla calculation
+    # Get daily data for Fibonacci retracement calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R1, S1)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
+    # Identify weekly swing high and low over last 4 weeks
+    swing_high = np.full(len(df_1w), np.nan)
+    swing_low = np.full(len(df_1w), np.nan)
     
-    # Trend filter: 12h EMA34
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    for i in range(4, len(df_1w)):
+        # Look back 4 weeks for highest high and lowest low
+        window_high = df_1w['high'].iloc[i-4:i+1].max()
+        window_low = df_1w['low'].iloc[i-4:i+1].min()
+        swing_high[i] = window_high
+        swing_low[i] = window_low
     
-    # Volume filter: current 4h volume > 1.3 * 30-period average
+    # Calculate Fibonacci retracement levels (38.2% and 61.8%)
+    diff = swing_high - swing_low
+    fib_382 = swing_high - diff * 0.382  # Resistance in uptrend, support in downtrend
+    fib_618 = swing_high - diff * 0.618  # Resistance in uptrend, support in downtrend
+    
+    # Align all to 6h timeframe
+    ema50_1w_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    fib_382_6h = align_htf_to_ltf(prices, df_1w, fib_382)
+    fib_618_6h = align_htf_to_ltf(prices, df_1w, fib_618)
+    
+    # Volume filter: current 6h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
-    
-    # Align all to 4h (primary timeframe)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_12h_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
+    start_idx = max(50, 20, 4)  # Need enough data for EMA50, volume MA, and swing calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34_12h_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema50_1w_6h[i]) or np.isnan(fib_382_6h[i]) or 
+            np.isnan(fib_618_6h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
-        trend = ema34_12h_4h[i]
+        trend = ema50_1w_6h[i]
+        fib_382_val = fib_382_6h[i]
+        fib_618_val = fib_618_6h[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: price above weekly EMA50 and breaks above 61.8% fib level with volume
+            if close[i] > trend and close[i] > fib_618_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: price below weekly EMA50 and breaks below 38.2% fib level with volume
+            elif close[i] < trend and close[i] < fib_382_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: price falls below 38.2% fib level (mean reversion)
+            if close[i] < fib_382_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: price rises above 61.8% fib level (mean reversion)
+            if close[i] > fib_618_val:
                 signals[i] = 0.0
                 position = 0
             else:
