@@ -1,13 +1,13 @@
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Based on proven patterns: Camarilla pivot levels from 1-day timeframe with trend and volume confirmation.
-# Uses R3 (resistance 3) and S3 (support 3) levels from daily Camarilla calculation.
-# Enters long when price breaks above R3 with 1-day EMA34 uptrend and volume spike.
-# Enters short when price breaks below S3 with 1-day EMA34 downtrend and volume spike.
-# Exits when price returns to the pivot point (central level) or trend reverses.
-# Designed for 4h timeframe with proper risk management to stay within 75-200 trades over 4 years.
+#!/usr/bin/env python3
+# Hypothesis: 6h timeframe with 1-day RSI and Bollinger Band squeeze for mean reversion.
+# In low volatility regimes (BB width < 30th percentile), price tends to mean-revert.
+# Enters long when RSI(14) < 30 and price > Bollinger lower band, short when RSI(14) > 70 and price < Bollinger upper band.
+# Uses 1-day RSI as momentum filter: only take longs when 1d RSI > 50, shorts when < 50.
+# Exits when volatility regime shifts to high volatility or RSI crosses 50.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_RSI_BB_Squeeze_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,81 +24,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for Camarilla calculation and trend
+    # Calculate 1-day Bollinger Bands (20, 2)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels for each day
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
     close_1d = df_1d['close']
+    sma_20 = close_1d.rolling(window=20, min_periods=20).mean()
+    std_20 = close_1d.rolling(window=20, min_periods=20).std()
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    bb_width = upper_bb - lower_bb
     
-    # Camarilla formula: 
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R3 = Pivot + (Range * 1.1 / 2)
-    # S3 = Pivot - (Range * 1.1 / 2)
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
+    # Bollinger Band squeeze: low volatility when BB width < 30th percentile
+    bb_width_percentile = bb_width.rolling(window=50, min_periods=50).quantile(0.3)
+    bb_squeeze = bb_width < bb_width_percentile
+    bb_squeeze_values = bb_squeeze.values
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze_values)
     
-    # Align Camarilla levels to 4h timeframe (wait for daily close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    # Bollinger Bands for entry/exit
+    upper_bb_values = upper_bb.values
+    lower_bb_values = lower_bb.values
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_values)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_values)
     
-    # 1-day EMA34 for trend filter
-    ema_34 = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1-day RSI(14) for momentum filter
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Volume spike detection: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # 6h RSI(14) for entry signals
+    delta_6h = pd.Series(close).diff()
+    gain_6h = delta_6h.where(delta_6h > 0, 0)
+    loss_6h = -delta_6h.where(delta_6h < 0, 0)
+    avg_gain_6h = gain_6h.rolling(window=14, min_periods=14).mean()
+    avg_loss_6h = loss_6h.rolling(window=14, min_periods=14).mean()
+    rs_6h = avg_gain_6h / avg_loss_6h
+    rsi_6h = 100 - (100 / (1 + rs_6h))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(pivot_aligned[i]) or np.isnan(ema_34_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(bb_squeeze_aligned[i]) or
+            np.isnan(lower_bb_aligned[i]) or np.isnan(upper_bb_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 + uptrend + volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
-                volume_spike[i]):
+            # Enter long: low volatility + RSI oversold + price above lower BB + 1d RSI bullish
+            if (bb_squeeze_aligned[i] and 
+                rsi_6h[i] < 30 and 
+                close[i] > lower_bb_aligned[i] and 
+                rsi_1d_aligned[i] > 50):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + downtrend + volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume_spike[i]):
+            # Enter short: low volatility + RSI overbought + price below upper BB + 1d RSI bearish
+            elif (bb_squeeze_aligned[i] and 
+                  rsi_6h[i] > 70 and 
+                  close[i] < upper_bb_aligned[i] and 
+                  rsi_1d_aligned[i] < 50):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to pivot or trend reverses
-            if (close[i] <= pivot_aligned[i] or 
-                close[i] < ema_34_aligned[i]):
+            # Exit long: volatility regime shifts to high OR RSI crosses 50
+            if (not bb_squeeze_aligned[i]) or (rsi_6h[i] >= 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot or trend reverses
-            if (close[i] >= pivot_aligned[i] or 
-                close[i] > ema_34_aligned[i]):
+            # Exit short: volatility regime shifts to high OR RSI crosses 50
+            if (not bb_squeeze_aligned[i]) or (rsi_6h[i] <= 50):
                 signals[i] = 0.0
                 position = 0
             else:
