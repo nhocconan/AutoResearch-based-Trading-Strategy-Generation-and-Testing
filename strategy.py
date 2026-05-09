@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS
-# Hypothesis: Tight breakout at Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
-# EMA34 is more responsive than EMA50, better capturing trend changes in volatile crypto markets.
-# Volume spike (>2x 20-period average) confirms breakout strength.
-# Designed for low trade frequency (<50/year) to minimize fee drag in BTC/ETH.
-# Works in both bull and bear markets by following the daily trend direction.
+# 6h_Chandelier_Exit_Volume_Regime
+# Hypothesis: Chandelier Exit (trailing stop based on ATR) combined with volume confirmation and ADX regime filter.
+# Long when price crosses above Chandelier Exit long level in strong uptrend (ADX>25), short when crosses below short level in strong downtrend.
+# Volume confirmation (>1.5x 20-period average) ensures breakout strength.
+# Designed for low trade frequency (<30/year) to minimize fee drift in 6h timeframe.
+# Works in both bull and bear markets by following trend direction with dynamic stop.
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
-timeframe = "4h"
+name = "6h_Chandelier_Exit_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +24,115 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and EMA
+    # Get 12h data for Chandelier Exit calculation (using 22-period ATR and 3x multiplier)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate True Range for 12h
+    tr_12h = np.zeros_like(high_12h)
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    for i in range(1, len(high_12h)):
+        tr_12h[i] = max(
+            high_12h[i] - low_12h[i],
+            abs(high_12h[i] - close_12h[i-1]),
+            abs(low_12h[i] - close_12h[i-1])
+        )
+    
+    # Calculate ATR(22) for 12h
+    atr_12h = np.full_like(high_12h, np.nan)
+    if len(tr_12h) >= 22:
+        atr_12h[21] = np.mean(tr_12h[0:22])
+        for i in range(22, len(tr_12h)):
+            atr_12h[i] = (atr_12h[i-1] * 21 + tr_12h[i]) / 22
+    
+    # Calculate Chandelier Exit levels for 12h
+    # Long exit: highest high - 3*ATR
+    # Short exit: lowest low + 3*ATR
+    highest_high_12h = np.full_like(high_12h, np.nan)
+    lowest_low_12h = np.full_like(low_12h, np.nan)
+    
+    if len(high_12h) >= 22:
+        for i in range(22, len(high_12h)):
+            highest_high_12h[i] = np.max(high_12h[i-21:i+1])
+            lowest_low_12h[i] = np.min(low_12h[i-21:i+1])
+    
+    chandelier_long_exit_12h = np.full_like(high_12h, np.nan)
+    chandelier_short_exit_12h = np.full_like(high_12h, np.nan)
+    
+    valid_atr = ~np.isnan(atr_12h)
+    if np.any(valid_atr):
+        chandelier_long_exit_12h[valid_atr] = highest_high_12h[valid_atr] - 3.0 * atr_12h[valid_atr]
+        chandelier_short_exit_12h[valid_atr] = lowest_low_12h[valid_atr] + 3.0 * atr_12h[valid_atr]
+    
+    # Align Chandelier Exit levels to 6h timeframe
+    chandelier_long_exit_aligned = align_htf_to_ltf(prices, df_12h, chandelier_long_exit_12h)
+    chandelier_short_exit_aligned = align_htf_to_ltf(prices, df_12h, chandelier_short_exit_12h)
+    
+    # Get 1d data for ADX calculation (trend strength)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Calculate True Range for 1d
+    tr_1d = np.zeros_like(high_1d)
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(high_1d)):
+        tr_1d[i] = max(
+            high_1d[i] - low_1d[i],
+            abs(high_1d[i] - close_1d[i-1]),
+            abs(low_1d[i] - close_1d[i-1])
+        )
     
-    # Calculate Camarilla levels (R1, S1 are the key breakout levels)
-    rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    # Calculate +DM and -DM for 1d
+    plus_dm_1d = np.zeros_like(high_1d)
+    minus_dm_1d = np.zeros_like(high_1d)
+    for i in range(1, len(high_1d)):
+        up_move = high_1d[i] - high_1d[i-1]
+        down_move = low_1d[i-1] - low_1d[i]
+        plus_dm_1d[i] = up_move if up_move > down_move and up_move > 0 else 0
+        minus_dm_1d[i] = down_move if down_move > up_move and down_move > 0 else 0
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate smoothed TR, +DM, -DM (14-period)
+    def smooth_series(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[0:period])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    atr_1d = smooth_series(tr_1d, 14)
+    plus_dm_smoothed = smooth_series(plus_dm_1d, 14)
+    minus_dm_smoothed = smooth_series(minus_dm_1d, 14)
     
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate +DI and -DI
+    plus_di_1d = np.full_like(high_1d, np.nan)
+    minus_di_1d = np.full_like(high_1d, np.nan)
+    valid_atr_1d = ~np.isnan(atr_1d) & (atr_1d != 0)
+    if np.any(valid_atr_1d):
+        plus_di_1d[valid_atr_1d] = 100 * plus_dm_smoothed[valid_atr_1d] / atr_1d[valid_atr_1d]
+        minus_di_1d[valid_atr_1d] = 100 * minus_dm_smoothed[valid_atr_1d] / atr_1d[valid_atr_1d]
+    
+    # Calculate DX and ADX
+    dx_1d = np.full_like(high_1d, np.nan)
+    di_sum = plus_di_1d + minus_di_1d
+    valid_di = ~np.isnan(di_sum) & (di_sum != 0)
+    if np.any(valid_di):
+        dx_1d[valid_di] = 100 * np.abs(plus_di_1d[valid_di] - minus_di_1d[valid_di]) / di_sum[valid_di]
+    
+    adx_1d = smooth_series(dx_1d, 14)
+    
+    # Align ADX to 6h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -70,42 +148,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA are ready
+    start_idx = max(22, 20, 28)  # Ensure Chandelier (22), volume MA (20), and ADX (14+14) are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(chandelier_long_exit_aligned[i]) or np.isnan(chandelier_short_exit_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_ratio[i] > 2.0):
+            # Enter long: price crosses above Chandelier long exit AND strong uptrend (ADX>25) AND volume confirmation
+            if (close[i] > chandelier_long_exit_aligned[i] and 
+                adx_1d_aligned[i] > 25 and 
+                volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0):
+            # Enter short: price crosses below Chandelier short exit AND strong downtrend (ADX>25) AND volume confirmation
+            elif (close[i] < chandelier_short_exit_aligned[i] and 
+                  adx_1d_aligned[i] > 25 and 
+                  volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price crosses below Chandelier long exit OR trend weakens (ADX<20)
+            if close[i] < chandelier_long_exit_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price crosses above Chandelier short exit OR trend weakens (ADX<20)
+            if close[i] > chandelier_short_exit_aligned[i] or adx_1d_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
