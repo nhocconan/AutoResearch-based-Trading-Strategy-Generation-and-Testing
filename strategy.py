@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d timeframe with weekly Bollinger Band squeeze (low volatility) and daily Donchian channel breakout.
-# In low volatility regimes (BB width < 20th percentile on weekly), price tends to breakout in the direction of the daily trend.
-# Enters long when price crosses above the daily Donchian upper in low-volatility regime, short when below daily Donchian lower.
-# Exits when volatility regime shifts to high volatility or price reverses to the daily Donchian midpoint.
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
+# Hypothesis: 6h timeframe with 12h RSI mean reversion and 1-day volume spike confirmation.
+# In overbought/oversold conditions (RSI > 70 or < 30 on 12h), price tends to revert.
+# Enters short when 12h RSI > 70 and 1-day volume > 1.5x 20-period average volume.
+# Enters long when 12h RSI < 30 and 1-day volume > 1.5x 20-period average volume.
+# Exits when RSI returns to neutral range (40-60) or volume condition fails.
+# Uses volume spike to confirm genuine exhaustion rather than weak pullbacks.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "1d_WeeklyBB_Squeeze_DailyDonchian_Breakout"
-timeframe = "1d"
+name = "6h_RSI_MeanReversion_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,52 +20,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 12-hour RSI (14-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    close_1w = df_1w['close']
-    sma_20w = close_1w.rolling(window=20, min_periods=20).mean()
-    std_20w = close_1w.rolling(window=20, min_periods=20).std()
-    upper_bbw = sma_20w + 2 * std_20w
-    lower_bbw = sma_20w - 2 * std_20w
-    bb_widthw = upper_bbw - lower_bbw
+    close_12h = df_12h['close']
+    delta = close_12h.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_values = rsi_12h.values
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h_values)
     
-    # Bollinger Band squeeze: low volatility when BB width < 20th percentile
-    bb_width_percentilew = bb_widthw.rolling(window=50, min_periods=50).quantile(0.2)
-    bb_squeezew = bb_widthw < bb_width_percentilew
-    bb_squeeze_valuesw = bb_squeezew.values
-    bb_squeeze_alignedw = align_htf_to_ltf(prices, df_1w, bb_squeeze_valuesw)
-    
-    # Calculate daily Donchian channel (20-period)
+    # Calculate 1-day volume average (20-period)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
-    donchian_upper = high_1d.rolling(window=20, min_periods=20).max()
-    donchian_lower = low_1d.rolling(window=20, min_periods=20).min()
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    volume_1d = df_1d['volume']
+    vol_ma_20 = volume_1d.rolling(window=20, min_periods=20).mean()
+    vol_ma_20_values = vol_ma_20.values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_values)
     
-    donchian_upper_values = donchian_upper.values
-    donchian_lower_values = donchian_lower.values
-    donchian_mid_values = donchian_mid.values
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_values)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_values)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid_values)
+    # Current 1-day volume (aligned)
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d.values)
     
-    # Breakout conditions: price > daily Donchian upper (long), price < daily Donchian lower (short)
-    price_above_donchian_upper = close > donchian_upper_aligned
-    price_below_donchian_lower = close < donchian_lower_aligned
-    price_above_donchian_mid = close > donchian_mid_aligned
-    price_below_donchian_mid = close < donchian_mid_aligned
+    # Volume spike condition: current volume > 1.5x 20-period average
+    volume_spike = volume_1d_aligned > 1.5 * vol_ma_20_aligned
+    
+    # RSI conditions
+    rsi_overbought = rsi_12h_aligned > 70
+    rsi_oversold = rsi_12h_aligned < 30
+    rsi_exit = (rsi_12h_aligned >= 40) & (rsi_12h_aligned <= 60)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,37 +67,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_squeeze_alignedw[i]) or
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or
-            np.isnan(price_above_donchian_upper[i]) or np.isnan(price_below_donchian_lower[i]) or
-            np.isnan(price_above_donchian_mid[i]) or np.isnan(price_below_donchian_mid[i])):
+        if (np.isnan(rsi_12h_aligned[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(rsi_exit[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: low volatility (weekly BB squeeze) + price > daily Donchian upper
-            if bb_squeeze_alignedw[i] and price_above_donchian_upper[i]:
+            # Enter long: oversold RSI + volume spike
+            if rsi_oversold[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: low volatility (weekly BB squeeze) + price < daily Donchian lower
-            elif bb_squeeze_alignedw[i] and price_below_donchian_lower[i]:
+            # Enter short: overbought RSI + volume spike
+            elif rsi_overbought[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: volatility shifts to high OR price crosses below daily Donchian mid
-            if (not bb_squeeze_alignedw[i]) or (not price_above_donchian_mid[i]):
+            # Exit long: RSI returns to neutral OR volume spike ends
+            if rsi_exit[i] or (not volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: volatility shifts to high OR price crosses above daily Donchian mid
-            if (not bb_squeeze_alignedw[i]) or (not price_below_donchian_mid[i]):
+            # Exit short: RSI returns to neutral OR volume spike ends
+            if rsi_exit[i] or (not volume_spike[i]):
                 signals[i] = 0.0
                 position = 0
             else:
