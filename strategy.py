@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Daily high, low, close for Camarilla pivot calculation
-    daily_high = df_d['high'].values
-    daily_low = df_d['low'].values
-    daily_close = df_d['close'].values
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = pivot + (daily_high - daily_low) * 1.1 / 12
-    s1 = pivot - (daily_high - daily_low) * 1.1 / 12
+    # 12h EMA(50) for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Align to 12h timeframe (Camarilla levels from previous day)
-    r1_aligned = align_htf_to_ltf(prices, df_d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_d, s1)
+    # Donchian(20) breakout levels on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Daily EMA(34) for trend filter
-    close_d = pd.Series(daily_close)
-    ema34_d = close_d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_d_aligned = align_htf_to_ltf(prices, df_d, ema34_d)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.8 * vol_ma20[i]
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and above daily EMA trend
-            if close[i] > r1_aligned[i] and vol_ok and close[i] > ema34_d_aligned[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above Donchian high with volume and above 12h EMA trend
+            if close[i] > donchian_high[i] and vol_ok and close[i] > ema50_12h_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below S1 with volume and below daily EMA trend
-            elif close[i] < s1_aligned[i] and vol_ok and close[i] < ema34_d_aligned[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below Donchian low with volume and below 12h EMA trend
+            elif close[i] < donchian_low[i] and vol_ok and close[i] < ema50_12h_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below S1 (reversion to mean)
-            if close[i] < s1_aligned[i]:
+            # Exit long: Price crosses below Donchian low (mean reversion)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: Price crosses above R1 (reversion to mean)
-            if close[i] > r1_aligned[i]:
+            # Exit short: Price crosses above Donchian high (mean reversion)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
