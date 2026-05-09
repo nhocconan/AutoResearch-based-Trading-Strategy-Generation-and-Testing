@@ -1,13 +1,15 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v2
-Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
-Daily EMA50 provides robust trend filter that adapts to bull/bear markets. Volume spike (>2x 24-period average)
-confirms breakout strength. Designed for low trade frequency (19-50/year) to minimize fee drift.
+12h_TRIX_VolumeSpike_Regime
+Hypothesis: TRIX(12) momentum + volume spike (>2x 24-period average) + Choppiness regime filter (CHOP<38.2 = trending) on 12h timeframe.
+TRIX filters noise and captures sustained momentum. Volume confirms breakout strength.
+Choppiness regime ensures we only trade in trending markets, avoiding whipsaws in ranging conditions.
+Designed for low trade frequency (12-37/year) to minimize fee drag on 12h timeframe.
+Works in both bull and bear markets by following momentum in trending regimes.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v2"
-timeframe = "4h"
+name = "12h_TRIX_VolumeSpike_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,39 +26,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla calculation
+    # Get daily data for TRIX and Choppiness calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Calculate TRIX(12) - triple smoothed EMA of ROC
+    # TRIX = EMA(EMA(EMA(ROC), 12), 12), 12)
+    roc = np.full_like(close_1d, np.nan)
+    roc[12:] = (close_1d[12:] - close_1d[:-12]) / close_1d[:-12] * 100
     
-    # Calculate daily Camarilla levels (R1, S1 are the key breakout levels)
-    rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    # Triple EMA smoothing
+    ema1 = np.full_like(close_1d, np.nan)
+    ema2 = np.full_like(close_1d, np.nan)
+    ema3 = np.full_like(close_1d, np.nan)
     
-    # Align daily Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    if len(close_1d) >= 12:
+        # First EMA
+        ema1[11] = np.mean(roc[0:12])
+        for i in range(12, len(roc)):
+            if not np.isnan(roc[i]):
+                ema1[i] = (roc[i] * 2 + ema1[i-1] * 10) / 12  # alpha = 2/(12+1)
+        
+        # Second EMA
+        ema2[22] = np.mean(ema1[12:23])
+        for i in range(23, len(ema1)):
+            if not np.isnan(ema1[i]):
+                ema2[i] = (ema1[i] * 2 + ema2[i-1] * 10) / 12
+        
+        # Third EMA (TRIX)
+        ema3[33] = np.mean(ema2[23:34])
+        for i in range(34, len(ema2)):
+            if not np.isnan(ema2[i]):
+                ema3[i] = (ema2[i] * 2 + ema3[i-1] * 10) / 12
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (ema_50_1d[i-1] * 49 + close_1d[i]) / 50
+    trix = ema3  # TRIX values
     
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align TRIX to 12h timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
+    # Calculate Choppiness Index(14) for regime detection
+    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    atr = np.full_like(close_1d, np.nan)
+    tr = np.maximum(np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1])), np.abs(low_1d[1:] - close_1d[:-1]))
+    tr = np.concatenate([[np.nan], tr])  # Align with index
+    
+    if len(tr) >= 14:
+        atr[13] = np.nanmean(tr[1:14])  # First ATR
+        for i in range(14, len(tr)):
+            if not np.isnan(tr[i]):
+                atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Calculate rolling max(high) and min(low) for 14 periods
+    max_high = np.full_like(high_1d, np.nan)
+    min_low = np.full_like(low_1d, np.nan)
+    
+    for i in range(13, len(high_1d)):
+        max_high[i] = np.max(high_1d[i-13:i+1])
+        min_low[i] = np.min(low_1d[i-13:i+1])
+    
+    chop = np.full_like(close_1d, 50.0)  # Default neutral
+    valid = (~np.isnan(atr)) & (~np.isnan(max_high)) & (~np.isnan(min_low)) & ((max_high - min_low) > 0)
+    chop[valid] = 100 * np.log10(nansum(atr[np.maximum(0, i-13):i+1]) / (max_high[i] - min_low[i])) / np.log10(14)
+    
+    # Align Choppiness to 12h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 24:
         vol_ma[23] = np.mean(volume[0:24])
@@ -71,12 +111,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(24, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(34, 24)  # Ensure TRIX and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,28 +126,28 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 2.0):
+            # Enter long: TRIX > 0 (bullish momentum) AND volume spike AND trending regime (CHOP < 38.2)
+            if (trix_aligned[i] > 0 and 
+                volume_ratio[i] > 2.0 and 
+                chop_aligned[i] < 38.2):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0):
+            # Enter short: TRIX < 0 (bearish momentum) AND volume spike AND trending regime (CHOP < 38.2)
+            elif (trix_aligned[i] < 0 and 
+                  volume_ratio[i] > 2.0 and 
+                  chop_aligned[i] < 38.2):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 3 bars
-            if bars_since_entry < 3:
+            # Minimum holding period: 2 bars
+            if bars_since_entry < 2:
                 signals[i] = 0.25
             else:
-                # Exit long: price breaks below S1 OR trend reversal (price < EMA50)
-                if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+                # Exit long: TRIX turns negative OR chop becomes ranging (CHOP > 61.8)
+                if trix_aligned[i] < 0 or chop_aligned[i] > 61.8:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -115,12 +155,12 @@ def generate_signals(prices):
                     signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 3 bars
-            if bars_since_entry < 3:
+            # Minimum holding period: 2 bars
+            if bars_since_entry < 2:
                 signals[i] = -0.25
             else:
-                # Exit short: price breaks above R1 OR trend reversal (price > EMA50)
-                if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+                # Exit short: TRIX turns positive OR chop becomes ranging (CHOP > 61.8)
+                if trix_aligned[i] > 0 or chop_aligned[i] > 61.8:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -128,3 +168,9 @@ def generate_signals(prices):
                     signals[i] = -0.25
     
     return signals
+
+def nansum(arr):
+    """Helper function to sum array ignoring NaNs"""
+    if len(arr) == 0:
+        return 0
+    return np.nansum(arr) if np.any(~np.isnan(arr)) else 0
