@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Triple_EMA_Filter_4hTrend_1hEntry"
-timeframe = "1h"
+name = "6h_Supertrend_MultiTF_Trend_With_Weekly_Pivot_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,81 +17,129 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Get 1d data for volume filter
+    # Calculate weekly pivot points (based on previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot: P = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    
+    # Weekly support/resistance levels
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + range_1w
+    s2_1w = pivot_1w - range_1w
+    
+    # Get daily data for Supertrend calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # 4h EMA20 for trend filter
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1h EMA20 and EMA50 for entry timing
-    close_series = pd.Series(close)
-    ema20_1h = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema50_1h = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ATR for Supertrend (7-period ATR, multiplier 3.0)
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], np.abs(high_1d[0] - close_1d[0]), np.abs(low_1d[0] - close_1d[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/7, adjust=False, min_periods=7).mean().values
     
-    # 1h volume spike filter (volume > 2x 20-period MA)
+    # Supertrend calculation
+    hl2 = (high_1d + low_1d) / 2
+    upper_band = hl2 + (3.0 * atr)
+    lower_band = hl2 - (3.0 * atr)
+    
+    # Initialize Supertrend
+    supertrend = np.full_like(close_1d, np.nan, dtype=float)
+    dir_ = np.full_like(close_1d, 1, dtype=int)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(1, len(close_1d)):
+        if close_1d[i] > upper_band[i-1]:
+            dir_[i] = 1
+        elif close_1d[i] < lower_band[i-1]:
+            dir_[i] = -1
+        else:
+            dir_[i] = dir_[i-1]
+            if dir_[i] == -1 and lower_band[i] > lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if dir_[i] == 1 and upper_band[i] < upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if dir_[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Align all indicators to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    dir_aligned = align_htf_to_ltf(prices, df_1d, dir_.astype(float))
+    
+    # Volume filters
     vol_series = pd.Series(volume)
-    vol_ma20_1h = vol_series.rolling(window=20, min_periods=20).mean().values
-    
-    # 1d volume MA for context
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema20_1h[i]) or 
-            np.isnan(ema50_1h[i]) or np.isnan(vol_ma20_1h[i]) or 
-            np.isnan(vol_ma20_1d_aligned[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
+            np.isnan(dir_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: current 1h volume > 2x 20-period MA
-        vol_ok = volume[i] > 2.0 * vol_ma20_1h[i]
-        
-        # Trend filter: 4h EMA20 slope (using current and 3 periods ago)
-        trend_up = ema20_4h_aligned[i] > ema20_4h_aligned[max(0, i-3)]
-        trend_down = ema20_4h_aligned[i] < ema20_4h_aligned[max(0, i-3)]
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume filter
         
         if position == 0:
-            # Long: price > EMA20_1h and EMA20_1h > EMA50_1h, with volume and uptrend
-            if close[i] > ema20_1h[i] and ema20_1h[i] > ema50_1h[i] and vol_ok and trend_up:
-                signals[i] = 0.20
+            # Long: Weekly pivot support + daily Supertrend uptrend + volume
+            if (close[i] > s1_1w_aligned[i] and  # Above weekly S1
+                dir_aligned[i] == 1 and         # Daily Supertrend uptrend
+                vol_ok):
+                signals[i] = 0.25
                 position = 1
-            # Short: price < EMA20_1h and EMA20_1h < EMA50_1h, with volume and downtrend
-            elif close[i] < ema20_1h[i] and ema20_1h[i] < ema50_1h[i] and vol_ok and trend_down:
-                signals[i] = -0.20
+            # Short: Weekly pivot resistance + daily Supertrend downtrend + volume
+            elif (close[i] < r1_1w_aligned[i] and  # Below weekly R1
+                  dir_aligned[i] == -1 and         # Daily Supertrend downtrend
+                  vol_ok):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < EMA20_1h or trend turns down
-            if close[i] < ema20_1h[i] or not trend_up:
+            # Exit long: Price falls below weekly S1 or Supertrend turns down
+            if (close[i] < s1_1w_aligned[i] or 
+                dir_aligned[i] == -1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > EMA20_1h or trend turns up
-            if close[i] > ema20_1h[i] or not trend_down:
+            # Exit short: Price rises above weekly R1 or Supertrend turns up
+            if (close[i] > r1_1w_aligned[i] or 
+                dir_aligned[i] == 1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
