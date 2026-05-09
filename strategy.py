@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 12h timeframe with weekly price channel structure and daily momentum filter.
-# Uses weekly Donchian channel (20-period) for breakout entries and 1d RSI for momentum confirmation.
-# Weekly Donchian provides robust support/resistance that adapts to volatility, working in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
-# Weekly data changes slowly, reducing whipsaw and improving win rate in ranging markets.
+# Hypothesis: 4h Donchian breakout with volume confirmation and ADX trend filter
+# Uses Donchian(20) for breakout entries, volume > 1.5x 20-period average for confirmation,
+# and ADX(14) > 25 to ensure trending markets. Target: 15-35 trades/year per symbol
+# with position size 0.25. Works in both bull and bear markets by capturing
+# genuine breakouts with volume and trend confirmation, reducing false signals.
 
-name = "12h_Donchian20_1dRSI_Momentum"
-timeframe = "12h"
+name = "4h_Donchian20_Volume_ADX_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,54 +24,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Donchian channel (20-period) from previous week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly high and low for Donchian channel
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Calculate 20-period Donchian bands
-    upper_band = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    lower_band = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
-    
-    # Align to 12h timeframe (wait for weekly bar to close)
-    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
-    
-    # Breakout conditions: price must close beyond the band
-    breakout_up = close > upper_band_aligned
-    breakout_down = close < lower_band_aligned
-    
-    # Get daily data for RSI momentum filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    # Calculate 14-period RSI
-    delta = np.diff(df_1d['close'].values, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100  # Avoid division by zero
-    
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Momentum filters: RSI > 50 for longs, RSI < 50 for shorts
-    rsi_long_filter = rsi_aligned > 50
-    rsi_short_filter = rsi_aligned < 50
+    # Breakout conditions: price must close beyond the level
+    breakout_up = close > highest_high
+    breakout_down = close < lowest_low
     
     # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
+    
+    # ADX trend filter (14-period)
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Calculate Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Avoid division by zero
+    plus_di = np.where(tr_sum > 0, (plus_dm_sum / tr_sum) * 100, 0)
+    minus_di = np.where(tr_sum > 0, (minus_dm_sum / tr_sum) * 100, 0)
+    
+    dx = np.where((plus_di + minus_di) > 0, 
+                  np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Trend filter: ADX > 25 indicates strong trend
+    trend_filter = adx > 25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,34 +77,35 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(rsi_long_filter[i]) or np.isnan(rsi_short_filter[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(volume_filter[i]) or np.isnan(trend_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above upper band + RSI > 50 + volume filter
-            if breakout_up[i] and rsi_long_filter[i] and volume_filter[i]:
+            # Long: bullish breakout + volume + trend
+            if breakout_up[i] and volume_filter[i] and trend_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band + RSI < 50 + volume filter
-            elif breakout_down[i] and rsi_short_filter[i] and volume_filter[i]:
+            # Short: bearish breakout + volume + trend
+            elif breakout_down[i] and volume_filter[i] and trend_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to lower band or RSI < 50
-            if close[i] <= lower_band_aligned[i] or not rsi_long_filter[i]:
+            # Exit long: price returns to Donchian middle or trend weakens
+            donchian_mid = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] <= donchian_mid or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to upper band or RSI > 50
-            if close[i] >= upper_band_aligned[i] or not rsi_short_filter[i]:
+            # Exit short: price returns to Donchian middle or trend weakens
+            donchian_mid = (highest_high[i] + lowest_low[i]) / 2
+            if close[i] >= donchian_mid or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
