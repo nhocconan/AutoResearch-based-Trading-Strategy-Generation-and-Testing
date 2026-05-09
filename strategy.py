@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Trend_Confirmation_v2"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,107 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (ADX)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for volume spike filter
+    # Get 1d data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX on 4h data
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # Camarilla R1, S1 levels (focus on key levels for breakout)
+    R1 = prev_close + 0.25 * (prev_high - prev_low)
+    S1 = prev_close - 0.25 * (prev_high - prev_low)
     
-    # Plus Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
+    # Align to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Minus Directional Movement
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Calculate 50-period EMA on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_plus14 = pd.Series(dm_plus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    dm_minus14 = pd.Series(dm_minus).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus14 / tr14
-    di_minus = 100 * dm_minus14 / tr14
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Align ADX to 1h
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Calculate 1d volume average for spike detection
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Calculate 1h Donchian breakout (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need 20 for Donchian
+    start_idx = max(50, 20)  # Need 50 for EMA, 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        vol_ma_val = vol_ma_1d_aligned[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        ema_1d = ema_50_1d_aligned[i]
         vol = volume[i]
-        high_20_val = high_20[i]
-        low_20_val = low_20[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: ADX > 25 (trending) AND breakout above 20-period high AND volume > 1.5x 1d average
-            if adx_val > 25 and close[i] > high_20_val and vol > 1.5 * vol_ma_val:
-                signals[i] = 0.20
+            # Enter long: Close > R1 AND price > 1d EMA50 (uptrend) AND volume > 2.0x average
+            if close[i] > r1 and close[i] > ema_1d and vol > 2.0 * vol_ma_val:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25 (trending) AND breakout below 20-period low AND volume > 1.5x 1d average
-            elif adx_val > 25 and close[i] < low_20_val and vol > 1.5 * vol_ma_val:
-                signals[i] = -0.20
+            # Enter short: Close < S1 AND price < 1d EMA50 (downtrend) AND volume > 2.0x average
+            elif close[i] < s1 and close[i] < ema_1d and vol > 2.0 * vol_ma_val:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close below 20-period low OR ADX weakens (< 20)
-            if close[i] < low_20_val or adx_val < 20:
+            # Exit long: Close < S1 OR trend reverses (price < 1d EMA50)
+            if close[i] < s1 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close above 20-period high OR ADX weakens (< 20)
-            if close[i] > high_20_val or adx_val < 20:
+            # Exit short: Close > R1 OR trend reverses (price > 1d EMA50)
+            if close[i] > r1 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
