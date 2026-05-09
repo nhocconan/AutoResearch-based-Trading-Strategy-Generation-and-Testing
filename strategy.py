@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 1d_1w_KAMA_RSI_Trend_Signal
-# Hypothesis: Use weekly KAMA to determine trend direction (bullish if price > KAMA, bearish if price < KAMA). Enter long/short on daily RSI extremes (RSI < 30 or > 70) only when aligned with weekly trend. Exit when RSI returns to neutral range (40-60). Designed for low-frequency, high-conviction trades with minimal churn.
+# 4h_RSI_Momentum_Swing_Capture
+# Hypothesis: Capture momentum swings by buying RSI oversold reversals (<30) and selling RSI overbought reversals (>70) on 4h timeframe, with volume confirmation and 1d EMA trend filter. Works in bull/bear by following trend direction for entries.
 
-name = "1d_1w_KAMA_RSI_Trend_Signal"
-timeframe = "1d"
+name = "4h_RSI_Momentum_Swing_Capture"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,87 +18,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for KAMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate weekly KAMA (ER = 10)
-    def kama(close, er_period=10):
-        n = len(close)
-        kama_arr = np.full(n, np.nan)
-        if n == 0:
-            return kama_arr
-        kama_arr[0] = close[0]
-        for i in range(1, n):
-            change = abs(close[i] - close[i-1])
-            volatility = np.sum(np.abs(np.diff(close[max(0, i-er_period+1):i+1])))
-            er = change / volatility if volatility != 0 else 0
-            sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # smoothing constant
-            kama_arr[i] = kama_arr[i-1] + sc * (close[i] - kama_arr[i-1])
-        return kama_arr
+    close_1d = df_1d['close'].values
+    # Calculate 1d EMA(50) with proper initialization
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    kama_1w = kama(close_1w, er_period=10)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Align 1d EMA to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily RSI (14)
-    def rsi(close, period=14):
-        n = len(close)
-        rsi_arr = np.full(n, np.nan)
-        if n < period:
-            return rsi_arr
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros(n)
-        avg_loss = np.zeros(n)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, n):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi_arr[period:] = 100 - (100 / (1 + rs[period:]))
-        return rsi_arr
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    rsi_14 = rsi(close)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    if len(close) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.full_like(close, np.nan)
+    valid_avg_loss = avg_loss != 0
+    rs[valid_avg_loss] = avg_gain[valid_avg_loss] / avg_loss[valid_avg_loss]
+    
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: 4h volume / 20-period average volume
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for enough data
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi_14[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price above weekly KAMA (bullish trend) AND RSI oversold (< 30)
-            if close[i] > kama_1w_aligned[i] and rsi_14[i] < 30:
+            # Enter long: RSI crosses above 30 (oversold reversal) AND volume confirmation AND bullish trend (close > EMA50)
+            if rsi[i] > 30 and rsi[i-1] <= 30 and volume_ratio[i] > 1.5 and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below weekly KAMA (bearish trend) AND RSI overbought (> 70)
-            elif close[i] < kama_1w_aligned[i] and rsi_14[i] > 70:
+            # Enter short: RSI crosses below 70 (overbought reversal) AND volume confirmation AND bearish trend (close < EMA50)
+            elif rsi[i] < 70 and rsi[i-1] >= 70 and volume_ratio[i] > 1.5 and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral (>= 40) or trend turns bearish
-            if rsi_14[i] >= 40 or close[i] < kama_1w_aligned[i]:
+            # Exit long: RSI crosses below 50 (momentum loss) or trend turns bearish
+            if rsi[i] < 50 and rsi[i-1] >= 50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral (<= 60) or trend turns bullish
-            if rsi_14[i] <= 60 or close[i] > kama_1w_aligned[i]:
+            # Exit short: RSI crosses above 50 (momentum loss) or trend turns bullish
+            if rsi[i] > 50 and rsi[i-1] <= 50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
