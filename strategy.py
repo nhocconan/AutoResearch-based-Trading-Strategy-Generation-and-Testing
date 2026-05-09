@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_1dTrend_Volume_143136"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
     # Calculate EMA34 on 1d close for trend filter
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r3_level = close_1d_vals + camarilla_range
     s3_level = close_1d_vals - camarilla_range
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
@@ -53,7 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 (1d) and volume MA
+    start_idx = max(40, 20)  # Need enough data for EMA34 (1d) and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
