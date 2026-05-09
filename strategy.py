@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Donchian20_Breakout_1wTrend_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_WilliamsFractal_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,62 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Williams fractal and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate 20-day Donchian channels on daily data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
-    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
+    # Williams Fractal (bearish: peak, bullish: trough)
+    high_arr = df_1d['high'].values
+    low_arr = df_1d['low'].values
+    bearish_fractal = np.zeros(len(high_arr))
+    bullish_fractal = np.zeros(len(low_arr))
     
-    # Calculate weekly EMA20 for trend filter
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    for i in range(2, len(high_arr) - 2):
+        if (high_arr[i] > high_arr[i-1] and high_arr[i] > high_arr[i-2] and
+            high_arr[i] > high_arr[i+1] and high_arr[i] > high_arr[i+2]):
+            bearish_fractal[i] = high_arr[i]
+        if (low_arr[i] < low_arr[i-1] and low_arr[i] < low_arr[i-2] and
+            low_arr[i] < low_arr[i+1] and low_arr[i] < low_arr[i+2]):
+            bullish_fractal[i] = low_arr[i]
     
-    # Volume confirmation: current volume > 1.5x 20-day average
+    # Fractals need 2 extra daily bars for confirmation (per rule 2b)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    
+    # 1d EMA34 for trend filter
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume spike detection (6h timeframe)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure sufficient lookback for indicators
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike filter
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Require strong volume spike
         
         if position == 0:
-            # Long: Price breaks above 20-day high with weekly uptrend and volume confirmation
-            if close[i] > upper_channel[i] and close[i] > ema_1w_aligned[i] and vol_ok:
+            # Long: Bullish fractal breakout with 1d uptrend and volume spike
+            if close[i] > bullish_fractal_aligned[i] and close[i] > ema_1d_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 20-day low with weekly downtrend and volume confirmation
-            elif close[i] < lower_channel[i] and close[i] < ema_1w_aligned[i] and vol_ok:
+            # Short: Bearish fractal breakdown with 1d downtrend and volume spike
+            elif close[i] < bearish_fractal_aligned[i] and close[i] < ema_1d_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below 20-day low or weekly trend turns down
-            if close[i] < lower_channel[i] or close[i] < ema_1w_aligned[i]:
+            # Exit long: Price falls below bearish fractal or trend turns down
+            if close[i] < bearish_fractal_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above 20-day high or weekly trend turns up
-            if close[i] > upper_channel[i] or close[i] > ema_1w_aligned[i]:
+            # Exit short: Price rises above bullish fractal or trend turns up
+            if close[i] > bullish_fractal_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
