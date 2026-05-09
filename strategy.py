@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Weekly_Range_Reversion
-# Hypothesis: On 12h timeframe, price tends to revert to weekly range extremes (high/low) after touching them.
-# Strategy: Identify weekly high and low from prior week. When price touches weekly high with bearish momentum (price < open), go short.
-# When price touches weekly low with bullish momentum (price > open), go long. Exit when price returns to weekly midpoint.
-# Uses weekly range as support/resistance in ranging markets, works in both bull and bear by fading extremes.
-# Target: 80-120 total trades over 4 years (20-30/year) with size 0.25.
+# Hypothesis: 4h Williams %R with 1d ADX trend filter and volume spike
+# Long when Williams %R crosses above -20 (oversold reversal) with ADX > 25 and volume > 1.5x average
+# Short when Williams %R crosses below -80 (overbought reversal) with ADX > 25 and volume > 1.5x average
+# Exit when Williams %R returns to -50 (mean reversion) or opposite extreme
+# Williams %R captures momentum reversals, ADX filters for trending conditions, volume confirms conviction
+# Designed for 4-8 trades per month (~50-100/year) with controlled risk in all market regimes
 
-name = "12h_Weekly_Range_Reversion"
-timeframe = "12h"
+name = "4h_WilliamsR_ADX_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,58 +22,83 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Get weekly data (prior week's high/low)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate 1d Williams %R (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Prior week's high and low (shifted by 1 to avoid look-ahead)
-    weekly_high = df_1w['high'].shift(1).values
-    weekly_low = df_1w['low'].shift(1).values
-    weekly_mid = (weekly_high + weekly_low) / 2
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
     
-    # Align weekly levels to 12h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    weekly_mid_aligned = align_htf_to_ltf(prices, df_1w, weekly_mid)
+    # Align Williams %R to 4h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Calculate 1d ADX (14-period) for trend filter
+    # ADX requires +DI and -DI calculation
+    plus_dm = np.where((df_1d['high'].diff()) > (df_1d['low'].diff().abs()), df_1d['high'].diff(), 0)
+    minus_dm = np.where((df_1d['low'].diff().abs()) > (df_1d['high'].diff()), df_1d['low'].diff().abs(), 0)
+    plus_dm = np.where(plus_dm < 0, 0, plus_dm)
+    minus_dm = np.where(minus_dm < 0, 0, minus_dm)
+    
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient data
+    start_idx = 50  # Need enough data for indicator calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(weekly_mid_aligned[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(williams_r_aligned[i-1]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price touches weekly low with bullish momentum (close > open)
-            if (low[i] <= weekly_low_aligned[i] and close[i] > open_price[i]):
+            # Enter long: Williams %R crosses above -20 (from oversold), ADX > 25, volume spike
+            if (williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and
+                adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches weekly high with bearish momentum (close < open)
-            elif (high[i] >= weekly_high_aligned[i] and close[i] < open_price[i]):
+            # Enter short: Williams %R crosses below -80 (from overbought), ADX > 25, volume spike
+            elif (williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and
+                  adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to weekly midpoint or above
-            if close[i] >= weekly_mid_aligned[i]:
+            # Exit long: Williams %R returns to -50 or crosses below -80
+            if (williams_r_aligned[i] >= -50) or (williams_r_aligned[i] < -80):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly midpoint or below
-            if close[i] <= weekly_mid_aligned[i]:
+            # Exit short: Williams %R returns to -50 or crosses above -20
+            if (williams_r_aligned[i] <= -50) or (williams_r_aligned[i] > -20):
                 signals[i] = 0.0
                 position = 0
             else:
