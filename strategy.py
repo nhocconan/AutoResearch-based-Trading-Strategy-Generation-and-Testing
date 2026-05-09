@@ -3,92 +3,72 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_Turtle_Soup_1d"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for daily calculations
+    # Get 1d data for Turtle Soup patterns
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 1w data for weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Previous day's close for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
+    # Previous day's high and low
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Align to 6h
+    prev_high_6h = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_6h = align_htf_to_ltf(prices, df_1d, prev_low)
     
-    # Trend filter: weekly EMA34 (needs weekly close to confirm)
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume filter: current 1d volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
-    
-    # Align all to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    volume_filter_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Simple volume filter: current 6h volume > 50-period average
+    vol_series = pd.Series(prices['volume'].values)
+    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
+    volume_filter = prices['volume'].values > vol_ma
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Need enough data for weekly EMA and volume MA
+    # Start after we have enough data
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(prev_high_6h[i]) or np.isnan(prev_low_6h[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_aligned[i]
-        s1_val = s1_aligned[i]
-        trend = ema34_1w_aligned[i]
-        vol_filter = volume_filter_aligned[i]
-        
         if position == 0:
-            # Enter long: break above R1 with volume and above weekly trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Long setup: price makes new low (< prev low) then reverses above prev low
+            if low[i] < prev_low_6h[i] and close[i] > prev_low_6h[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below weekly trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Short setup: price makes new high (> prev high) then reverses below prev high
+            elif high[i] > prev_high_6h[i] and close[i] < prev_high_6h[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: price breaks below the low of the setup bar
+            if low[i] < prev_low_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: price breaks above the high of the setup bar
+            if high[i] > prev_high_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
