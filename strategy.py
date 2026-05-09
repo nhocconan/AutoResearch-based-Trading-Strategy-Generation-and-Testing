@@ -3,13 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h Trend Filter + Volume Spike
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 and rising, Bear Power < 0 and falling, with 12h EMA50 uptrend and volume spike
-# Short when Bear Power < 0 and falling, Bull Power > 0 and rising, with 12h EMA50 downtrend and volume spike
-# Works in bull/bear by adapting to trend via 12h EMA50 filter. Volume ensures momentum confirmation.
-name = "6h_ElderRay_12hEMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "4h_HTF_RangeBreakout_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,26 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get daily data for range and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily range (high-low) average
+    daily_range = df_1d['high'].values - df_1d['low'].values
+    avg_daily_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
     
-    # Elder Ray components: EMA13 of close
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # Daily volume average
+    daily_vol = df_1d['volume'].values
+    avg_daily_vol = pd.Series(daily_vol).rolling(window=20, min_periods=20).mean().values
     
-    # 12h volume average for volume filter
-    vol_12h = df_12h['volume'].values
-    vol_avg_12h = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+    # Daily close for trend context
+    daily_close = df_1d['close'].values
+    ema20_daily = pd.Series(daily_close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align all to 6h
-    ema50_12h_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vol_avg_12h_6h = align_htf_to_ltf(prices, df_12h, vol_avg_12h)
+    # Align all to 4h
+    avg_range_4h = align_htf_to_ltf(prices, df_1d, avg_daily_range)
+    avg_vol_4h = align_htf_to_ltf(prices, df_1d, avg_daily_vol)
+    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20_daily)
     
     signals = np.zeros(n)
     position = 0
@@ -49,44 +45,55 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_6h[i]) or np.isnan(vol_avg_12h_6h[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(avg_range_4h[i]) or np.isnan(avg_vol_4h[i]) or np.isnan(ema20_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_12h_6h[i]
-        vol_avg = vol_avg_12h_6h[i]
-        vol_ok = volume[i] > vol_avg * 1.5
+        # Current day's range reference (from previous day's close)
+        day_open_idx = i - (i % 16)  # Start of current day in 4h bars
+        if day_open_idx < 0:
+            continue
+            
+        # Get the daily reference values for this day
+        day_idx = day_open_idx // 16
+        if day_idx >= len(df_1d):
+            continue
+            
+        # Use previous day's close as anchor for range
+        prev_close = daily_close[day_idx - 1] if day_idx > 0 else daily_close[0]
+        prev_range = avg_daily_range[day_idx - 1] if day_idx > 0 else avg_daily_range[0]
+        prev_vol_avg = avg_daily_vol[day_idx - 1] if day_idx > 0 else avg_daily_vol[0]
         
-        # Elder Ray signals
-        bull_rising = bull_power[i] > bull_power[i-1] if i > 0 else False
-        bull_falling = bull_power[i] < bull_power[i-1] if i > 0 else False
-        bear_rising = bear_power[i] > bear_power[i-1] if i > 0 else False
-        bear_falling = bear_power[i] < bear_power[i-1] if i > 0 else False
+        # Calculate bands based on previous day
+        upper_band = prev_close + 0.5 * prev_range
+        lower_band = prev_close - 0.5 * prev_range
+        vol_threshold = prev_vol_avg * 1.8
         
         if position == 0:
-            # Long: Bull Power > 0 and rising, Bear Power < 0, uptrend, volume spike
-            if bull_power[i] > 0 and bull_rising and bear_power[i] < 0 and close[i] > trend and vol_ok:
+            # Long: break above upper band with volume surge
+            if close[i] > upper_band and volume[i] > vol_threshold:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and falling, Bull Power > 0, downtrend, volume spike
-            elif bear_power[i] < 0 and bear_falling and bull_power[i] > 0 and close[i] < trend and vol_ok:
+            # Short: break below lower band with volume surge
+            elif close[i] < lower_band and volume[i] > vol_threshold:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power turns negative or trend reversal
-            if bull_power[i] <= 0 or close[i] < trend:
+            # Exit long: price returns to mid-point or volume drops
+            mid_point = prev_close
+            if close[i] < mid_point or volume[i] < vol_threshold * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power turns positive or trend reversal
-            if bear_power[i] >= 0 or close[i] > trend:
+            # Exit short: price returns to mid-point or volume drops
+            mid_point = prev_close
+            if close[i] > mid_point or volume[i] < vol_threshold * 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
