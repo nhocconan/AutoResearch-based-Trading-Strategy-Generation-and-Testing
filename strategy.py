@@ -1,13 +1,14 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# Hypothesis: 4h timeframe with daily pivot structure and weekly trend filter.
-# Uses daily Camarilla levels (R1/S1) for breakout entries and weekly EMA34 for trend filter.
-# Daily pivot provides responsive support/resistance that works in both bull and bear markets.
-# Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
-# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
+# 1d_WickReversal_1wHighLow_Volume
+# Hypothesis: On 1d timeframe, trade reversals at weekly high/low wicks.
+# Long when price closes below weekly low but reverses back above it with volume.
+# Short when price closes above weekly high but reverses back below it with volume.
+# Weekly structure provides strong support/resistance; intraday rejection signals exhaustion.
+# Works in both bull (buy dips at weekly support) and bear (sell rallies at weekly resistance).
+# Target: 20-60 trades over 4 years (5-15/year) with size 0.25.
 
-name = "4h_Camarilla_R1_S1_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_WickReversal_1wHighLow_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,45 +25,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R1, S1) from previous day
-    prev_close = np.roll(close, 6)   # 6 bars = 1 day * 6 bars per day (4h timeframe)
-    prev_high = np.roll(high, 6)
-    prev_low = np.roll(low, 6)
-    prev_close[:6] = np.nan          # First values invalid
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 4
-    s1 = prev_close - 1.1 * camarilla_range / 4
-    
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r1
-    breakout_down = close < s1
-    
-    # Get weekly data for EMA34 trend filter
+    # Get weekly data for structure
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Weekly high and low from completed weekly bars
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    trend_up = close > ema_34_1w_aligned
-    trend_down = close < ema_34_1w_aligned
+    # Align to daily timeframe (use previous week's completed high/low)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
+    # Wick rejection signals:
+    # Long setup: price pierces weekly low but closes back above it (bullish rejection)
+    pierce_low = low < weekly_low_aligned
+    close_above_low = close > weekly_low_aligned
+    long_setup = pierce_low & close_above_low
+    
+    # Short setup: price pierces weekly high but closes back below it (bearish rejection)
+    pierce_high = high > weekly_high_aligned
+    close_below_high = close < weekly_high_aligned
+    short_setup = pierce_high & close_below_high
+    
+    # Volume confirmation: current volume > 1.5x 20-day average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * avg_volume)
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 20  # Need volume average
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+            np.isnan(long_setup[i]) or np.isnan(short_setup[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R1 + weekly uptrend + volume spike
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: bullish rejection at weekly low + volume
+            if long_setup[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + weekly downtrend + volume spike
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: bearish rejection at weekly high + volume
+            elif short_setup[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: bearish rejection at weekly high or loss of momentum
+            if short_setup[i] or (close[i] < weekly_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: bullish rejection at weekly low or loss of momentum
+            if long_setup[i] or (close[i] > weekly_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
