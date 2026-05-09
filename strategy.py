@@ -3,50 +3,58 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Vortex_Trend_Volume_Confirm"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    # Get 4h data for price and volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get daily data for Vortex indicator (HTF)
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Calculate Vortex indicator on daily data
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
     
-    # Camarilla formulas
-    range_prev = high_prev - low_prev
-    pivot_prev = (high_prev + low_prev + close_prev) / 3.0
-    r3 = pivot_prev + (range_prev * 1.1 / 4)
-    s3 = pivot_prev - (range_prev * 1.1 / 4)
-    r4 = pivot_prev + (range_prev * 1.1 / 2)
-    s4 = pivot_prev - (range_prev * 1.1 / 2)
+    # True Range
+    tr1 = np.abs(high_d[1:] - low_d[1:])
+    tr2 = np.abs(high_d[1:] - close_d[:-1])
+    tr3 = np.abs(low_d[1:] - close_d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Align Camarilla levels to 4h timeframe
-    pivot_prev_aligned = align_htf_to_ltf(prices, df_1d, pivot_prev)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Vortex Indicator components
+    vm_plus = np.abs(high_d[1:] - low_d[:-1])  # |High - Prev Low|
+    vm_minus = np.abs(low_d[1:] - high_d[:-1])  # |Low - Prev High|
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # Get 1d trend filter (EMA50)
-    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Vortex values
+    vi_plus = vm_plus_sum / (tr_sum + 1e-10)
+    vi_minus = vm_minus_sum / (tr_sum + 1e-10)
+    
+    # Align Vortex to 4h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_d, vi_minus)
+    
+    # Volume filter on 4h: volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
@@ -54,51 +62,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(20, 14)  # Need enough data for volume MA and Vortex
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(pivot_prev_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
-            np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(vi_plus_aligned[i]) or 
+            np.isnan(vi_minus_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot_val = pivot_prev_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        r4_val = r4_aligned[i]
-        s4_val = s4_aligned[i]
-        ema_50_val = ema_50_aligned[i]
+        vi_plus_val = vi_plus_aligned[i]
+        vi_minus_val = vi_minus_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price breaks above R3 + above 1d EMA50 + volume filter
-            if close[i] > r3_val and close[i] > ema_50_val and vol_filter:
+            # Enter long: VI+ > VI- + volume filter
+            if vi_plus_val > vi_minus_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S3 + below 1d EMA50 + volume filter
-            elif close[i] < s3_val and close[i] < ema_50_val and vol_filter:
+            # Enter short: VI- > VI+ + volume filter
+            elif vi_minus_val > vi_plus_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below R3 or below 1d EMA50
-            if close[i] < r3_val or close[i] < ema_50_val:
+            # Exit long: VI- crosses above VI+
+            if vi_minus_val > vi_plus_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above S3 or above 1d EMA50
-            if close[i] > s3_val or close[i] > ema_50_val:
+            # Exit short: VI+ crosses above VI-
+            if vi_plus_val > vi_minus_val:
                 signals[i] = 0.0
                 position = 0
             else:
