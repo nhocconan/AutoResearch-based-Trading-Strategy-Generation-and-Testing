@@ -1,11 +1,11 @@
-# 1d_Camarilla_R1_S1_1wTrend_Filter_Volume
-# Hypothesis: Daily timeframe with weekly trend filter. Uses weekly EMA50 for trend direction
-# and daily Camarilla R1/S1 for entry signals. Volume confirmation ensures momentum.
-# Weekly trend filter reduces whipsaw by aligning with higher timeframe trend.
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
+#!/usr/bin/env python3
+# 12h timeframe with 1d/1w multi-timeframe confirmation
+# Uses 1d RSI for mean reversion and 1w Donchian channel for breakout direction
+# Position sizing: 0.25 for long, -0.25 for short
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "1d_Camarilla_R1_S1_1wTrend_Filter_Volume"
-timeframe = "1d"
+name = "12h_RSI14_1wDonchian20_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,72 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R1, S1) from previous day
-    prev_close = np.roll(close, 1)  # 1 bar = 1 day
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
+    # Calculate 1d RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 4
-    s1 = prev_close - 1.1 * camarilla_range / 4
-    
-    # Breakout conditions: price must close beyond the level
-    breakout_up = close > r1
-    breakout_down = close < s1
-    
-    # Get weekly data for EMA50 trend filter
+    # Get 1w data for Donchian channel
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate weekly Donchian(20)
+    high_20 = pd.Series(df_1w['high'].values).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(df_1w['low'].values).rolling(window=20, min_periods=20).min().values
     
-    trend_up = close > ema_50_1w_aligned
-    trend_down = close < ema_50_1w_aligned
+    # Align weekly Donchian to 12h timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Breakout conditions
+    breakout_up = close > high_20_aligned
+    breakout_down = close < low_20_aligned
+    
+    # RSI mean reversion filter
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
+    
+    # Volume filter: current volume > 1.5x 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 60  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(rsi[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R1 + weekly uptrend + volume confirmation
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: breakout above weekly high + RSI oversold + volume filter
+            if breakout_up[i] and rsi_oversold[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + weekly downtrend + volume confirmation
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: breakout below weekly low + RSI overbought + volume filter
+            elif breakout_down[i] and rsi_overbought[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: RSI returns to neutral or breakdown below weekly low
+            if rsi[i] >= 50 or breakout_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: RSI returns to neutral or breakout above weekly high
+            if rsi[i] <= 50 or breakout_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
