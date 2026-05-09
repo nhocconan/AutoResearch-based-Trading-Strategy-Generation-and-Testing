@@ -3,110 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_RVI_Signal_4hTrend_1dFilter"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data for filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate RVI on 1h timeframe
-    num = close - open_price
-    den = high - low
-    den = np.where(den == 0, 1e-10, den)
-    rvi_raw = num / den
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Smooth RVI with 10-period SMA
-    rvi_series = pd.Series(rvi_raw)
-    rvi = rvi_series.rolling(window=10, min_periods=10).mean().values
+    # Camarilla levels
+    R3 = prev_close + 1.1 * prev_range / 6
+    S3 = prev_close - 1.1 * prev_range / 6
+    R4 = prev_close + 1.1 * prev_range / 2
+    S4 = prev_close - 1.1 * prev_range / 2
     
-    # Signal line: EMA of RVI
-    rvi_ema = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
+    # Align to 6h timeframe
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4)
     
-    # 4h EMA50 for trend filter
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Get weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # 1d EMA200 for long-term filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly EMA20 for trend direction
+    weekly_close = df_1w['close'].values
+    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_ema_6h = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # Volume filter
+    # Volume filter: above 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rvi[i]) or np.isnan(rvi_ema[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R3_6h[i]) or np.isnan(S3_6h[i]) or 
+            np.isnan(R4_6h[i]) or np.isnan(S4_6h[i]) or 
+            np.isnan(weekly_ema_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]
-        in_session = (8 <= hours[i] <= 20)
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        
+        # Session filter: 08-20 UTC (reduce noise trades)
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: RVI crosses above signal line + above 4h EMA + above 1d EMA200 + volume + session
-            if (rvi[i] > rvi_ema[i] and 
-                rvi[i-1] <= rvi_ema[i-1] and  # crossover
-                close[i] > ema_4h_aligned[i] and 
-                close[i] > ema_1d_aligned[i] and 
+            # Long breakout: price breaks above R4 with weekly uptrend
+            if (close[i] > R4_6h[i] and 
+                close[i] > weekly_ema_6h[i] and  # weekly uptrend
                 vol_ok and 
                 in_session):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: RVI crosses below signal line + below 4h EMA + below 1d EMA200 + volume + session
-            elif (rvi[i] < rvi_ema[i] and 
-                  rvi[i-1] >= rvi_ema[i-1] and  # crossover
-                  close[i] < ema_4h_aligned[i] and 
-                  close[i] < ema_1d_aligned[i] and 
+            # Short breakdown: price breaks below S4 with weekly downtrend
+            elif (close[i] < S4_6h[i] and 
+                  close[i] < weekly_ema_6h[i] and  # weekly downtrend
                   vol_ok and 
                   in_session):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RVI crosses below signal line or price below 4h EMA
-            if (rvi[i] < rvi_ema[i] and rvi[i-1] >= rvi_ema[i-1]) or close[i] < ema_4h_aligned[i]:
+            # Exit long: price falls back below R3 (mean reversion)
+            if close[i] < R3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RVI crosses above signal line or price above 4h EMA
-            if (rvi[i] > rvi_ema[i] and rvi[i-1] <= rvi_ema[i-1]) or close[i] > ema_4h_aligned[i]:
+            # Exit short: price rises back above S3 (mean reversion)
+            if close[i] > S3_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
