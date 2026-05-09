@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Daily_Camarilla_R1S1_Breakout_Trend_Volume_v3"
-timeframe = "4h"
+name = "1H_4H_1D_Camarilla_R1S1_Breakout_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,6 +16,10 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Pre-compute session hours (08-20 UTC) once before loop
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Get daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
@@ -35,7 +39,7 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (range_1d * 1.1 / 4)
     s1_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align to 4h
+    # Align to 1h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -54,8 +58,9 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_aligned[i]):
+        # Skip if data not ready or outside session
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,11 +69,11 @@ def generate_signals(prices):
         if position == 0:
             # Enter long: price breaks above R1 + above daily EMA34 + volume confirmation
             if close[i] > r1_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Enter short: price breaks below S1 + below daily EMA34 + volume confirmation
             elif close[i] < s1_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -77,7 +82,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: price above daily EMA34 (trend change)
@@ -85,6 +90,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
