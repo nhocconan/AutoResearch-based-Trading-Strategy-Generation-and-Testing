@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Strategy: 12h Camarilla pivot breakout with 1d trend filter and volume confirmation
-# Long when price breaks above R1 and close > 1d EMA(34) and volume > 1.5x average
-# Short when price breaks below S1 and close < 1d EMA(34) and volume > 1.5x average
-# Exit when price returns to Pivot point
-# Designed for 12h timeframe with selective entries to minimize trade frequency
-# Works in both bull and bear markets via trend filter and volume confirmation
+# 4h_RVOL_Trend_Breakout
+# Strategy: 4h breakout of 20-period high/low with volume confirmation (RVOL > 1.5) and 1d EMA50 trend filter.
+# Long when price breaks above 20-period high + RVOL > 1.5 + close > 1d EMA50.
+# Short when price breaks below 20-period low + RVOL > 1.5 + close < 1d EMA50.
+# Exit when price returns to 10-period SMA (mean reversion) or opposite breakout occurs.
+# Designed for 4h timeframe to capture momentum with volume confirmation and trend filter.
+# RVOL filters out low-volume breakouts, reducing false signals.
+# EMA50 trend filter avoids counter-trend trades in strong trends.
+# Target: 20-50 trades/year per symbol to minimize fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RVOL_Trend_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,90 +27,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate average volume (20-period)
-    vol_ma = np.zeros(n)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        vol_count += 1
-        if i >= 20:
-            vol_sum -= volume[i-20]
-            vol_count -= 1
-        if vol_count > 0:
-            vol_ma[i] = vol_sum / vol_count
-        else:
-            vol_ma[i] = 0.0
+    # Calculate 20-period high and low for breakout
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    
+    # Calculate 20-period average volume for RVOL
+    avg_volume = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        avg_volume[i] = np.mean(volume[i - lookback + 1:i + 1])
+    rvol = np.where(avg_volume > 0, volume / avg_volume, 0)
+    
+    # Calculate 10-period SMA for exit
+    sma_10 = np.full(n, np.nan)
+    for i in range(9, n):
+        sma_10[i] = np.mean(close[i - 9:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Ensure enough data for EMA
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or vol_ma[i] == 0.0):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Calculate Camarilla levels from previous day
-        if i >= 1:
-            # Use previous day's high, low, close
-            prev_idx = i - 1
-            # For simplicity, use the same day's data approximation
-            # In practice, we'd need to group by day, but this approximates
-            prev_high = high[prev_idx]
-            prev_low = low[prev_idx]
-            prev_close = close[prev_idx]
-            
-            # Calculate pivot and Camarilla levels
-            pivot = (prev_high + prev_low + prev_close) / 3.0
-            range_val = prev_high - prev_low
-            r1 = close + (range_val * 1.1 / 12)
-            s1 = close - (range_val * 1.1 / 12)
-        else:
-            # Not enough data for previous day
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(rvol[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(sma_10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1, above 1d EMA34, volume spike
-            if (close[i] > r1 and 
-                close[i] > ema_34_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i]):
+            # Enter long: breakout above 20-period high + RVOL > 1.5 + above 1d EMA50
+            if close[i] > highest_high[i] and rvol[i] > 1.5 and close[i] > ema_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1, below 1d EMA34, volume spike
-            elif (close[i] < s1 and 
-                  close[i] < ema_34_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i]):
+            # Enter short: breakout below 20-period low + RVOL > 1.5 + below 1d EMA50
+            elif close[i] < lowest_low[i] and rvol[i] > 1.5 and close[i] < ema_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to pivot or below
-            if close[i] <= pivot:
+            # Exit long: return to 10-period SMA or opposite breakout
+            if close[i] < sma_10[i] or close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot or above
-            if close[i] >= pivot:
+            # Exit short: return to 10-period SMA or opposite breakout
+            if close[i] > sma_10[i] or close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
