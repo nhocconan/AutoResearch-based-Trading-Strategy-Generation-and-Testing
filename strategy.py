@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-name = "1h_4hTrend_1dCci_MeanReversion"
-timeframe = "1h"
+
+name = "6h_ElderRay_BullPower_BearPower_1wTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,89 +10,75 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Get weekly data for trend filter (1-week EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA20 trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Weekly EMA34 trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Get 1d data for CCI mean reversion signal
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Weekly trend: price above/below weekly EMA34
+    weekly_uptrend = close > ema_34_1w_aligned
+    weekly_downtrend = close < ema_34_1w_aligned
     
-    # Calculate 14-period CCI on daily data
-    typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    sma_tp = pd.Series(typical_price).rolling(window=14, min_periods=14).mean().values
-    mean_dev = pd.Series(typical_price).rolling(window=14, min_periods=14).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    ).values
-    cci_14 = (typical_price - sma_tp) / (0.015 * mean_dev)
-    cci_14_aligned = align_htf_to_ltf(prices, df_1d, cci_14)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(cci_14_aligned[i]) or
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(weekly_uptrend[i]) or np.isnan(weekly_downtrend[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long: 4h uptrend + CCI oversold (< -100) + volume
-            if (close[i] > ema_20_4h_aligned[i]) and (cci_14_aligned[i] < -100) and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 (bulls in control) + weekly uptrend + volume filter
+            if bull_power[i] > 0 and weekly_uptrend[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + CCI overbought (> 100) + volume
-            elif (close[i] < ema_20_4h_aligned[i]) and (cci_14_aligned[i] > 100) and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: Bear Power < 0 (bears in control) + weekly downtrend + volume filter
+            elif bear_power[i] < 0 and weekly_downtrend[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: CCI returns to neutral (> -50) or trend reversal
-            if cci_14_aligned[i] > -50 or close[i] < ema_20_4h_aligned[i]:
+            # Exit long: Bull Power turns negative OR weekly trend turns down
+            if bull_power[i] <= 0 or not weekly_uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: CCI returns to neutral (< 50) or trend reversal
-            if cci_14_aligned[i] < 50 or close[i] > ema_20_4h_aligned[i]:
+            # Exit short: Bear Power turns positive OR weekly trend turns up
+            if bear_power[i] >= 0 or not weekly_downtrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
