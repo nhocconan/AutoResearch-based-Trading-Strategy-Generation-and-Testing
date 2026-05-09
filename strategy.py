@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WklyTrend_DlyPullback_WithVol
-# Hypothesis: Buy weekly trend pullbacks on daily timeframe with volume confirmation.
-# Long when weekly trend is up, price pulls back to daily EMA21 with volume > 1.3x average.
-# Short when weekly trend is down, price bounces to daily EMA21 with volume > 1.3x average.
-# Uses weekly trend filter to avoid counter-trend trades, daily EMA for entry timing,
-# and volume spike to confirm institutional interest. Designed for low trade frequency.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA trend filter and volume confirmation.
+# Long when 1d trend up and price breaks above R3 with volume > 1.5x average.
+# Short when 1d trend down and price breaks below S3 with volume > 1.5x average.
+# Uses 4h timeframe for lower turnover vs 12h, targeting 20-50 trades/year.
+# Combines pivot-based structure with trend and volume filters to reduce whipsaw and improve edge.
 
-name = "1d_WklyTrend_DlyPullback_WithVol"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,29 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate weekly EMA34 for trend filter
-    ema34_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 34:
-        ema34_1w[33] = np.mean(close_1w[0:34])
-        for i in range(34, len(close_1w)):
-            ema34_1w[i] = (close_1w[i] * 2 + ema34_1w[i-1] * 32) / 34
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align weekly EMA to daily timeframe
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate Camarilla levels (R3, S3) from previous day
+    camarilla_r3 = np.full_like(high_1d, np.nan)
+    camarilla_s3 = np.full_like(low_1d, np.nan)
     
-    # Calculate daily EMA21 for entry timing
-    ema21_daily = np.full_like(close, np.nan)
-    if len(close) >= 21:
-        ema21_daily[20] = np.mean(close[0:21])
-        for i in range(21, len(close)):
-            ema21_daily[i] = (close[i] * 2 + ema21_daily[i-1] * 19) / 21
+    for i in range(1, len(close_1d)):
+        # Use previous day's data
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        
+        camarilla_r3[i] = pc + (ph - pl) * 1.1 / 4
+        camarilla_s3[i] = pc - (ph - pl) * 1.1 / 4
+    
+    # Align 1d indicators to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -62,41 +72,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 21, 20)  # Need weekly EMA, daily EMA, and volume MA
+    start_idx = max(34, 1, 20)  # Need 1d EMA, Camarilla, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(ema21_daily[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        weekly_up = close[i] > ema34_1w_aligned[i]
+        # Determine 1d trend
+        trend_up = close[i] > ema34_1d_aligned[i]
         
         if position == 0:
-            # Enter long: weekly trend up + pullback to EMA21 + volume confirmation
-            if weekly_up and close[i] <= ema21_daily[i] * 1.005 and volume_ratio[i] > 1.3:
+            # Enter long: 1d trend up + price breaks above R3 + volume confirmation
+            if trend_up and close[i] > camarilla_r3_aligned[i] and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly trend down + bounce to EMA21 + volume confirmation
-            elif not weekly_up and close[i] >= ema21_daily[i] * 0.995 and volume_ratio[i] > 1.3:
+            # Enter short: 1d trend down + price breaks below S3 + volume confirmation
+            elif not trend_up and close[i] < camarilla_s3_aligned[i] and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly trend turns down or price moves above EMA21
-            if not weekly_up or close[i] > ema21_daily[i] * 1.01:
+            # Exit long: 1d trend turns down or price breaks below S3
+            if not trend_up or close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly trend turns up or price moves below EMA21
-            if weekly_up or close[i] < ema21_daily[i] * 0.99:
+            # Exit short: 1d trend turns up or price breaks above R3
+            if trend_up or close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
