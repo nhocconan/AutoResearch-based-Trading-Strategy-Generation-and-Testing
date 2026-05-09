@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h_1d_Trend_Volume_Simple"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Breakout_Trend_Volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,86 +17,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and volume filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 10:
         return np.zeros(n)
     
-    # Get 1d data for additional volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Previous week's OHLC for weekly pivot
+    prev_high_w = df_w['high'].shift(1).values
+    prev_low_w = df_w['low'].shift(1).values
+    prev_close_w = df_w['close'].shift(1).values
+    
+    # Calculate weekly pivot points
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
+    r3_w = pivot_w + 1.1 * (prev_high_w - prev_low_w)
+    s3_w = pivot_w - 1.1 * (prev_high_w - prev_low_w)
+    
+    # Get daily data for trend and volume filter
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 20:
         return np.zeros(n)
     
-    # 4h EMA50 for trend
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Daily EMA50 for trend filter
+    ema50_d = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h volume filter: current volume > 1.5 * 20-period average
-    vol_4h_series = pd.Series(df_4h['volume'].values)
-    vol_ma_4h = vol_4h_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter_4h = df_4h['volume'].values > (vol_ma_4h * 1.5)
-    vol_filter_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_filter_4h)
+    # Daily volume filter: current volume > 1.5 * 20-day average
+    vol_series_d = pd.Series(df_d['volume'].values)
+    vol_ma_d = vol_series_d.rolling(window=20, min_periods=20).mean().values
+    volume_filter_d = df_d['volume'].values > (vol_ma_d * 1.5)
     
-    # 1d volume filter: current volume > 1.3 * 20-period average
-    vol_1d_series = pd.Series(df_1d['volume'].values)
-    vol_ma_1d = vol_1d_series.rolling(window=20, min_periods=20).mean().values
-    vol_filter_1d = df_1d['volume'].values > (vol_ma_1d * 1.3)
-    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d)
+    # Align all to 6h timeframe
+    r3_w_6h = align_htf_to_ltf(prices, df_w, r3_w)
+    s3_w_6h = align_htf_to_ltf(prices, df_w, s3_w)
+    ema50_d_6h = align_htf_to_ltf(prices, df_d, ema50_d)
+    volume_filter_6h = align_htf_to_ltf(prices, df_d, volume_filter_d)
     
     signals = np.zeros(n)
     position = 0
     
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    start_idx = 50  # Need enough data for EMA50
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(r3_w_6h[i]) or np.isnan(s3_w_6h[i]) or
+            np.isnan(ema50_d_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip if any required data is NaN
-        if (np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_filter_4h_aligned[i]) or 
-            np.isnan(vol_filter_1d_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        trend = ema50_4h_aligned[i]
-        vol_ok_4h = vol_filter_4h_aligned[i]
-        vol_ok_1d = vol_filter_1d_aligned[i]
+        r3_val = r3_w_6h[i]
+        s3_val = s3_w_6h[i]
+        trend = ema50_d_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: price above 4h EMA50 with volume confirmation on both timeframes
-            if close[i] > trend and vol_ok_4h and vol_ok_1d:
-                signals[i] = 0.20
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price below 4h EMA50 with volume confirmation on both timeframes
-            elif close[i] < trend and vol_ok_4h and vol_ok_1d:
-                signals[i] = -0.20
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below 4h EMA50
-            if close[i] < trend:
+            # Exit long: close below S3 (mean reversion to pivot)
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 4h EMA50
-            if close[i] > trend:
+            # Exit short: close above R3 (mean reversion to pivot)
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
