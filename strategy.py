@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with 1-day structure. Uses daily ATR for volatility filter and daily EMA50 for trend.
-# Trades breakouts of previous day's high/low with volatility-adjusted position sizing.
-# Trend filter ensures trades align with higher timeframe direction.
-# Volatility filter avoids low-volatility chop where breakouts fail.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h breakout at daily Camarilla R4/S4 levels with daily EMA34 trend filter and volume spike.
+# Uses wider R4/S4 levels (1.6x range) to reduce false breakouts and increase signal quality.
+# Daily EMA34 ensures trades align with higher timeframe trend to avoid whipsaw in sideways markets.
+# Volume spike (2x 20-period average) confirms institutional participation.
+# Target: 100-180 total trades over 4 years (25-45/year) with size 0.25 for balanced risk/return.
 
-name = "12h_DailyBreakout_ATRFilter_EMA50"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,94 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Previous day's high/low for breakout levels
+    # Calculate daily Camarilla levels (R4, S4) from previous day
+    prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    prev_close[0] = np.nan  # First value invalid
     
-    # Daily ATR for volatility filter (14-period)
+    camarilla_range = prev_high - prev_low
+    r4 = prev_close + 1.6 * camarilla_range / 2  # R4 level
+    s4 = prev_close - 1.6 * camarilla_range / 2  # S4 level
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r4
+    breakout_down = close < s4
+    
+    # Get daily data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate True Range for 1d
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1d = tr.rolling(window=14, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
     
-    # 12h ATR for position sizing (volatility-adjusted)
-    tr_12h = pd.Series(np.maximum(
-        high - low,
-        np.maximum(
-            abs(high - np.roll(close, 1)),
-            abs(low - np.roll(close, 1))
-        )
-    )).rolling(window=14, min_periods=14).mean().values
-    atr_norm = tr_12h / (atr_14_1d_aligned + 1e-10)  # Normalize by daily ATR
-    
-    # Breakout conditions
-    breakout_up = close > prev_high
-    breakout_down = close < prev_low
-    
-    # Trend filter
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
-    
-    # Volatility filter: avoid low volatility (ATR ratio < 0.5) and extreme volatility (> 3.0)
-    vol_filter = (atr_norm >= 0.5) & (atr_norm <= 3.0)
+    # Volume filter: current volume > 2.0x 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
             np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(vol_filter[i])):
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above prev day high + uptrend + adequate volatility
-            if breakout_up[i] and trend_up[i] and vol_filter[i]:
-                # Size inversely to volatility (but capped)
-                size = 0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
-                signals[i] = size
+            # Long: breakout above R4 + 1d uptrend + volume spike
+            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: breakout below prev day low + downtrend + adequate volatility
-            elif breakout_down[i] and trend_down[i] and vol_filter[i]:
-                size = 0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
-                signals[i] = -size
+            # Short: breakout below S4 + 1d downtrend + volume spike
+            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to prev day close or trend reversal
+            # Exit long: price returns to previous day's close or trend reversal
             if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to prev day close or trend reversal
+            # Exit short: price returns to previous day's close or trend reversal
             if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25 * min(1.0, 0.5 / max(atr_norm[i], 0.1))
+                signals[i] = -0.25
     
     return signals
