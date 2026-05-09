@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation.
-# Long when price breaks above Donchian upper band + price > 1d EMA50 + volume spike.
-# Short when price breaks below Donchian lower band + price < 1d EMA50 + volume spike.
-# Uses volume > 1.5x 20-period EMA for confirmation. Exits when price crosses back through Donchian midpoint.
-# Designed to capture breakouts in both bull and bear markets with strict entry to limit trades.
-name = "12h_Donchian20_1dEMA50_VolumeBreakout"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(34) trend filter and volume confirmation.
+# Long when price breaks above upper Donchian band + 1d EMA up + volume spike.
+# Short when price breaks below lower Donchian band + 1d EMA down + volume spike.
+# Uses daily EMA for trend direction to avoid whipsaw in choppy markets.
+# Volume confirmation ensures breakouts have conviction.
+# Designed for fewer, high-quality trades to minimize fee drag.
+name = "4h_Donchian20_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,28 +25,15 @@ def generate_signals(prices):
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
-    
-    upper = rolling_max(high, 20)
-    lower = rolling_min(low, 20)
-    midpoint = (upper + lower) / 2
-    
-    # 1d EMA50 trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA trend filter
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation: volume > 1.5x 20-period EMA
@@ -55,11 +43,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for indicators
+    start_idx = max(34, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,26 +57,28 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper band + price > 1d EMA50 + volume spike
-            if price > upper[i] and price > ema_1d_aligned[i] and vol_confirm[i]:
+            # Long: break above upper Donchian + 1d EMA up + volume confirmation
+            if (price > highest_high[i] and price > ema_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower band + price < 1d EMA50 + volume spike
-            elif price < lower[i] and price < ema_1d_aligned[i] and vol_confirm[i]:
+            # Short: break below lower Donchian + 1d EMA down + volume confirmation
+            elif (price < lowest_low[i] and price < ema_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below midpoint
-            if price < midpoint[i]:
+            # Exit long: price re-enters Donchian channel (below midpoint) or 1d EMA turns down
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if price < midpoint or price < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above midpoint
-            if price > midpoint[i]:
+            # Exit short: price re-enters Donchian channel (above midpoint) or 1d EMA turns up
+            midpoint = (highest_high[i] + lowest_low[i]) / 2
+            if price > midpoint or price > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
