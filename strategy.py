@@ -1,15 +1,16 @@
+#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +18,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and daily data for Camarilla pivots
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Chop and TRIX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 2 or len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # TRIX on 1d close: triple EMA
+    close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
     
-    # Daily Camarilla pivot levels (based on previous day)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Chop on 1d: true range and ATR
+    tr1 = np.abs(high[1:] - low[1:])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Chop calculation
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(sum_atr / (hh - ll)) / np.log10(14)
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Align TRIX and Chop to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Camarilla levels
-    R1 = pivot + (range_hl * 1.1 / 4)
-    S1 = pivot - (range_hl * 1.1 / 4)
-    
-    # Align to 12h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume filter: current 12h volume > 1.5 * 20-period average
+    # Volume filter: current 4h volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 34)  # Need enough data for volume MA and weekly EMA
+    start_idx = max(20, 14, 12)  # Need enough data
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1 = R1_aligned[i]
-        s1 = S1_aligned[i]
-        trend = ema34_1w_aligned[i]
+        trix = trix_aligned[i]
+        chop_val = chop_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above weekly trend
-            if close[i] > r1 and close[i] > trend and vol_filter:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: break below S1 with volume and below weekly trend
-            elif close[i] < s1 and close[i] < trend and vol_filter:
-                signals[i] = -0.25
-                position = -1
-        
+            # Chop > 61.8 = ranging (mean revert)
+            if chop_val > 61.8 and vol_filter:
+                if trix < -0.5:  # Oversold
+                    signals[i] = 0.25
+                    position = 1
+                elif trix > 0.5:  # Overbought
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Exit long: close below S1 (reversion to mean)
-            if close[i] < s1:
+            # Exit long: TRIX crosses above zero or Chop < 38.2 (trending)
+            if trix > 0.0 or chop_val < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit short: close above R1 (reversion to mean)
-            if close[i] > r1:
+            # Exit short: TRIX crosses below zero or Chop < 38.2
+            if trix < 0.0 or chop_val < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+#%%
