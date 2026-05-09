@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4h_RangeReversal_Bollinger_Bands_2std
-# Hypothesis: Mean reversion at Bollinger Bands (20,2) with volume confirmation and trend filter from 1d EMA50.
-# In ranging markets, price reverts from bands; in trends, only trade with trend (price > EMA50 for long, < EMA50 for short).
-# Uses Bollinger Bands for entry/exit, volume > 1.3x 20-bar average for confirmation, and 1d EMA50 for trend filter.
-# Designed for 20-40 trades/year on 4h timeframe to avoid fee drag.
+# 1D_1W_Momentum_Follow
+# Hypothesis: Trend following on daily timeframe using 50-day EMA for direction, with weekly trend confirmation to avoid whipsaws in ranging markets. Weekly ADX > 25 confirms strong trend. Entry when price closes above/below 50-day EMA with weekly trend alignment. Exit when price crosses back below/above EMA or weekly trend weakens. Designed for 10-25 trades/year on daily timeframe to minimize fee drag while capturing major trends in both bull and bear markets.
 
-name = "4h_RangeReversal_Bollinger_Bands_2std"
-timeframe = "4h"
+name = "1D_1W_Momentum_Follow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,81 +15,120 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    bb_ma = np.full_like(close, np.nan)
-    bb_stddev = np.full_like(close, np.nan)
-    if len(close) >= bb_period:
-        for i in range(bb_period - 1, len(close)):
-            bb_ma[i] = np.mean(close[i - bb_period + 1:i + 1])
-            bb_stddev[i] = np.std(close[i - bb_period + 1:i + 1])
-    bb_upper = bb_ma + bb_std * bb_stddev
-    bb_lower = bb_ma - bb_std * bb_stddev
-    
-    # Volume filter: 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(19, len(volume)):
-            vol_ma[i] = np.mean(volume[i - 19:i + 1])
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
-    
-    # Get 1d data for EMA50 trend filter
+    # Get daily data (same as primary timeframe for EMA calculation)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate 1d EMA(50)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 50-day EMA for trend direction
     ema_50_1d = np.full_like(close_1d, np.nan)
     if len(close_1d) >= 50:
         ema_50_1d[49] = np.mean(close_1d[0:50])
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
-    # Align 1d EMA50 to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Align 50-day EMA to daily timeframe (no alignment needed as same timeframe)
+    ema_50_1d_aligned = ema_50_1d  # Already on daily timeframe
+    
+    # Get weekly data for trend confirmation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:  # Need at least 14 periods for ADX
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate ADX(14) for weekly trend strength
+    # True Range
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values using Wilder's smoothing (alpha = 1/period)
+    def wildeR_smoothing(values, period):
+        smoothed = np.full_like(values, np.nan)
+        if len(values) >= period:
+            smoothed[period-1] = np.nansum(values[:period])
+            for i in range(period, len(values)):
+                if not np.isnan(smoothed[i-1]):
+                    smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+        return smoothed
+    
+    atr_1w = wildeR_smoothing(tr, 14)
+    dm_plus_smoothed = wildeR_smoothing(dm_plus, 14)
+    dm_minus_smoothed = wildeR_smoothing(dm_minus, 14)
+    
+    # Directional Indicators
+    di_plus = np.full_like(close_1w, np.nan)
+    di_minus = np.full_like(close_1w, np.nan)
+    dx = np.full_like(close_1w, np.nan)
+    
+    valid = (~np.isnan(atr_1w)) & (atr_1w != 0)
+    di_plus[valid] = 100 * dm_plus_smoothed[valid] / atr_1w[valid]
+    di_minus[valid] = 100 * dm_minus_smoothed[valid] / atr_1w[valid]
+    
+    dx_valid = (~np.isnan(di_plus)) & (~np.isnan(di_minus)) & ((di_plus + di_minus) != 0)
+    dx[dx_valid] = 100 * np.abs(di_plus[dx_valid] - di_minus[dx_valid]) / (di_plus[dx_valid] + di_minus[dx_valid])
+    
+    # ADX is smoothed DX
+    adx_1w = wildeR_smoothing(dx, 14)
+    
+    # Align weekly ADX to daily timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 20, 1)
+    start_idx = 50  # Need 50 days for EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(volume_ratio[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price touches/below lower BB AND volume confirmation AND bullish trend (price > EMA50)
-            if close[i] <= bb_lower[i] and volume_ratio[i] > 1.3 and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: Price above EMA50 AND weekly ADX > 25 (strong trend)
+            if close[i] > ema_50_1d_aligned[i] and adx_1w_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price touches/above upper BB AND volume confirmation AND bearish trend (price < EMA50)
-            elif close[i] >= bb_upper[i] and volume_ratio[i] > 1.3 and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: Price below EMA50 AND weekly ADX > 25 (strong trend)
+            elif close[i] < ema_50_1d_aligned[i] and adx_1w_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses above the middle band (mean reversion complete) or trend turns bearish
-            if close[i] >= bb_ma[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: Price crosses below EMA50 OR weekly trend weakens (ADX < 20)
+            if close[i] < ema_50_1d_aligned[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses below the middle band or trend turns bullish
-            if close[i] <= bb_ma[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: Price crosses above EMA50 OR weekly trend weakens (ADX < 20)
+            if close[i] > ema_50_1d_aligned[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
