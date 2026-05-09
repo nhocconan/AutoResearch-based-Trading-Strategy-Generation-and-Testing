@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_PivotPoint_MomentumReversal_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,41 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels and trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 1d data for pivot points and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA50 on weekly close for trend filter
-    close_weekly = df_weekly['close'].values
-    ema50_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema50_weekly)
+    # Calculate EMA50 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate weekly pivot levels from previous weekly bar
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
-    close_weekly_vals = df_weekly['close'].values
+    # Calculate pivot points from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Weekly pivot point and key levels
-    pivot_point = (high_weekly + low_weekly + close_weekly_vals) / 3
-    weekly_range = high_weekly - low_weekly
+    # Classic pivot point formula
+    pivot_point = (high_1d + low_1d + close_1d_vals) / 3
+    r1 = 2 * pivot_point - low_1d
+    s1 = 2 * pivot_point - high_1d
+    r2 = pivot_point + (high_1d - low_1d)
+    s2 = pivot_point - (high_1d - low_1d)
     
-    # Weekly resistance and support levels (similar to Camarilla but using weekly range)
-    r1 = pivot_point + (weekly_range * 1.1 / 2)
-    s1 = pivot_point - (weekly_range * 1.1 / 2)
-    r2 = pivot_point + weekly_range
-    s2 = pivot_point - weekly_range
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # Align weekly pivot levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
-    
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Volume spike filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,10 +58,11 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema50_weekly_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(pivot_aligned[i]) or 
             np.isnan(r1_aligned[i]) or 
             np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
+            np.isnan(r2_aligned[i]) or 
             np.isnan(s2_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
@@ -71,34 +70,35 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        ema50 = ema50_weekly_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
-        r2 = r2_aligned[i]
-        s2 = s2_aligned[i]
+        ema50 = ema50_1d_aligned[i]
+        pivot = pivot_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        r2_val = r2_aligned[i]
+        s2_val = s2_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above R2 + weekly uptrend + volume spike
-            if close[i] > r2 and close[i] > ema50 and vol_spike:
+            # Enter long: Price pulls back to S1 in uptrend with volume spike
+            if close[i] <= s1_val and close[i] > ema50 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below S2 + weekly downtrend + volume spike
-            elif close[i] < s2 and close[i] < ema50 and vol_spike:
+            # Enter short: Price pulls back to R1 in downtrend with volume spike
+            elif close[i] >= r1_val and close[i] < ema50 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below S1 or weekly trend turns down
-            if close[i] < s1 or close[i] < ema50:
+            # Exit long: Price reaches R1 or trend turns down
+            if close[i] >= r1_val or close[i] < ema50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above R1 or weekly trend turns up
-            if close[i] > r1 or close[i] > ema50:
+            # Exit short: Price reaches S1 or trend turns up
+            if close[i] <= s1_val or close[i] > ema50:
                 signals[i] = 0.0
                 position = 0
             else:
