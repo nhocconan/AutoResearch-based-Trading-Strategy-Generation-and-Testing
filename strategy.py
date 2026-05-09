@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout (20-period) with volume spike and 1d ADX trend filter.
-# Donchian channels capture breakouts; volume confirms institutional interest; ADX ensures trend strength.
-# Works in bull/bear by following 1d trend direction. Target: 20-40 trades/year.
-name = "4h_Donchian20_VolumeSpike_1dADX20"
-timeframe = "4h"
+# Hypothesis: 12-hour chart Williams %R overbought/oversold signals with 1-day EMA trend filter and volume confirmation.
+# Williams %R identifies momentum extremes; EMA filter ensures alignment with daily trend; volume confirms strength.
+# This combination works in both bull and bear markets by following the higher-timeframe trend while capturing mean reversion within that trend.
+name = "12h_WilliamsR_1dEMA34_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,78 +20,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # Get 1-day data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:  # Need enough for EMA(34)
         return np.zeros(n)
     
-    # 1d ADX(14) for trend strength filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Williams %R on 12-hour data
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    # We'll use 14-period lookback as standard
+    lookback = 14
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
+    
+    # Calculate 1-day EMA(34) for trend filter
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    def smooth(values, period):
-        smoothed = np.zeros_like(values)
-        smoothed[period-1] = np.nansum(values[:period])
-        for i in range(period, len(values)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
-        return smoothed
-    
-    atr = smooth(tr, 14)
-    dm_plus_smooth = smooth(dm_plus, 14)
-    dm_minus_smooth = smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth(dx, 14)
-    
-    # Align ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 4h
-    def donchian_channel(high_vals, low_vals, period):
-        upper = np.full_like(high_vals, np.nan)
-        lower = np.full_like(low_vals, np.nan)
-        for i in range(period-1, len(high_vals)):
-            upper[i] = np.max(high_vals[i-period+1:i+1])
-            lower[i] = np.min(low_vals[i-period+1:i+1])
-        return upper, lower
-    
-    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
-    
-    # Volume spike: volume > 2x 20-period EMA
+    # Volume confirmation: volume > 1.3x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ema20)
+    vol_confirm = volume > (1.3 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need Donchian and ADX warmup
+    start_idx = lookback  # Need enough data for Williams %R calculation
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ema20[i])):
+        # Skip if required data unavailable (NaN from calculations or alignment)
+        if (np.isnan(williams_r[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,26 +59,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper + ADX > 20 + volume spike
-            if (price > donchian_upper[i] and adx_aligned[i] > 20 and vol_spike[i]):
+            # Long: Williams %R oversold (< -80) + price above 1-day EMA34 + volume confirmation
+            if (williams_r[i] < -80 and price > ema_34_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + ADX > 20 + volume spike
-            elif (price < donchian_lower[i] and adx_aligned[i] > 20 and vol_spike[i]):
+            # Short: Williams %R overbought (> -20) + price below 1-day EMA34 + volume confirmation
+            elif (williams_r[i] > -20 and price < ema_34_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian lower
-            if price < donchian_lower[i]:
+            # Exit long: Williams %R returns above -50 (momentum fading) or price breaks below EMA
+            if (williams_r[i] > -50 or price < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian upper
-            if price > donchian_upper[i]:
+            # Exit short: Williams %R returns below -50 (momentum fading) or price breaks above EMA
+            if (williams_r[i] < -50 or price > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
