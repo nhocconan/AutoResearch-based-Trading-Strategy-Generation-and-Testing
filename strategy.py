@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,46 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (weekly EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily Camarilla R3, S3 levels
+    # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_vals = df_1d['close'].values
     
+    # Camarilla R3, S3 levels: (H-L)*1.1/6
     camarilla_range = (high_1d - low_1d) * 1.1 / 6
     r3_level = close_1d_vals + camarilla_range * 4
     s3_level = close_1d_vals - camarilla_range * 4
     
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume spike filter: current volume > 2.0 * 50-period average
+    # Volume spike filter: current volume > 2.0 * 30-period average (stricter)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 50)  # Need enough data for weekly EMA and volume MA
+    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema34_1w_aligned[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or
             np.isnan(volume_spike[i])):
@@ -65,23 +62,23 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        ema34 = ema34_1w_aligned[i]
+        ema34 = ema34_1d_aligned[i]
         r3 = r3_aligned[i]
         s3 = s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above R3 + weekly uptrend + volume spike
+            # Enter long: Close breaks above R3 + 1d uptrend + volume spike
             if close[i] > r3 and close[i] > ema34 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below S3 + weekly downtrend + volume spike
+            # Enter short: Close breaks below S3 + 1d downtrend + volume spike
             elif close[i] < s3 and close[i] < ema34 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below S3 or weekly trend turns down
+            # Exit long: Close falls below S3 or 1d trend turns down
             if close[i] < s3 or close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
@@ -89,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above R3 or weekly trend turns up
+            # Exit short: Close rises above R3 or 1d trend turns up
             if close[i] > r3 or close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
