@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 6h timeframe with daily pivot structure (from 1d) and weekly trend filter.
+# Hypothesis: 4h timeframe with daily pivot structure (from 1d) and weekly trend filter.
 # Uses daily Camarilla levels (R3/S3) for breakout entries and 1w EMA34 for trend filter.
 # Daily pivot provides structural support/resistance that works in both bull and bear markets.
 # Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "6h_Camarilla_R3_S3_1wEMA34_Trend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_1wEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
