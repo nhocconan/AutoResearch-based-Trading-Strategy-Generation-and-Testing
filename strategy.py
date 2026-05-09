@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RangeBreakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,37 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volatility
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # KAMA parameters
+    fast_sc = 0.666  # EMA constant for fast EMA (2)
+    slow_sc = 0.0645 # EMA constant for slow EMA (30)
     
-    # Previous day's range-based breakout levels (ATR-based)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Efficiency Ratio (ER) and Smoothing Constant (SC)
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    vol = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
+    # Fix dimensions: change has length n-10, vol has length n-1
+    # We'll compute ER for index i using change[i:i+10] and vol[i:i+10]
+    er = np.full(n, np.nan)
+    for i in range(10, n):
+        if vol[i-10:i] > 0:  # vol[i-10:i] corresponds to periods i-10 to i-1
+            er[i] = change[i-10:i].sum() / vol[i-10:i].sum()
+        else:
+            er[i] = 0
     
-    # Calculate ATR(14) on daily for volatility filter
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).mean().values
+    # Calculate SC: [ER * (fast_sc - slow_sc) + slow_sc]^2
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Dynamic breakout multiplier based on volatility
-    breakout_mult = 0.5 + (atr14 / prev_close)  # Adaptive to volatility
-    upper_break = prev_high + (prev_high - prev_low) * breakout_mult
-    lower_break = prev_low - (prev_high - prev_low) * breakout_mult
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[9] = close[9]  # Start after first 10 periods
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align breakout levels to 4h
-    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
-    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
     
-    # Volume filter: current 4h volume > 1.5 * 20-period average
+    # First average
+    avg_gain[13] = gain[1:14].mean()
+    avg_loss[13] = loss[1:14].mean()
+    
+    # Wilder smoothing
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Chopiness Index (14-period) - range detection
+    atr = np.full(n, np.nan)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # Align with original index
+    
+    # ATR calculation
+    atr[13] = tr[1:14].mean()
+    for i in range(14, n):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Chop calculation: 100 * log10(sum(ATR,14) / (HHH - LLL)) / log10(14)
+    sum_atr14 = np.full(n, np.nan)
+    hh_l = np.full(n, np.nan)
+    ll_h = np.full(n, np.nan)
+    
+    for i in range(13, n):
+        sum_atr14[i] = tr[i-13:i+1].sum()  # 14-period sum of TR
+        hh_l[i] = high[i-13:i+1].max() - low[i-13:i+1].min()
+    
+    chop = np.full(n, np.nan)
+    for i in range(13, n):
+        if hh_l[i] > 0:
+            chop[i] = 100 * np.log10(sum_atr14[i] / hh_l[i]) / np.log10(14)
+        else:
+            chop[i] = 50  # Neutral when no range
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
@@ -55,42 +102,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 50)  # Need enough data for calculations
+    start_idx = max(20, 14)  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ub = upper_break_aligned[i]
-        lb = lower_break_aligned[i]
-        trend = ema50_1d_aligned[i]
-        vol_filter = volume_filter[i]
-        
         if position == 0:
-            # Enter long: break above dynamic upper level with volume and above trend
-            if close[i] > ub and close[i] > trend and vol_filter:
+            # Enter long: price above KAMA, RSI > 50, low chop (trending)
+            if close[i] > kama[i] and rsi[i] > 50 and chop[i] < 38.2 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below dynamic lower level with volume and below trend
-            elif close[i] < lb and close[i] < trend and vol_filter:
+            # Enter short: price below KAMA, RSI < 50, low chop (trending)
+            elif close[i] < kama[i] and rsi[i] < 50 and chop[i] < 38.2 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below trend or volatility drops
-            if close[i] < trend or not vol_filter:
+            # Exit long: price below KAMA OR RSI < 40 OR high chop (ranging)
+            if close[i] < kama[i] or rsi[i] < 40 or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above trend or volatility drops
-            if close[i] > trend or not vol_filter:
+            # Exit short: price above KAMA OR RSI > 60 OR high chop (ranging)
+            if close[i] > kama[i] or rsi[i] > 60 or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
