@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Vortex_Trend_Filter
-# Hypothesis: Vortex indicator (VI+ and VI-) identifies trend direction, with VI+ > VI- indicating uptrend and VI- > VI+ indicating downtrend.
-# Combined with Vortex crossovers for entry/exit and volume confirmation to filter false signals.
-# Works in bull/bear: Trend filter prevents counter-trend trades, volume ensures institutional participation.
-# Uses 1-day Vortex for trend alignment and 4-hour for entry timing.
+# 6h_WilliamsAlligator_ElderRay_Trend
+# Hypothesis: Williams Alligator (JAW/TEETH/LIPS) defines trend direction, Elder Ray (Bull/Bear Power) filters entries.
+# Works in bull/bear: Alligator keeps us in major trends, Elder Ray avoids counter-trend entries during pullbacks.
+# Uses 1-day EMA13 for Alligator components and 1-day EMA13/EMA8 for Elder Ray components.
+# Target: 50-150 total trades over 4 years (12-37/year) with 0.25 position size.
 
-name = "4h_Vortex_Vortex_Trend_Filter"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_ElderRay_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,150 +15,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1-day Vortex for trend filter
+    # Calculate Williams Alligator components from 1-day data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Alligator: JAW (13-period SMMA, 8 bars ahead), TEETH (8-period SMMA, 5 bars ahead), LIPS (5-period SMMA, 3 bars ahead)
+    # Using EMA as proxy for SMMA with same period for simplicity and better responsiveness
+    jaw_1d = np.full_like(close_1d, np.nan)
+    teeth_1d = np.full_like(close_1d, np.nan)
+    lips_1d = np.full_like(close_1d, np.nan)
     
-    # True Range for 1d
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d = np.concatenate([[np.nan], tr_1d])  # Align with index
+    if len(close_1d) >= 13:
+        # JAW: 13-period EMA
+        jaw_1d[12] = np.mean(close_1d[0:13])
+        for i in range(13, len(close_1d)):
+            jaw_1d[i] = (jaw_1d[i-1] * 12 + close_1d[i]) / 13
+        
+        # TEETH: 8-period EMA
+        teeth_1d[7] = np.mean(close_1d[0:8])
+        for i in range(8, len(close_1d)):
+            teeth_1d[i] = (teeth_1d[i-1] * 7 + close_1d[i]) / 8
+        
+        # LIPS: 5-period EMA
+        lips_1d[4] = np.mean(close_1d[0:5])
+        for i in range(5, len(close_1d)):
+            lips_1d[i] = (lips_1d[i-1] * 4 + close_1d[i]) / 5
     
-    # Vortex Indicator components
-    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
-    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
+    # Align Alligator components to 6h timeframe
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
     
-    # Sum over 14 periods (standard Vortex period)
-    tr14_1d = np.full_like(tr_1d, np.nan)
-    vm_plus14_1d = np.full_like(vm_plus, np.nan)
-    vm_minus14_1d = np.full_like(vm_minus, np.nan)
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Using 1-day EMA13 as the reference
+    ema13_1d = jaw_1d  # JAW is already 13-period EMA
+    bull_power_1d = df_1d['high'].values - ema13_1d
+    bear_power_1d = df_1d['low'].values - ema13_1d
     
-    if len(tr_1d) >= 14:
-        for i in range(14, len(tr_1d)):
-            tr14_1d[i] = np.nansum(tr_1d[i-13:i+1])
-            vm_plus14_1d[i] = np.nansum(vm_plus[i-13:i+1])
-            vm_minus14_1d[i] = np.nansum(vm_minus[i-13:i+1])
-    
-    # VI+ and VI-
-    vi_plus_1d = np.full_like(tr_1d, np.nan)
-    vi_minus_1d = np.full_like(tr_1d, np.nan)
-    valid = (~np.isnan(tr14_1d)) & (tr14_1d != 0)
-    vi_plus_1d[valid] = vm_plus14_1d[valid] / tr14_1d[valid]
-    vi_minus_1d[valid] = vm_minus14_1d[valid] / tr14_1d[valid]
-    
-    # Trend: VI+ > VI- indicates uptrend, VI- > VI+ indicates downtrend
-    vi_plus_1d_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_1d)
-    vi_minus_1d_aligned = align_htf_to_ltf(prices, df_1d, vi_minus_1d)
-    
-    # Calculate 4-hour Vortex for entry signals
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    
-    vm_plus = np.abs(high[1:] - low[:-1])
-    vm_minus = np.abs(low[1:] - high[:-1])
-    vm_plus = np.concatenate([[np.nan], vm_plus])
-    vm_minus = np.concatenate([[np.nan], vm_minus])
-    
-    # Sum over 14 periods
-    tr14 = np.full_like(tr, np.nan)
-    vm_plus14 = np.full_like(vm_plus, np.nan)
-    vm_minus14 = np.full_like(vm_minus, np.nan)
-    
-    if len(tr) >= 14:
-        for i in range(14, len(tr)):
-            tr14[i] = np.nansum(tr[i-13:i+1])
-            vm_plus14[i] = np.nansum(vm_plus[i-13:i+1])
-            vm_minus14[i] = np.nansum(vm_minus[i-13:i+1])
-    
-    # VI+ and VI-
-    vi_plus = np.full_like(tr, np.nan)
-    vi_minus = np.full_like(tr, np.nan)
-    valid = (~np.isnan(tr14)) & (tr14 != 0)
-    vi_plus[valid] = vm_plus14[valid] / tr14[valid]
-    vi_minus[valid] = vm_minus14[valid] / tr14[valid]
-    
-    # Vortex crossover signals: VI+ crosses above VI- = buy, VI- crosses above VI+ = sell
-    vi_plus_cross_vi_minus = np.full_like(vi_plus, False)
-    vi_minus_cross_vi_plus = np.full_like(vi_minus, False)
-    
-    for i in range(1, len(vi_plus)):
-        if not np.isnan(vi_plus[i]) and not np.isnan(vi_minus[i]) and not np.isnan(vi_plus[i-1]) and not np.isnan(vi_minus[i-1]):
-            vi_plus_cross_vi_minus[i] = (vi_plus[i] > vi_minus[i]) and (vi_plus[i-1] <= vi_minus[i-1])
-            vi_minus_cross_vi_plus[i] = (vi_minus[i] > vi_plus[i]) and (vi_minus[i-1] <= vi_plus[i-1])
-    
-    # Volume confirmation: current volume / 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        for i in range(20, len(volume)):
-            vol_ma[i] = np.nanmean(volume[i-19:i+1])
-        # Initialize first 19 values with NaN, 20th with mean of first 20
-        if len(volume) >= 20:
-            vol_ma[19] = np.nanmean(volume[0:20])
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Align Elder Ray components to 6h timeframe
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Ensure volume MA and Vortex are ready
+    start_idx = 13  # Ensure EMA13 is ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vi_plus_1d_aligned[i]) or np.isnan(vi_minus_1d_aligned[i]) or
-            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or 
+            np.isnan(lips_1d_aligned[i]) or np.isnan(bull_power_1d_aligned[i]) or 
+            np.isnan(bear_power_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: VI+ crosses above VI- (bullish) AND uptrend (VI+ > VI- on 1d) AND volume spike
-            if (vi_plus_cross_vi_minus[i] and 
-                vi_plus_1d_aligned[i] > vi_minus_1d_aligned[i] and 
-                volume_ratio[i] > 1.5):
+            # Enter long: Bullish alignment (Lips > Teeth > Jaw) AND Bull Power > 0
+            if (lips_1d_aligned[i] > teeth_1d_aligned[i] > jaw_1d_aligned[i] and 
+                bull_power_1d_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: VI- crosses above VI+ (bearish) AND downtrend (VI- > VI+ on 1d) AND volume spike
-            elif (vi_minus_cross_vi_plus[i] and 
-                  vi_minus_1d_aligned[i] > vi_plus_1d_aligned[i] and 
-                  volume_ratio[i] > 1.5):
+            # Enter short: Bearish alignment (Lips < Teeth < Jaw) AND Bear Power < 0
+            elif (lips_1d_aligned[i] < teeth_1d_aligned[i] < jaw_1d_aligned[i] and 
+                  bear_power_1d_aligned[i] < 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: VI- crosses above VI+ (bearish crossover) OR trend reversal (VI- > VI+ on 1d)
-            if vi_minus_cross_vi_plus[i] or (vi_minus_1d_aligned[i] > vi_plus_1d_aligned[i]):
+            # Exit long: Bearish alignment OR Bull Power turns negative
+            if (lips_1d_aligned[i] < teeth_1d_aligned[i] or 
+                bull_power_1d_aligned[i] < 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: VI+ crosses above VI- (bullish crossover) OR trend reversal (VI+ > VI- on 1d)
-            if vi_plus_cross_vi_minus[i] or (vi_plus_1d_aligned[i] > vi_minus_1d_aligned[i]):
+            # Exit short: Bullish alignment OR Bear Power turns positive
+            if (lips_1d_aligned[i] > teeth_1d_aligned[i] or 
+                bear_power_1d_aligned[i] > 0):
                 signals[i] = 0.0
                 position = 0
             else:
