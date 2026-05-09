@@ -3,12 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1-day high/low as breakout levels with 1-week trend filter and volume confirmation.
-# Enters long when price breaks above 1-day high with weekly uptrend and volume spike, short when price breaks below 1-day low with weekly downtrend and volume spike.
-# Exits on trend reversal or price crossing opposite level (high<->low). Uses weekly timeframe for trend to avoid look-ahead and capture longer-term bias.
-# Designed to work in both bull and bear markets by aligning with weekly trend. Target: 20-50 trades/year to minimize fee drag.
+# Hypothesis: 4h strategy using 1-day Bollinger Band width squeeze with 1-day trend filter and volume confirmation.
+# Enters long when price closes above upper Bollinger Band with daily uptrend and volume spike,
+# short when price closes below lower Bollinger Band with daily downtrend and volume spike.
+# Exits on trend reversal or price crossing opposite Bollinger Band.
+# Bollinger Band width acts as volatility filter - low width indicates consolidation before breakout.
+# Designed to work in both bull and bear markets by aligning with daily trend.
+# Target: 20-40 trades/year to minimize fee drag.
 
-name = "4h_DailyHighLow_1wTrend_Volume"
+name = "4h_BollingerWidth_Squeeze_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,28 +25,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate EMA20 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Get 1d data for high/low breakout levels
+    # Get 1d data for Bollinger Bands and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Use previous 1d high and low as breakout levels (to avoid look-ahead)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Bollinger Bands on 1d close (20-period, 2 std dev)
+    close_1d = df_1d['close'].values
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20_1d + (2 * std20_1d)
+    lower_bb = sma20_1d - (2 * std20_1d)
     
-    # Align 1d high/low to 4h timeframe (shifted by 1 day to use completed bar)
-    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d, additional_delay_bars=0)
-    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d, additional_delay_bars=0)
+    # Calculate EMA20 on 1d close for trend filter
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align indicators to 4h timeframe
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
     # Volume spike filter: current volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
@@ -53,45 +53,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for EMA20 (1w) and volume MA
+    start_idx = max(20, 20)  # Need enough data for BB and EMA20 (1d)
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(high_1d_aligned[i]) or 
-            np.isnan(low_1d_aligned[i]) or
+        if (np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or 
+            np.isnan(ema20_1d_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema20_1w_val = ema20_1w_aligned[i]
-        high_level = high_1d_aligned[i]
-        low_level = low_1d_aligned[i]
+        upper_bb_val = upper_bb_aligned[i]
+        lower_bb_val = lower_bb_aligned[i]
+        ema20_1d_val = ema20_1d_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above 1d high + 1w uptrend + volume spike
-            if close[i] > high_level and close[i] > ema20_1w_val and vol_spike:
+            # Enter long: Close above upper BB + 1d uptrend + volume spike
+            if close[i] > upper_bb_val and close[i] > ema20_1d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below 1d low + 1w downtrend + volume spike
-            elif close[i] < low_level and close[i] < ema20_1w_val and vol_spike:
+            # Enter short: Close below lower BB + 1d downtrend + volume spike
+            elif close[i] < lower_bb_val and close[i] < ema20_1d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below 1d low or 1w trend turns down
-            if close[i] < low_level or close[i] < ema20_1w_val:
+            # Exit long: Close below lower BB or 1d trend turns down
+            if close[i] < lower_bb_val or close[i] < ema20_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above 1d high or 1w trend turns up
-            if close[i] > high_level or close[i] > ema20_1w_val:
+            # Exit short: Close above upper BB or 1d trend turns up
+            if close[i] > upper_bb_val or close[i] > ema20_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
