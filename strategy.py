@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_ChaikinMoneyFlow_DCM_Breakout_1dTrend_Volume
-Hypothesis: Chaikin Money Flow (CMF) measures institutional money flow.
-Enter long when CMF > 0.15 and price breaks above Donchian Channel (20) upper band,
-short when CMF < -0.15 and price breaks below lower band.
-Use 1-day EMA50 as trend filter to ensure alignment with higher timeframe trend.
-Volume confirmation via volume > 1.5x 20-period average.
-Session filter: 08:00-20:00 UTC to avoid low liquidity periods.
+4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+Hypothesis: Use Camarilla pivot levels (R1/S1) from daily timeframe for breakout entries,
+with 1-day EMA34 as trend filter and volume confirmation. This strategy aims to capture
+institutional breakout levels while avoiding counter-trend trades. Camarilla levels are
+widely watched by institutions, providing high-probability breakout points. The daily
+EMA34 filter ensures alignment with the broader trend, reducing false breakouts.
 Designed for low trade frequency (20-40/year) with high win rate by requiring
-money flow confirmation, trend alignment, and volatility breakout.
-Works in bull markets via long signals and bear markets via short signals.
+Camarilla level breaks, trend alignment, and volume confirmation. Works in both bull
+and bear markets by following the daily trend direction.
 """
 
-name = "4h_ChaikinMoneyFlow_DCM_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,7 +21,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -30,40 +29,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20)
-    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Chaikin Money Flow (20)
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    mf_multiplier = ((close - low) - (high - close)) / (high - low)
-    # Replace division by zero or NaN with 0
-    mf_multiplier = np.where((high - low) == 0, 0, mf_multiplier)
-    mf_multiplier = np.where(np.isnan(mf_multiplier), 0, mf_multiplier)
-    # Money Flow Volume = Money Flow Multiplier * Volume
-    mf_volume = mf_multiplier * volume
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(volume_sum == 0, 0, mf_volume_sum / volume_sum)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get daily data for Camarilla pivot calculation and EMA34 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1-day EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla pivot levels (R1, S1) from previous day's OHLC
+    # Using previous day's data to avoid look-ahead
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
+    # Pivot point (not used for entry but needed for R1/S1 calculation)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Camarilla R1 and S1 levels
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
+    
+    # Align Camarilla levels to 4h timeframe (available after daily bar closes)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Calculate 1-day EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
+    
+    # Volume filter: current volume > 1.8x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    volume_filter = volume > (1.8 * avg_volume)
     
-    # Session filter: 08:00-20:00 UTC
+    # Session filter: 08:00-20:00 UTC (avoid low-volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
@@ -74,37 +74,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or np.isnan(cmf[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or np.isnan(volume_filter[i]) or
-            np.isnan(session_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(session_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: CMF > 0.15 + breakout above DC high + 1d uptrend + volume spike + session
-            if cmf[i] > 0.15 and close[i] > dc_high[i] and trend_up[i] and volume_filter[i] and session_filter[i]:
+            # Long: break above R1 + daily uptrend + volume spike + session
+            if close[i] > r1_aligned[i] and trend_up[i] and volume_filter[i] and session_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF < -0.15 + breakout below DC low + 1d downtrend + volume spike + session
-            elif cmf[i] < -0.15 and close[i] < dc_low[i] and trend_down[i] and volume_filter[i] and session_filter[i]:
+            # Short: break below S1 + daily downtrend + volume spike + session
+            elif close[i] < s1_aligned[i] and trend_down[i] and volume_filter[i] and session_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Donchian middle or trend reversal
-            dc_middle = (dc_high[i] + dc_low[i]) / 2
-            if close[i] < dc_middle or not trend_up[i]:
+            # Exit long: price returns to pivot or trend reversal
+            if close[i] < pivot[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian middle or trend reversal
-            dc_middle = (dc_high[i] + dc_low[i]) / 2
-            if close[i] > dc_middle or not trend_down[i]:
+            # Exit short: price returns to pivot or trend reversal
+            if close[i] > pivot[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
