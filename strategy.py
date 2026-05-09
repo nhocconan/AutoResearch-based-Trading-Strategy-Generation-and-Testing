@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d timeframe with weekly structure using Donchian breakout from previous week's high/low
-# combined with weekly EMA50 trend filter and volume confirmation. Weekly structure provides robust
-# support/resistance that works in both bull and bear markets. Weekly trend filter reduces whipsaw by
-# only allowing trades in direction of higher timeframe trend. Target: 30-100 total trades over 4 years
-# (7-25/year) with size 0.25.
+# Hypothesis: 12h timeframe with daily Camarilla levels (R3/S3) for breakout entries, weekly EMA50 for trend filter, and volume confirmation.
+# Daily Camarilla levels provide strong support/resistance that work in both bull and bear markets.
+# Weekly EMA50 trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
+# Volume confirmation ensures momentum behind breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "1d_Donchian20_1wEMA50_Trend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_1wEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,14 +23,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Donchian channels (20 periods = 20 weeks)
-    # We need weekly high/low from 20 weeks ago for breakout
-    weekly_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    weekly_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla levels (R3, S3) from previous day
+    prev_close = np.roll(close, 2)  # 2 bars = 1 day (12h * 2 = 24h)
+    prev_high = np.roll(high, 2)
+    prev_low = np.roll(low, 2)
+    prev_close[:2] = np.nan  # First values invalid
     
-    # Breakout conditions: price must close beyond the weekly level
-    breakout_up = close > weekly_high
-    breakout_down = close < weekly_low
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2
+    s3 = prev_close - 1.1 * camarilla_range / 2
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r3
+    breakout_down = close < s3
     
     # Get weekly data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -64,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above weekly high + weekly uptrend + volume filter
+            # Long: breakout above R3 + weekly uptrend + volume confirmation
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below weekly low + weekly downtrend + volume filter
+            # Short: breakout below S3 + weekly downtrend + volume confirmation
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to weekly low or trend reversal
-            if close[i] <= weekly_low[i] or not trend_up[i]:
+            # Exit long: price returns to previous day's close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly high or trend reversal
-            if close[i] >= weekly_high[i] or not trend_down[i]:
+            # Exit short: price returns to previous day's close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
