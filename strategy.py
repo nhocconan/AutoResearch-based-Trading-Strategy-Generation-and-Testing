@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA100 trend filter.
-# Uses 4h timeframe for balance between trade frequency and signal quality.
-# Donchian breakouts capture momentum, volume confirms strength, EMA100 ensures trend alignment.
-# Designed to work in both bull and bear markets by following daily trend.
-name = "4h_Donchian20_1dEMA100_Volume_Trend"
-timeframe = "4h"
+# Hypothesis: Daily Bollinger Band squeeze breakout with weekly trend filter and volume confirmation.
+# Uses Bollinger Band width to identify low volatility periods (squeeze) followed by breakouts.
+# Weekly EMA20 trend filter ensures alignment with higher timeframe trend.
+# Volume confirmation filters out false breakouts.
+# Designed to work in both bull and bear markets by capturing volatility expansions.
+name = "1d_BollingerSqueeze_Breakout_WeeklyEMA20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,32 +22,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA100 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Daily Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    bb_middle = close_series.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_series.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # Bollinger Band width squeeze detection (lower 20% of 50-period range)
+    bb_width_series = pd.Series(bb_width)
+    bb_width_rank = bb_width_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    squeeze_condition = bb_width_rank < 0.2  # In squeeze when BB width is in lowest 20%
+    
+    # Weekly data for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # 4h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA20 trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Daily EMA100 trend filter
-    ema_100_1d = pd.Series(df_1d['close'].values).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_100_4h = align_htf_to_ltf(prices, df_1d, ema_100_1d)
-    
-    # Volume spike filter: volume > 1.5x 20-period EMA
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema20)
+    vol_confirmation = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50  # Ensure sufficient data for all indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(ema_100_4h[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+            np.isnan(ema_20_1d[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,26 +67,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume spike and above daily EMA100
-            if (price > high_max[i] and vol_spike[i] and price > ema_100_4h[i]):
+            # Enter long: price breaks above upper BB, not in squeeze, with volume confirmation and above weekly EMA20
+            if (price > bb_upper[i] and not squeeze_condition[i] and vol_confirmation[i] and price > ema_20_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume spike and below daily EMA100
-            elif (price < low_min[i] and vol_spike[i] and price < ema_100_4h[i]):
+            # Enter short: price breaks below lower BB, not in squeeze, with volume confirmation and below weekly EMA20
+            elif (price < bb_lower[i] and not squeeze_condition[i] and vol_confirmation[i] and price < ema_20_1d[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Donchian low (mean reversion)
-            if price < low_min[i]:
+            # Exit long: price returns to middle BB (mean reversion)
+            if price < bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Donchian high (mean reversion)
-            if price > high_max[i]:
+            # Exit short: price returns to middle BB (mean reversion)
+            if price > bb_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
