@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Russell2000_Strength_Breakout"
-timeframe = "6h"
+name = "4h_WilliamsFractal_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,84 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Russell 2000 proxy (BTC volatility index)
+    # Get 1d data for Williams Fractals and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily returns and volatility (proxy for Russell 2000 strength)
-    daily_ret = np.diff(df_1d['close'].values) / df_1d['close'].values[:-1]
-    daily_ret = np.concatenate([[np.nan], daily_ret])  # align with df_1d index
-    vol_10d = pd.Series(daily_ret).rolling(window=10, min_periods=10).std().values
+    # Calculate Williams Fractals (requires 5-point pattern)
+    high_arr = df_1d['high'].values
+    low_arr = df_1d['low'].values
     
-    # Russell 2000 strength: low volatility = risk-on environment
-    russell_strength = vol_10d < np.percentile(vol_10d[~np.isnan(vol_10d)], 30)
+    bearish_fractal = np.zeros(len(high_arr), dtype=bool)
+    bullish_fractal = np.zeros(len(low_arr), dtype=bool)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    for i in range(2, len(high_arr) - 2):
+        # Bearish fractal: high[i] is highest of 5 candles
+        if (high_arr[i] > high_arr[i-1] and high_arr[i] > high_arr[i-2] and
+            high_arr[i] > high_arr[i+1] and high_arr[i] > high_arr[i+2]):
+            bearish_fractal[i] = True
+        # Bullish fractal: low[i] is lowest of 5 candles
+        if (low_arr[i] < low_arr[i-1] and low_arr[i] < low_arr[i-2] and
+            low_arr[i] < low_arr[i+1] and low_arr[i] < low_arr[i+2]):
+            bullish_fractal[i] = True
     
-    # Weekly EMA20 for trend
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get 6h data for entry signals (Donchian breakout)
-    # Calculate 20-period Donchian channels on 6h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_series = pd.Series(volume)
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all indicators to 6h timeframe
-    russell_strength_6h = align_htf_to_ltf(prices, df_1d, russell_strength)
-    ema20_1w_6h = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align to 4h with extra delay for fractals (need 2 bars confirmation)
+    bearish_fractal_4h = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
+    bullish_fractal_4h = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
+    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 30)  # Need enough data for Donchian and weekly EMA
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(russell_strength_6h[i]) or np.isnan(ema20_1w_6h[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(bearish_fractal_4h[i]) or np.isnan(bullish_fractal_4h[i]) or
+            np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        russell_ok = russell_strength_6h[i]
-        weekly_trend = ema20_1w_6h[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
-        vol_ok = volume_confirm[i]
+        bearish = bearish_fractal_4h[i] > 0.5
+        bullish = bullish_fractal_4h[i] > 0.5
+        trend = ema50_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
-            # Enter long: Donchian breakout above upper channel + Russell strength + above weekly trend
-            if close[i] > upper_channel and russell_ok and close[i] > weekly_trend and vol_ok:
+            # Enter long: bullish fractal with volume and above trend
+            if bullish and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Donchian breakdown below lower channel + Russell strength + below weekly trend
-            elif close[i] < lower_channel and russell_ok and close[i] < weekly_trend and vol_ok:
+            # Enter short: bearish fractal with volume and below trend
+            elif bearish and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below Donchian lower channel (breakdown)
-            if close[i] < lower_channel:
+            # Exit long: price crosses below EMA50
+            if close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above Donchian upper channel (breakout)
-            if close[i] > upper_channel:
+            # Exit short: price crosses above EMA50
+            if close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
