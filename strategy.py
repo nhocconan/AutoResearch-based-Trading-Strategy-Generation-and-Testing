@@ -3,17 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Combines daily Camarilla pivot levels with 4h trend and volume confirmation
-# to capture reversals in range-bound markets and continuations in trends.
-# Works in bull/bear by using pivot levels as dynamic support/resistance.
-# Target: 20-40 trades/year on 4h to avoid fee drag.
-name = "4h_Camarilla_Pivot_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyKAMA_Pullback"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,52 +17,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivots (using previous day's OHLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Weekly KAMA for trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
-    # Previous day's close, high, low
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    # Camarilla levels
-    R4 = prev_close + (prev_high - prev_low) * 1.5000
-    R3 = prev_close + (prev_high - prev_low) * 1.2500
-    R2 = prev_close + (prev_high - prev_low) * 1.1666
-    R1 = prev_close + (prev_high - prev_low) * 1.0833
-    S1 = prev_close - (prev_high - prev_low) * 1.0833
-    S2 = prev_close - (prev_high - prev_low) * 1.1666
-    S3 = prev_close - (prev_high - prev_low) * 1.2500
-    S4 = prev_close - (prev_high - prev_low) * 1.5000
-    # Align to 4h
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    R2_4h = align_htf_to_ltf(prices, df_1d, R2)
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
-    S2_4h = align_htf_to_ltf(prices, df_1d, S2)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
     
-    # 4h trend: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # KAMA components
+    change = np.abs(np.diff(df_1w['close'].values, prepend=df_1w['close'].values[0]))
+    volatility = np.abs(np.diff(df_1w['close'].values))
+    er = change / (volatility + 1e-10)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(df_1w['close'].values)
+    kama[0] = df_1w['close'].values[0]
+    for i in range(1, len(kama)):
+        kama[i] = kama[i-1] + sc[i] * (df_1w['close'].values[i] - kama[i-1])
     
-    # Volume filter: volume > 1.5x 20-period SMA
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    
+    # Daily ATR for volatility filter
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily RSI for pullback entries
+    delta = np.diff(close, prepend=close[0])
+    gain = np.maximum(delta, 0)
+    loss = np.maximum(-delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma20
+    vol_filter = volume > 1.2 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(ema50_4h_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(kama_aligned[i]) or np.isnan(atr[i]) or \
+           np.isnan(rsi[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,35 +69,35 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price above S1 and EMA50, with volume
-            if (price > S1_4h[i] and 
-                price > ema50_4h_aligned[i] and 
+            # Long: price above weekly KAMA (trend), RSI pullback (oversold), with volume
+            if (price > kama_aligned[i] and 
+                rsi[i] < 35 and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: price below R1 and EMA50, with volume
-            elif (price < R1_4h[i] and 
-                  price < ema50_4h_aligned[i] and 
+            # Short: price below weekly KAMA (trend), RSI pullback (overbought), with volume
+            elif (price < kama_aligned[i] and 
+                  rsi[i] > 65 and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price crosses below S1 or EMA50
-            if (price < S1_4h[i] or 
-                price < ema50_4h_aligned[i]):
+            # Exit long: price crosses below weekly KAMA or RSI overbought
+            if (price < kama_aligned[i] or 
+                rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above R1 or EMA50
-            if (price > R1_4h[i] or 
-                price > ema50_4h_aligned[i]):
+            # Exit short: price crosses above weekly KAMA or RSI oversold
+            if (price > kama_aligned[i] or 
+                rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
