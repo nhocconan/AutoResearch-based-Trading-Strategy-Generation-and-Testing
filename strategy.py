@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivotDir_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,55 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter
+    # Weekly data for pivot and Donchian
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 1:
         return np.zeros(n)
     
-    # KAMA parameters
-    close_series = pd.Series(close)
-    change = abs(close_series.diff(10))
-    volatility = abs(close_series.diff(1)).rolling(window=10, min_periods=1).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Weekly OHLC for pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
     
-    # Align weekly trend
-    weekly_close = df_1w['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # Weekly pivot point: P = (H + L + C) / 3
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly support/resistance levels
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
     
-    # RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Use previous week's levels to avoid look-ahead
+    pivot_prev = np.roll(pivot, 1)
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r2_prev = np.roll(r2, 1)
+    s2_prev = np.roll(s2, 1)
+    pivot_prev[0] = np.nan
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
+    r2_prev[0] = np.nan
+    s2_prev[0] = np.nan
     
-    # Choppiness Index (14)
-    atr1 = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    atr1[0] = high[0] - low[0]
-    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=1).sum().values
-    hh = pd.Series(high).rolling(window=14, min_periods=1).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=1).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-    chop = np.nan_to_num(chop, nan=50.0)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot_prev)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1_prev)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1_prev)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2_prev)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2_prev)
+    
+    # Daily Donchian channel (20-period high/low)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate Donchian channels
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    
+    # Align Donchian to 6h timeframe
+    donchian_high_6h = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Volume filter: volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if weekly trend data unavailable
-        if np.isnan(weekly_ema50_aligned[i]):
+        # Skip if required data unavailable
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or
+            np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,26 +92,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price above KAMA, RSI > 50, chop < 61.8 (trending), weekly uptrend
-            if (price > kama[i] and rsi[i] > 50 and chop[i] < 61.8 and price > weekly_ema50_aligned[i]):
+            # Long: price breaks above weekly R1 with volume spike and above Donchian high
+            if (price > r1_6h[i] and vol_spike[i] and price > donchian_high_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, RSI < 50, chop < 61.8 (trending), weekly downtrend
-            elif (price < kama[i] and rsi[i] < 50 and chop[i] < 61.8 and price < weekly_ema50_aligned[i]):
+            # Short: price breaks below weekly S1 with volume spike and below Donchian low
+            elif (price < s1_6h[i] and vol_spike[i] and price < donchian_low_6h[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below KAMA or chop > 61.8 (ranging)
-            if price < kama[i] or chop[i] > 61.8:
+            # Exit long: price falls back below weekly pivot (mean reversion to pivot)
+            if price < pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above KAMA or chop > 61.8 (ranging)
-            if price > kama[i] or chop[i] > 61.8:
+            # Exit short: price rises back above weekly pivot (mean reversion to pivot)
+            if price > pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
