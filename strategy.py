@@ -1,12 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian channel breakout with 1d volatility filter and volume confirmation
-# Long when price breaks above 4h Donchian upper band (20) AND 1d ATR ratio indicates low volatility AND volume spike
-# Short when price breaks below 4h Donchian lower band (20) AND 1d ATR ratio indicates low volatility AND volume spike
-# Exit when price returns to 4h Donchian midpoint or volatility increases
-# Uses volatility filter to avoid whipsaws in high volatility regimes, targeting 20-40 trades/year
+"""
+6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+- Long when price breaks above Donchian(20) high AND weekly pivot > weekly MA(20) AND volume spike
+- Short when price breaks below Donchian(20) low AND weekly pivot < weekly MA(20) AND volume spike
+- Exit when price returns to Donchian midpoint OR weekly pivot trend reverses
+- Uses daily for Donchian breakout reference, weekly for pivot/MA filter
+- Designed for 6h timeframe with ~15-35 trades/year to minimize fee drag
+"""
 
-name = "4h_Donchian_VolFilter_Volume"
-timeframe = "4h"
+name = "6h_Donchian_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,85 +27,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility filter
+    # Get daily data for Donchian channels (20-day high/low)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d ATR for volatility filter (ATR ratio)
+    # Calculate Donchian channels from daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # True Range for 1d
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]  # First value
-    tr2[0] = np.abs(high_1d[0] - close_1d[0])
-    tr3[0] = np.abs(low_1d[0] - close_1d[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 20-period rolling high/low for Donchian
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # ATR(10) and ATR(30) for volatility ratio
-    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_30 = pd.Series(tr).ewm(span=30, adjust=False, min_periods=30).mean().values
-    atr_ratio = atr_10 / atr_30  # Low when < 1 (volatility contracting)
-    vol_filter = atr_ratio < 1.0  # Volatility contracting or stable
+    # Align daily Donchian levels to 6h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    donchian_mid_aligned = align_htf_to_ltf(prices, df_1d, donchian_mid)
     
-    # Align daily volatility filter to 4h timeframe
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1d, vol_filter)
+    # Get weekly data for pivot and MA filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_max
-    donchian_lower = low_min
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Calculate weekly pivot point (typical price) and MA(20)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Volume spike: current volume > 2x 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Weekly pivot = (H+L+C)/3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    
+    # Weekly MA(20) of pivot
+    weekly_pivot_ma = pd.Series(weekly_pivot).rolling(window=20, min_periods=20).mean().values
+    
+    # Align weekly data to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_pivot_ma_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_ma)
+    
+    # Volume spike: current volume > 2.0x 30-period average volume
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean()
     vol_spike = volume > (2.0 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for Donchian and volatility
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(donchian_mid[i]) or np.isnan(vol_filter_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(donchian_mid_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(weekly_pivot_ma_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper + vol filter + volume spike
-            if (close[i] > donchian_upper[i] and 
-                vol_filter_aligned[i] and 
+            # Enter long: Donchian breakout up + weekly pivot > MA + volume spike
+            if (close[i] > donchian_high_aligned[i] and 
+                weekly_pivot_aligned[i] > weekly_pivot_ma_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian lower + vol filter + volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  vol_filter_aligned[i] and 
+            # Enter short: Donchian breakout down + weekly pivot < MA + volume spike
+            elif (close[i] < donchian_low_aligned[i] and 
+                  weekly_pivot_aligned[i] < weekly_pivot_ma_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to Donchian midpoint OR volatility increases
-            if (close[i] < donchian_mid[i]) or (not vol_filter_aligned[i]):
+            # Exit long: price returns to Donchian midpoint OR weekly pivot < MA
+            if (close[i] < donchian_mid_aligned[i]) or (weekly_pivot_aligned[i] < weekly_pivot_ma_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to Donchian midpoint OR volatility increases
-            if (close[i] > donchian_mid[i]) or (not vol_filter_aligned[i]):
+            # Exit short: price returns to Donchian midpoint OR weekly pivot > MA
+            if (close[i] > donchian_mid_aligned[i]) or (weekly_pivot_aligned[i] > weekly_pivot_ma_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
