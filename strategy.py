@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian breakout with 1d ATR volatility filter and volume confirmation
-# Long when: close > Donchian upper(20), ATR(14) > 1.5x 20-period ATR MA, volume > 1.5x 20-period volume MA
-# Short when: close < Donchian lower(20), ATR(14) > 1.5x 20-period ATR MA, volume > 1.5x 20-period volume MA
-# Exit when: price crosses Donchian midpoint OR volatility drops below threshold
-# Position size: 0.25 (25% of capital) to limit drawdown. Target: 25-50 trades/year.
-# Works in trending markets (breakouts) and avoids low-volatility chop.
+# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation
+# Uses weekly high/low/close to calculate Donchian channels (20-week). 
+# Long when: close > upper band, 1w EMA(20) rising, volume spike (>1.5x 20-period average)
+# Short when: close < lower band, 1w EMA(20) falling, volume spike
+# Exit when: price crosses the middle band OR trend reverses
+# Position size: 0.25 (25% of capital) to limit drawdown. Target: 10-25 trades/year.
+# Designed to work in both bull (breakouts) and bear (mean-reversion at extremes) markets.
 
-name = "4h_Donchian20_ATRVolFilter_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,70 +25,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = high_roll.values
-    donchian_lower = low_roll.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Get weekly data for Donchian channel calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # ATR(14) for volatility filter
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Donchian channels (20-week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # ATR volatility filter: current ATR > 1.5x 20-period ATR MA
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr > (1.5 * atr_ma)
+    # Upper band: highest high of last 20 weeks
+    donchian_upper = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low of last 20 weeks
+    donchian_lower = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Middle band: average of upper and lower
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
-    # Volume confirmation: current volume > 1.5x 20-period volume MA
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    # Align weekly Donchian levels to daily timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    donchian_middle_aligned = align_htf_to_ltf(prices, df_1w, donchian_middle)
+    
+    # Get weekly data for trend filter
+    # 1w EMA(20) for trend filter
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_prev = np.roll(ema_20_1w, 1)
+    ema_20_1w_prev[0] = ema_20_1w[0]
+    ema_rising = ema_20_1w > ema_20_1w_prev
+    ema_falling = ema_20_1w < ema_20_1w_prev
+    ema_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_rising)
+    ema_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_falling)
+    
+    # Volume spike: current volume > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(donchian_mid[i]) or np.isnan(vol_filter[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(donchian_middle_aligned[i]) or np.isnan(ema_rising_aligned[i]) or
+            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > Donchian upper + volatility filter + volume spike
-            if (close[i] > donchian_upper[i] and 
-                vol_filter[i] and 
+            # Enter long: price > Donchian upper + 1w EMA rising + volume spike
+            if (close[i] > donchian_upper_aligned[i] and 
+                ema_rising_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < Donchian lower + volatility filter + volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  vol_filter[i] and 
+            # Enter short: price < Donchian lower + 1w EMA falling + volume spike
+            elif (close[i] < donchian_lower_aligned[i] and 
+                  ema_falling_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian midpoint OR volatility drops
-            if (close[i] < donchian_mid[i]) or (not vol_filter[i]):
+            # Exit long: price crosses below middle band OR trend turns down
+            if (close[i] < donchian_middle_aligned[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian midpoint OR volatility drops
-            if (close[i] > donchian_mid[i]) or (not vol_filter[i]):
+            # Exit short: price crosses above middle band OR trend turns up
+            if (close[i] > donchian_middle_aligned[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
