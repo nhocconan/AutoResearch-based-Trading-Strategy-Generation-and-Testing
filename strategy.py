@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Vortex_Trend_Confirmation_With_Volume_Spike
-# Hypothesis: Use Vortex Indicator (VI) from 1d timeframe to identify trend direction on 12h chart.
-# Long when VI+ > VI- and price breaks above 12h EMA20 with volume > 2x 20-period average.
-# Short when VI- > VI+ and price breaks below 12h EMA20 with volume > 2x 20-period average.
-# Exit when Vortex signal reverses or volume drops below average.
-# Works in bull markets by catching strong uptrends, in bear markets by capturing downtrends.
-# Volume spike ensures only high-momentum moves trigger entries, reducing false signals.
-# Target: 15-30 trades/year on 12h timeframe to avoid fee drag.
+# 1d_Ichimoku_Kumo_Breakout_1wTrend_Filter
+# Hypothesis: Buy when price breaks above Kumo (cloud) with bullish weekly Tenkan/Kijun cross and price > weekly Senkou Span A;
+# Sell when price breaks below Kumo with bearish weekly Tenkan/Kijun cross and price < weekly Senkou Span B.
+# Uses Ichimoku cloud as dynamic support/resistance and weekly trend filter to avoid counter-trend trades.
+# Designed for 10-25 trades/year on 1d timeframe with low turnover to minimize fee drag.
 
-name = "12h_Vortex_Trend_Confirmation_With_Volume_Spike"
-timeframe = "12h"
+name = "1d_Ichimoku_Kumo_Breakout_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,129 +15,131 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Vortex Indicator and EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 26:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Vortex Indicator components on 1d data
-    # VM+ = |high(t) - low(t-1)|, VM- = |low(t) - high(t-1)|
-    vm_plus = np.abs(high_1d - np.roll(low_1d, 1))
-    vm_minus = np.abs(low_1d - np.roll(high_1d, 1))
-    vm_plus[0] = np.nan  # First value has no previous
-    vm_minus[0] = np.nan
+    # Calculate Ichimoku components on daily data
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    high_tenkan = np.full_like(high, np.nan)
+    low_tenkan = np.full_like(low, np.nan)
+    if len(high) >= period_tenkan:
+        for i in range(period_tenkan - 1, len(high)):
+            high_tenkan[i] = np.max(high[i - period_tenkan + 1:i + 1])
+            low_tenkan[i] = np.min(low[i - period_tenkan + 1:i + 1])
+    tenkan = (high_tenkan + low_tenkan) / 2
     
-    # True Range = max(|high-low|, |high-close_prev|, |low-close_prev|)
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-    true_range[0] = np.nan  # First value has no previous close
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    high_kijun = np.full_like(high, np.nan)
+    low_kijun = np.full_like(low, np.nan)
+    if len(high) >= period_kijun:
+        for i in range(period_kijun - 1, len(high)):
+            high_kijun[i] = np.max(high[i - period_kijun + 1:i + 1])
+            low_kijun[i] = np.min(low[i - period_kijun + 1:i + 1])
+    kijun = (high_kijun + low_kijun) / 2
     
-    # Smooth over 14 periods (standard VI period)
-    def smooth_sum(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # Initialize first value
-        result[period-1] = np.nansum(arr[0:period])
-        # Rolling sum
-        for i in range(period, len(arr)):
-            if not np.isnan(result[i-1]) and not np.isnan(arr[i]):
-                result[i] = result[i-1] - arr[i-period] + arr[i]
-            else:
-                result[i] = np.nan
-        return result
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2 plotted 26 periods ahead
+    senkou_a = (tenkan + kijun) / 2
     
-    vm_plus_sum = smooth_sum(vm_plus, 14)
-    vm_minus_sum = smooth_sum(vm_minus, 14)
-    tr_sum = smooth_sum(true_range, 14)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2 plotted 26 periods ahead
+    period_senkou_b = 52
+    high_senkou_b = np.full_like(high, np.nan)
+    low_senkou_b = np.full_like(low, np.nan)
+    if len(high) >= period_senkou_b:
+        for i in range(period_senkou_b - 1, len(high)):
+            high_senkou_b[i] = np.max(high[i - period_senkou_b + 1:i + 1])
+            low_senkou_b[i] = np.min(low[i - period_senkou_b + 1:i + 1])
+    senkou_b = (high_senkou_b + low_senkou_b) / 2
     
-    # VI+ = VM+_sum / TR_sum, VI- = VM-_sum / TR_sum
-    vi_plus = np.full_like(high_1d, np.nan)
-    vi_minus = np.full_like(high_1d, np.nan)
-    valid = (~np.isnan(vm_plus_sum)) & (~np.isnan(vm_minus_sum)) & (~np.isnan(tr_sum)) & (tr_sum != 0)
-    vi_plus[valid] = vm_plus_sum[valid] / tr_sum[valid]
-    vi_minus[valid] = vm_minus_sum[valid] / tr_sum[valid]
+    # Align Ichimoku components to daily (no shift needed as they are already forward-looking in calculation)
+    # But we need to ensure we don't use future data: the Ichimoku lines are plotted ahead, so we use values from today
+    # For entry logic, we use current Tenkan, Kijun, Senkou A, Senkou B without additional shift
     
-    # Calculate 1d EMA20 for trend confirmation
-    ema_20_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 20:
-        ema_20_1d[19] = np.mean(close_1d[0:20])
-        for i in range(20, len(close_1d)):
-            ema_20_1d[i] = (close_1d[i] * 2 + ema_20_1d[i-1] * 18) / 20
+    # Weekly trend filter: Tenkan/Kijun cross and price vs Senkou Span
+    # Weekly Tenkan-sen
+    high_tenkan_1w = np.full_like(high_1w, np.nan)
+    low_tenkan_1w = np.full_like(low_1w, np.nan)
+    if len(high_1w) >= period_tenkan:
+        for i in range(period_tenkan - 1, len(high_1w)):
+            high_tenkan_1w[i] = np.max(high_1w[i - period_tenkan + 1:i + 1])
+            low_tenkan_1w[i] = np.min(low_1w[i - period_tenkan + 1:i + 1])
+    tenkan_1w = (high_tenkan_1w + low_tenkan_1w) / 2
     
-    # Align 1d indicators to 12h timeframe
-    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
-    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Weekly Kijun-sen
+    high_kijun_1w = np.full_like(high_1w, np.nan)
+    low_kijun_1w = np.full_like(low_1w, np.nan)
+    if len(high_1w) >= period_kijun:
+        for i in range(period_kijun - 1, len(high_1w)):
+            high_kijun_1w[i] = np.max(high_1w[i - period_kijun + 1:i + 1])
+            low_kijun_1w[i] = np.min(low_1w[i - period_kijun + 1:i + 1])
+    kijun_1w = (high_kijun_1w + low_kijun_1w) / 2
     
-    # Calculate 12h EMA20 for entry trigger
-    ema_20_12h = np.full_like(close, np.nan)
-    if len(close) >= 20:
-        ema_20_12h[19] = np.mean(close[0:20])
-        for i in range(20, len(close)):
-            ema_20_12h[i] = (close[i] * 2 + ema_20_12h[i-1] * 18) / 20
+    # Weekly Senkou Span A and B
+    senkou_a_1w = (tenkan_1w + kijun_1w) / 2
+    high_senkou_b_1w = np.full_like(high_1w, np.nan)
+    low_senkou_b_1w = np.full_like(low_1w, np.nan)
+    if len(high_1w) >= period_senkou_b:
+        for i in range(period_senkou_b - 1, len(high_1w)):
+            high_senkou_b_1w[i] = np.max(high_1w[i - period_senkou_b + 1:i + 1])
+            low_senkou_b_1w[i] = np.min(low_1w[i - period_senkou_b + 1:i + 1])
+    senkou_b_1w = (high_senkou_b_1w + low_senkou_b_1w) / 2
     
-    # Volume filter: 12h volume / 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Align weekly indicators to daily timeframe (wait for weekly close)
+    tenkan_1w_aligned = align_htf_to_ltf(prices, df_1w, tenkan_1w)
+    kijun_1w_aligned = align_htf_to_ltf(prices, df_1w, kijun_1w)
+    senkou_a_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_a_1w)
+    senkou_b_1w_aligned = align_htf_to_ltf(prices, df_1w, senkou_b_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(period_senkou_b, period_kijun)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or \
-           np.isnan(ema_20_1d_aligned[i]) or np.isnan(ema_20_12h[i]) or \
-           np.isnan(volume_ratio[i]):
+        if np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or \
+           np.isnan(tenkan_1w_aligned[i]) or np.isnan(kijun_1w_aligned[i]) or \
+           np.isnan(senkou_a_1w_aligned[i]) or np.isnan(senkou_b_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: VI+ > VI- (bullish trend) AND price above EMA20 AND volume spike
-            if vi_plus_aligned[i] > vi_minus_aligned[i] and close[i] > ema_20_12h[i] and volume_ratio[i] > 2.0:
+            # Enter long: Price breaks above Kumo (Senkou Span A) AND bullish weekly Tenkan/Kijun cross AND price > weekly Senkou Span A
+            if close[i] > senkou_a[i] and tenkan_1w_aligned[i] > kijun_1w_aligned[i] and close[i] > senkou_a_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: VI- > VI+ (bearish trend) AND price below EMA20 AND volume spike
-            elif vi_minus_aligned[i] > vi_plus_aligned[i] and close[i] < ema_20_12h[i] and volume_ratio[i] > 2.0:
+            # Enter short: Price breaks below Kumo (Senkou Span B) AND bearish weekly Tenkan/Kijun cross AND price < weekly Senkou Span B
+            elif close[i] < senkou_b[i] and tenkan_1w_aligned[i] < kijun_1w_aligned[i] and close[i] < senkou_b_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Vortex turns bearish OR price breaks below EMA20 OR volume drops
-            if vi_minus_aligned[i] > vi_plus_aligned[i] or close[i] < ema_20_12h[i] or volume_ratio[i] < 1.0:
+            # Exit long: Price breaks below Kumo (Senkou Span B) or weekly trend turns bearish
+            if close[i] < senkou_b[i] or tenkan_1w_aligned[i] < kijun_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Vortex turns bullish OR price breaks above EMA20 OR volume drops
-            if vi_plus_aligned[i] > vi_minus_aligned[i] or close[i] > ema_20_12h[i] or volume_ratio[i] < 1.0:
+            # Exit short: Price breaks above Kumo (Senkou Span A) or weekly trend turns bullish
+            if close[i] > senkou_a[i] or tenkan_1w_aligned[i] > kijun_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
