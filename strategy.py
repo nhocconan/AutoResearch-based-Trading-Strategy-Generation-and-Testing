@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Reversal_Breakout
-Hypothesis: Price often reverses at weekly pivot levels (R1/S1) in ranging markets, but breaks through with momentum in trending markets. Uses weekly pivot points (calculated from prior week) as dynamic support/resistance. Entry: break of R1/S1 with volume confirmation (>1.5x 24-period average) and EMA50 filter (price > EMA for longs, < EMA for shorts) to avoid false breakouts. Exits on opposite pivot touch or EMA crossover. Designed for 6h timeframe to capture multi-day moves while avoiding excessive whipsaw. Weekly pivot provides robust levels that work in both bull and bear markets as it adapts to recent price action.
+12h_KAMA_Trend_1wTrend_VolumeSpike
+Hypothesis: KAMA adapts to market noise, providing smooth trend signals. Combined with weekly trend filter and volume spike confirmation, this strategy captures strong trends while avoiding whipsaws in both bull and bear markets. The weekly timeframe provides robust trend direction, and volume spikes confirm momentum. Designed for low trade frequency (12-37/year) to minimize fee drag.
 """
 
-name = "6h_Weekly_Pivot_Reversal_Breakout"
-timeframe = "6h"
+name = "12h_KAMA_Trend_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,49 +22,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Previous week's values for weekly pivot calculation (standard formula)
-    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
-    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
-    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
+    # Calculate KAMA (adaptive moving average) on 12h data
+    er_len = 10
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
     
-    # Weekly Pivot Point (PP) and support/resistance levels
-    pp = (ph + pl + pc) / 3.0
-    r1 = 2 * pp - pl          # Resistance 1
-    s1 = 2 * pp - ph          # Support 1
-    r2 = pp + (ph - pl)       # Resistance 2
-    s2 = pp - (ph - pl)       # Support 2
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1) if len(close) > 1 else np.array([])
+    volatility = np.concatenate([np.full(er_len-1, np.nan), volatility]) if len(volatility) > 0 else np.full(len(close), np.nan)
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    er = np.full_like(change, np.nan)
+    er = np.concatenate([np.full(er_len-1, np.nan), er])
+    valid = (~np.isnan(change)) & (~np.isnan(volatility[er_len-1:])) & (volatility[er_len-1:] != 0)
+    er[er_len-1:] = np.where(valid, change[er_len-1:] / volatility[er_len-1:], 0)
     
-    # EMA50 on weekly close for trend filter
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (ema_50_1w[i-1] * 49 + close_1w[i]) / 50
+    sc = np.full_like(er, np.nan)
+    sc[er_len-1:] = (er[er_len-1:] * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    kama = np.full_like(close, np.nan)
+    if len(close) >= er_len:
+        kama[er_len-1] = close[er_len-1]
+        for i in range(er_len, len(close)):
+            if not np.isnan(sc[i]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+            else:
+                kama[i] = kama[i-1]
     
-    # Volume spike filter: current volume / 24-period average volume (24*6h = 6 days)
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[0:34])
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = (ema_34_1w[i-1] * 33 + close_1w[i]) / 34
+    
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 24:
-        vol_ma[23] = np.mean(volume[0:24])
-        for i in range(24, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
     volume_ratio = np.full_like(volume, np.nan)
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
@@ -74,12 +79,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(24, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, er_len)  # Ensure volume MA and KAMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -89,17 +93,17 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume confirmation
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
-                volume_ratio[i] > 1.5):
+            # Enter long: price > KAMA AND weekly uptrend AND volume spike
+            if (close[i] > kama[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume confirmation
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
-                  volume_ratio[i] > 1.5):
+            # Enter short: price < KAMA AND weekly downtrend AND volume spike
+            elif (close[i] < kama[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
@@ -109,8 +113,8 @@ def generate_signals(prices):
             if bars_since_entry < 2:
                 signals[i] = 0.25
             else:
-                # Exit conditions: touch S1 (contrarian exit) OR trend reversal (price < EMA50)
-                if close[i] < s1_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+                # Exit long: price < KAMA OR weekly downtrend
+                if close[i] < kama[i] or close[i] < ema_34_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -122,8 +126,8 @@ def generate_signals(prices):
             if bars_since_entry < 2:
                 signals[i] = -0.25
             else:
-                # Exit conditions: touch R1 (contrarian exit) OR trend reversal (price > EMA50)
-                if close[i] > r1_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+                # Exit short: price > KAMA OR weekly uptrend
+                if close[i] > kama[i] or close[i] > ema_34_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
