@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Camarilla R4/S4 breakout with 1d VWAP trend filter and volume spike
-# Long when price breaks above R4 with price above 1d VWAP and volume > 2x average
-# Short when price breaks below S4 with price below 1d VWAP and volume > 2x average
-# Exit when price retouches the central pivot (PP)
-# R4/S4 are less commonly used than R3/S3, offering stronger breakout signals with fewer trades
-# Designed to capture significant breakouts with institutional levels, VWAP for trend, volume for conviction
-# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
+# Hypothesis: 4h CAMARILLA R3/S3 BREAKOUT with 12h EMA20 TREND FILTER and VOLUME CONFIRMATION
+# Long when price breaks above R3 with 12h EMA20 uptrend and volume > 2x average
+# Short when price breaks below S3 with 12h EMA20 downtrend and volume > 2x average
+# Exit when price retouches central pivot (PP) or reverses to opposite S1/R1
+# Uses 12h trend filter to reduce whipsaw in choppy markets, focusing on strong institutional levels
+# Designed to capture breakouts with lower frequency than daily-based filters
+# Target: 100-180 total trades over 4 years (25-45/year) with size 0.25
 
-name = "4h_Camarilla_R4S4_Breakout_1dVWAP_VolumeSpike"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA20_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,34 +25,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d VWAP for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Calculate 12h CAMARILLA levels (PP, R1, R2, R3, S1, S2, S3)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 1:
         return np.zeros(n)
     
-    # Typical price and cumulative VWAP calculation
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap = vwap.values
-    
-    # Align VWAP to 4h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    
-    # Calculate 1d OHLC for Camarilla levels (using previous day)
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    prev_close = df_1d['close'].shift(1)
+    # Previous 12h bar's OHLC for CAMARILLA calculation
+    prev_high = df_12h['high'].shift(1)
+    prev_low = df_12h['low'].shift(1)
+    prev_close = df_12h['close'].shift(1)
     
     # Calculate pivot point
     pp = (prev_high + prev_low + prev_close) / 3
-    # Calculate R4 and S4 levels (extended Camarilla)
-    r4 = pp + (prev_high - prev_low) * 1.5000
-    s4 = pp - (prev_high - prev_low) * 1.5000
+    # Calculate CAMARILLA levels
+    r3 = pp + (prev_high - prev_low) * 1.2500
+    s3 = pp - (prev_high - prev_low) * 1.2500
+    pp_val = pp
+    s1 = pp - (prev_high - prev_low) * 1.0833
+    r1 = pp + (prev_high - prev_low) * 1.0833
     
-    # Align Camarilla levels to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
+    # Align CAMARILLA levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_12h, pp_val.values)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3.values)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1.values)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1.values)
+    
+    # Calculate 12h EMA20 for trend filter
+    ema20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
     # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -61,42 +62,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for VWAP calculation
+    start_idx = 50  # Need enough data for EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vwap_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R4, price above VWAP, volume spike
-            if (close[i] > r4_aligned[i] and 
-                close[i] > vwap_aligned[i] and 
+            # Enter long: price breaks above R3, 12h EMA20 uptrend, volume spike
+            if (close[i] > r3_aligned[i] and 
+                ema20_12h_aligned[i] > ema20_12h_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S4, price below VWAP, volume spike
-            elif (close[i] < s4_aligned[i] and 
-                  close[i] < vwap_aligned[i] and 
+            # Enter short: price breaks below S3, 12h EMA20 downtrend, volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  ema20_12h_aligned[i] < ema20_12h_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price retouches central pivot
-            if close[i] <= pp_aligned[i]:
+            # Exit long: price retouches central pivot or reverses to S1
+            if (close[i] <= pp_aligned[i]) or (close[i] < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price retouches central pivot
-            if close[i] >= pp_aligned[i]:
+            # Exit short: price retouches central pivot or reverses to R1
+            if (close[i] >= pp_aligned[i]) or (close[i] > r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
