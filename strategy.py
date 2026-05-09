@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
-# Hypothesis: 4h Donchian breakout with 12h EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > 12h EMA50 AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian(20) low AND price < 12h EMA50 AND volume > 1.5x 20-period average
-# Exit when price breaks opposite Donchian band OR EMA50 contradicts position
-# Position size: 0.28 to balance return and drawdown
-# Designed for trending markets with momentum confirmation and volume validation
+#/usr/bin/env python3
+# Hypothesis: 1h mean reversion with 4h trend filter and 1d volume regime
+# Long when price is below 4h VWAP but above 1h VWAP, volume above 1d average, and 4h trend is bullish
+# Short when price is above 4h VWAP but below 1h VWAP, volume above 1d average, and 4h trend is bearish
+# Exit when price crosses 1h VWAP or volume drops below average
+# Uses 4h for trend direction and 1d for volume regime to reduce whipsaw, 1h for precise entry
+# Position size: 0.20 (20% of capital) to limit drawdown
+# Designed to work in both trending and ranging markets via VWAP mean reversion and volume confirmation
 
-name = "4h_Donchian_EMA50_Volume_Filter"
-timeframe = "4h"
+name = "1h_VWAP_MeanReversion_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,61 +25,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = high_roll.values
-    donchian_low = low_roll.values
+    # 1h VWAP for mean reversion signal
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap_1h = vwap_num / vwap_den
     
-    # 12h EMA50 for trend filter
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4h VWAP for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 1:
+        return np.zeros(n)
+    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
+    vwap_num_4h = np.cumsum(typical_price_4h * df_4h['volume'].values)
+    vwap_den_4h = np.cumsum(df_4h['volume'].values)
+    vwap_4h = vwap_num_4h / vwap_den_4h
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)
+    # 1d volume average for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    vol_avg_1d = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA50 and Donchian
+    start_idx = 20  # Need enough data for volume average
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema50[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(vwap_1h[i]) or np.isnan(vwap_4h_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high AND above EMA50 (bullish) + volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema50[i] and 
-                vol_spike[i]):
-                signals[i] = 0.28
+            # Enter long: price below 4h VWAP (bullish 4h context) but above 1h VWAP (short-term mean reversion long)
+            # AND volume above 1d average (confirm participation)
+            if (close[i] < vwap_4h_aligned[i] and 
+                close[i] > vwap_1h[i] and 
+                volume[i] > vol_avg_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below Donchian low AND below EMA50 (bearish) + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema50[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.28
+            # Enter short: price above 4h VWAP (bearish 4h context) but below 1h VWAP (short-term mean reversion short)
+            # AND volume above 1d average (confirm participation)
+            elif (close[i] > vwap_4h_aligned[i] and 
+                  close[i] < vwap_1h[i] and 
+                  volume[i] > vol_avg_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR EMA50 turns bearish
-            if (close[i] < donchian_low[i]) or (close[i] < ema50[i]):
+            # Exit long: price crosses below 1h VWAP (mean reversion complete) OR volume drops below average
+            if (close[i] < vwap_1h[i]) or (volume[i] < vol_avg_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR EMA50 turns bullish
-            if (close[i] > donchian_high[i]) or (close[i] > ema50[i]):
+            # Exit short: price crosses above 1h VWAP (mean reversion complete) OR volume drops below average
+            if (close[i] > vwap_1h[i]) or (volume[i] < vol_avg_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.20
     
     return signals
