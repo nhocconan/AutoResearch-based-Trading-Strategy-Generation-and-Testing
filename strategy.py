@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_WeeklyPivot_R2S2_Rejection_R3S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Anchored_VWAP_Deviation_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly OHLC for pivot levels (based on previous week's OHLC)
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate VWAP reset at each 1d boundary (start of day)
+    vwap = np.zeros(n)
+    vwap_sum = 0.0
+    vol_sum = 0.0
+    prev_date = None
     
-    # Calculate pivot and levels from previous week's OHLC
-    prev_high_1w = np.roll(high_1w, 1)
-    prev_low_1w = np.roll(low_1w, 1)
-    prev_close_1w = np.roll(close_1w, 1)
-    prev_high_1w[0] = np.nan
-    prev_low_1w[0] = np.nan
-    prev_close_1w[0] = np.nan
+    for i in range(n):
+        current_date = pd.Timestamp(prices['open_time'].iloc[i]).date()
+        if prev_date is None or current_date != prev_date:
+            # Reset at start of new day
+            vwap_sum = 0.0
+            vol_sum = 0.0
+            prev_date = current_date
+        
+        typical_price = (high[i] + low[i] + close[i]) / 3.0
+        vwap_sum += typical_price * volume[i]
+        vol_sum += volume[i]
+        
+        if vol_sum > 0:
+            vwap[i] = vwap_sum / vol_sum
+        else:
+            vwap[i] = close[i]
     
-    prev_weekly_range = prev_high_1w - prev_low_1w
-    pivot = (prev_high_1w + prev_low_1w + prev_close_1w) / 3
-    r2 = pivot + 1.1 * prev_weekly_range / 2
-    r3 = pivot + 1.1 * prev_weekly_range
-    s2 = pivot - 1.1 * prev_weekly_range / 2
-    s3 = pivot - 1.1 * prev_weekly_range
+    # VWAP deviation as percentage
+    vwap_dev = (close - vwap) / vwap * 100.0
     
-    # Align weekly pivot levels to daily
-    r2_1d = align_htf_to_ltf(prices, df_1w, r2)
-    r3_1d = align_htf_to_ltf(prices, df_1w, r3)
-    s2_1d = align_htf_to_ltf(prices, df_1w, s2)
-    s3_1d = align_htf_to_ltf(prices, df_1w, s3)
+    # Calculate 20-period standard deviation of VWAP deviation for dynamic bands
+    vwap_dev_ma = pd.Series(vwap_dev).rolling(window=20, min_periods=20).mean().values
+    vwap_dev_std = pd.Series(vwap_dev).rolling(window=20, min_periods=20).std().values
     
-    # 20-day volume average for spike detection
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Dynamic bands: 2 standard deviations
+    upper_band = vwap_dev_ma + 2.0 * vwap_dev_std
+    lower_band = vwap_dev_ma - 2.0 * vwap_dev_std
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r2_1d[i]) or np.isnan(s2_1d[i]) or np.isnan(ema20_1d[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema50_6h[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(vwap_dev[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.0 x 20-day average
-        vol_spike = volume[i] > vol_avg[i] * 2.0
-        
         if position == 0:
-            # Long: Break above weekly R2 with uptrend and volume spike
-            if close[i] > r2_1d[i] and close[i] > ema20_1d[i] and vol_spike:
+            # Long: Price deviates significantly below VWAP (oversold) in uptrend
+            if vwap_dev[i] < lower_band[i] and close[i] > ema50_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below weekly S2 with downtrend and volume spike
-            elif close[i] < s2_1d[i] and close[i] < ema20_1d[i] and vol_spike:
+            # Short: Price deviates significantly above VWAP (overbought) in downtrend
+            elif vwap_dev[i] > upper_band[i] and close[i] < ema50_6h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below weekly S2 OR trend turns down
-            if close[i] < s2_1d[i] or close[i] < ema20_1d[i]:
+            # Exit long: Price returns to VWAP or trend turns down
+            if vwap_dev[i] > vwap_dev_ma[i] or close[i] < ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above weekly R2 OR trend turns up
-            if close[i] > r2_1d[i] or close[i] > ema20_1d[i]:
+            # Exit short: Price returns to VWAP or trend turns up
+            if vwap_dev[i] < vwap_dev_ma[i] or close[i] > ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
