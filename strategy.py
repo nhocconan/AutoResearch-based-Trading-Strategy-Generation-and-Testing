@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Fisher_Transform_1dTrend_VolumeSpike"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Works in bull: breaks above upper band in uptrend. Works in bear: breaks below lower band in downtrend.
+# Volume filter reduces false breakouts. Target 20-40 trades/year to avoid fee drag.
+name = "4h_Donchian_Breakout_12hEMA50_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,38 +20,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Fisher Transform
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 50-period EMA on 12h close for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Fisher Transform on 1d close (period=9)
-    # Fisher Transform formula: Fisher = 0.5 * ln((1 + X) / (1 - X))
-    # where X = 2 * (price - min_low) / (max_high - min_low) - 1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate highest high and lowest low over 9 periods
-    high_max = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_min = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    
-    # Avoid division by zero
-    range_hl = high_max - low_min
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    
-    # Normalize price to [-1, 1]
-    x_raw = 2 * (close_1d - low_min) / range_hl - 1
-    # Clip to prevent log of negative or zero
-    x_raw = np.clip(x_raw, -0.999, 0.999)
-    
-    # Fisher Transform
-    fisher = 0.5 * np.log((1 + x_raw) / (1 - x_raw))
-    fisher_aligned = align_htf_to_ltf(prices, df_1d, fisher)
+    # Calculate 20-period Donchian channels on 4h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Calculate 20-period volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,43 +40,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 34 for 1d EMA and 20 for volume average
+    start_idx = max(50, 20)  # Need 50 for 12h EMA and 20 for Donchian/volume
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(fisher_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(high_max[i]) or 
+            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        fisher_val = fisher_aligned[i]
-        ema_1d = ema_34_1d_aligned[i]
+        ema_12h = ema_50_12h_aligned[i]
+        donch_high = high_max[i]
+        donch_low = low_min[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Fisher crosses above -1.5 AND price > 1d EMA34 (uptrend) AND volume > 2.0x average
-            if fisher_val > -1.5 and close[i] > ema_1d and vol > 2.0 * vol_ma_val:
+            # Enter long: price breaks above Donchian high AND price > 12h EMA50 (uptrend) AND volume > 1.5x average
+            if close[i] > donch_high and close[i] > ema_12h and vol > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Fisher crosses below +1.5 AND price < 1d EMA34 (downtrend) AND volume > 2.0x average
-            elif fisher_val < 1.5 and close[i] < ema_1d and vol > 2.0 * vol_ma_val:
+            # Enter short: price breaks below Donchian low AND price < 12h EMA50 (downtrend) AND volume > 1.5x average
+            elif close[i] < donch_low and close[i] < ema_12h and vol > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Fisher crosses below -1.5 OR trend reverses (price < 1d EMA34)
-            if fisher_val < -1.5 or close[i] < ema_1d:
+            # Exit long: price breaks below Donchian low OR trend reverses (price < 12h EMA50)
+            if close[i] < donch_low or close[i] < ema_12h:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Fisher crosses above +1.5 OR trend reverses (price > 1d EMA34)
-            if fisher_val > 1.5 or close[i] > ema_1d:
+            # Exit short: price breaks above Donchian high OR trend reverses (price > 12h EMA50)
+            if close[i] > donch_high or close[i] > ema_12h:
                 signals[i] = 0.0
                 position = 0
             else:
