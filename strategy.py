@@ -3,20 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator trend following with 1d trend filter
-# Uses 1d EMA50 for trend filter and Williams Alligator (Jaw/Teeth/Lips) on 4h for entry
-# Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMAs
-# Long when Lips > Teeth > Jaw and price > 1d EMA50
-# Short when Lips < Teeth < Jaw and price < 1d EMA50
-# Designed for low trade frequency (15-40/year) to avoid fee drag in 4h timeframe
-# Works in trending markets and avoids whipsaws in ranging markets via Alligator convergence/divergence
-name = "4h_WilliamsAlligator_1dEMA50_Trend"
-timeframe = "4h"
+# Hypothesis: 6h strategy using weekly pivot direction and daily volume confirmation.
+# Uses 1w pivot points (calculated from prior week) for trend filter and 1d volume spike for entry timing.
+# Designed for low trade frequency (12-37/year) to avoid fee drag in 6h timeframe.
+# Works in both bull/bear markets by requiring alignment with weekly pivot trend and volume confirmation.
+name = "6h_WeeklyPivot_DailyVolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,72 +21,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly pivot points (using prior week's data)
+    # R1 = 2*P - L, S1 = 2*P - H, R2 = P + (H-L), S2 = P - (H-L)
+    # where P = (H+L+C)/3
+    wh = df_1w['high'].values
+    wl = df_1w['low'].values
+    wc = df_1w['close'].values
     
-    # Calculate Williams Alligator on 4h data
-    # Jaw: 13-period SMMA, smoothed 8 periods ahead
-    jaw_raw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    jaw = jaw_raw.rolling(window=8, min_periods=8).mean()
+    wp = (wh + wl + wc) / 3.0
+    wr1 = 2 * wp - wl
+    ws1 = 2 * wp - wh
+    wr2 = wp + (wh - wl)
+    ws2 = wp - (wh - wl)
     
-    # Teeth: 8-period SMMA, smoothed 5 periods ahead
-    teeth_raw = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    teeth = teeth_raw.rolling(window=5, min_periods=5).mean()
+    # Align weekly pivots to 6h (wait for weekly close)
+    wp_6h = align_htf_to_ltf(prices, df_1w, wp)
+    wr1_6h = align_htf_to_ltf(prices, df_1w, wr1)
+    ws1_6h = align_htf_to_ltf(prices, df_1w, ws1)
+    wr2_6h = align_htf_to_ltf(prices, df_1w, wr2)
+    ws2_6h = align_htf_to_ltf(prices, df_1w, ws2)
     
-    # Lips: 5-period SMMA, smoothed 3 periods ahead
-    lips_raw = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    lips = lips_raw.rolling(window=3, min_periods=3).mean()
+    # Get daily data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    jaw_values = jaw.values
-    teeth_values = teeth.values
-    lips_values = lips.values
+    # Calculate 20-day average volume
+    vol_ma_20 = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_6h = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for sufficient data for Alligator components
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_4h[i]) or np.isnan(jaw_values[i]) or np.isnan(teeth_values[i]) or np.isnan(lips_values[i]):
+        if np.isnan(wp_6h[i]) or np.isnan(vol_ma_20_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams Alligator signals
-        # Bullish alignment: Lips > Teeth > Jaw
-        bullish_alignment = lips_values[i] > teeth_values[i] and teeth_values[i] > jaw_values[i]
-        # Bearish alignment: Lips < Teeth < Jaw
-        bearish_alignment = lips_values[i] < teeth_values[i] and teeth_values[i] < jaw_values[i]
+        # Volume spike: current volume > 1.5 * 20-day average
+        vol_spike = volume[i] > 1.5 * vol_ma_20_6h[i]
         
         if position == 0:
-            # Long: bullish alignment and price above 1d EMA50
-            if bullish_alignment and close[i] > ema_50_4h[i]:
+            # Long: price above weekly R1 and volume spike
+            if close[i] > wr1_6h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment and price below 1d EMA50
-            elif bearish_alignment and close[i] < ema_50_4h[i]:
+            # Short: price below weekly S1 and volume spike
+            elif close[i] < ws1_6h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish alignment or price below 1d EMA50
-            if bearish_alignment or close[i] < ema_50_4h[i]:
+            # Exit long: price below weekly pivot or volume spike ends
+            if close[i] < wp_6h[i] or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish alignment or price above 1d EMA50
-            if bullish_alignment or close[i] > ema_50_4h[i]:
+            # Exit short: price above weekly pivot or volume spike ends
+            if close[i] > wp_6h[i] or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
