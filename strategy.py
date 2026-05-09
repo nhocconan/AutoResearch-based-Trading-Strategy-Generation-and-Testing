@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1dTrend_Volume
-# Hypothesis: Elder Ray (Bull/Bear Power) with 1d EMA trend filter and volume spike.
-# Works in bull/bear: Trend filter ensures we trade with higher timeframe momentum,
-# Elder Ray captures momentum strength, volume confirms institutional participation.
-# Targets 50-150 total trades over 4 years.
+# 4h_KAMA_Trend_Filter_RSI_Extremes
+# Hypothesis: KAMA filters trend direction while RSI extremes with volume confirmation provide mean-reversion entries.
+# Works in bull/bear: KAMA trend filter avoids counter-trend trades; RSI extremes + volume spike capture reversals.
+# Targets 20-40 trades/year by requiring trend alignment, RSI <30 or >70, and volume >2x average.
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Trend_Filter_RSI_Extremes"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,33 +22,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 13-period EMA for Elder Ray (using 13 as common period)
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        alpha = 2 / (period + 1)
-        result[period-1] = np.mean(arr[0:period])
-        for i in range(period, len(arr)):
-            result[i] = alpha * arr[i] + (1 - alpha) * result[i-1]
-        return result
+    # Calculate KAMA (Kaufman Adaptive Moving Average) for trend
+    def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+        kama = np.full_like(close, np.nan)
+        if len(close) < er_length + 1:
+            return kama
+        
+        change = np.abs(np.diff(close, n=er_length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        kama[er_length] = close[er_length]
+        for i in range(er_length + 1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    ema13 = ema(close, 13)
+    # Calculate RSI
+    def calculate_rsi(close, length=14):
+        rsi = np.full_like(close, np.nan)
+        if len(close) < length + 1:
+            return rsi
+        
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        
+        avg_gain[length] = np.mean(gain[:length])
+        avg_loss[length] = np.mean(loss[:length])
+        
+        for i in range(length + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high - ema13
-    bear_power = ema13 - low
-    
-    # Get 1d EMA34 for trend filter
+    # Get daily data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema34_1d = ema(close_1d, 34)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume spike: current volume / 20-period average
+    # Calculate KAMA on daily data for trend filter
+    kama_1d = calculate_kama(close_1d, er_length=10, fast_sc=2, slow_sc=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    
+    # Calculate RSI on 4h data
+    rsi_4h = calculate_rsi(close, length=14)
+    
+    # Volume ratio: current volume / 20-period average
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -63,44 +92,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure EMA34 and volume MA are ready
+    start_idx = max(20, 15)  # Ensure volume MA and RSI are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_4h[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Bull Power > 0 AND uptrend (close > EMA34) AND volume spike
-            if (bull_power[i] > 0 and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume_ratio[i] > 1.8):
+            # Enter long: price above KAMA (uptrend) AND RSI oversold (<30) AND volume spike
+            if (close[i] > kama_1d_aligned[i] and 
+                rsi_4h[i] < 30 and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power > 0 AND downtrend (close < EMA34) AND volume spike
-            elif (bear_power[i] > 0 and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume_ratio[i] > 1.8):
+            # Enter short: price below KAMA (downtrend) AND RSI overbought (>70) AND volume spike
+            elif (close[i] < kama_1d_aligned[i] and 
+                  rsi_4h[i] > 70 and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power <= 0 OR trend reversal (close < EMA34)
-            if bull_power[i] <= 0 or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price below KAMA OR RSI overbought (>70)
+            if close[i] < kama_1d_aligned[i] or rsi_4h[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power <= 0 OR trend reversal (close > EMA34)
-            if bear_power[i] <= 0 or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price above KAMA OR RSI oversold (<30)
+            if close[i] > kama_1d_aligned[i] or rsi_4h[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
