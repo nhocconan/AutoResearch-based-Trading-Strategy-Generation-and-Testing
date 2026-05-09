@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_DailyTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,39 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Using previous week's data (already complete when we get it)
-    prev_week_high = df_1w['high'].shift(1).values  # Previous week high
-    prev_week_low = df_1w['low'].shift(1).values    # Previous week low
-    prev_week_close = df_1w['close'].shift(1).values # Previous week close
+    # Calculate previous day's Camarilla pivot levels (standard formula)
+    # Using previous day's data (already complete when we get it)
+    prev_day_high = df_1d['high'].shift(1).values    # Previous day high
+    prev_day_low = df_1d['low'].shift(1).values      # Previous day low
+    prev_day_close = df_1d['close'].shift(1).values  # Previous day close
     
-    # Pivot point calculation
-    pivot_point = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot_point - prev_week_low
-    s1 = 2 * pivot_point - prev_week_high
-    r2 = pivot_point + (prev_week_high - prev_week_low)
-    s2 = pivot_point - (prev_week_high - prev_week_low)
-    r3 = prev_week_high + 2 * (pivot_point - prev_week_low)
-    s3 = prev_week_low - 2 * (prev_week_high - pivot_point)
+    # Calculate pivot point and support/resistance levels
+    pivot_point = (prev_day_high + prev_day_low + prev_day_close) / 3.0
+    range_ = prev_day_high - prev_day_low
+    r1 = pivot_point + (range_ * 1.0 / 8.0)
+    s1 = pivot_point - (range_ * 1.0 / 8.0)
+    r2 = pivot_point + (range_ * 2.0 / 8.0)
+    s2 = pivot_point - (range_ * 2.0 / 8.0)
+    r3 = pivot_point + (range_ * 3.0 / 8.0)
+    s3 = pivot_point - (range_ * 3.0 / 8.0)
+    r4 = pivot_point + (range_ * 4.0 / 8.0)
+    s4 = pivot_point - (range_ * 4.0 / 8.0)
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_point_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Align daily pivot levels to 4h timeframe
+    pivot_point_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate 34-period EMA on daily close for trend filter
     close_1d = df_1d['close'].values
@@ -81,6 +81,8 @@ def generate_signals(prices):
         s2_level = s2_aligned[i]
         r3_level = r3_aligned[i]
         s3_level = s3_aligned[i]
+        r4_level = r4_aligned[i]
+        s4_level = s4_aligned[i]
         ema_1d = ema_34_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
@@ -96,16 +98,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below pivot OR trend reverses (price < daily EMA34)
-            if close[i] < pivot or close[i] < ema_1d:
+            # Exit long: Price breaks below S1 OR trend reverses (price < daily EMA34)
+            if close[i] < s1_level or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above pivot OR trend reverses (price > daily EMA34)
-            if close[i] > pivot or close[i] > ema_1d:
+            # Exit short: Price breaks above R1 OR trend reverses (price > daily EMA34)
+            if close[i] > r1_level or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
