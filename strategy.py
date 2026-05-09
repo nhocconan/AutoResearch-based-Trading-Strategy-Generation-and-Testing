@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v4"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,10 +22,10 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend filter
+    # Calculate 20-period EMA on 1d close for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Calculate Camarilla levels from previous day's OHLC
     prev_close = df_1d['close'].shift(1).values
@@ -50,12 +50,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 34 for 1d EMA and 20 for volume average
+    start_idx = max(20, 20)  # Need 20 for 1d EMA and volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
         if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,22 +65,22 @@ def generate_signals(prices):
         s1 = S1_aligned[i]
         h4 = H4_aligned[i]
         l4 = L4_aligned[i]
-        ema_1d = ema_34_1d_aligned[i]
+        ema_1d = ema_20_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Close > R1 AND price > 1d EMA34 (uptrend) AND volume > 2.5x average
+            # Enter long: Close > R1 AND price > 1d EMA20 (uptrend) AND volume > 2.5x average
             if close[i] > r1 and close[i] > ema_1d and vol > 2.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S1 AND price < 1d EMA34 (downtrend) AND volume > 2.5x average
+            # Enter short: Close < S1 AND price < 1d EMA20 (downtrend) AND volume > 2.5x average
             elif close[i] < s1 and close[i] < ema_1d and vol > 2.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < S1 OR trend reverses (price < 1d EMA34)
+            # Exit long: Close < S1 OR trend reverses (price < 1d EMA20)
             if close[i] < s1 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
@@ -88,7 +88,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > R1 OR trend reverses (price > 1d EMA34)
+            # Exit short: Close > R1 OR trend reverses (price > 1d EMA20)
             if close[i] > r1 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
