@@ -1,16 +1,6 @@
-# 1D_Wilson_Wave_Oscillator_Trend_Filter
-# Combines Wilson Wave Oscillator with trend filter and volume confirmation
-# Wilson Wave Oscillator: %K = (Close - Lowest Low) / (Highest High - Lowest Low) * 100
-# Trend filter: 1w EMA200 on weekly chart for long-term direction
-# Volume confirmation: Daily volume > 1.5x 20-day average
-# Entry: WWO oversold (<20) in uptrend or overbought (>80) in downtrend + volume confirmation
-# Exit: Opposite WWO level or trend reversal
-# Designed for 1d timeframe to work in both bull and bear markets
-# Target: 15-25 trades/year to stay within fee limits
-
 #!/usr/bin/env python3
-name = "1D_Wilson_Wave_Oscillator_Trend_Filter"
-timeframe = "1d"
+name = "6H_Keltner_Channel_RSI_Extreme"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,85 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA200 for trend filter
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 1w EMA200 to daily timeframe
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    
-    # Calculate Wilson Wave Oscillator (14-period)
-    wwo_period = 14
-    highest_high = pd.Series(high).rolling(window=wwo_period, min_periods=wwo_period).max().values
-    lowest_low = pd.Series(low).rolling(window=wwo_period, min_periods=wwo_period).min().values
-    
-    # Avoid division by zero
-    range_ww = highest_high - lowest_low
-    wwo_raw = np.where(range_ww != 0, (close - lowest_low) / range_ww * 100, 50)
-    
-    # Get daily data for volume confirmation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-day volume average
-    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily EMA100 for trend filter
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Align volume MA to daily timeframe (same timeframe, so direct use)
-    vol_ma20_aligned = vol_ma20_1d
+    # Calculate 6h Keltner Channel components
+    # ATR(10)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # EMA(20) of typical price for Keltner middle
+    tp = (high + low + close) / 3
+    ema20_tp = pd.Series(tp).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner Bands
+    keltner_upper = ema20_tp + 2.0 * atr10
+    keltner_lower = ema20_tp - 2.0 * atr10
+    
+    # Calculate 6h RSI(14)
+    delta = np.diff(close)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data for all indicators
-    start_idx = max(200, wwo_period, 20)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(wwo_raw[i]) or 
-            np.isnan(vol_ma20_aligned[i])):
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Uptrend: price above 1w EMA200
-        uptrend = close[i] > ema200_1w_aligned[i]
-        # Downtrend: price below 1w EMA200
-        downtrend = close[i] < ema200_1w_aligned[i]
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = volume[i] > vol_ma20_aligned[i] * 1.5
+        # Uptrend: price above daily EMA100
+        uptrend = close[i] > ema100_1d_aligned[i]
+        # Downtrend: price below daily EMA100
+        downtrend = close[i] < ema100_1d_aligned[i]
         
         if position == 0:
-            # Enter long: WWO oversold (<20) in uptrend + volume confirmation
-            if uptrend and wwo_raw[i] < 20 and volume_confirm:
+            # Enter long: Uptrend + RSI oversold (<30) + price touches lower Keltner band
+            if uptrend and rsi[i] < 30 and close[i] <= keltner_lower[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: WWO overbought (>80) in downtrend + volume confirmation
-            elif downtrend and wwo_raw[i] > 80 and volume_confirm:
+            # Enter short: Downtrend + RSI overbought (>70) + price touches upper Keltner band
+            elif downtrend and rsi[i] > 70 and close[i] >= keltner_upper[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: WWO overbought (>80) or trend turns down
-            if wwo_raw[i] > 80 or not uptrend:
+            # Exit long: RSI overbought (>70) or trend turns down
+            if rsi[i] > 70 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: WWO oversold (<20) or trend turns up
-            if wwo_raw[i] < 20 or not downtrend:
+            # Exit short: RSI oversold (<30) or trend turns up
+            if rsi[i] < 30 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
