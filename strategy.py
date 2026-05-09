@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,78 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 4h data for trend filter and daily data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_4h) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    # Previous day's high and low
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Previous day's Camarilla R1 and S1 (daily)
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    r1 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) / 12
+    s1 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) / 12
     
-    # Calculate Camarilla levels: R3, S3
-    # R3 = close + 1.1*(high - low)
-    # S3 = close - 1.1*(high - low)
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
+    # Align Camarilla levels to 1h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Align to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Trend filter: 4h EMA50
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: current 12h volume > 1.8 * 24-period average
+    # Volume filter: current 1h volume > 1.5 * 24-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(24, 34)  # Need enough data for volume MA and EMA34
+    start_idx = max(24, 50)  # Need enough data for volume MA and EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema50_4h_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
-        trend = ema34_1d_aligned[i]
+        r1_val = r1_aligned[i]
+        s1_val = s1_aligned[i]
+        trend = ema50_4h_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R3 with volume and above trend
-            if close[i] > r3 and close[i] > trend and vol_filter:
-                signals[i] = 0.25
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: break below S3 with volume and below trend
-            elif close[i] < s3 and close[i] < trend and vol_filter:
-                signals[i] = -0.25
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 (mean reversion to center)
-            if close[i] < s3:
+            # Exit long: close below S1 (mean reversion)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: close above R3 (mean reversion to center)
-            if close[i] > r3:
+            # Exit short: close above R1 (mean reversion)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
