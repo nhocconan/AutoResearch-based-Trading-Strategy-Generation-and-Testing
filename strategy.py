@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyDonchian20_1wEMA50_VolumeConfirm"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,69 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on weekly close for trend filter
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate 20-period Donchian channels on daily
-    highest_20 = np.full(n, np.nan)
-    lowest_20 = np.full(n, np.nan)
+    # Camarilla R1, S1, H4, L4 levels
+    R1 = prev_close + 0.25 * (prev_high - prev_low)
+    S1 = prev_close - 0.25 * (prev_high - prev_low)
+    H4 = prev_high + 0.5 * (prev_high - prev_low)
+    L4 = prev_low - 0.5 * (prev_high - prev_low)
     
-    for i in range(20, n):
-        highest_20[i] = np.max(high[i-20:i])
-        lowest_20[i] = np.min(low[i-20:i])
+    # Align to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    
+    # Calculate 20-period EMA on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Calculate 20-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Need 20 for Donchian, 50 for weekly EMA
+    start_idx = max(20, 20)  # Need 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1w = ema_50_1w_aligned[i]
-        high_20 = highest_20[i]
-        low_20 = lowest_20[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        h4 = H4_aligned[i]
+        l4 = L4_aligned[i]
+        ema_1d = ema_20_1d_aligned[i]
         vol = volume[i]
-        
-        # Calculate 20-period volume average for confirmation
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-        else:
-            vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: High > 20-period high AND price > weekly EMA50 (uptrend) AND volume > 1.8x average
-            if high[i] > high_20 and close[i] > ema_1w and vol > 1.8 * vol_ma:
+            # Enter long: Close > R1 AND price > 1d EMA20 (uptrend) AND volume > 1.5x average
+            if close[i] > r1 and close[i] > ema_1d and vol > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Low < 20-period low AND price < weekly EMA50 (downtrend) AND volume > 1.8x average
-            elif low[i] < low_20 and close[i] < ema_1w and vol > 1.8 * vol_ma:
+            # Enter short: Close < S1 AND price < 1d EMA20 (downtrend) AND volume > 1.5x average
+            elif close[i] < s1 and close[i] < ema_1d and vol > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Low < 20-period low OR trend reverses (price < weekly EMA50)
-            if low[i] < low_20 or close[i] < ema_1w:
+            # Exit long: Close < S1 OR trend reverses (price < 1d EMA20)
+            if close[i] < s1 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: High > 20-period high OR trend reverses (price > weekly EMA50)
-            if high[i] > high_20 or close[i] > ema_1w:
+            # Exit short: Close > R1 OR trend reverses (price > 1d EMA20)
+            if close[i] > r1 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
