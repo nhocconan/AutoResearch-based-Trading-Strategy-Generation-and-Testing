@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA34 trend filter and volume spike confirmation.
-# Donchian breakout captures breakouts from price channels, effective in both trending and ranging markets.
-# EMA34 on 1w confirms long-term trend direction. Volume > 2x average confirms institutional interest.
-# Designed for low trade frequency (<25/year) to minimize fee drag in bear markets.
-name = "1d_Donchian20_1wEMA34_VolumeSpike"
-timeframe = "1d"
+# Hypothesis: 4h Camarilla R3/S3 level breakout with 1d EMA34 trend filter and volume spike confirmation.
+# Camarilla R3/S3 represent strong support/resistance in ranging markets; breakout above/below indicates momentum.
+# EMA34 on 1d confirms long-term trend direction. Volume > 2x average confirms institutional interest.
+# Designed for low trade frequency (<50/year) to minimize fee drag in bear markets.
+name = "4h_Camarilla_R3S3_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,39 +21,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1w close
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 34-period EMA on 1d close
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Donchian channels (20-period high/low)
-    # Use rolling window with min_periods=20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Use previous day's high, low, close for current bar's levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # R3 level: Close + (High - Low) * 1.1 / 4
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    # S3 level: Close - (High - Low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 for Donchian channels
+    start_idx = max(34, 1)  # Need 34 for EMA34 and 1 for rolling
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1w = ema_34_1w_aligned[i]
-        upper_channel = donchian_high[i]
-        lower_channel = donchian_low[i]
+        ema_1d = ema_34_1d_aligned[i]
+        r3_level = r3[i]
+        s3_level = s3[i]
         vol = volume[i]
         
         # Calculate 20-period volume average for spike detection
@@ -63,26 +70,26 @@ def generate_signals(prices):
             vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
         if position == 0:
-            # Enter long: Close > Upper Donchian AND price > 1w EMA34 (uptrend) AND volume > 2x average
-            if close[i] > upper_channel and close[i] > ema_1w and vol > 2.0 * vol_ma:
+            # Enter long: Close > R3 AND price > 1d EMA34 (uptrend) AND volume > 2x average
+            if close[i] > r3_level and close[i] > ema_1d and vol > 2.0 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < Lower Donchian AND price < 1w EMA34 (downtrend) AND volume > 2x average
-            elif close[i] < lower_channel and close[i] < ema_1w and vol > 2.0 * vol_ma:
+            # Enter short: Close < S3 AND price < 1d EMA34 (downtrend) AND volume > 2x average
+            elif close[i] < s3_level and close[i] < ema_1d and vol > 2.0 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < Lower Donchian OR trend reverses (price < 1w EMA34)
-            if close[i] < lower_channel or close[i] < ema_1w:
+            # Exit long: Close < S3 OR trend reverses (price < 1d EMA34)
+            if close[i] < s3_level or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > Upper Donchian OR trend reverses (price > 1w EMA34)
-            if close[i] > upper_channel or close[i] > ema_1w:
+            # Exit short: Close > R3 OR trend reverses (price > 1d EMA34)
+            if close[i] > r3_level or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
