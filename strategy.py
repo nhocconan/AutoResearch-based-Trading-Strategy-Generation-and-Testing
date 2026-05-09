@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
-timeframe = "12h"
+name = "4h_Ichimoku_Kumo_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,32 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter and Ichimoku components
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 52:
         return np.zeros(n)
     
-    # Calculate 20-period EMA on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Calculate Ichimoku components on 12h data
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_12h).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_12h).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Camarilla R1, S1, H4, L4 levels
-    R1 = prev_close + 0.25 * (prev_high - prev_low)
-    S1 = prev_close - 0.25 * (prev_high - prev_low)
-    H4 = prev_high + 0.5 * (prev_high - prev_low)
-    L4 = prev_low - 0.5 * (prev_high - prev_low)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_12h).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_12h).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Align Camarilla levels to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2, shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2, shifted 26 periods ahead
+    period52_high = pd.Series(high_12h).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_12h).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 4h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_b)
+    
+    # Calculate 50-period EMA on 12h close for additional trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate 20-period volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,46 +61,53 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need 20 for 1d EMA and volume average
+    start_idx = max(52, 20)  # Need 52 for Ichimoku, 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1 = R1_aligned[i]
-        s1 = S1_aligned[i]
-        h4 = H4_aligned[i]
-        l4 = L4_aligned[i]
-        ema_1d = ema_20_1d_aligned[i]
+        tenkan = tenkan_sen_aligned[i]
+        kijun = kijun_sen_aligned[i]
+        senkou_a = senkou_a_aligned[i]
+        senkou_b = senkou_b_aligned[i]
+        ema_12h = ema_50_12h_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
+        # Kumo (cloud) boundaries: max/min of Senkou Span A and B
+        upper_kumo = max(senkou_a, senkou_b)
+        lower_kumo = min(senkou_a, senkou_b)
+        
         if position == 0:
-            # Enter long: Close > R1 AND price > 1d EMA20 (uptrend) AND volume > 2.5x average
-            if close[i] > r1 and close[i] > ema_1d and vol > 2.5 * vol_ma_val:
+            # Enter long: Price breaks above Kumo AND bullish Kumo (Senkou A > Senkou B) AND price > 12h EMA50 AND volume > 2x average
+            if (close[i] > upper_kumo and senkou_a > senkou_b and 
+                close[i] > ema_12h and vol > 2.0 * vol_ma_val):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S1 AND price < 1d EMA20 (downtrend) AND volume > 2.5x average
-            elif close[i] < s1 and close[i] < ema_1d and vol > 2.5 * vol_ma_val:
+            # Enter short: Price breaks below Kumo AND bearish Kumo (Senkou A < Senkou B) AND price < 12h EMA50 AND volume > 2x average
+            elif (close[i] < lower_kumo and senkou_a < senkou_b and 
+                  close[i] < ema_12h and vol > 2.0 * vol_ma_val):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < S1 OR trend reverses (price < 1d EMA20)
-            if close[i] < s1 or close[i] < ema_1d:
+            # Exit long: Price falls below Kumo OR Kumo turns bearish
+            if close[i] < lower_kumo or senkou_a < senkou_b:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > R1 OR trend reverses (price > 1d EMA20)
-            if close[i] > r1 or close[i] > ema_1d:
+            # Exit short: Price rises above Kumo OR Kumo turns bullish
+            if close[i] > upper_kumo or senkou_a > senkou_b:
                 signals[i] = 0.0
                 position = 0
             else:
