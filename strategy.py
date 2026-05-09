@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Donchian20_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,40 +12,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 1d timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Daily volatility filter: ATR(14) > 20-period SMA of ATR
-    tr1 = high[1:] - low[:-1]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[:-1] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr14 > 1.5 * atr_ma20  # elevated volatility regime
-    
-    # Weekly trend filter: EMA50 on 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Camarilla pivot levels from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ph = df_1d['high'].values
+    pl = df_1d['low'].values
+    pc = df_1d['close'].values
+    
+    R4 = pc + ((ph - pl) * 1.5)
+    R3 = pc + ((ph - pl) * 1.25)
+    S3 = pc - ((ph - pl) * 1.25)
+    S4 = pc - ((ph - pl) * 1.5)
+    
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 1.5 * vol_ma20
+    
+    # 1d trend: EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 60
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr_ma20[i]) or np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
+           np.isnan(ema34_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,35 +59,32 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band + elevated vol + weekly uptrend
-            if (price > highest_high[i] and  # Donchian breakout
-                vol_filter[i] and            # volatility expansion
-                price > ema50_1w_aligned[i]): # weekly uptrend
+            # Long: break above R3 with volume spike + uptrend
+            if (price > R3_aligned[i] and 
+                vol_spike[i] and 
+                price > ema34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-                continue
-            
-            # Short: price breaks below lower Donchian band + elevated vol + weekly downtrend
-            elif (price < lowest_low[i] and   # Donchian breakdown
-                  vol_filter[i] and           # volatility expansion
-                  price < ema50_1w_aligned[i]): # weekly downtrend
+            # Short: break below S3 with volume spike + downtrend
+            elif (price < S3_aligned[i] and 
+                  vol_spike[i] and 
+                  price < ema34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-                continue
         
         elif position == 1:
-            # Exit long: price retreats to middle of range or weekly trend fails
-            if (price < (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
-                price < ema50_1w_aligned[i]):                     # weekly trend fail
+            # Exit long: price returns to S4 or trend fails
+            if (price < S4_aligned[i] or 
+                price < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises to middle of range or weekly trend fails
-            if (price > (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
-                price > ema50_1w_aligned[i]):                     # weekly trend fail
+            # Exit short: price returns to R4 or trend fails
+            if (price > R4_aligned[i] or 
+                price > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
