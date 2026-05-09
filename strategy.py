@@ -1,11 +1,13 @@
-# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 from previous 1d candle with 1d uptrend and volume confirmation.
-# Short when price breaks below Camarilla S1 with 1d downtrend and volume confirmation.
+#!/usr/bin/env python3
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
 # Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# Added minimum holding period of 3 bars to reduce trade frequency and combat overtrading.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to stay within profitable range.
 
-name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -48,13 +50,14 @@ def generate_signals(prices):
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0  # Track bars since entry to enforce minimum holding period
     
     # Start after we have enough data
     start_idx = 100
@@ -65,32 +68,49 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
+        
+        bars_since_entry += 1
         
         if position == 0:
             # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
             if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
+                bars_since_entry = 0
             # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
             elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
-            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions: minimum holding period + reversal signals
+            if bars_since_entry >= 3:  # Minimum 3 bars held
+                # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
+                if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
             else:
+                # Hold position until minimum period elapsed
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
-            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit conditions: minimum holding period + reversal signals
+            if bars_since_entry >= 3:  # Minimum 3 bars held
+                # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
+                if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
             else:
+                # Hold position until minimum period elapsed
                 signals[i] = -0.25
     
     return signals
