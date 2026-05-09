@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Daily_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
     # EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h
+    # Align to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -48,7 +48,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -61,11 +61,11 @@ def generate_signals(prices):
         if position == 0:
             # Enter long: price breaks above R1 + above 1d EMA34 + volume confirmation
             if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Enter short: price breaks below S1 + below 1d EMA34 + volume confirmation
             elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -74,7 +74,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit short: price above 1d EMA34 (trend change)
@@ -82,6 +82,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
