@@ -1,19 +1,10 @@
-# 6h_ElderRay_Power_1dTrend_Volume
-# Elder Ray (Bull/Bear Power) with 1d EMA trend filter and volume confirmation
-# Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long: Bull Power > 0, price > 1d EMA50, volume > 1.5x avg
-# Short: Bear Power < 0, price < 1d EMA50, volume > 1.5x avg
-# Exit when power reverses sign
-# Target: 50-150 trades over 4 years (12-37/year)
-# Works in bull (trend following) and bear (mean reversion via power reversal)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_Power_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla pivot levels (R3, S3) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(13) for Elder Ray (13 periods on 6h timeframe)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).values
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    R3 = pivot + (range_1d * 1.1 / 2)
+    S3 = pivot - (range_1d * 1.1 / 2)
     
-    # Elder Ray components
-    bull_power = high - ema13  # High - EMA13
-    bear_power = low - ema13   # Low - EMA13
+    # Align R3 and S3 to 12h timeframe (use previous day's levels)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Calculate 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -55,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,26 +62,26 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Bull Power positive, price above 1d EMA trend, volume confirmation
-            if bull_power[i] > 0 and close[i] > ema50_1d_aligned[i] and vol_ok:
+            # Long: Price breaks above R3 with volume and above 1d EMA trend
+            if close[i] > R3_aligned[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative, price below 1d EMA trend, volume confirmation
-            elif bear_power[i] < 0 and close[i] < ema50_1d_aligned[i] and vol_ok:
+            # Short: Price breaks below S3 with volume and below 1d EMA trend
+            elif close[i] < S3_aligned[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bear Power becomes negative (trend weakening)
-            if bear_power[i] < 0:
+            # Exit long: Price crosses back below S3 (reversion to mean)
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bull Power becomes positive (trend weakening)
-            if bull_power[i] > 0:
+            # Exit short: Price crosses back above R3
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
