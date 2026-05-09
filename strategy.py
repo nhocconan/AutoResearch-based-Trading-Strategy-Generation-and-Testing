@@ -1,14 +1,6 @@
-# 6H_WeeklyPivot_DailyTrend_VolumeBreakout
-# Weekly pivot levels from 1-week high/low, with daily trend filter and volume confirmation
-# Long: break above weekly high + daily uptrend + volume spike
-# Short: break below weekly low + daily downtrend + volume spike
-# Uses 1-week data for pivot points and 1-day for trend filter
-# Designed to work in both bull and bear markets by following weekly structure
-# Target: 20-50 trades per year to minimize fee drag
-
 #!/usr/bin/env python3
-name = "6H_WeeklyPivot_DailyTrend_VolumeBreakout"
-timeframe = "6h"
+name = "12H_Keltner_Channel_Trend_Pullback"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,75 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points (weekly high/low)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for trend filter and Keltner parameters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly high and low (pivot levels)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Calculate 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Align weekly and daily data to 6h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate 20-day EMA for trend filter
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate daily ATR(10) for Keltner channels
+    tr_1d = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
+        )
+    )
+    tr_1d = np.concatenate([[np.nan], tr_1d])  # align with original index
+    atr10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Calculate Keltner channels: EMA(20) ± 2*ATR(10)
+    upper_keltner = ema20_1d + 2 * atr10_1d
+    lower_keltner = ema20_1d - 2 * atr10_1d
+    
+    # Align to 12h timeframe
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 50
+    # Start after we have enough data for calculations
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        # Skip if EMA data not ready
+        if np.isnan(ema20_1d_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2x 24-period average volume (4 days)
-        avg_volume = np.mean(volume[max(0, i-24):i])
-        volume_confirm = volume[i] > avg_volume * 2.0
+        # Volume confirmation: current volume > 1.5x 10-period average volume
+        if i >= 10:
+            avg_volume = np.mean(volume[i-10:i])
+            volume_confirm = volume[i] > avg_volume * 1.5
+        else:
+            volume_confirm = False
         
         if position == 0:
-            # Enter long: break above weekly high + daily uptrend + volume confirmation
-            if (close[i] > weekly_high_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_confirm):
+            # Enter long: price touches lower Keltner band + uptrend + volume confirmation
+            if low[i] <= lower_keltner_aligned[i] and close[i] > ema20_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below weekly low + daily downtrend + volume confirmation
-            elif (close[i] < weekly_low_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_confirm):
+            # Enter short: price touches upper Keltner band + downtrend + volume confirmation
+            elif high[i] >= upper_keltner_aligned[i] and close[i] < ema20_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: break below weekly low or lose daily uptrend
-            if (close[i] < weekly_low_aligned[i] or 
-                close[i] < ema50_1d_aligned[i]):
+            # Exit long: price crosses above EMA(20) or touches upper band
+            if close[i] >= ema20_1d_aligned[i] or high[i] >= upper_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: break above weekly high or lose daily downtrend
-            if (close[i] > weekly_high_aligned[i] or 
-                close[i] > ema50_1d_aligned[i]):
+            # Exit short: price crosses below EMA(20) or touches lower band
+            if close[i] <= ema20_1d_aligned[i] or low[i] <= lower_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
