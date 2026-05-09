@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_1dTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_Volume_Spike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     r3_level = close_1d_vals + camarilla_range
     s3_level = close_1d_vals - camarilla_range
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
