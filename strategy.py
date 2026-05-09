@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI4_Div_Liquidity_v2"
-timeframe = "4h"
+name = "12h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 30:
@@ -37,22 +37,11 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
     
-    # RSI(4) for divergence detection
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    avg_loss = loss.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Price and RSI extrema for divergence
-    price_high = high_series.rolling(window=10, min_periods=10).max().values
-    price_low = low_series.rolling(window=10, min_periods=10).min().values
-    rsi_high = pd.Series(rsi_values).rolling(window=10, min_periods=10).max().values
-    rsi_low = pd.Series(rsi_values).rolling(window=10, min_periods=10).min().values
+    # Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,9 +51,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or 
-            np.isnan(vol_ma20_current[i]) or np.isnan(rsi_values[i]) or
-            np.isnan(price_high[i]) or np.isnan(price_low[i]) or
-            np.isnan(rsi_high[i]) or np.isnan(rsi_low[i])):
+            np.isnan(vol_ma20_current[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,35 +60,30 @@ def generate_signals(prices):
         
         vol_ok = volume[i] > 1.5 * vol_ma20_current[i]
         
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        bull_div = (low[i] < price_low[i-1] and rsi_values[i] > rsi_low[i-1])
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        bear_div = (high[i] > price_high[i-1] and rsi_values[i] < rsi_high[i-1])
-        
         if position == 0:
-            # Long: Bullish divergence with volume and above 1d EMA trend
-            if bull_div and vol_ok and close[i] > ema34_1d_aligned[i]:
-                signals[i] = 0.25
+            # Long: Breakout above Donchian high with volume and above 1d EMA trend
+            if close[i] > donchian_high[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Bearish divergence with volume and below 1d EMA trend
-            elif bear_div and vol_ok and close[i] < ema34_1d_aligned[i]:
-                signals[i] = -0.25
+            # Short: Breakdown below Donchian low with volume and below 1d EMA trend
+            elif close[i] < donchian_low[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: Bearish divergence or trend reversal
-            if bear_div or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Price falls below Donchian low or trend reversal
+            if close[i] < donchian_low[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: Bullish divergence or trend reversal
-            if bull_div or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Price rises above Donchian high or trend reversal
+            if close[i] > donchian_high[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
