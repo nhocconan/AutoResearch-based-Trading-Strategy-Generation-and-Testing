@@ -3,15 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d ADX regime filter and volume confirmation.
-# Bull Power = EMA(13) - Low, Bear Power = High - EMA(13). 
-# Long when Bull Power > 0 and rising + ADX > 20 (trending) + volume spike.
-# Short when Bear Power < 0 and falling + ADX > 20 + volume spike.
-# Uses 13-period EMA for sensitivity, 1d ADX for regime, volume > 1.5x EMA(20) for confirmation.
-# Designed to capture momentum in both bull and bear markets while avoiding whipsaws in ranges.
-# Target: 12-30 trades/year (50-120 total over 4 years) to minimize fee drag.
-name = "6h_ElderRay_1dADX20_VolumeConfirm"
-timeframe = "6h"
+# Hypothesis: 12-hour Donchian breakout with 1-day ADX trend filter and volume spike.
+# Uses daily ADX for trend strength, 12h Donchian channels for breakout signals,
+# and volume surge for confirmation. Designed to work in both bull (breakouts above upper channel)
+# and bear (breakdowns below lower channel). Target: 15-30 trades/year to avoid fee drag.
+name = "12h_Donchian20_1dADX25_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,9 +21,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX regime filter
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate 14-period ADX for daily timeframe
@@ -39,15 +36,15 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    tr[0] = tr1[0]  # First period
     
-    # Plus/Minus Directional Movement
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
     up_move = np.diff(high_1d, prepend=high_1d[0])
     down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Wilder's smoothing
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
     period = 14
     alpha = 1.0 / period
     atr = np.zeros_like(tr)
@@ -55,81 +52,91 @@ def generate_signals(prices):
     for i in range(1, len(tr)):
         atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
     
-    plus_di = 100 * np.where(atr > 0,
-                             np.convolve(plus_dm, np.ones(period)/period, mode='full')[:len(plus_dm)] / atr, 0)
-    minus_di = 100 * np.where(atr > 0,
-                              np.convolve(minus_dm, np.ones(period)/period, mode='full')[:len(minus_dm)] / atr, 0)
+    plus_di = np.zeros_like(tr)
+    minus_di = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if atr[i] > 0:
+            # Use Wilder's smoothing for DI
+            if i < period:
+                plus_di[i] = np.nan
+                minus_di[i] = np.nan
+            elif i == period:
+                plus_di[i] = 100 * np.sum(plus_dm[1:period+1]) / (atr[i] * period)
+                minus_di[i] = 100 * np.sum(minus_dm[1:period+1]) / (atr[i] * period)
+            else:
+                plus_di[i] = 100 * ((plus_di[i-1] * (period-1) + plus_dm[i]) / (atr[i] * period))
+                minus_di[i] = 100 * ((minus_di[i-1] * (period-1) + minus_dm[i]) / (atr[i] * period))
+        else:
+            plus_di[i] = 0
+            minus_di[i] = 0
     
-    # DX and ADX
-    dx = np.where((plus_di + minus_di) > 0,
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) > 0, 
                   100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.zeros_like(dx)
+    adx = np.full_like(dx, np.nan)
     for i in range(len(dx)):
-        if i < period:
+        if i < 2 * period - 1:
             adx[i] = np.nan
-        elif i == period:
-            adx[i] = np.mean(dx[1:period+1])
+        elif i == 2 * period - 1:
+            adx[i] = np.nanmean(dx[period:2*period])
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # 6h EMA(13) for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Donchian channels (20-period) for 12h timeframe
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    for i in range(len(high)):
+        if i < 20:
+            highest_high[i] = np.nan
+            lowest_low[i] = np.nan
+        else:
+            highest_high[i] = np.max(high[i-19:i+1])
+            lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Bull Power = EMA(13) - Low, Bear Power = High - EMA(13)
-    bull_power = ema13 - low
-    bear_power = high - ema13
-    
-    # Rising/Falling power (1-period change)
-    bull_power_rising = bull_power > np.roll(bull_power, 1)
-    bear_power_falling = bear_power < np.roll(bear_power, 1)
-    bull_power_rising[0] = False
-    bear_power_falling[0] = False
-    
-    # Align 1d ADX to 6h timeframe
+    # Align 1d ADX to 12h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
+    vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Need enough data for indicators
+    start_idx = 20  # Need 20 periods for Donchian channels
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(adx_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ema20[i])):
+        # Skip if required data unavailable (NaN from indicators)
+        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = close[i]
+        
         if position == 0:
-            # Enter long: Bull Power > 0 and rising + ADX > 20 + volume spike
-            if (bull_power[i] > 0 and bull_power_rising[i] and 
-                adx_aligned[i] > 20 and vol_confirm[i]):
+            # Enter long: price breaks above upper channel + 1d ADX > 25 + volume spike
+            if (price > highest_high[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0 and falling + ADX > 20 + volume spike
-            elif (bear_power[i] < 0 and bear_power_falling[i] and 
-                  adx_aligned[i] > 20 and vol_confirm[i]):
+            # Enter short: price breaks below lower channel + 1d ADX > 25 + volume spike
+            elif (price < lowest_low[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power <= 0 or ADX drops below 15
-            if bull_power[i] <= 0 or adx_aligned[i] < 15:
+            # Exit long: price returns below upper channel or ADX drops below 20
+            if price < highest_high[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power >= 0 or ADX drops below 15
-            if bear_power[i] >= 0 or adx_aligned[i] < 15:
+            # Exit short: price returns above lower channel or ADX drops below 20
+            if price > lowest_low[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
