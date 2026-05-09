@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Williams Alligator + Elder Ray with 1d trend filter
-# Long when: Alligator bullish (jaws < teeth < lips), Elder Ray bull power > 0, 1d EMA(50) rising
-# Short when: Alligator bearish (jaws > teeth > lips), Elder Ray bear power < 0, 1d EMA(50) falling
-# Exit when: Alligator reverses or Elder Ray power crosses zero
-# Position size: 0.25 (25% of capital) to limit drawdown. Target: 12-37 trades/year.
-# Williams Alligator uses SMAs of median price (HLC/3) with specific periods.
-# Elder Ray measures bull/bear power relative to EMA(13).
-# Designed to work in trending markets (both bull and bear) by following the 1d trend.
+# Hypothesis: 4h KAMA trend direction with 1d Bollinger Band squeeze and volume confirmation
+# Long when: KAMA rising, price > upper BB(20,2) on 1d, volume spike (>1.5x 20-period avg)
+# Short when: KAMA falling, price < lower BB(20,2) on 1d, volume spike
+# Exit when: price crosses KAMA OR BB middle
+# Position size: 0.25 (25% of capital) to limit drawdown. Target: 20-40 trades/year.
+# Designed to capture trends in bull markets and avoid whipsaws in bear via BB squeeze filter.
 
-name = "12h_Alligator_ElderRay_1dTrend"
-timeframe = "12h"
+name = "4h_KAMA_BB_Squeeze_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,46 +22,39 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: SMAs of median price
-    median_price = (high + low) / 3
-    # Jaws: SMA(13) of median, shifted 8 bars
-    jaws_raw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values
-    jaws = np.roll(jaws_raw, 8)
-    jaws[:8] = jaws_raw[0]  # fill initial values
-    # Teeth: SMA(8) of median, shifted 5 bars
-    teeth_raw = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values
-    teeth = np.roll(teeth_raw, 5)
-    teeth[:5] = teeth_raw[0]
-    # Lips: SMA(5) of median, shifted 3 bars
-    lips_raw = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values
-    lips = np.roll(lips_raw, 3)
-    lips[:3] = lips_raw[0]
+    # Calculate KAMA (4h)
+    price_change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, price_change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_rising = kama > np.roll(kama, 1)
+    kama_falling = kama < np.roll(kama, 1)
+    kama_rising[0] = False
+    kama_falling[0] = False
     
-    alligator_bullish = (jaws < teeth) & (teeth < lips)
-    alligator_bearish = (jaws > teeth) & (teeth > lips)
-    
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    elder_bull = bull_power > 0
-    elder_bear = bear_power < 0
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA(50) for trend filter
     close_1d = df_1d['close']
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_prev = np.roll(ema_50_1d, 1)
-    ema_50_1d_prev[0] = ema_50_1d[0]
-    ema_rising = ema_50_1d > ema_50_1d_prev
-    ema_falling = ema_50_1d < ema_50_1d_prev
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising)
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling)
+    bb_middle = close_1d.rolling(window=20, min_periods=20).mean().values
+    bb_std = close_1d.rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
+    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
+    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
+    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    
+    # Volume spike: current volume > 1.5x 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,39 +63,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(kama_rising[i]) or np.isnan(kama_falling[i]) or
+            np.isnan(bb_upper_aligned[i]) or np.isnan(bb_lower_aligned[i]) or
+            np.isnan(bb_middle_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Alligator bullish + Elder Ray bull power > 0 + 1d EMA rising
-            if (alligator_bullish[i] and 
-                elder_bull[i] and 
-                ema_rising_aligned[i]):
+            # Enter long: KAMA rising + price > upper BB + volume spike
+            if (kama_rising[i] and 
+                close[i] > bb_upper_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Alligator bearish + Elder Ray bear power < 0 + 1d EMA falling
-            elif (alligator_bearish[i] and 
-                  elder_bear[i] and 
-                  ema_falling_aligned[i]):
+            # Enter short: KAMA falling + price < lower BB + volume spike
+            elif (kama_falling[i] and 
+                  close[i] < bb_lower_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Elder Ray bull power <= 0
-            if (not alligator_bullish[i]) or (bull_power[i] <= 0):
+            # Exit long: price crosses below KAMA OR below BB middle
+            if (close[i] < kama[i]) or (close[i] < bb_middle_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Elder Ray bear power >= 0
-            if (not alligator_bearish[i]) or (bear_power[i] >= 0):
+            # Exit short: price crosses above KAMA OR above BB middle
+            if (close[i] > kama[i]) or (close[i] > bb_middle_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
