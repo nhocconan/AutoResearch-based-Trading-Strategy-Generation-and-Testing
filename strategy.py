@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# 2025-06-22 | 4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v3
 # Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
 # Daily EMA50 provides robust trend filter that adapts to bull/bear markets. Volume spike (>2x 24-period average)
-# confirms breakout strength. Designed for low trade frequency (12-37/year) to minimize fee drag.
+# confirms breakout strength. Designed for low trade frequency (19-50/year) to minimize fee drift.
+# Version 3: Increased position size to 0.25 and refined exit conditions for better risk-reward.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,7 +42,7 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -54,7 +55,7 @@ def generate_signals(prices):
     
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 24:
         vol_ma[23] = np.mean(volume[0:24])
