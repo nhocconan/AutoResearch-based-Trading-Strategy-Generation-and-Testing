@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h mean reversion with 4h Bollinger Bands and 1d trend filter
-# In ranging markets (2025+), price tends to revert to mean at Bollinger Bands
-# Long when: price touches lower BB(20,2) on 4h + 1d EMA(50) rising + RSI(14) < 30 on 1h
-# Short when: price touches upper BB(20,2) on 4h + 1d EMA(50) falling + RSI(14) > 70 on 1h
-# Exit when: price returns to 4h BB middle band or RSI crosses 50
-# Position size: 0.20 to limit drawdown. Target: 20-40 trades/year.
-# Uses 4h for entry signals, 1d for trend filter, 1h for RSI timing.
+# Hypothesis: 6h RSI mean reversion with weekly pivot resistance/support confirmation
+# Uses weekly RSI(14) for mean reversion signals and weekly pivot points for structure.
+# Long when: weekly RSI < 30 AND price > weekly pivot (support area)
+# Short when: weekly RSI > 70 AND price < weekly pivot (resistance area)
+# Exit when: RSI crosses back to neutral zone (40-60) OR price crosses pivot
+# Position size: 0.25 to manage drawdown. Target: 20-40 trades/year.
+# Designed to work in both bull (mean reversion in uptrend) and bear (mean reversion in downtrend) markets.
 
-name = "1h_BollingerMeanReversion_1dTrend_RSI"
-timeframe = "1h"
+name = "6h_RSI_MeanReversion_WeeklyPivot"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,99 +17,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for Bollinger Bands
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for RSI and pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 4h Bollinger Bands (20, 2)
-    close_4h = df_4h['close']
-    sma_20_4h = close_4h.rolling(window=20, min_periods=20).mean()
-    std_20_4h = close_4h.rolling(window=20, min_periods=20).std()
-    bb_upper_4h = sma_20_4h + (2 * std_20_4h)
-    bb_lower_4h = sma_20_4h - (2 * std_20_4h)
-    bb_middle_4h = sma_20_4h
-    
-    # Align 4h Bollinger Bands to 1h timeframe
-    bb_upper_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_upper_4h.values)
-    bb_lower_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_lower_4h.values)
-    bb_middle_4h_aligned = align_htf_to_ltf(prices, df_4h, bb_middle_4h.values)
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # 1d EMA(50) for trend filter
-    close_1d = df_1d['close']
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_prev = np.roll(ema_50_1d, 1)
-    ema_50_1d_prev[0] = ema_50_1d[0]
-    ema_rising = ema_50_1d > ema_50_1d_prev
-    ema_falling = ema_50_1d < ema_50_1d_prev
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising)
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling)
-    
-    # Calculate 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
+    # Calculate weekly RSI(14)
+    close_1w = df_1w['close'].values
+    delta = np.diff(close_1w)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    
+    avg_gain = np.zeros_like(close_1w)
+    avg_loss = np.zeros_like(close_1w)
+    
+    # Wilder's smoothing
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(close_1w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi_1w = 100 - (100 / (1 + rs))
+    # Set first 14 values to NaN
+    rsi_1w[:14] = np.nan
+    
+    # Calculate weekly pivot points (standard floor trader's pivot)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    pivot = (high_1w + low_1w + close_1w) / 3
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
+    
+    # Align weekly indicators to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough data for indicators
+    start_idx = 20  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_upper_4h_aligned[i]) or np.isnan(bb_lower_4h_aligned[i]) or
-            np.isnan(bb_middle_4h_aligned[i]) or np.isnan(ema_rising_aligned[i]) or
-            np.isnan(ema_falling_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price at or below 4h lower BB + 1d EMA rising + RSI oversold
-            if (close[i] <= bb_lower_4h_aligned[i] and 
-                ema_rising_aligned[i] and 
-                rsi[i] < 30):
-                signals[i] = 0.20
+            # Enter long: RSI oversold AND price above pivot (support area)
+            if (rsi_1w_aligned[i] < 30 and close[i] > pivot_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price at or above 4h upper BB + 1d EMA falling + RSI overbought
-            elif (close[i] >= bb_upper_4h_aligned[i] and 
-                  ema_falling_aligned[i] and 
-                  rsi[i] > 70):
-                signals[i] = -0.20
+            # Enter short: RSI overbought AND price below pivot (resistance area)
+            elif (rsi_1w_aligned[i] > 70 and close[i] < pivot_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to 4h middle BB or RSI crosses above 50
-            if (close[i] >= bb_middle_4h_aligned[i]) or (rsi[i] > 50):
+            # Exit long: RSI returns to neutral OR price falls below pivot
+            if (rsi_1w_aligned[i] >= 40) or (close[i] < pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to 4h middle BB or RSI crosses below 50
-            if (close[i] <= bb_middle_4h_aligned[i]) or (rsi[i] < 50):
+            # Exit short: RSI returns to neutral OR price rises above pivot
+            if (rsi_1w_aligned[i] <= 60) or (close[i] > pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
