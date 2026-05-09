@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_RSI_MeanReversion_TrendFilter
-# Hypothesis: RSI mean-reversion on daily timeframe with 1w trend filter and volume confirmation.
-# Long when RSI < 30 and price above 1w EMA50; short when RSI > 70 and price below 1w EMA50.
-# Volume filter: current volume > 1.5x 20-day average to avoid low-liquidity signals.
-# Designed for 15-25 trades/year on 1d timeframe, targeting BTC/ETH with balanced long/short logic.
+# 6h_Donchian_Breakout_20_1dTrend_Volume
+# Hypothesis: Breakout above/below 6h Donchian(20) channels with volume >1.5x 20-bar average and trend filter from 1d EMA50.
+# Donchian channels provide dynamic support/resistance, while 1d EMA50 filters for higher timeframe trend.
+# Volume confirmation ensures breakouts have conviction. Designed for 15-30 trades/year on 6h timeframe.
+# Works in bull markets (breakouts continue trend) and bear markets (breakouts reverse false moves).
 
-name = "1d_RSI_MeanReversion_TrendFilter"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_20_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,50 +15,40 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate 1w EMA(50) with proper initialization
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50
+    close_1d = df_1d['close'].values
+    # Calculate 1d EMA(50) with proper initialization
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Align 1w EMA to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align 1d EMA to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 6h Donchian channels (20-period)
+    high_20 = np.full_like(high, np.nan)
+    low_20 = np.full_like(low, np.nan)
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
+    if len(high) >= 20:
+        for i in range(19, len(high)):
+            high_20[i] = np.max(high[i-19:i+1])
+            low_20[i] = np.min(low[i-19:i+1])
     
-    # Wilder's smoothing: first average is simple mean
-    if len(close) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])  # gain[1] to gain[13] (13 periods)
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: 1d volume / 20-period average volume
+    # Volume filter: 6h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -72,37 +62,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: RSI < 30 (oversold) AND volume confirmation AND bullish trend (price > EMA50)
-            if rsi[i] < 30 and volume_ratio[i] > 1.5 and close[i] > ema_50_1w_aligned[i]:
+            # Enter long: Price breaks above Donchian upper band AND volume confirmation AND bullish trend (close > EMA50)
+            if close[i] > high_20[i] and volume_ratio[i] > 1.5 and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought) AND volume confirmation AND bearish trend (price < EMA50)
-            elif rsi[i] > 70 and volume_ratio[i] > 1.5 and close[i] < ema_50_1w_aligned[i]:
+            # Enter short: Price breaks below Donchian lower band AND volume confirmation AND bearish trend (close < EMA50)
+            elif close[i] < low_20[i] and volume_ratio[i] > 1.5 and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion) or trend turns bearish
-            if rsi[i] > 50 or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: Price breaks below Donchian lower band (reversal) or trend turns bearish
+            if close[i] < low_20[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion) or trend turns bullish
-            if rsi[i] < 50 or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: Price breaks above Donchian upper band (reversal) or trend turns bullish
+            if close[i] > high_20[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
