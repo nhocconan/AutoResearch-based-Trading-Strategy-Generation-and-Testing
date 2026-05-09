@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h EMA Crossover with 4h Trend Filter and Volume Spike
-# Uses 9/21 EMA crossover for entry timing on 1h, filtered by 4h EMA50 trend direction
-# Volume spike confirms institutional participation
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours
-# Target: 15-37 trades/year (60-150 over 4 years) to stay within fee limits
-name = "1h_EMA9_21_Crossover_4hTrend_VolumeSpike"
-timeframe = "1h"
+# Hypothesis: 6h Elder Ray Power + 12h Trend Filter + Volume Spike
+# Elder Ray measures bull/bear power relative to EMA, effective in both bull and bear markets.
+# 12h trend filter ensures we trade with higher timeframe momentum.
+# Volume spike confirms institutional participation.
+# Target: 15-35 trades/year (60-140 over 4 years) to avoid fee drag.
+name = "6h_ElderRay_Power_12hTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +22,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # EMA9 and EMA21 for crossover signals
-    ema9 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Get 13-period EMA for Elder Ray (13 is standard)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
+    
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Align 12h EMA50 to 6h
+    ema50_12h_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,15 +51,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema9[i]) or np.isnan(ema21[i]) or np.isnan(ema50_4h_1h[i]) or 
-            np.isnan(vol_avg[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade between 08:00-20:00 UTC
-        if hours[i] < 8 or hours[i] > 20:
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema50_12h_6h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,29 +62,29 @@ def generate_signals(prices):
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: EMA9 crosses above EMA21 + above 4h EMA50 + volume spike
-            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1] and close[i] > ema50_4h_1h[i] and vol_spike:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 (bulls in control) + above 12h EMA50 + volume spike
+            if bull_power[i] > 0 and close[i] > ema50_12h_6h[i] and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: EMA9 crosses below EMA21 + below 4h EMA50 + volume spike
-            elif ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1] and close[i] < ema50_4h_1h[i] and vol_spike:
-                signals[i] = -0.20
+            # Short: Bear Power < 0 (bears in control) + below 12h EMA50 + volume spike
+            elif bear_power[i] < 0 and close[i] < ema50_12h_6h[i] and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: EMA9 crosses below EMA21 OR price below 4h EMA50
-            if ema9[i] < ema21[i] and ema9[i-1] >= ema21[i-1] or close[i] < ema50_4h_1h[i]:
+            # Exit long: Bear Power turns negative OR price below 12h EMA50
+            if bear_power[i] < 0 or close[i] < ema50_12h_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: EMA9 crosses above EMA21 OR price above 4h EMA50
-            if ema9[i] > ema21[i] and ema9[i-1] <= ema21[i-1] or close[i] > ema50_4h_1h[i]:
+            # Exit short: Bull Power turns positive OR price above 12h EMA50
+            if bull_power[i] > 0 or close[i] > ema50_12h_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
