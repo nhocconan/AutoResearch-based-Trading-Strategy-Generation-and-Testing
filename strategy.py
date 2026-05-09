@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_DonchianBreakout_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Donchian levels and trend filter
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Upper band: highest high of last 20 days
-    upper_band = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    # Lower band: lowest low of last 20 days
-    lower_band = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate daily Camarilla levels (R3, S3) using previous day's OHLC
+    prev_close = np.roll(df_1d['close'], 1)
+    prev_high = np.roll(df_1d['high'], 1)
+    prev_low = np.roll(df_1d['low'], 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    
+    # Camarilla levels: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need 50 for EMA + buffer for Donchian
+    start_idx = 35  # Need 34 for EMA + 1 for roll
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_50_1d_aligned[i]
-        upper = upper_band_aligned[i]
-        lower = lower_band_aligned[i]
+        ema_1d = ema_34_1d_aligned[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
         
         if position == 0:
-            # Enter long: Break above upper band in uptrend (price > EMA50)
-            if close[i] > upper and close[i] > ema_1d:
+            # Enter long: Break above R3 in uptrend (price > EMA34) with volume confirmation
+            if close[i] > r3 and close[i] > ema_1d and volume[i] > np.median(volume[max(0, i-24):i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Break below lower band in downtrend (price < EMA50)
-            elif close[i] < lower and close[i] < ema_1d:
+            # Enter short: Break below S3 in downtrend (price < EMA34) with volume confirmation
+            elif close[i] < s3 and close[i] < ema_1d and volume[i] > np.median(volume[max(0, i-24):i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below EMA50 (trend change) or reaches lower band (mean reversion)
-            if close[i] < ema_1d or close[i] < lower:
+            # Exit long: Price crosses below EMA34 (trend change) or reaches S3 (stop)
+            if close[i] < ema_1d or close[i] < s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above EMA50 (trend change) or reaches upper band (mean reversion)
-            if close[i] > ema_1d or close[i] > upper:
+            # Exit short: Price crosses above EMA34 (trend change) or reaches R3 (stop)
+            if close[i] > ema_1d or close[i] > r3:
                 signals[i] = 0.0
                 position = 0
             else:
