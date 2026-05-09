@@ -1,10 +1,12 @@
-# 1D_KAMA_Trend_Stochastic_RSI_Confirmation
-# Hypothesis: On 1d timeframe, enter long when KAMA indicates uptrend and StochRSI is oversold (<0.2), enter short when KAMA indicates downtrend and StochRSI is overbought (>0.8).
-# Uses 1w trend filter to avoid counter-trend trades and KAMA for smooth trend following.
-# Target: 10-25 trades/year per symbol (40-100 total over 4 years).
+#!/usr/bin/env python3
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
+# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 
-name = "1D_KAMA_Trend_Stochastic_RSI_Confirmation"
-timeframe = "1d"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,108 +21,74 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for KAMA and StochRSI
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA calculation
-    def calculate_kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=length))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.zeros_like(close)
-        er[length:] = change / (volatility + 1e-10)
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Calculate Camarilla levels for 1d: R1, S1 based on previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    # Camarilla R1 = close + (range * 1.1/12)
+    # Camarilla S1 = close - (range * 1.1/12)
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Stochastic RSI
-    def stoch_rsi(close, length=14, rsi_length=14, stoch_length=14):
-        delta = np.diff(close)
-        up = np.clip(delta, 0, None)
-        down = np.clip(-delta, 0, None)
-        ma_up = np.zeros_like(close)
-        ma_down = np.zeros_like(close)
-        ma_up[rsi_length] = np.mean(up[:rsi_length])
-        ma_down[rsi_length] = np.mean(down[:rsi_length])
-        for i in range(rsi_length+1, len(close)):
-            ma_up[i] = (ma_up[i-1] * (rsi_length-1) + up[i-1]) / rsi_length
-            ma_down[i] = (ma_down[i-1] * (rsi_length-1) + down[i-1]) / rsi_length
-        rsi = np.zeros_like(close)
-        rsi[rsi_length:] = 100 * ma_up[rsi_length:] / (ma_up[rsi_length:] + ma_down[rsi_length:] + 1e-10)
-        # Stochastic of RSI
-        stoch_rsi = np.zeros_like(close)
-        for i in range(stoch_length-1, len(rsi)):
-            min_rsi = np.min(rsi[i-stoch_length+1:i+1])
-            max_rsi = np.max(rsi[i-stoch_length+1:i+1])
-            if max_rsi - min_rsi > 1e-10:
-                stoch_rsi[i] = (rsi[i] - min_rsi) / (max_rsi - min_rsi)
-            else:
-                stoch_rsi[i] = 0.5
-        return stoch_rsi
+    # 1d trend: EMA(34) on close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema_34
     
-    # Calculate indicators
-    kama = calculate_kama(close_1d, length=10, fast=2, slow=30)
-    stoch_rsi_val = stoch_rsi(close_1d, length=14, rsi_length=14, stoch_length=14)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_avg * 1.5)
     
-    # 1w trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up_1w = close_1w > ema_20_1w
-    
-    # Align to 1d timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    stoch_rsi_aligned = align_htf_to_ltf(prices, df_1d, stoch_rsi_val)
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1w)
+    # Align 1d indicators to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(kama_aligned[i]) or np.isnan(stoch_rsi_aligned[i]) or np.isnan(trend_up_1w_aligned[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA uptrend + StochRSI oversold + 1w uptrend
-            if close_1d[i] > kama_aligned[i] and stoch_rsi_aligned[i] < 0.2 and trend_up_1w_aligned[i]:
+            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA downtrend + StochRSI overbought + 1w downtrend
-            elif close_1d[i] < kama_aligned[i] and stoch_rsi_aligned[i] > 0.8 and not trend_up_1w_aligned[i]:
+            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA downtrend or StochRSI overbought
-            if close_1d[i] < kama_aligned[i] or stoch_rsi_aligned[i] > 0.8:
+            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
+            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA uptrend or StochRSI oversold
-            if close_1d[i] > kama_aligned[i] or stoch_rsi_aligned[i] < 0.2:
+            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
+            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
