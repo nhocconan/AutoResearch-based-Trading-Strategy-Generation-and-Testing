@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Trix_Zero_Cross_Volume_Spike_Trend_Filter
-# Hypothesis: TRIX zero-cross signals with volume spike confirmation and 1d trend filter.
-# Works in bull/bear: Trend filter ensures we only trade with higher timeframe momentum.
-# TRIX captures momentum changes; zero-cross provides objective entry/exit signals.
-# Volume spike filters for institutional participation. Target: 20-40 trades/year.
+# 1D_KAMA_Trend_With_RSI_Filter_and_Volume
+# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
+# Combined with RSI(14) for momentum confirmation and volume spike for institutional validation.
+# Uses weekly trend filter to avoid counter-trend trades. Designed for low turnover (target: 15-25 trades/year).
 
-name = "4h_Trix_Zero_Cross_Volume_Spike_Trend_Filter"
-timeframe = "4h"
+name = "1D_KAMA_Trend_With_RSI_Filter_and_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,22 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX (12-period EMA of EMA of EMA of close, then ROC)
-    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
-    trix = np.concatenate([[np.nan], trix])  # align with original length
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close)).cumsum()
+        volatility = np.concatenate([[0], volatility[:-1]])  # sum of abs changes over er_length
+        
+        # Avoid division by zero
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
+        
+        kama = np.full_like(close, np.nan)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Calculate 1d EMA34 for trend filter (higher timeframe trend)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    kama = calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate RSI(14)
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        
+        # First average
+        if len(gain) >= period:
+            avg_gain[period-1] = np.mean(gain[0:period])
+            avg_loss[period-1] = np.mean(loss[0:period])
+        
+        # Wilder smoothing
+        for i in range(period, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close, period=14)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -51,44 +76,64 @@ def generate_signals(prices):
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
+    # Get weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Weekly EMA21 for trend
+    ema_21_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 21:
+        ema_21_1w[20] = np.mean(close_1w[0:21])
+        for i in range(21, len(close_1w)):
+            ema_21_1w[i] = (ema_21_1w[i-1] * 20 + close_1w[i]) / 21
+    
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 12)  # Ensure TRIX and volume MA are ready
+    start_idx = max(20, 21, 14)  # Ensure volume MA, weekly EMA, and RSI are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(ema_21_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: TRIX crosses above zero AND uptrend (price > EMA34) AND volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume_ratio[i] > 1.8):
+            # Enter long: price above KAMA (uptrend) AND RSI > 50 (bullish momentum) 
+            # AND volume spike AND weekly uptrend
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                volume_ratio[i] > 1.5 and 
+                close[i] > ema_21_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX crosses below zero AND downtrend (price < EMA34) AND volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume_ratio[i] > 1.8):
+            # Enter short: price below KAMA (downtrend) AND RSI < 50 (bearish momentum)
+            # AND volume spike AND weekly downtrend
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  volume_ratio[i] > 1.5 and 
+                  close[i] < ema_21_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below zero OR trend reversal (price < EMA34)
-            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price below KAMA OR RSI < 40 (losing momentum)
+            if close[i] < kama[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above zero OR trend reversal (price > EMA34)
-            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price above KAMA OR RSI > 60 (losing bearish momentum)
+            if close[i] > kama[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
