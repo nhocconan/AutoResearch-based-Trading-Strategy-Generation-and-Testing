@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h timeframe with daily pivot structure and 12h trend filter.
-# Uses daily Camarilla levels (R3/S3) for breakout entries and 12h EMA50 for trend filter.
-# Daily pivot provides robust structural support/resistance that works in both bull and bear markets.
-# 12h trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h timeframe with daily pivot structure and weekly trend filter.
+# Uses daily Camarilla levels (R3/S3) for breakout entries and weekly EMA50 for trend filter.
+# Daily pivot provides robust intraday support/resistance that works in both bull and bear markets.
+# Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
+# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
 
-name = "6h_Camarilla_R3_S3_12hEMA50_Trend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_1wEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 50:
         return np.zeros(n)
     
@@ -24,10 +24,10 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Calculate daily Camarilla levels (R3, S3) from previous day
-    prev_close = np.roll(close, 4)  # 4 bars = 1 day (6h * 4 = 24h)
-    prev_high = np.roll(high, 4)
-    prev_low = np.roll(low, 4)
-    prev_close[:4] = np.nan  # First values invalid
+    prev_close = np.roll(close, 6)  # 6 bars = 1.5 days * 4 bars per day (approximate daily)
+    prev_high = np.roll(high, 6)
+    prev_low = np.roll(low, 6)
+    prev_close[:6] = np.nan  # First values invalid
     
     camarilla_range = prev_high - prev_low
     r3 = prev_close + 1.1 * camarilla_range / 2
@@ -37,21 +37,21 @@ def generate_signals(prices):
     breakout_up = close > r3
     breakout_down = close < s3
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    trend_up = close > ema_50_12h_aligned
-    trend_down = close < ema_50_12h_aligned
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
+    # Volume filter: current volume > 1.5x 20-period average volume (balanced to avoid overtrading)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * avg_volume)
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,11 +69,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 12h uptrend + volume spike
+            # Long: breakout above R3 + weekly uptrend + volume spike
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 12h downtrend + volume spike
+            # Short: breakout below S3 + weekly downtrend + volume spike
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
