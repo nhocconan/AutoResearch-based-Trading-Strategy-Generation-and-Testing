@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d timeframe with weekly volume-weighted average price (VWAP) and daily trend filter.
-# Uses weekly VWAP as dynamic support/resistance and daily EMA50 for trend filter.
-# Weekly VWAP adapts to market conditions and works in both bull and bear markets.
-# Daily trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
+# Hypothesis: 6h timeframe with daily Donchian channel breakout and volume confirmation.
+# Uses daily Donchian(20) breakout with volume > 2x average to capture institutional moves.
+# Trend filter from 1d EMA50 ensures trades align with higher timeframe trend.
+# Designed for low trade frequency (12-37/year) to minimize fee impact in 2025 bear market.
 
-name = "1d_VWAP_1w_VWAP_1dEMA50_Trend"
-timeframe = "1d"
+name = "6h_Donchian20_1dEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,46 +22,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly VWAP from previous week
-    # VWAP = sum(price * volume) / sum(volume) for the week
-    typical_price = (high + low + close) / 3.0
-    tpv = typical_price * volume
-    
-    # Calculate cumulative sums for the week (7 days)
-    cum_tpv = np.zeros(n)
-    cum_vol = np.zeros(n)
-    
-    for i in range(n):
-        if i == 0:
-            cum_tpv[i] = tpv[i]
-            cum_vol[i] = volume[i]
-        else:
-            cum_tpv[i] = cum_tpv[i-1] + tpv[i]
-            cum_vol[i] = cum_vol[i-1] + volume[i]
-    
-    # Get values from 7 days ago (previous week)
-    prev_cum_tpv = np.roll(cum_tpv, 7)
-    prev_cum_vol = np.roll(cum_vol, 7)
-    prev_cum_tpv[:7] = np.nan
-    prev_cum_vol[:7] = np.nan
-    
-    weekly_vwap = prev_cum_tpv / prev_cum_vol
-    
-    # Get daily data for EMA50 trend filter
+    # Get daily data for Donchian(20) and EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    
+    # Calculate daily Donchian(20) channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
     # Calculate 1d EMA50 trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align HTF indicators to 6h timeframe (wait for daily bar close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Volume filter: current volume > 2.0x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,35 +52,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_vwap[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above weekly VWAP + daily uptrend + volume spike
-            if close[i] > weekly_vwap[i] and trend_up[i] and volume_filter[i]:
+            # Long: breakout above Donchian high + 1d uptrend + volume spike
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly VWAP + daily downtrend + volume spike
-            elif close[i] < weekly_vwap[i] and trend_down[i] and volume_filter[i]:
+            # Short: breakout below Donchian low + 1d downtrend + volume spike
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to weekly VWAP or trend reversal
-            if close[i] <= weekly_vwap[i] or not trend_up[i]:
+            # Exit long: price returns to Donchian low or trend reversal
+            if close[i] <= donchian_low_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly VWAP or trend reversal
-            if close[i] >= weekly_vwap[i] or not trend_down[i]:
+            # Exit short: price returns to Donchian high or trend reversal
+            if close[i] >= donchian_high_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
