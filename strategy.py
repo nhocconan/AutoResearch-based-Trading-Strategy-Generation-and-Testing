@@ -9,7 +9,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,7 +28,7 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla levels
+    # Camarilla levels (R3, S3, R4, S4)
     R3 = prev_close + 1.1 * prev_range / 6
     S3 = prev_close - 1.1 * prev_range / 6
     R4 = prev_close + 1.1 * prev_range / 2
@@ -40,18 +40,18 @@ def generate_signals(prices):
     R4_12h = align_htf_to_ltf(prices, df_1d, R4)
     S4_12h = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Get daily trend filter
+    # Get daily trend filter (EMA34)
     daily_close = df_1d['close'].values
     daily_ema = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     daily_ema_12h = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Volume filter: above 1.5x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: above 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for indicators to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
