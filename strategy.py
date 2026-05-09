@@ -3,56 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h session-based mean reversion at Bollinger Bands with 4h trend filter
-# Uses Bollinger Bands (20,2) for mean reversion entries, 4h EMA for trend direction,
-# and session filter (08-20 UTC) to reduce noise. Designed to work in both bull (buy dips in uptrend)
-# and bear (sell rallies in downtrend). Target: 20-50 trades/year to avoid fee drag.
-name = "1h_BollingerMeanReversion_4hEMA_Trend_Session"
-timeframe = "1h"
+# Hypothesis: 12h Camarilla pivot point reversal with 1d trend filter and volume confirmation.
+# Uses daily Camarilla levels (H4/L4) for mean reversion entries in ranging markets,
+# filtered by 1-day ADX < 30 to avoid trending markets, and volume spike for confirmation.
+# Designed to work in both bull (buy at L4 in range) and bear (sell at H4 in range).
+# Target: 15-30 trades/year to minimize fee drag.
+name = "12h_Camarilla_H4L4_1dADX30_VolumeConfirm"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Precompute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1d data for Camarilla pivot levels and ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 50-period EMA for 4h trend
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate previous day's Camarilla levels (H4, L4)
+    # Formula: H4 = Close + 1.5 * (High - Low), L4 = Close - 1.5 * (High - Low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bollinger Bands (20,2) for 1h
-    bb_period = 20
-    bb_std = 2
-    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma_20 + (bb_std * std_20)
-    lower_band = sma_20 - (bb_std * std_20)
+    camarilla_h4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_l4 = close_1d - 1.5 * (high_1d - low_1d)
+    
+    # Calculate 14-period ADX for daily timeframe (trend filter)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
+    
+    plus_di = 100 * np.where(atr > 0, 
+                             np.convolve(plus_dm, np.ones(period)/period, mode='full')[:len(plus_dm)] / atr, 0)
+    minus_di = 100 * np.where(atr > 0,
+                              np.convolve(minus_dm, np.ones(period)/period, mode='full')[:len(minus_dm)] / atr, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) > 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = np.zeros_like(dx)
+    for i in range(len(dx)):
+        if i < period:
+            adx[i] = np.nan
+        elif i == period:
+            adx[i] = np.mean(dx[1:period+1])
+        else:
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
+    # Align 1d Camarilla levels and ADX to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA (moderate threshold)
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = bb_period  # Need 20 periods for Bollinger Bands
+    start_idx = 1  # Need at least 1 day of data for Camarilla levels
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(sma_20[i]) or 
-            np.isnan(std_20[i]) or not in_session[i]):
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,29 +100,41 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price touches lower band + price above 4h EMA (uptrend)
-            if (price <= lower_band[i] and price > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+            # Enter long: price at or below L4 + 1d ADX < 30 (ranging) + volume spike
+            if (price <= camarilla_l4_aligned[i] and adx_aligned[i] < 30 and vol_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price touches upper band + price below 4h EMA (downtrend)
-            elif (price >= upper_band[i] and price < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+            # Enter short: price at or above H4 + 1d ADX < 30 (ranging) + volume spike
+            elif (price >= camarilla_h4_aligned[i] and adx_aligned[i] < 30 and vol_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to middle band or trend changes
-            if price >= sma_20[i] or price < ema_50_4h_aligned[i]:
+            # Exit long: price reaches midpoint (Camarilla H3/L3) or ADX rises above 40 (trend)
+            camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)  # H3 level
+            camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)  # L3 level
+            camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+            camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+            
+            midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+            if price >= midpoint or adx_aligned[i] > 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to middle band or trend changes
-            if price <= sma_20[i] or price > ema_50_4h_aligned[i]:
+            # Exit short: price reaches midpoint or ADX rises above 40 (trend)
+            camarilla_h3 = close_1d + 1.125 * (high_1d - low_1d)  # H3 level
+            camarilla_l3 = close_1d - 1.125 * (high_1d - low_1d)  # L3 level
+            camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+            camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+            
+            midpoint = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+            if price <= midpoint or adx_aligned[i] > 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
