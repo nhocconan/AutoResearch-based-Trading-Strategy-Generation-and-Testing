@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1h timeframe with 4h Donchian channel breakout for direction and 1h volume confirmation for entry timing.
-# Uses 4h Donchian(20) for trend direction and 1h volume spike (>1.5x 20-period average) for entry confirmation.
-# Enters long when price breaks above 4h Donchian high with volume confirmation, short when breaks below 4h Donchian low with volume confirmation.
-# Exits when price returns to 4h Donchian midpoint or volume drops below average.
-# Designed to work in both bull and bear markets by using volatility-based breakouts with volume confirmation.
-# Target: 60-150 total trades over 4 years (15-37/year) with size 0.20.
+# Hypothesis: 6h timeframe with 1-week ADX trend filter and 1-day RSI mean reversion.
+# In high ADX (>25) trending markets, follow 1-day RSI momentum (RSI>55 long, RSI<45 short).
+# In low ADX (<20) ranging markets, fade extreme RSI (RSI>70 short, RSI<30 long).
+# Uses 1-week ADX for regime detection and 1-day RSI for signals, avoiding whipsaws in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "1h_Donchian20_4hVolConf"
-timeframe = "1h"
+name = "6h_WeeklyADX_DailyRSI_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,23 +23,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate 1-week ADX(14) for trend regime
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    donch_mid = (donch_high + donch_low) / 2.0
+    # True Range and Directional Movement
+    prev_close = np.roll(df_1w['close'], 1)
+    prev_high = np.roll(df_1w['high'], 1)
+    prev_low = np.roll(df_1w['low'], 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Align 4h Donchian levels to 1h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
-    donch_mid_aligned = align_htf_to_ltf(prices, df_4h, donch_mid)
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = np.abs(df_1w['high'] - prev_close)
+    tr3 = np.abs(df_1w['low'] - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Calculate volume spike (1.5x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ma)
+    up_move = df_1w['high'] - prev_high
+    down_move = prev_low - df_1w['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr_1w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    plus_di_1w = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
+    minus_di_1w = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False, min_periods=14).mean().values / atr_1w
+    dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = pd.Series(dx_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Regime detection
+    adx_high = adx_1w > 25   # Trending regime
+    adx_low = adx_1w < 20    # Ranging regime
+    adx_high_aligned = align_htf_to_ltf(prices, df_1w, adx_high)
+    adx_low_aligned = align_htf_to_ltf(prices, df_1w, adx_low)
+    
+    # Calculate 1-day RSI(14)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    delta = np.diff(df_1d['close'], prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,37 +80,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
-            np.isnan(donch_mid_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(adx_high_aligned[i]) or np.isnan(adx_low_aligned[i]) or
+            np.isnan(rsi_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above 4h Donchian high with volume spike
-            if close[i] > donch_high_aligned[i] and vol_spike[i]:
-                signals[i] = 0.20
+            # Enter long: trending + RSI>55 OR ranging + RSI<30
+            if (adx_high_aligned[i] and rsi_1d_aligned[i] > 55) or \
+               (adx_low_aligned[i] and rsi_1d_aligned[i] < 30):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 4h Donchian low with volume spike
-            elif close[i] < donch_low_aligned[i] and vol_spike[i]:
-                signals[i] = -0.20
+            # Enter short: trending + RSI<45 OR ranging + RSI>70
+            elif (adx_high_aligned[i] and rsi_1d_aligned[i] < 45) or \
+                 (adx_low_aligned[i] and rsi_1d_aligned[i] > 70):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to 4h Donchian midpoint or volume drops below average
-            if close[i] <= donch_mid_aligned[i] or not vol_spike[i]:
+            # Exit long: trend weakens OR RSI reverses
+            if not adx_high_aligned[i] or rsi_1d_aligned[i] < 45:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to 4h Donchian midpoint or volume drops below average
-            if close[i] >= donch_mid_aligned[i] or not vol_spike[i]:
+            # Exit short: trend weakens OR RSI reverses
+            if not adx_high_aligned[i] or rsi_1d_aligned[i] > 55:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
