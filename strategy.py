@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
-# Long when: close > Donchian upper(20), 1d EMA(34) rising, volume spike (>1.5x 20-period average)
-# Short when: close < Donchian lower(20), 1d EMA(34) falling, volume spike
-# Exit when: price crosses Donchian midpoint OR trend reverses
-# Position size: 0.25 (25% of capital) to limit drawdown. Target: 12-37 trades/year.
-# Designed to work in both bull (breakouts) and bear (mean-reversion at extremes) markets.
+# Hypothesis: 1h RSI(14) mean reversion with 4h EMA(50) trend filter and volume confirmation
+# Long when: RSI < 30, price > 4h EMA(50) (bullish bias), volume > 1.5x 20-period average
+# Short when: RSI > 70, price < 4h EMA(50) (bearish bias), volume > 1.5x 20-period average
+# Exit when: RSI crosses above 50 (long exit) or below 50 (short exit)
+# Position size: 0.20 (20% of capital) to limit drawdown. Target: 15-37 trades/year (60-150 total over 4 years).
+# Uses 4h EMA for trend direction (reduces whipsaw) and 1h RSI for precise entry/exit timing.
+# Session filter (08-20 UTC) avoids low-liquidity periods. Works in both bull (mean reversion in uptrend) and bear (mean reversion in downtrend).
 
-name = "12h_Donchian20_1dEMA_VolumeSpike"
-timeframe = "12h"
+name = "1h_RSI14_4hEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -19,80 +20,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = high_roll.values
-    donchian_lower = low_roll.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = gain_ma / loss_ma
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 1d EMA(34) for trend filter
-    close_1d = df_1d['close']
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_prev = np.roll(ema_34_1d, 1)
-    ema_34_1d_prev[0] = ema_34_1d[0]
-    ema_rising = ema_34_1d > ema_34_1d_prev
-    ema_falling = ema_34_1d < ema_34_1d_prev
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising)
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling)
+    # 4h EMA(50) for trend filter
+    close_4h = df_4h['close']
+    ema_50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume spike: current volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (1.5 * vol_ma.values)
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough data for indicators
+    start_idx = 50  # Need enough data for RSI and EMA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(donchian_mid[i]) or np.isnan(ema_rising_aligned[i]) or
-            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(vol_spike[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > Donchian upper + 1d EMA rising + volume spike
-            if (close[i] > donchian_upper[i] and 
-                ema_rising_aligned[i] and 
+            # Enter long: RSI < 30 (oversold), price > 4h EMA(50) (bullish bias), volume spike
+            if (rsi[i] < 30 and 
+                close[i] > ema_50_4h_aligned[i] and 
                 vol_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price < Donchian lower + 1d EMA falling + volume spike
-            elif (close[i] < donchian_lower[i] and 
-                  ema_falling_aligned[i] and 
+            # Enter short: RSI > 70 (overbought), price < 4h EMA(50) (bearish bias), volume spike
+            elif (rsi[i] > 70 and 
+                  close[i] < ema_50_4h_aligned[i] and 
                   vol_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian midpoint OR trend turns down
-            if (close[i] < donchian_mid[i]) or (not ema_rising_aligned[i]):
+            # Exit long: RSI crosses above 50 (momentum shift)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price crosses above Donchian midpoint OR trend turns up
-            if (close[i] > donchian_mid[i]) or (not ema_falling_aligned[i]):
+            # Exit short: RSI crosses below 50 (momentum shift)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
