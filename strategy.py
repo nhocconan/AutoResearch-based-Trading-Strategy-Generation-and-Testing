@@ -1,16 +1,10 @@
-# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Camarilla breakout with daily trend filter and volume confirmation on 12h timeframe.
-# Uses 1d Camarilla levels (R1/S1) and 1d EMA34 trend filter with volume spike confirmation.
-# Designed to work in both bull and bear markets by filtering trades with higher timeframe trend.
-# Target: 50-150 trades over 4 years (12-37/year) to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,75 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, EMA trend, and volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # 1d Camarilla levels (R1, S1)
+    # 12h EMA50 for trend
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 1d Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     range_1d = high_1d - low_1d
-    camarilla_high = close_1d + 1.1 * range_1d / 12  # R1 level
-    camarilla_low = close_1d - 1.1 * range_1d / 12   # S1 level
+    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
+    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
     
     # 1d volume average for volume filter
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 12h
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    camarilla_high_12h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_12h = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    vol_avg_1d_12h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align all to 4h
+    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_12h[i]) or np.isnan(camarilla_high_12h[i]) or 
-            np.isnan(camarilla_low_12h[i]) or np.isnan(vol_avg_1d_12h[i])):
+        if (np.isnan(ema50_12h_4h[i]) or np.isnan(camarilla_high_4h[i]) or 
+            np.isnan(camarilla_low_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema34_1d_12h[i]
-        resistance = camarilla_high_12h[i]
-        support = camarilla_low_12h[i]
-        vol_avg = vol_avg_1d_12h[i]
-        vol_ok = volume[i] > vol_avg * 2.0
+        trend = ema50_12h_4h[i]
+        resistance = camarilla_high_4h[i]
+        support = camarilla_low_4h[i]
+        vol_avg = vol_avg_1d_4h[i]
+        vol_ok = volume[i] > vol_avg * 2.0  # Increased volume filter from 1.5 to 2.0
         
         if position == 0:
-            # Long: break above R1 with volume and above 1d EMA34
+            # Long: break above R3 with volume and above 12h EMA50
             if close[i] > resistance and vol_ok and close[i] > trend:
-                signals[i] = 0.25
+                signals[i] = 0.30  # Increased position size from 0.25 to 0.30
                 position = 1
-            # Short: break below S1 with volume and below 1d EMA34
+            # Short: break below S3 with volume and below 12h EMA50
             elif close[i] < support and vol_ok and close[i] < trend:
-                signals[i] = -0.25
+                signals[i] = -0.30  # Increased position size from -0.25 to -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 or trend reversal
+            # Exit long: close below S3 or trend reversal
             if close[i] < support or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: close above R1 or trend reversal
+            # Exit short: close above R3 or trend reversal
             if close[i] > resistance or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
