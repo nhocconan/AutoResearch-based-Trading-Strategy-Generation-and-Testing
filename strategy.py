@@ -1,12 +1,13 @@
-# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-# Strategy: Use 1-day Camarilla pivot levels (S3/R3) for breakout entries on 4h timeframe
-# Long when price breaks above R3 with volume spike and 1d trend filter (price > EMA200)
-# Short when price breaks below S3 with volume spike and 1d trend filter (price < EMA200)
-# Exit when price reverses to opposite S3/R3 level or trend fails
-# Uses volatility-based volume confirmation and trend alignment to reduce false breakouts
-# Designed for 4h timeframe with institutional level breakouts and volume confirmation
+#!/usr/bin/env python3
+# 4h_Choppiness_Donchian_Breakout_1dTrend
+# Strategy: Donchian breakout with 1d EMA trend filter and choppiness regime filter
+# Long when price breaks above Donchian(20) high, EMA50 > EMA200 on 1d, and CHOP(14) > 61.8 (range)
+# Short when price breaks below Donchian(20) low, EMA50 < EMA200 on 1d, and CHOP(14) > 61.8
+# Exit when price crosses 10-period EMA in opposite direction or CHOP < 38.2 (trend)
+# Uses choppiness to avoid whipsaws in strong trends and capture breakouts in ranging markets
+# Designed for 4h timeframe with selective entries to minimize trade frequency and maximize edge
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+name = "4h_Choppiness_Donchian_Breakout_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,80 +17,108 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Calculate 1-day Camarilla pivot levels (S3, R3)
+    # Calculate 1d EMA50 and EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Calculate pivot point and ranges for previous day
-    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3
-    range_ = high_1d[:-1] - low_1d[:-1]
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Camarilla levels: S3 = close - 1.1*(high-low)/6, R3 = close + 1.1*(high-low)/6
-    s3 = close_1d[:-1] - 1.1 * range_ / 6
-    r3 = close_1d[:-1] + 1.1 * range_ / 6
+    # Calculate Donchian channels (20-period)
+    def donchian_channel(high, low, period):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    # Align S3 and R3 to 4h timeframe (previous day's levels)
-    s3_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d.iloc[:-1], r3)
+    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
     
-    # Calculate 1-day EMA200 for trend filter
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    # Calculate EMA(10) for exit signal
+    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate volume spike detector (volume > 2x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * vol_ma)
+    # Calculate Choppiness Index (14-period)
+    def choppiness_index(high, low, close, period):
+        chop = np.full_like(close, np.nan)
+        atr = np.full_like(close, np.nan)
+        
+        # Calculate True Range
+        tr = np.zeros_like(close)
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth TR with Wilder's method (equivalent to EMA with alpha=1/period)
+        atr_smoothed = np.full_like(close, np.nan)
+        if len(tr) >= period:
+            atr_smoothed[period-1] = np.nanmean(tr[0:period])
+            for i in range(period, len(tr)):
+                atr_smoothed[i] = (atr_smoothed[i-1] * (period-1) + tr[i]) / period
+        
+        # Calculate Choppiness Index
+        for i in range(period-1, len(close)):
+            if not np.isnan(atr_smoothed[i]):
+                max_high = np.max(high[i-period+1:i+1])
+                min_low = np.min(low[i-period+1:i+1])
+                if max_high > min_low and atr_smoothed[i] > 0:
+                    chop[i] = 100 * np.log10((atr_smoothed[i] * period) / (max_high - min_low)) / np.log10(period)
+        return chop
+    
+    chop = choppiness_index(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for indicators
+    start_idx = max(50, 200)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(ema10[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 with volume spike and uptrend
-            if (close[i] > r3_aligned[i] and volume_spike[i] and 
-                close[i] > ema_200_aligned[i]):
+            # Enter long: Donchian breakout up, 1d uptrend, ranging market (high chop)
+            if (close[i] > donchian_upper[i] and 
+                ema50_1d_aligned[i] > ema200_1d_aligned[i] and 
+                chop[i] > 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 with volume spike and downtrend
-            elif (close[i] < s3_aligned[i] and volume_spike[i] and 
-                  close[i] < ema_200_aligned[i]):
+            # Enter short: Donchian breakout down, 1d downtrend, ranging market (high chop)
+            elif (close[i] < donchian_lower[i] and 
+                  ema50_1d_aligned[i] < ema200_1d_aligned[i] and 
+                  chop[i] > 61.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 or trend fails
-            if (close[i] < s3_aligned[i] or close[i] < ema_200_aligned[i]):
+            # Exit long: price crosses below EMA10 or chop indicates trend (low chop)
+            if close[i] < ema10[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3 or trend fails
-            if (close[i] > r3_aligned[i] or close[i] > ema_200_aligned[i]):
+            # Exit short: price crosses above EMA10 or chop indicates trend (low chop)
+            if close[i] > ema10[i] or chop[i] < 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
