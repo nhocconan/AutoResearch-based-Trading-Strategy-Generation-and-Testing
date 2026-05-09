@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4H_20DayBreakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each daily bar (R3, S3)
-    # R3 = close + 1.1*(high-low)/6, S3 = close - 1.1*(high-low)/6
-    camarilla_range = high_1d - low_1d
-    R3 = close_1d + 1.1 * camarilla_range / 6
-    S3 = close_1d - 1.1 * camarilla_range / 6
+    # Calculate 50-period EMA on daily for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily R3/S3 to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Calculate 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Calculate 1-day average volume for volume spike detection
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    # Align daily EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for calculations
-    start_idx = 30
+    # Start after we have enough data for 20-period high/low
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(avg_volume_1d_aligned[i]):
+        # Skip if EMA data not ready
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 20-day average volume (aligned)
-        volume_confirm = volume[i] > avg_volume_1d_aligned[i] * 1.5
+        # Calculate 20-period high and low for breakout levels
+        period_high = np.max(high[i-20:i])
+        period_low = np.min(low[i-20:i])
         
         # Determine trend
-        uptrend = close[i] > ema34_1d_aligned[i]
-        downtrend = close[i] < ema34_1d_aligned[i]
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average volume
+        avg_volume = np.mean(volume[i-20:i])
+        volume_confirm = volume[i] > avg_volume * 1.5
         
         if position == 0:
-            # Enter long: price crosses above R3 + uptrend + volume confirmation
-            if close[i] > R3_aligned[i] and uptrend and volume_confirm:
-                signals[i] = 0.25
+            # Enter long: price breaks above 20-period high + uptrend + volume confirmation
+            if close[i] > period_high and uptrend and volume_confirm:
+                signals[i] = 0.30
                 position = 1
-            # Enter short: price crosses below S3 + downtrend + volume confirmation
-            elif close[i] < S3_aligned[i] and downtrend and volume_confirm:
-                signals[i] = -0.25
+            # Enter short: price breaks below 20-period low + downtrend + volume confirmation
+            elif close[i] < period_low and downtrend and volume_confirm:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below S3 (reversion to mean)
-            if close[i] < S3_aligned[i]:
+            # Exit long: price breaks below 10-period low (Turtle exit rule)
+            exit_low = np.min(low[i-10:i])
+            if close[i] < exit_low:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price crosses above R3 (reversion to mean)
-            if close[i] > R3_aligned[i]:
+            # Exit short: price breaks above 10-period high
+            exit_high = np.max(high[i-10:i])
+            if close[i] > exit_high:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
