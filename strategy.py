@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h timeframe with daily pivot structure and 12h trend filter.
-# Uses daily Camarilla levels (R1/S1) for breakout entries and 12h EMA50 for trend filter.
-# Daily pivot provides robust support/resistance that works in both bull and bear markets.
-# 12h trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
-# Volume confirmation ensures participation. Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
+# Hypothesis: 1h timeframe with 4h Donchian breakout and 1d trend filter.
+# Uses 4h Donchian channel breakout for entries, filtered by 1d EMA trend direction.
+# Designed to work in both bull and bear markets by only trading in direction of higher timeframe trend.
+# Target: 60-150 total trades over 4 years (15-37/year) with size 0.20.
+# Uses session filter (08-20 UTC) to reduce noise trades.
 
-name = "4h_Camarilla_R1_S1_1dPivot_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_Donchian20_4h_1dEMA50_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mltd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,75 +23,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R1, S1) from previous day
-    prev_close = np.roll(close, 6)   # 6 bars = 1 day * 6 bars per day (4h TF)
-    prev_high = np.roll(high, 6)
-    prev_low = np.roll(low, 6)
-    prev_close[:6] = np.nan          # First values invalid
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 4
-    s1 = prev_close - 1.1 * camarilla_range / 4
-    
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r1
-    breakout_down = close < s1
-    
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for Donchian channel (20-period high/low)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h Donchian channel (20-period high/low)
+    donchian_high = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    trend_up = close > ema_50_12h_aligned
-    trend_down = close < ema_50_12h_aligned
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Volume filter: current volume > 1.5x 20-period average volume (moderate to avoid overtrading)
+    # Calculate 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Trend direction: price above/below EMA50
+    trend_up = close > ema_50_1d_aligned
+    trend_down = close < ema_50_1d_aligned
+    
+    # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
+    # Breakout conditions
+    breakout_up = close > donchian_high_aligned
+    breakout_down = close < donchian_low_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if data not ready
+        # Skip if data not ready or outside session
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
             np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(volume_filter[i]) or not session_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R1 + 12h uptrend + volume spike
+            # Long: breakout above 4h Donchian high + 1d uptrend + volume + session
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below S1 + 12h downtrend + volume spike
+            # Short: breakout below 4h Donchian low + 1d downtrend + volume + session
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price returns to 4h Donchian low or trend reversal
+            if close[i] <= donchian_low_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price returns to 4h Donchian high or trend reversal
+            if close[i] >= donchian_high_aligned[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
