@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WilliamsAlligator_ElderRay_Trend
-Hypothesis: Combines Williams Alligator (trend detection) with Elder Ray (bull/bear power) on 6h timeframe.
-Williams Alligator uses SMAs of 13, 8, 5 periods to identify trend direction and strength.
-Elder Ray measures bull power (high - EMA13) and bear power (EMA13 - low) to confirm trend strength.
-In bull markets: Go long when Alligator is bullish (jaws < teeth < lips) and bull power is rising.
-In bear markets: Go short when Alligator is bearish (jaws > teeth > lips) and bear power is rising.
-Works in both regimes by following the trend direction confirmed by Elder Ray.
-Uses volume confirmation to avoid false breakouts.
-Target: 50-150 total trades over 4 years (12-37/year).
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime
+Hypothesis: 12h breakout at daily Camarilla R1/S1 levels with 1d trend filter (price > EMA34 for long, < EMA34 for short),
+volume spike (>2x 20-period average) and chop regime filter (CHOP > 61.8 for ranging, < 38.2 for trending).
+Designed for low trade frequency (<30/year) to minimize fee drag in BTC/ETH.
+Works in both bull and bear markets by following the daily trend direction and using regime filter to avoid whipsaws.
 """
 
-name = "6h_WilliamsAlligator_ElderRay_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,52 +25,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator and Elder Ray calculation
+    # Get daily data for Camarilla calculation and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Williams Alligator SMAs (13, 8, 5)
-    def sma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            for i in range(period-1, len(arr)):
-                result[i] = np.mean(arr[i-period+1:i+1])
-        return result
+    # Previous day's values for Camarilla calculation
+    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
+    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
+    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
     
-    # Alligator lines: Jaws (13), Teeth (8), Lips (5)
-    jaws = sma(close_1d, 13)
-    teeth = sma(close_1d, 8)
-    lips = sma(close_1d, 5)
+    # Calculate Camarilla levels (R1, S1 are the key breakout levels)
+    rang = ph - pl
+    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
+    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align Alligator lines to 6h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            multiplier = 2 / (period + 1)
-            result[period-1] = np.mean(arr[0:period])
-            for i in range(period, len(arr)):
-                result[i] = (arr[i] * multiplier) + (result[i-1] * (1 - multiplier))
-        return result
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
     
-    ema13 = ema(close_1d, 13)
-    bull_power = high_1d - ema13
-    bear_power = ema13 - low_1d
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Volume confirmation: current volume / 20-period average
+    # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -85,50 +68,77 @@ def generate_signals(prices):
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
+    # Chop regime filter: calculate on 12h data
+    # CHOP = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    atr = np.full_like(close, np.nan)
+    tr = np.full_like(close, np.nan)
+    if len(close) >= 2:
+        tr[0] = high[0] - low[0]
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    if len(tr) >= 14:
+        atr_sum = np.full_like(close, np.nan)
+        atr_sum[13] = np.sum(tr[0:14])
+        for i in range(14, len(close)):
+            atr_sum[i] = atr_sum[i-1] - tr[i-14] + tr[i]
+        
+        max_high = np.full_like(close, np.nan)
+        min_low = np.full_like(close, np.nan)
+        if len(high) >= 14:
+            max_high[13] = np.max(high[0:14])
+            min_low[13] = np.min(low[0:14])
+            for i in range(14, len(close)):
+                max_high[i] = max(max_high[i-1], high[i])
+                min_low[i] = min(min_low[i-1], low[i])
+        
+        chop = np.full_like(close, np.nan)
+        valid_chop = (~np.isnan(atr_sum)) & (~np.isnan(max_high)) & (~np.isnan(min_low)) & ((max_high - min_low) > 0)
+        chop[valid_chop] = 100 * np.log10(atr_sum[valid_chop] / (max_high[valid_chop] - min_low[valid_chop])) / np.log10(14)
+    else:
+        chop = np.full_like(close, np.nan)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 34, 14)  # Ensure volume MA, EMA and CHOP are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams Alligator conditions
-        alligator_bullish = (jaws_aligned[i] < teeth_aligned[i]) and (teeth_aligned[i] < lips_aligned[i])
-        alligator_bearish = (jaws_aligned[i] > teeth_aligned[i]) and (teeth_aligned[i] > lips_aligned[i])
-        
         if position == 0:
-            # Enter long: Alligator bullish AND rising bull power AND volume spike
-            if (alligator_bullish and 
-                bull_power_aligned[i] > bull_power_aligned[i-1] and 
-                volume_ratio[i] > 1.8):
+            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike AND trending regime (CHOP < 38.2)
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_ratio[i] > 2.0 and
+                chop[i] < 38.2):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Alligator bearish AND rising bear power AND volume spike
-            elif (alligator_bearish and 
-                  bear_power_aligned[i] > bear_power_aligned[i-1] and 
-                  volume_ratio[i] > 1.8):
+            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike AND trending regime (CHOP < 38.2)
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_ratio[i] > 2.0 and
+                  chop[i] < 38.2):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator turns bearish OR bull power falls
-            if not alligator_bullish or bull_power_aligned[i] < bull_power_aligned[i-1]:
+            # Exit long: price breaks below S1 OR trend reversal (price < EMA34) OR ranging regime (CHOP > 61.8)
+            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator turns bullish OR bear power falls
-            if not alligator_bearish or bear_power_aligned[i] < bear_power_aligned[i-1]:
+            # Exit short: price breaks above R1 OR trend reversal (price > EMA34) OR ranging regime (CHOP > 61.8)
+            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
