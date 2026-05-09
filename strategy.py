@@ -1,13 +1,7 @@
-# 4h_Camarilla_R3_S3_1dEMA34_Trend_Volume_Rev2
-# Strategy: Breakouts at daily Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation.
-# Works in bull/bear by following daily trend. Designed for low trade frequency (~20-50/year) with high win rate.
-# Uses 4h timeframe for entries and 1d for trend filter.
-# Added: Reduced trade frequency by tightening volume filter to 2.5x average volume and requiring price to close beyond Camarilla level for confirmation.
-
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R3_S3_1dEMA34_Trend_Volume_Rev2"
-timeframe = "4h"
+name = "12h_KAMA_1dTrend_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,26 +13,20 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
+    # Calculate KAMA on price
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
-    
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r3
-    breakout_down = close < s3
-    
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -50,9 +38,9 @@ def generate_signals(prices):
     trend_up = close > ema_34_1d_aligned
     trend_down = close < ema_34_1d_aligned
     
-    # Volume filter: current volume > 2.5x 20-period average volume (tighter than before)
+    # Volume filter: current volume > 2.0x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.5 * avg_volume)
+    volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,8 +49,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+        if (np.isnan(kama[i]) or np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,26 +57,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 1d uptrend + volume spike
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: price above KAMA + 1d uptrend + volume spike
+            if close[i] > kama[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 1d downtrend + volume spike
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: price below KAMA + 1d downtrend + volume spike
+            elif close[i] < kama[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price crosses below KAMA or trend reversal
+            if close[i] <= kama[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price crosses above KAMA or trend reversal
+            if close[i] >= kama[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
