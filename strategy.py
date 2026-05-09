@@ -1,17 +1,10 @@
-# 6h Camarilla R3/S3 Breakout with Volume Spike and 1d EMA Trend Filter
-# Strategy targets breakouts of daily Camarilla R3/S3 levels with volume confirmation
-# and trend alignment from daily EMA50. Works in both bull and bear markets by
-# following momentum when price breaks key daily levels with institutional volume.
-# Uses 60-minute bars for execution with 1-day reference for levels and trend.
-# Target: 15-35 trades/year per symbol to avoid fee drag.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +19,12 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 100:
+        return np.zeros(n)
+    
+    # Get 12h data for volume filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 100:
         return np.zeros(n)
     
     # Previous day's close for Camarilla calculation (R3, S3)
@@ -41,15 +39,16 @@ def generate_signals(prices):
     # Trend filter: 1d EMA50
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 6h
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Volume filter: current 6h volume > 2.0 * 20-period average
-    vol_series = pd.Series(volume)
+    # Volume filter: current 12h volume > 1.5 * 20-period average
+    vol_series = pd.Series(df_12h['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter_12h = df_12h['volume'].values > (vol_ma * 1.5)
+    
+    # Align all to 12h
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_filter_12h)
     
     signals = np.zeros(n)
     position = 0
@@ -57,17 +56,17 @@ def generate_signals(prices):
     start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(ema50_1d_6h[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
+            np.isnan(ema50_1d_12h[i]) or np.isnan(volume_filter_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_6h[i]
-        s3_val = s3_6h[i]
-        trend = ema50_1d_6h[i]
-        vol_filter = volume_filter[i]
+        r3_val = r3_12h[i]
+        s3_val = s3_12h[i]
+        trend = ema50_1d_12h[i]
+        vol_filter = volume_filter_12h_aligned[i]
         
         if position == 0:
             # Enter long: break above R3 with volume and above trend
