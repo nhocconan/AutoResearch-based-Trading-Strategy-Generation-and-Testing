@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1-day Choppiness Index regime filter (CHOP > 61.8 = range, CHOP < 38.2 = trend)
-# Combined with 1-day Bollinger Band mean reversion: long when price < lower BB and CHOP > 61.8,
-# short when price > upper BB and CHOP > 61.8. Uses 1-day indicators to avoid look-ahead.
-# Designed to work in both bull and bear markets by focusing on mean reversion in ranging markets.
-# Target: 20-50 trades/year to minimize fee drag.
+# Hypothesis: 12h strategy using weekly Donchian breakout with 1-day trend filter and volume confirmation.
+# Enters long when price breaks above weekly Donchian upper with daily uptrend and volume spike,
+# short when price breaks below weekly Donchian lower with daily downtrend and volume spike.
+# Exits on opposite Donchian break or trend reversal. Uses weekly for structure and daily for trend
+# to work in both bull and bear markets. Target: 12-37 trades/year (50-150 total over 4 years).
 
-name = "12h_Chop_BB_MeanReversion"
+name = "12h_WeeklyDonchian_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,88 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Choppiness Index and Bollinger Bands
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for Donchian channels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1-day Choppiness Index (CHOP)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Weekly Donchian channels (20-period high/low)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # Daily EMA34 for trend filter
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Highest high and lowest low over 14 periods
-    hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
-    sum_tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh_ll_diff = hh_14 - ll_14
-    chop = 100 * np.log10(sum_tr14 / hh_ll_diff) / np.log10(14)
-    chop = np.where(hh_ll_diff == 0, 100, chop)  # Avoid division by zero
-    chop = np.where(sum_tr14 == 0, 0, chop)
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # Calculate 1-day Bollinger Bands (20, 2)
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # Volume spike filter: current volume > 2.0 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for CHOP and BB calculations
+    start_idx = max(20, 20, 20)  # Need enough data for Donchian (20), EMA34 (34), volume MA (20)
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(chop_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop_val = chop_aligned[i]
-        upper_bb_val = upper_bb_aligned[i]
-        lower_bb_val = lower_bb_aligned[i]
+        donch_high = donchian_high_aligned[i]
+        donch_low = donchian_low_aligned[i]
+        ema34_1d_val = ema34_1d_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Price below lower BB and choppy market (CHOP > 61.8)
-            if close[i] < lower_bb_val and chop_val > 61.8:
+            # Enter long: Price breaks above weekly Donchian high + daily uptrend + volume spike
+            if close[i] > donch_high and close[i] > ema34_1d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price above upper BB and choppy market (CHOP > 61.8)
-            elif close[i] > upper_bb_val and chop_val > 61.8:
+            # Enter short: Price breaks below weekly Donchian low + daily downtrend + volume spike
+            elif close[i] < donch_low and close[i] < ema34_1d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses above SMA or market starts trending (CHOP < 38.2)
-            if close[i] > sma_20[-1] if len(sma_20) > 0 else False or chop_val < 38.2:
+            # Exit long: Price breaks below weekly Donchian low or daily trend turns down
+            if close[i] < donch_low or close[i] < ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses below SMA or market starts trending (CHOP < 38.2)
-            if close[i] < sma_20[-1] if len(sma_20) > 0 else False or chop_val < 38.2:
+            # Exit short: Price breaks above weekly Donchian high or daily trend turns up
+            if close[i] > donch_high or close[i] > ema34_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
