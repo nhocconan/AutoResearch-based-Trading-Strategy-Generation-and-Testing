@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,10 +22,10 @@ def generate_signals(prices):
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA(30) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema30_1d = close_1d.ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema30_1d)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Calculate Camarilla levels from previous 1d bar's range
     high_1d = df_1d['high'].values
@@ -40,34 +40,34 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume confirmation: current volume > 2.0x 20-period average (~10-day average for 4h)
+    # Volume confirmation: current volume > 2.5x 30-period average (~15-day average for 4h)
     vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma30 = vol_series.rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and volume MA
+    start_idx = 60  # warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema30_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+            np.isnan(vol_ma30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]
+        vol_ok = volume[i] > 2.5 * vol_ma30[i]
         
         if position == 0:
             # Long: Close breaks above R1 with volume spike and above 1d EMA trend
-            if close[i] > r1_aligned[i] and vol_ok and close[i] > ema30_1d_aligned[i]:
+            if close[i] > r1_aligned[i] and vol_ok and close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Close breaks below S1 with volume spike and below 1d EMA trend
-            elif close[i] < s1_aligned[i] and vol_ok and close[i] < ema30_1d_aligned[i]:
+            elif close[i] < s1_aligned[i] and vol_ok and close[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
