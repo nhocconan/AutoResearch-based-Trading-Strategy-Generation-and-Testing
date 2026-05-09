@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_Daily_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12H_DailyCamarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 6h
+    # Align to 12h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -47,16 +47,6 @@ def generate_signals(prices):
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 2.0)
     
-    # RSI(14) for additional momentum filter
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -65,33 +55,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]) or np.isnan(rsi_values[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]) or np.isnan(volume_confirm[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation + RSI > 50
-            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i] and rsi_values[i] > 50:
+            # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation
+            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation + RSI < 50
-            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i] and rsi_values[i] < 50:
+            # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation
+            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily EMA34 (trend change) OR RSI < 30 (oversold)
-            if close[i] < ema34_aligned[i] or rsi_values[i] < 30:
+            # Exit long: price below daily EMA34 (trend change)
+            if close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above daily EMA34 (trend change) OR RSI > 70 (overbought)
-            if close[i] > ema34_aligned[i] or rsi_values[i] > 70:
+            # Exit short: price above daily EMA34 (trend change)
+            if close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
