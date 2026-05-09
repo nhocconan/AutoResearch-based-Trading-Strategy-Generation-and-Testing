@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_1W_RSI20_Pullback_With_Volume_Filter"
-timeframe = "1d"
+name = "6H_PairTrading_BTC_ETH_Zscore_1dVWAP"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly RSI(20) for trend filter
-    delta_1w = pd.Series(close_1w).diff()
-    gain_1w = delta_1w.clip(lower=0)
-    loss_1w = -delta_1w.clip(upper=0)
-    avg_gain_1w = gain_1w.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
-    avg_loss_1w = loss_1w.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
-    rs_1w = avg_gain_1w / avg_loss_1w.replace(0, np.nan)
-    rsi_1w = 100 - (100 / (1 + rs_1w))
-    rsi_1w_values = rsi_1w.fillna(50).values
-    
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
-    
-    # Get daily data for RSI(14) and volume
+    # Get daily data for VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily RSI(14)
-    delta_1d = pd.Series(close_1d).diff()
-    gain_1d = delta_1d.clip(lower=0)
-    loss_1d = -delta_1d.clip(upper=0)
-    avg_gain_1d = gain_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss_1d = loss_1d.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs_1d = avg_gain_1d / avg_loss_1d.replace(0, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs_1d))
-    rsi_1d_values = rsi_1d.fillna(50).values
+    # Calculate daily VWAP (typical price * volume cumulative)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price_1d * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = np.divide(vwap_numerator, vwap_denominator, 
+                        out=np.full_like(typical_price_1d, np.nan), 
+                        where=vwap_denominator!=0)
     
-    # Calculate daily volume SMA(10)
-    vol_sma10_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    # Align daily VWAP to 6h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Calculate price deviation from VWAP (as percentage)
+    price_dev = (close - vwap_1d_aligned) / vwap_1d_aligned * 100
+    
+    # Calculate rolling z-score of price deviation (20-day lookback)
+    # Using pandas for efficient rolling z-score
+    price_dev_series = pd.Series(price_dev)
+    rolling_mean = price_dev_series.rolling(window=20, min_periods=20).mean().values
+    rolling_std = price_dev_series.rolling(window=20, min_periods=20).std().values
+    zscore = np.divide(price_dev - rolling_mean, rolling_std, 
+                       out=np.full_like(price_dev, np.nan), 
+                       where=rolling_std!=0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
+    # Start after we have enough data for z-score
     start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(rsi_1d_values[i]) or np.isnan(vol_sma10_1d[i]):
+        # Skip if z-score not ready
+        if np.isnan(zscore[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market conditions
-        # Weekly trend: RSI(20) > 50 = bullish, < 50 = bearish
-        weekly_bullish = rsi_1w_aligned[i] > 50
-        weekly_bearish = rsi_1w_aligned[i] < 50
-        # Daily oversold/overbought: RSI(14) < 30 = oversold, > 70 = overbought
-        daily_oversold = rsi_1d_values[i] < 30
-        daily_overbought = rsi_1d_values[i] > 70
-        # Volume confirmation: current volume > 1.5x 10-day average
-        volume_confirm = volume[i] > vol_sma10_1d[i] * 1.5
+        z = zscore[i]
         
         if position == 0:
-            # Enter long: Weekly bullish + daily oversold + volume confirmation
-            if weekly_bullish and daily_oversold and volume_confirm:
+            # Enter long when price significantly below VWAP (mean reversion long)
+            if z < -1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Weekly bearish + daily overbought + volume confirmation
-            elif weekly_bearish and daily_overbought and volume_confirm:
+            # Enter short when price significantly above VWAP (mean reversion short)
+            elif z > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Weekly turns bearish OR daily RSI > 50
-            if not weekly_bullish or rsi_1d_values[i] > 50:
+            # Exit long when price reverts to VWAP or overshoots slightly
+            if z > -0.5:  # Return to near VWAP or slight overshoot
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Weekly turns bullish OR daily RSI < 50
-            if not weekly_bearish or rsi_1d_values[i] < 50:
+            # Exit short when price reverts to VWAP or undershoots slightly
+            if z < 0.5:  # Return to near VWAP or slight undershoot
                 signals[i] = 0.0
                 position = 0
             else:
