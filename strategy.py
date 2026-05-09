@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 4h_RSI_Pullback_With_Volume_Spice
-# Hypothesis: RSI pullback strategy with volume spike confirmation and 4h EMA trend filter.
-# Works in bull/bear: Trend filter ensures trades align with higher timeframe momentum, 
-# RSI pullback (from overbought/oversold) provides mean reversion entries, volume spike confirms institutional interest.
-# Uses 4h EMA50 for trend, RSI(14) for mean reversion signals, and volume ratio (>2.0) for confirmation.
-# Designed for moderate trade frequency (~25-40 trades/year) to minimize fee drag.
+# 12h_Keltner_Breakout_VolumeSpike_Trend
+# Hypothesis: Keltner breakout with volume spike and trend filter on 12h timeframe. Works in bull/bear by avoiding counter-trend trades.
+# Uses Keltner channel (20-period, 2xATR) breakouts, volume > 1.5x average, and trend filter (price above/below EMA50).
+# Keltner channels adapt to volatility, providing robust breakout signals in both trending and ranging markets.
 
-name = "4h_RSI_Pullback_With_Volume_Spice"
-timeframe = "4h"
+name = "12h_Keltner_Breakout_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,31 +22,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate ATR for Keltner channels
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
+    atr = np.full_like(close, np.nan)
+    if len(tr) >= 20:
+        atr[19] = np.mean(tr[0:20])
+        for i in range(20, len(tr)):
+            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
     
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[1:14]) if len(gain) >= 14 else 0
-    avg_loss[13] = np.mean(loss[1:14]) if len(loss) >= 14 else 0
+    # Calculate Keltner channels: EMA20 ± 2*ATR
+    ema20 = np.full_like(close, np.nan)
+    if len(close) >= 20:
+        ema20[19] = np.mean(close[0:20])
+        for i in range(20, len(close)):
+            ema20[i] = (ema20[i-1] * 19 + close[i]) / 20
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    upper_keltner = ema20 + 2 * atr
+    lower_keltner = ema20 - 2 * atr
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate 4h EMA50 for trend filter
-    ema_50 = np.full_like(close, np.nan)
+    # Calculate EMA50 for trend filter
+    ema50 = np.full_like(close, np.nan)
     if len(close) >= 50:
-        ema_50[49] = np.mean(close[0:50])
+        ema50[49] = np.mean(close[0:50])
         for i in range(50, len(close)):
-            ema_50[i] = (ema_50[i-1] * 49 + close[i]) / 50
+            ema50[i] = (ema50[i-1] * 49 + close[i]) / 50
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -64,41 +65,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 50)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(rsi[i]) or np.isnan(ema_50[i]) or np.isnan(volume_ratio[i]):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
+            np.isnan(ema50[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: RSI < 30 (oversold) AND price > EMA50 (uptrend) AND volume spike
-            if (rsi[i] < 30 and 
-                close[i] > ema_50[i] and 
-                volume_ratio[i] > 2.0):
+            # Enter long: price breaks above upper Keltner AND uptrend (price > EMA50) AND volume spike
+            if (close[i] > upper_keltner[i] and 
+                close[i] > ema50[i] and 
+                volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI > 70 (overbought) AND price < EMA50 (downtrend) AND volume spike
-            elif (rsi[i] > 70 and 
-                  close[i] < ema_50[i] and 
-                  volume_ratio[i] > 2.0):
+            # Enter short: price breaks below lower Keltner AND downtrend (price < EMA50) AND volume spike
+            elif (close[i] < lower_keltner[i] and 
+                  close[i] < ema50[i] and 
+                  volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (mean reversion complete) OR trend reversal (price < EMA50)
-            if rsi[i] > 50 or close[i] < ema_50[i]:
+            # Exit long: price breaks below lower Keltner OR trend reversal (price < EMA50)
+            if close[i] < lower_keltner[i] or close[i] < ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 (mean reversion complete) OR trend reversal (price > EMA50)
-            if rsi[i] < 50 or close[i] > ema_50[i]:
+            # Exit short: price breaks above upper Keltner OR trend reversal (price > EMA50)
+            if close[i] > upper_keltner[i] or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
