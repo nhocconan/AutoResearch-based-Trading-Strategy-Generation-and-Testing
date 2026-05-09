@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "6h_Volume_Spice_Donchian_Breakout_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation (shifted by 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_open = np.roll(prices['open'].values, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    prev_open[0] = prices['open'].values[0]
+    # Donchian channel (20-period) on 6h
+    lookback = 20
+    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Calculate Camarilla R3/S3 levels
-    range_ = prev_high - prev_low
-    close_prev = prev_close
-    r3 = close_prev + range_ * 1.1 / 4
-    s3 = close_prev - range_ * 1.1 / 4
-    
-    # Daily trend: EMA34 on 1d (loaded once, aligned)
+    # Daily trend: EMA34 on 1d
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: volume > 1.3x 20-period SMA
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.3 * vol_ma20
+    # Volume filter: volume > 1.8x 30-period SMA (more selective)
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    vol_filter = volume > 1.8 * vol_ma30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,8 +40,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(r3[i]) or np.isnan(s3[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma30[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,16 +50,16 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R3 with daily uptrend and volume
-            if (price > r3[i] and 
+            # Long: breakout above upper Donchian with daily uptrend and volume
+            if (price > upper[i] and 
                 price > ema34_1d_aligned[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S3 with daily downtrend and volume
-            elif (price < s3[i] and 
+            # Short: breakdown below lower Donchian with daily downtrend and volume
+            elif (price < lower[i] and 
                   price < ema34_1d_aligned[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
