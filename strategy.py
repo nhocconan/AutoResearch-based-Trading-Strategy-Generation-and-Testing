@@ -3,12 +3,6 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume spike.
-# Uses price structure (Camarilla pivots) for entries, 1d EMA for trend filter,
-# and volume surge for confirmation. Designed to work in both bull and bear
-# markets by requiring trend alignment and avoiding whipsaws via volume filter.
-# Target: 20-40 trades/year per symbol to minimize fee drag.
-
 name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
 timeframe = "4h"
 leverage = 1.0
