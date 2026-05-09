@@ -1,9 +1,3 @@
-# 143706: 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume spike.
-# Works in bull (breakouts continue) and bear (mean reversion from extremes).
-# Uses 4h timeframe for optimal trade frequency (~25-50/year) and low fee drag.
-# 1d trend avoids counter-trend trades; volume confirms breakout strength.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
