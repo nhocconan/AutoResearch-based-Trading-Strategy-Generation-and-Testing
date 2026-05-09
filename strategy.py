@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_RVI_Signal_1dTrend_ETF_Style"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,65 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend
+    # Get 1d data for trend and ETF-style RVI calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar (H1, L1, C1)
-    # These are the key levels for R1 and S1
-    H1 = df_1d['high'].values
-    L1 = df_1d['low'].values
-    C1 = df_1d['close'].values
+    # Calculate RVI (Relative Vigor Index) on 6h timeframe
+    # RVI = (Close - Open) / (High - Low) smoothed
+    num = close - prices['open'].values
+    den = high - low
+    # Avoid division by zero
+    den = np.where(den == 0, 1e-10, den)
+    rvi_raw = num / den
     
-    # Camarilla R1 and S1 levels
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    R1 = C1 + (H1 - L1) * 1.1 / 12
-    S1 = C1 - (H1 - L1) * 1.1 / 12
+    # Smooth RVI with 10-period SMA
+    rvi_series = pd.Series(rvi_raw)
+    rvi = rvi_series.rolling(window=10, min_periods=10).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Signal line: EMA of RVI
+    rvi_ema = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
     
-    # Get 1d EMA34 for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get 1d EMA50 for trend filter
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike detection (4h timeframe)
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(rvi[i]) or np.isnan(rvi_ema[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Strong volume spike
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
         # Session filter: 08-20 UTC (reduce noise trades)
         hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA (uptrend) + volume spike
-            if (close[i] > R1_aligned[i] and 
+            # Long: RVI crosses above signal line + above 1d EMA + volume
+            if (rvi[i] > rvi_ema[i] and 
+                rvi[i-1] <= rvi_ema[i-1] and  # crossover
                 close[i] > ema_1d_aligned[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA (downtrend) + volume spike
-            elif (close[i] < S1_aligned[i] and 
+            # Short: RVI crosses below signal line + below 1d EMA + volume
+            elif (rvi[i] < rvi_ema[i] and 
+                  rvi[i-1] >= rvi_ema[i-1] and  # crossover
                   close[i] < ema_1d_aligned[i] and 
                   vol_ok and 
                   in_session):
@@ -83,16 +83,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 or volume dries up
-            if close[i] < S1_aligned[i] or volume[i] < 0.5 * vol_ma20[i]:
+            # Exit long: RVI crosses below signal line
+            if rvi[i] < rvi_ema[i] and rvi[i-1] >= rvi_ema[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 or volume dries up
-            if close[i] > R1_aligned[i] or volume[i] < 0.5 * vol_ma20[i]:
+            # Exit short: RVI crosses above signal line
+            if rvi[i] > rvi_ema[i] and rvi[i-1] <= rvi_ema[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
