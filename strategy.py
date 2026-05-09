@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Choppiness_Keltner_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,74 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and trend
+    # Get 1d data for ATR, EMA, and Choppiness
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # True Range components
+    prev_close = df_1d['close'].shift(1).values
+    tr1 = df_1d['high'].values - df_1d['low'].values
+    tr2 = np.abs(df_1d['high'].values - prev_close)
+    tr3 = np.abs(df_1d['low'].values - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Elder Ray calculations (13-period EMA)
-    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13
-    bear_power = ema13 - df_1d['low'].values
+    # ATR(14)
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # EMA(20) for Keltner mid
+    ema20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: current 12h volume > 1.3 * 20-period average
-    vol_series = pd.Series(df_12h['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_12h = df_12h['volume'].values > (vol_ma * 1.3)
+    # Choppiness Index (14)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = df_1d['high'].rolling(window=14, min_periods=14).max().values
+    ll = df_1d['low'].rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
     
-    # Align all to 6h
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_6h = align_htf_to_ltf(prices, df_12h, volume_filter_12h)
+    # Keltner Bands
+    upper = ema20 + 2.0 * atr
+    lower = ema20 - 2.0 * atr
+    
+    # Align to 4h
+    upper_4h = align_htf_to_ltf(prices, df_1d, upper)
+    lower_4h = align_htf_to_ltf(prices, df_1d, lower)
+    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
+    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = 14  # Need enough for ATR and Choppiness
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or
-            np.isnan(ema34_1d_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or
+            np.isnan(chop_4h[i]) or np.isnan(ema20_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull = bull_power_6h[i]
-        bear = bear_power_6h[i]
-        trend = ema34_1d_6h[i]
-        vol_filter = volume_filter_6h[i]
+        up = upper_4h[i]
+        low = lower_4h[i]
+        chop_val = chop_4h[i]
+        mid = ema20_4h[i]
         
         if position == 0:
-            # Enter long: bull power > 0, price above trend, volume confirmation
-            if bull > 0 and close[i] > trend and vol_filter:
+            # Enter long: price above upper Keltner in low chop (trending)
+            if close[i] > up and chop_val < 38.2:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bear power > 0, price below trend, volume confirmation
-            elif bear > 0 and close[i] < trend and vol_filter:
+            # Enter short: price below lower Keltner in low chop (trending)
+            elif close[i] < low and chop_val < 38.2:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bear power becomes positive (bearish pressure)
-            if bear > 0:
+            # Exit long: price below EMA (trend end) or high chop (range)
+            if close[i] < mid or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bull power becomes positive (bullish pressure)
-            if bull > 0:
+            # Exit short: price above EMA (trend end) or high chop (range)
+            if close[i] > mid or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
