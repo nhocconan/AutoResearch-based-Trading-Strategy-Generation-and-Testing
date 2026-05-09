@@ -1,12 +1,14 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 
-# Hypothesis: 1h timeframe strategy using 4h Donchian breakout for direction and 1h for entry timing.
-# Uses volume confirmation and session filter (08-20 UTC) to reduce false signals.
-# Target: 15-37 trades/year per symbol by combining higher timeframe structure with lower timeframe precision.
-# Works in both bull and bear markets by following 4h trend and requiring volume confirmation.
+# Hypothesis: 6h timeframe with weekly pivot structure (from 1w) and daily trend filter.
+# Uses weekly Camarilla levels (R3/S3) for breakout entries and 1d EMA34 for trend filter.
+# Weekly pivot provides structural support/resistance that works in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Weekly data changes slowly, reducing whipsaw and improving win rate in ranging markets.
 
-name = "1h_Donchian20_4hTrend_Volume_Session"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_1wEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,41 +25,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period high/low) for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Calculate weekly Camarilla levels (R3, S3) from previous week
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = np.nan  # First value invalid
+    
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2
+    s3 = prev_close - 1.1 * camarilla_range / 2
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r3
+    breakout_down = close < s3
+    
+    # Get weekly data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donchian_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Calculate 1w EMA34 trend filter
+    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align to 1h timeframe (wait for 4h bar to close)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
+    trend_up = close > ema_34_1w_aligned
+    trend_down = close < ema_34_1w_aligned
     
-    # Determine 4h trend based on Donchian breakout
-    trend_up = close > donchian_high_aligned
-    trend_down = close < donchian_low_aligned
-    
-    # Volume filter: current volume > 2.0x 24-period average volume
-    avg_volume = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * avg_volume)
-    
-    # Session filter: 08-20 UTC (use pre-computed hour from index)
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,29 +71,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 4h uptrend (price above Donchian high) + volume + session
-            if trend_up[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # Long: breakout above R3 + 1w uptrend + volume spike
+            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend (price below Donchian low) + volume + session
-            elif trend_down[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # Short: breakout below S3 + 1w downtrend + volume spike
+            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 4h trend reversal or volume drop
-            if not trend_up[i] or not volume_filter[i]:
+            # Exit long: price returns to previous week's close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 4h trend reversal or volume drop
-            if not trend_down[i] or not volume_filter[i]:
+            # Exit short: price returns to previous week's close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
