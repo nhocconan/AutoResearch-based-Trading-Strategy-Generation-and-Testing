@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Ichimoku_TK_Cross_1dCloud_Filter"
-timeframe = "6h"
+name = "4h_Supertrend_KAMA_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Ichimoku cloud
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Supertrend on 1d (ATR=10, multiplier=3) - robust trend filter
+    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
+    tr2 = np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
+    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan_sen = (max_high_tenkan + min_low_tenkan) / 2
+    # Basic ATR calculation for Supertrend
+    hl2 = (high + low) / 2
+    upperband = hl2 + (3 * atr)
+    lowerband = hl2 - (3 * atr)
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun_sen = (max_high_kijun + min_low_kijun) / 2
+    # Initialize Supertrend
+    supertrend = np.full_like(close, np.nan)
+    dir = np.ones_like(close, dtype=int)  # 1 for uptrend, -1 for downtrend
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2, shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    for i in range(10, len(close)):
+        if np.isnan(atr[i]) or np.isnan(hl2[i]):
+            continue
+            
+        if close[i] > upperband[i-1]:
+            dir[i] = 1
+        elif close[i] < lowerband[i-1]:
+            dir[i] = -1
+        else:
+            dir[i] = dir[i-1]
+            
+        if dir[i] == 1:
+            lowerband[i] = max(lowerband[i], lowerband[i-1])
+            supertrend[i] = lowerband[i]
+        else:
+            upperband[i] = min(upperband[i], upperband[i-1])
+            supertrend[i] = upperband[i]
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2, shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou_b = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou_b = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou_b + min_low_senkou_b) / 2)
+    # Align 1d Supertrend to 4h
+    supertrend_1d = supertrend
+    dir_1d = dir
+    supertrend_4h = align_htf_to_ltf(prices, df_1d, supertrend_1d)
+    dir_4h = align_htf_to_ltf(prices, df_1d, dir_1d.astype(float))
     
-    # Align Ichimoku components to 6h
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # KAMA on 4h for entry timing (ER=10)
+    change = np.abs(np.diff(close, k=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1) if len(close) > 1 else np.array([])
+    # Proper ER calculation
+    er = np.zeros_like(close)
+    for i in range(9, len(close)):
+        if i >= 9:
+            price_change = np.abs(close[i] - close[i-9])
+            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            if volatility_sum > 0:
+                er[i] = price_change / volatility_sum
+            else:
+                er[i] = 0
     
-    # 20-period volume average for spike detection
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    sc[0] = 0
+    
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Volume condition: current volume > 2.0 x 20-period average
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Enough for indicators to stabilize
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(supertrend_4h[i]) or np.isnan(dir_4h[i]) or 
+            np.isnan(kama[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,43 +107,27 @@ def generate_signals(prices):
         # Volume condition: current volume > 2.0 x 20-period average
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
-        # Determine cloud color and position relative to cloud
-        # Green cloud: Senkou A > Senkou B (bullish)
-        # Red cloud: Senkou A < Senkou B (bearish)
-        # Price above cloud: close > max(Senkou A, Senkou B)
-        # Price below cloud: close < min(Senkou A, Senkou B)
-        # Price inside cloud: min <= close <= max
-        
-        cloud_top = np.maximum(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = np.minimum(senkou_a_6h[i], senkou_b_6h[i])
-        
         if position == 0:
-            # Long: TK cross bullish (Tenkan > Kijun) + price above cloud + volume spike
-            if (tenkan_sen_6h[i] > kijun_sen_6h[i] and 
-                close[i] > cloud_top and 
-                vol_spike):
+            # Long: Price above Supertrend (uptrend) AND price > KAMA AND volume spike
+            if dir_4h[i] == 1 and close[i] > kama[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: TK cross bearish (Tenkan < Kijun) + price below cloud + volume spike
-            elif (tenkan_sen_6h[i] < kijun_sen_6h[i] and 
-                  close[i] < cloud_bottom and 
-                  vol_spike):
+            # Short: Price below Supertrend (downtrend) AND price < KAMA AND volume spike
+            elif dir_4h[i] == -1 and close[i] < kama[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TK cross bearish OR price drops below cloud
-            if (tenkan_sen_6h[i] < kijun_sen_6h[i] or 
-                close[i] < cloud_top):
+            # Exit long: Trend turns down OR price falls below KAMA
+            if dir_4h[i] == -1 or close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TK cross bullish OR price rises above cloud
-            if (tenkan_sen_6h[i] > kijun_sen_6h[i] or 
-                close[i] > cloud_bottom):
+            # Exit short: Trend turns up OR price rises above KAMA
+            if dir_4h[i] == 1 or close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
