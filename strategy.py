@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
+name = "4h_Vortex_Trend_With_Volume_And_Chop_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,81 +17,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend
+    # Get 1d data for Vortex and Chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d bar (H1, L1, C1)
-    H1 = df_1d['high'].values
-    L1 = df_1d['low'].values
-    C1 = df_1d['close'].values
+    # Vortex Indicator on 1d
+    # VM = |High - Prev Close|, VM = |Low - Prev Close|
+    vm_plus = np.abs(high[1:] - close[:-1])
+    vm_minus = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(
+        np.abs(high[1:] - low[1:]),
+        np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
+    )
+    # Pad first value with 0 for alignment
+    vm_plus = np.concatenate([[0], vm_plus])
+    vm_minus = np.concatenate([[0], vm_minus])
+    tr = np.concatenate([[0], tr])
     
-    # Camarilla R1 and S1 levels
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    R1 = C1 + (H1 - L1) * 1.1 / 12
-    S1 = C1 - (H1 - L1) * 1.1 / 12
+    # Sum over 14 periods
+    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    vt_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Vortex lines
+    vi_plus_norm = vi_plus / vt_tr
+    vi_minus_norm = vi_minus / vt_tr
     
-    # Get 1d EMA50 for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Chop Index on 1d: measures sideways vs trending
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10((highest_high - lowest_low) / np.sum(tr[-14:]) if len(tr) >= 14 else np.nan) / np.log10(14)
+    chop = pd.Series(chop).rolling(window=14, min_periods=14).mean().values  # Smooth chop
     
-    # Volume spike detection (4h timeframe)
+    # Align to 4h
+    vi_plus_norm_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_norm)
+    vi_minus_norm_aligned = align_htf_to_ltf(prices, df_1d, vi_minus_norm)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume spike detection on 4h
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA to stabilize
+    start_idx = 50  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(vi_plus_norm_aligned[i]) or np.isnan(vi_minus_norm_aligned[i]) or 
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Strong volume spike
-        
-        # Session filter: 08-20 UTC (reduce noise trades)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike
+        chop_ok = chop_aligned[i] > 50  # Chop > 50 indicates ranging/trading range
         
         if position == 0:
-            # Long: price breaks above R1 + above 1d EMA (uptrend) + volume spike
-            if (close[i] > R1_aligned[i] and 
-                close[i] > ema_1d_aligned[i] and 
-                vol_ok and 
-                in_session):
+            # Long: VI+ > VI- (uptrend) + chop > 50 (not too choppy) + volume spike
+            if (vi_plus_norm_aligned[i] > vi_minus_norm_aligned[i] and 
+                chop_ok and 
+                vol_ok):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 1d EMA (downtrend) + volume spike
-            elif (close[i] < S1_aligned[i] and 
-                  close[i] < ema_1d_aligned[i] and 
-                  vol_ok and 
-                  in_session):
+            # Short: VI- > VI+ (downtrend) + chop > 50 + volume spike
+            elif (vi_minus_norm_aligned[i] > vi_plus_norm_aligned[i] and 
+                  chop_ok and 
+                  vol_ok):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 or volume dries up
-            if close[i] < S1_aligned[i] or volume[i] < 0.5 * vol_ma20[i]:
+            # Exit long: trend reversal or volatility drop
+            if (vi_minus_norm_aligned[i] > vi_plus_norm_aligned[i] or 
+                volume[i] < 0.7 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 or volume dries up
-            if close[i] > R1_aligned[i] or volume[i] < 0.5 * vol_ma20[i]:
+            # Exit short: trend reversal or volatility drop
+            if (vi_plus_norm_aligned[i] > vi_minus_norm_aligned[i] or 
+                volume[i] < 0.7 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
