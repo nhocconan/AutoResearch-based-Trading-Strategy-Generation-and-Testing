@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slow
-Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Uses daily Camarilla R1/S1 levels (narrower bands) for breakout signals, requiring 1d EMA trend alignment and volume confirmation. This combination should yield 15-30 trades/year with strong edge in both bull (breakouts with trend) and bear (mean reversion at S1/R1) markets while keeping trades sparse enough to overcome fee drag.
+6h_OrderFlow_Imbalance_Pullback_v2
+Hypothesis: 6h price pullbacks to institutional order flow zones (identified by volume-weighted average price)
+combined with 1d trend alignment and volume confirmation yield high-probability entries.
+Works in bull/bear by trading with higher timeframe trend only.
+Target: 20-50 trades/year via strict confluence of VWAP deviation, 1d EMA trend, and volume surge.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slow"
-timeframe = "12h"
+name = "6h_OrderFlow_Imbalance_Pullback_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +25,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for trend filter and VWAP calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -32,28 +35,38 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = (close_1d[i] * 2 + ema50_1d[i-1] * 48) / 50
     
-    # Align 1d EMA34 to 12h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1d EMA50 to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels for each 1d bar: R1, S1 (using 1.1 multiplier / 2)
-    camarilla_r1_1d = np.full_like(close_1d, np.nan)
-    camarilla_s1_1d = np.full_like(close_1d, np.nan)
+    # Calculate 6-period VWAP (typical price * volume) / volume
+    typical_price = (high + low + close) / 3.0
+    vp = typical_price * volume
     
-    for i in range(len(df_1d)):
-        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
-            camarilla_r1_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
-            camarilla_s1_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
+    vwap_numerator = np.full_like(vp, np.nan)
+    vwap_denominator = np.full_like(volume, np.nan)
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
-    camarilla_s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    if len(vp) >= 6:
+        vwap_numerator[5] = np.sum(vp[0:6])
+        vwap_denominator[5] = np.sum(volume[0:6])
+        for i in range(6, len(vp)):
+            vwap_numerator[i] = vwap_numerator[i-1] + vp[i] - vp[i-6]
+            vwap_denominator[i] = vwap_denominator[i-1] + volume[i] - volume[i-6]
+    
+    vwap = np.full_like(close, np.nan)
+    valid_denom = vwap_denominator != 0
+    vwap[valid_denom] = vwap_numerator[valid_denom] / vwap_denominator[valid_denom]
+    
+    # Calculate VWAP deviation as percentage
+    vwap_dev_pct = np.full_like(close, np.nan)
+    valid_vwap = ~np.isnan(vwap)
+    vwap_dev_pct[valid_vwap] = (close[valid_vwap] - vwap[valid_vwap]) / vwap[valid_vwap] * 100.0
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -69,42 +82,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
+    start_idx = max(50, 6, 20)  # Need 1d EMA50, VWAP(6), and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_1d_aligned[i]) or 
-            np.isnan(camarilla_s1_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vwap_dev_pct[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        trend_up = close[i] > ema34_1d_aligned[i]
-        volume_surge = volume_ratio[i] > 1.8
+        trend_up = close[i] > ema50_1d_aligned[i]
+        vwap_dev = vwap_dev_pct[i]
+        volume_surge = volume_ratio[i] > 1.5
         
         if position == 0:
-            # Enter long: Uptrend + price breaks above R1 + volume surge
-            if trend_up and close[i] > camarilla_r1_1d_aligned[i] and volume_surge:
+            # Enter long: Uptrend + price below VWAP (pullback) + volume surge
+            if trend_up and vwap_dev < -0.5 and volume_surge:  # 0.5% below VWAP
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + price breaks below S1 + volume surge
-            elif not trend_up and close[i] < camarilla_s1_1d_aligned[i] and volume_surge:
+            # Enter short: Downtrend + price above VWAP (pullback) + volume surge
+            elif not trend_up and vwap_dev > 0.5 and volume_surge:  # 0.5% above VWAP
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR price breaks below S1
-            if not trend_up or close[i] < camarilla_s1_1d_aligned[i]:
+            # Exit long: Trend turns down OR price crosses above VWAP OR volume dries up
+            if not trend_up or vwap_dev > 0.2 or volume_ratio[i] < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR price breaks above R1
-            if trend_up or close[i] > camarilla_r1_1d_aligned[i]:
+            # Exit short: Trend turns up OR price crosses below VWAP OR volume dries up
+            if trend_up or vwap_dev < -0.2 or volume_ratio[i] < 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
