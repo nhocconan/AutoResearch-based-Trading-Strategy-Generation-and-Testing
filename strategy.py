@@ -17,9 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla pivot calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate 1d EMA(34) for trend filter
@@ -27,22 +27,21 @@ def generate_signals(prices):
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels from previous day
+    # Get daily OHLC for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_arr = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d_arr) / 3
-    range_1d = high_1d - low_1d
+    # Calculate Camarilla levels: R1, S1
+    # R1 = Close + 1.1*(High-Low)/12
+    # S1 = Close - 1.1*(High-Low)/12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d_arr + 1.1 * camarilla_range / 12
+    s1 = close_1d_arr - 1.1 * camarilla_range / 12
     
-    # Camarilla R1 and S1 levels
-    r1 = close_1d_arr + (range_1d * 1.1 / 12)
-    s1 = close_1d_arr - (range_1d * 1.1 / 12)
-    
-    # Align to 4h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
@@ -51,7 +50,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -75,16 +74,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses back below pivot
-            if close[i] < pivot_aligned[i]:
+            # Exit long: Price crosses back below S1 (trend reversal)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses back above pivot
-            if close[i] > pivot_aligned[i]:
+            # Exit short: Price crosses back above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
