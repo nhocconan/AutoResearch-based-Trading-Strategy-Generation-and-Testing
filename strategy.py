@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI_Tick_Filter_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,36 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for RSI and trend
+    # Get 1d data for Camarilla levels and EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # 1d RSI(14) - mean reversion signal
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align both to 6h
-    rsi_6h = align_htf_to_ltf(prices, df_1d, rsi_values)
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 1d Camarilla levels (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_high = close_1d + 1.1 * range_1d / 12  # R1 level
+    camarilla_low = close_1d - 1.1 * range_1d / 12   # S1 level
     
-    # 6h RSI(2) for entry timing - short-term mean reversion
-    rsi_fast = pd.Series(close).diff()
-    gain_fast = rsi_fast.clip(lower=0)
-    loss_fast = -rsi_fast.clip(upper=0)
-    avg_gain_fast = gain_fast.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss_fast = loss_fast.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs_fast = avg_gain_fast / (avg_loss_fast + 1e-10)
-    rsi_fast_values = 100 - (100 / (1 + rs_fast))
+    # 1d volume average for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # 1w EMA20 for higher timeframe trend
+    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align all to 12h
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    camarilla_high_12h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_12h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_12h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    ema20_1w_12h = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     signals = np.zeros(n)
     position = 0
@@ -54,38 +58,46 @@ def generate_signals(prices):
     start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_6h[i]) or np.isnan(ema50_1d_6h[i]) or 
-            np.isnan(rsi_fast_values[i])):
+        if (np.isnan(ema34_1d_12h[i]) or np.isnan(camarilla_high_12h[i]) or 
+            np.isnan(camarilla_low_12h[i]) or np.isnan(vol_avg_1d_12h[i]) or 
+            np.isnan(ema20_1w_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_1d = rsi_6h[i]
-        ema50 = ema50_1d_6h[i]
-        rsi_fast = rsi_fast_values[i]
+        trend_1d = ema34_1d_12h[i]
+        trend_1w = ema20_1w_12h[i]
+        resistance = camarilla_high_12h[i]
+        support = camarilla_low_12h[i]
+        vol_avg = vol_avg_1d_12h[i]
+        vol_ok = volume[i] > vol_avg * 1.5
+        
+        # Only trade when 1d and 1w trends align
+        trend_up = trend_1d > trend_1w
+        trend_down = trend_1d < trend_1w
         
         if position == 0:
-            # Long: 1d RSI oversold (<30) + 6s RSI extremely oversold (<10) + above 1d EMA50
-            if rsi_1d < 30 and rsi_fast < 10 and close[i] > ema50:
+            # Long: break above R1 with volume and bullish alignment
+            if close[i] > resistance and vol_ok and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d RSI overbought (>70) + 6s RSI extremely overbought (>90) + below 1d EMA50
-            elif rsi_1d > 70 and rsi_fast > 90 and close[i] < ema50:
+            # Short: break below S1 with volume and bearish alignment
+            elif close[i] < support and vol_ok and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 1d RSI overbought or price below EMA50
-            if rsi_1d > 70 or close[i] < ema50:
+            # Exit long: close below S1 or trend turns bearish
+            if close[i] < support or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 1d RSI oversold or price above EMA50
-            if rsi_1d < 30 or close[i] > ema50:
+            # Exit short: close above R1 or trend turns bullish
+            if close[i] > resistance or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
