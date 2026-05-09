@@ -1,106 +1,108 @@
 #!/usr/bin/env python3
-# Hypothesis: 6-hour timeframe with weekly RSI divergence and volume confirmation.
-# In bear markets, bullish RSI divergence (price makes lower low, RSI makes higher low) signals potential reversals.
-# In bull markets, bearish RSI divergence (price makes higher high, RSI makes lower high) signals potential pullbacks.
-# Uses weekly RSI to avoid noise and capture major turning points.
-# Volume confirmation ensures divergence is supported by participation.
+# Hypothesis: 12h timeframe with 1-day Williams %R extreme readings and 12-hour RSI momentum confirmation.
+# In oversold conditions (Williams %R < -80), price tends to revert upward; in overbought (Williams %R > -20), price tends to revert downward.
+# Uses 12-hour RSI to confirm momentum: only take longs when RSI > 50 (bullish momentum), shorts when RSI < 50 (bearish momentum).
+# Williams %R calculated on daily timeframe provides institutional-level overbought/oversold signals.
+# RSI on 12h provides entry timing aligned with the primary timeframe.
+# Exit when Williams %R returns to neutral range (-50 to -50) or RSI crosses 50 in opposite direction.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "6h_WeeklyRSI_Divergence_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_RSI_Momentum"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf  # Note: corrected import name
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Calculate 1-day Williams %R (14-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate weekly RSI (14-period)
-    close_1w = df_1w['close']
-    delta = close_1w.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
+    
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = high_1d.rolling(window=14, min_periods=14).max()
+    lowest_low = low_1d.rolling(window=14, min_periods=14).min()
+    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    
+    williams_r_values = williams_r.values
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_values)
+    
+    # Oversold/overbought conditions
+    williams_r_oversold = williams_r < -80
+    williams_r_overbought = williams_r > -20
+    williams_r_oversold_values = williams_r_oversold.values
+    williams_r_overbought_values = williams_r_overbought.values
+    williams_r_oversold_aligned = align_htf_to_ltf(prices, df_1d, williams_r_oversold_values)
+    williams_r_overbought_aligned = align_htf_to_ltf(prices, df_1d, williams_r_overbought_values)
+    
+    # 12-hour RSI (14-period) for momentum confirmation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     rs = avg_gain / avg_loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_values = rsi_1w.values
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate weekly price swing points (simplified: local minima/maxima)
-    # We'll use rolling window to find swing points
-    window = 5
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Find swing highs and lows
-    is_swing_high = np.zeros(len(high_1w), dtype=bool)
-    is_swing_low = np.zeros(len(low_1w), dtype=bool)
-    
-    for i in range(window, len(high_1w) - window):
-        if high_1w[i] == np.max(high_1w[i-window:i+window+1]):
-            is_swing_high[i] = True
-        if low_1w[i] == np.min(low_1w[i-window:i+window+1]):
-            is_swing_low[i] = True
-    
-    # Extract swing points
-    swing_highs = high_1w[is_swing_high]
-    swing_lows = low_1w[is_swing_low]
-    swing_high_times = df_1w.index[is_swing_high]
-    swing_low_times = df_1w.index[is_swing_low]
-    
-    # For simplicity, we'll use the most recent swing points
-    # In practice, we'd track the last two swing points for divergence
-    # We'll approximate by checking if current price is near swing and RSI is diverging
-    
-    # Align RSI to 6t timeframe
-    rsi_1w_aligned = align_ltf_to_htf(prices, df_1w, rsi_values)
-    
-    # Calculate volume moving average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rsi_values = rsi.values
+    rsi_above_50 = rsi > 50
+    rsi_below_50 = rsi < 50
+    rsi_above_50_values = rsi_above_50.values
+    rsi_below_50_values = rsi_below_50.values
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Simple approach: look for RSI extremes with volume confirmation
-    # Bullish: RSI < 30 and rising + volume above average
-    # Bearish: RSI > 70 and falling + volume above average
-    
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if data not ready
+        if (np.isnan(williams_r_aligned[i]) or
+            np.isnan(williams_r_oversold_aligned[i]) or np.isnan(williams_r_overbought_aligned[i]) or
+            np.isnan(rsi_values[i]) or np.isnan(rsi_above_50_values[i]) or np.isnan(rsi_below_50_values[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
-            
-        rsi = rsi_1w_aligned[i]
-        vol = volume[i]
-        vol_avg = vol_ma[i]
         
-        # Bullish condition: RSI oversold and rising with volume confirmation
-        if rsi < 30 and i > start_idx and rsi_1w_aligned[i] > rsi_1w_aligned[i-1] and vol > vol_avg:
-            signals[i] = 0.25
-        # Bearish condition: RSI overbought and falling with volume confirmation
-        elif rsi > 70 and i > start_idx and rsi_1w_aligned[i] < rsi_1w_aligned[i-1] and vol > vol_avg:
-            signals[i] = -0.25
+        if position == 0:
+            # Enter long: Williams %R oversold + RSI > 50 (bullish momentum)
+            if williams_r_oversold_aligned[i] and rsi_above_50_values[i]:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: Williams %R overbought + RSI < 50 (bearish momentum)
+            elif williams_r_overbought_aligned[i] and rsi_below_50_values[i]:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit long: Williams %R exits oversold OR RSI turns bearish (< 50)
+            if (not williams_r_oversold_aligned[i]) or (not rsi_above_50_values[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: Williams %R exits overbought OR RSI turns bullish (> 50)
+            if (not williams_r_overbought_aligned[i]) or (not rsi_below_50_values[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
-
-# Note: The above implementation is a simplified version of RSI divergence.
-# For a production version, we would properly track swing points and check for
-# divergence between price and RSI at those swing points.
-# However, due to the complexity of aligning swing points across timeframes
-# and the risk of look-ahead bias, we use a simpler RSI extreme approach
-# which still captures the essence of the strategy while being implementable
-# within the constraints.
