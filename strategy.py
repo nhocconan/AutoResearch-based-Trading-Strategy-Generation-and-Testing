@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Vortex_Trend_Filter_1dVWAP_Support_Resistance
-Hypothesis: Use Vortex Indicator (VI) for trend direction on 12h timeframe, filtered by daily VWAP
-as dynamic support/resistance. Enter long when VI+ > VI- and price > daily VWAP, short when VI- > VI+
-and price < daily VWAP. Exit on opposite signal. Designed for low trade frequency with strong trend
-filtering to work in both bull and bear markets.
+4h_Donchian20_Breakout_1wTrend_VolumeSpike
+Hypothesis: Breakouts from daily Donchian(20) channels with weekly trend filter and volume spike confirmation.
+Uses 4h timeframe for execution, weekly EMA200 for trend direction, and volume > 2x 24-period average.
+Designed for low trade frequency (20-50/year) to minimize fee drift and work in both bull and bear markets.
 """
 
-name = "12h_Vortex_Trend_Filter_1dVWAP_Support_Resistance"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1wTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,90 +24,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP calculation
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA200 for trend filter
+    ema_200_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 200:
+        ema_200_1w[199] = np.mean(close_1w[0:200])
+        for i in range(200, len(close_1w)):
+            ema_200_1w[i] = (ema_200_1w[i-1] * 199 + close_1w[i]) / 200
+    
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Daily Donchian channels (20-period high/low)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate daily VWAP (typical price * volume cumulative / volume cumulative)
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    pv_1d = typical_price_1d * volume_1d
-    cum_pv_1d = np.cumsum(pv_1d)
-    cum_volume_1d = np.cumsum(volume_1d)
-    vwap_1d = np.divide(cum_pv_1d, cum_volume_1d, out=np.full_like(cum_pv_1d, np.nan), where=cum_volume_1d!=0)
+    # Calculate 20-period Donchian channels
+    upper_20 = np.full_like(high_1d, np.nan)
+    lower_20 = np.full_like(low_1d, np.nan)
     
-    # Align daily VWAP to 12h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    for i in range(19, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-19:i+1])
+        lower_20[i] = np.min(low_1d[i-19:i+1])
     
-    # Calculate Vortex Indicator on 12h data (period=14)
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.abs(high[0] - low[0])  # First period
-    vm_minus[0] = np.abs(low[0] - high[0])  # First period
+    upper_20_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # First period
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 24:
+        vol_ma[23] = np.mean(volume[0:24])
+        for i in range(24, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
     
-    # Sum over 14 periods
-    n_periods = 14
-    vm_plus_sum = np.full_like(vm_plus, np.nan)
-    vm_minus_sum = np.full_like(vm_minus, np.nan)
-    tr_sum = np.full_like(tr, np.nan)
-    
-    if len(vm_plus) >= n_periods:
-        vm_plus_sum[n_periods-1] = np.sum(vm_plus[0:n_periods])
-        vm_minus_sum[n_periods-1] = np.sum(vm_minus[0:n_periods])
-        tr_sum[n_periods-1] = np.sum(tr[0:n_periods])
-        for i in range(n_periods, len(vm_plus)):
-            vm_plus_sum[i] = vm_plus_sum[i-1] - vm_plus[i-n_periods] + vm_plus[i]
-            vm_minus_sum[i] = vm_minus_sum[i-1] - vm_minus[i-n_periods] + vm_minus[i]
-            tr_sum[i] = tr_sum[i-1] - tr[i-n_periods] + tr[i]
-    
-    vi_plus = np.divide(vm_plus_sum, tr_sum, out=np.full_like(vm_plus_sum, np.nan), where=tr_sum!=0)
-    vi_minus = np.divide(vm_minus_sum, tr_sum, out=np.full_like(vm_minus_sum, np.nan), where=tr_sum!=0)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(n_periods-1, 0)  # Ensure VI is ready
+    start_idx = max(24, 200)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
-        # Skip if VWAP or VI data not ready
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i])):
+        # Skip if data not ready
+        if (np.isnan(ema_200_1w_aligned[i]) or 
+            np.isnan(upper_20_aligned[i]) or 
+            np.isnan(lower_20_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
+        bars_since_entry += 1
+        
         if position == 0:
-            # Enter long: VI+ > VI- (bullish trend) AND price > VWAP (above support)
-            if vi_plus[i] > vi_minus[i] and close[i] > vwap_1d_aligned[i]:
+            # Enter long: price breaks above upper Donchian AND uptrend (price > EMA200) AND volume spike
+            if (close[i] > upper_20_aligned[i] and 
+                close[i] > ema_200_1w_aligned[i] and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: VI- > VI+ (bearish trend) AND price < VWAP (below resistance)
-            elif vi_minus[i] > vi_plus[i] and close[i] < vwap_1d_aligned[i]:
+                bars_since_entry = 0
+            # Enter short: price breaks below lower Donchian AND downtrend (price < EMA200) AND volume spike
+            elif (close[i] < lower_20_aligned[i] and 
+                  close[i] < ema_200_1w_aligned[i] and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: VI- > VI+ (trend turns bearish) OR price < VWAP (breaks support)
-            if vi_minus[i] > vi_plus[i] or close[i] < vwap_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Minimum holding period: 4 bars
+            if bars_since_entry < 4:
                 signals[i] = 0.25
+            else:
+                # Exit long: price breaks below lower Donchian OR trend reversal (price < EMA200)
+                if close[i] < lower_20_aligned[i] or close[i] < ema_200_1w_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: VI+ > VI- (trend turns bullish) OR price > VWAP (breaks resistance)
-            if vi_plus[i] > vi_minus[i] or close[i] > vwap_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Minimum holding period: 4 bars
+            if bars_since_entry < 4:
                 signals[i] = -0.25
+            else:
+                # Exit short: price breaks above upper Donchian OR trend reversal (price > EMA200)
+                if close[i] > upper_20_aligned[i] or close[i] > ema_200_1w_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
