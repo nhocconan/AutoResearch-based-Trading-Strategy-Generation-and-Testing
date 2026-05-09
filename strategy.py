@@ -1,14 +1,17 @@
+# 6h Weekly Pivot + Volume Spike + Trend Confirmation
+# Hypothesis: Combines weekly pivot points (1w) for institutional support/resistance with volume confirmation and daily trend filter.
+# Weekly pivot levels (R1/S1) act as key price levels where reversals or breakouts occur.
+# Volume spikes confirm institutional participation. Daily ADX > 25 ensures trades align with stronger trends.
+# Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1).
+# Target: 15-35 trades/year to minimize fee drag on 6h timeframe.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h 20-period Donchian breakout with 1d ADX25 trend filter and volume spike.
-# Uses daily ADX for trend strength, Donchian channels for breakout signals,
-# and volume surge for confirmation. Designed to work in both bull (breakouts above upper channel)
-# and bear (breakdowns below lower channel). Target: 20-50 trades/year to avoid fee drag.
-name = "4h_Donchian20_1dADX25_VolumeSpike"
-timeframe = "4h"
+name = "6h_WeeklyPivot_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,7 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (using previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Pivot point and support/resistance levels
+    pivot = (high_1w[:-1] + low_1w[:-1] + close_1w[:-1]) / 3
+    r1 = 2 * pivot - low_1w[:-1]
+    s1 = 2 * pivot - high_1w[:-1]
+    r2 = pivot + (high_1w[:-1] - low_1w[:-1])
+    s2 = pivot - (high_1w[:-1] - low_1w[:-1])
+    
+    # Align weekly pivot levels to 6h timeframe (previous week's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Get daily data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -36,15 +61,15 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    # Plus/Minus Directional Movement
     up_move = np.diff(high_1d, prepend=high_1d[0])
     down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    # Wilder's smoothing
     period = 14
     alpha = 1.0 / period
     atr = np.zeros_like(tr)
@@ -69,37 +94,24 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Donchian channels (20-period) for 4h timeframe
-    highest_high = np.maximum.accumulate(high)
-    lowest_low = np.minimum.accumulate(low)
-    
-    # For true Donchian, we need to reset the accumulation every 20 periods
-    upper_channel = np.full_like(high, np.nan)
-    lower_channel = np.full_like(low, np.nan)
-    for i in range(len(high)):
-        if i < 20:
-            upper_channel[i] = np.nan
-            lower_channel[i] = np.nan
-        else:
-            upper_channel[i] = np.max(high[i-19:i+1])
-            lower_channel[i] = np.min(low[i-19:i+1])
-    
-    # Align 1d ADX to 4h timeframe
+    # Align daily ADX to 6h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
+    # Volume confirmation: volume > 2.0x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian channels
+    # Start after enough data for indicators
+    start_idx = max(20, 14)  # EMA20 and ADX14
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -108,26 +120,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + 1d ADX > 25 + volume spike
-            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter long: price breaks above R1 + ADX > 25 + volume spike
+            if (price > r1_aligned[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + 1d ADX > 25 + volume spike
-            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter short: price breaks below S1 + ADX > 25 + volume spike
+            elif (price < s1_aligned[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below upper channel or ADX drops below 20
-            if price < upper_channel[i] or adx_aligned[i] < 20:
+            # Exit long: price returns below pivot or ADX drops below 20
+            if price < pivot_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above lower channel or ADX drops below 20
-            if price > lower_channel[i] or adx_aligned[i] < 20:
+            # Exit short: price returns above pivot or ADX drops below 20
+            if price > pivot_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
