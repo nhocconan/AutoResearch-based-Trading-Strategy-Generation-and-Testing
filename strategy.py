@@ -1,10 +1,19 @@
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 breakouts on 12h timeframe with 1d trend filter and volume confirmation
+# will capture meaningful moves in both bull and bear markets while avoiding overtrading.
+# Target: 20-50 trades per symbol over 4 years (5-12.5/year) to stay within fee limits.
+# Uses discrete position sizing (0.25) to minimize churn.
+# R1/S1 levels provide tighter, more reliable breakouts than R4/S4.
+# 1d EMA34 trend filter ensures alignment with higher timeframe momentum.
+# Volume confirmation (1.3x 20-bar MA) filters out low-conviction breakouts.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,18 +25,20 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_open = np.roll(prices['open'].values, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    prev_open[0] = prices['open'].values[0]
+    # Previous day's OHLC for Camarilla calculation (using 12h bars: 2 bars per day)
+    prev_high = np.roll(high, 2)
+    prev_low = np.roll(low, 2)
+    prev_close = np.roll(close, 2)
+    prev_open = np.roll(open_price, 2)
+    # Fill first two values with current bar data
+    prev_high[0:2] = high[0:2]
+    prev_low[0:2] = low[0:2]
+    prev_close[0:2] = close[0:2]
+    prev_open[0:2] = open_price[0:2]
     
-    # Calculate Camarilla R1 and S1 levels (tighter breakout levels)
+    # Calculate Camarilla R1 and S1 levels (tighter than R4/S4)
     range_ = prev_high - prev_low
     close_prev = prev_close
     r1 = close_prev + range_ * 1.1 / 12
