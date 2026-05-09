@@ -7,7 +7,7 @@ Go short when price breaks below S1 with 1d EMA34 downtrend and volume spike.
 Camarilla levels provide statistically significant intraday support/resistance.
 1d EMA34 filters for trend direction to avoid counter-trend trades.
 Volume confirmation ensures breakouts have participation.
-Designed for low trade frequency (12-37/year) with high win rate by requiring confluence.
+Designed for low trade frequency (~12-37/year) with high win rate by requiring confluence.
 Works in both bull and bear markets by following the 1d trend direction.
 """
 
