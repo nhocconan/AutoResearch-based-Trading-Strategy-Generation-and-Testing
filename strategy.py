@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h KAMA trend filter and volume confirmation.
-# Donchian(20) breakout captures breakout momentum. KAMA on 12h adapts to market regime (trending/ranging).
-# Volume > 1.5x average confirms institutional interest. Designed for low trade frequency (<30/year) to minimize fee drag.
-name = "4h_Donchian20_12hKAMA_VolumeConfirm"
-timeframe = "4h"
+# Hypothesis: 1h mean reversion with 4h Bollinger Bands and 1d trend filter.
+# Uses 4h Bollinger Bands for mean reversion signals: long when price touches lower band in uptrend,
+# short when price touches upper band in downtrend. 1d EMA50 determines trend direction.
+# Includes volume confirmation (1.5x average volume) and session filter (08-20 UTC).
+# Designed for low trade frequency (<40/year) to minimize fee drag in choppy markets.
+name = "1h_BollingerMeanReversion_4hBB_1dEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,90 +22,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for KAMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for Bollinger Bands
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate KAMA on 12h close
-    close_12h = df_12h['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    volatility = np.abs(np.diff(close_12h))
-    er = np.zeros_like(close_12h)
-    er[1:] = change[1:] / np.where(volatility[1:] == 0, 1, volatility[1:])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    kama_12h = kama
-    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
+    # Calculate 20-period Bollinger Bands on 4h close
+    close_4h = df_4h['close'].values
+    sma_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).mean().values
+    std_20_4h = pd.Series(close_4h).rolling(window=20, min_periods=20).std().values
+    upper_bb_4h = sma_20_4h + 2.0 * std_20_4h
+    lower_bb_4h = sma_20_4h - 2.0 * std_20_4h
     
-    # Calculate Donchian channels (20-period)
-    donchian_high = np.maximum.accumulate(high)
-    donchian_low = np.minimum.accumulate(low)
-    # Reset every 20 periods
-    for i in range(20, len(donchian_high)):
-        if i % 20 == 0:
-            donchian_high[i] = high[i]
-            donchian_low[i] = low[i]
-        else:
-            donchian_high[i] = max(donchian_high[i-1], high[i])
-            donchian_low[i] = min(donchian_low[i-1], low[i])
-    # Alternative: use rolling window
-    donchian_high = np.array([np.max(high[max(0, i-19):i+1]) for i in range(len(high))])
-    donchian_low = np.array([np.min(low[max(0, i-19):i+1]) for i in range(len(low))])
+    # Align Bollinger Bands to 1h timeframe
+    upper_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_bb_4h)
+    lower_bb_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_bb_4h)
+    sma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, sma_20_4h)
+    
+    # Get 1d data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Calculate 50-period EMA on 1d close
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Pre-calculate session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 for Donchian
+    start_idx = max(50, 20)  # Need 50 for EMA50 and 20 for Bollinger Bands
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(kama_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if (np.isnan(upper_bb_4h_aligned[i]) or np.isnan(lower_bb_4h_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(sma_20_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_12h = kama_12h_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        upper_bb = upper_bb_4h_aligned[i]
+        lower_bb = lower_bb_4h_aligned[i]
+        sma_20 = sma_20_4h_aligned[i]
+        ema_50 = ema_50_1d_aligned[i]
         vol = volume[i]
         
-        # Calculate 20-period volume average for confirmation
+        # Calculate 20-period volume average for spike confirmation
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
         else:
             vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
         if position == 0:
-            # Enter long: Close > upper Donchian AND price > 12h KAMA (uptrend) AND volume > 1.5x average
-            if close[i] > upper and close[i] > kama_12h and vol > 1.5 * vol_ma:
-                signals[i] = 0.25
+            # Enter long: Price touches lower BB AND price > 1d EMA50 (uptrend) AND volume > 1.5x average
+            if close[i] <= lower_bb and close[i] > ema_50 and vol > 1.5 * vol_ma:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Close < lower Donchian AND price < 12h KAMA (downtrend) AND volume > 1.5x average
-            elif close[i] < lower and close[i] < kama_12h and vol > 1.5 * vol_ma:
-                signals[i] = -0.25
+            # Enter short: Price touches upper BB AND price < 1d EMA50 (downtrend) AND volume > 1.5x average
+            elif close[i] >= upper_bb and close[i] < ema_50 and vol > 1.5 * vol_ma:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < lower Donchian OR trend reverses (price < 12h KAMA)
-            if close[i] < lower or close[i] < kama_12h:
+            # Exit long: Price crosses above SMA(20) OR trend reverses (price < 1d EMA50)
+            if close[i] >= sma_20 or close[i] < ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Close > upper Donchian OR trend reverses (price > 12h KAMA)
-            if close[i] > upper or close[i] > kama_12h:
+            # Exit short: Price crosses below SMA(20) OR trend reverses (price > 1d EMA50)
+            if close[i] <= sma_20 or close[i] > ema_50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
