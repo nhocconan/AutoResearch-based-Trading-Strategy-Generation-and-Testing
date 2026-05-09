@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Trend_RSI_1d"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -15,75 +15,76 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1d data for RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R3, S3)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 12h KAMA
+    price_series = pd.Series(close)
+    delta = price_series.diff().abs()
+    direction = abs(price_series - price_series.shift(10))
+    volatility = delta.rolling(window=10, min_periods=10).sum()
+    er = direction / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla levels (R3, S3)
-    r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.125 / 4  # 1.1 * 1.125 = 1.2375
-    s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.125 / 4
+    # Calculate 1d RSI(14)
+    rsi_period = 14
+    delta_1d = df_1d['close'].diff()
+    gain = (delta_1d.where(delta_1d > 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
+    loss = (-delta_1d.where(delta_1d < 0, 0)).rolling(window=rsi_period, min_periods=rsi_period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 1d RSI to 12h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Volume filter: current 1d volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
-    
-    # Align all to 6h
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align KAMA to 12h (already in same timeframe, but ensure alignment)
+    kama_aligned = align_htf_to_ltf(prices, prices, kama)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 34, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = max(30, rsi_period)
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
-            np.isnan(ema34_1d_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_6h[i]
-        s3_val = s3_6h[i]
-        trend = ema34_1d_6h[i]
-        vol_filter = volume_filter_6h[i]
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
         
         if position == 0:
-            # Enter long: break above R3 with volume and above trend
-            if close[i] > r3_val and close[i] > trend and vol_filter:
+            # Enter long: price above KAMA and RSI < 50 (bullish momentum in bear)
+            if close[i] > kama_val and rsi_val < 50:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with volume and below trend
-            elif close[i] < s3_val and close[i] < trend and vol_filter:
+            # Enter short: price below KAMA and RSI > 50 (bearish momentum in bull)
+            elif close[i] < kama_val and rsi_val > 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 (mean reversion to center)
-            if close[i] < s3_val:
+            # Exit long: price below KAMA or RSI > 70 (overbought)
+            if close[i] < kama_val or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 (mean reversion to center)
-            if close[i] > r3_val:
+            # Exit short: price above KAMA or RSI < 30 (oversold)
+            if close[i] > kama_val or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
