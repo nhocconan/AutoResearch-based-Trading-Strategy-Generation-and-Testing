@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Refined
-# Hypothesis: Refined version with tighter entry conditions (volume > 2x average) and reduced position size (0.20) to lower trade frequency and improve generalization.
-# Long when 1d trend up (price > EMA34) and price breaks above R3 with volume > 2x average.
-# Short when 1d trend down (price < EMA34) and price breaks below S3 with volume > 2x average.
-# Uses volume confirmation to filter breakouts and reduce false signals. Position size 0.20 to manage risk.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA trend filter and volume confirmation.
+# Long when 1d trend up and price breaks above R3 with volume > 1.5x average.
+# Short when 1d trend down and price breaks below S3 with volume > 1.5x average.
+# Combines pivot-based structure with trend and volume filters to reduce whipsaw and improve edge.
+# Designed to work in both bull and bear markets by following the 1d trend direction.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Refined"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -52,7 +53,7 @@ def generate_signals(prices):
         camarilla_r3[i] = pc + (ph - pl) * 1.1 / 4
         camarilla_s3[i] = pc - (ph - pl) * 1.1 / 4
     
-    # Align 1d indicators to 12h timeframe
+    # Align 1d indicators to 4h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
@@ -86,13 +87,13 @@ def generate_signals(prices):
         trend_up = close[i] > ema34_1d_aligned[i]
         
         if position == 0:
-            # Enter long: 1d trend up + price breaks above R3 + volume confirmation (tighter: >2x)
-            if trend_up and close[i] > camarilla_r3_aligned[i] and volume_ratio[i] > 2.0:
-                signals[i] = 0.20
+            # Enter long: 1d trend up + price breaks above R3 + volume confirmation
+            if trend_up and close[i] > camarilla_r3_aligned[i] and volume_ratio[i] > 1.5:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + price breaks below S3 + volume confirmation (tighter: >2x)
-            elif not trend_up and close[i] < camarilla_s3_aligned[i] and volume_ratio[i] > 2.0:
-                signals[i] = -0.20
+            # Enter short: 1d trend down + price breaks below S3 + volume confirmation
+            elif not trend_up and close[i] < camarilla_s3_aligned[i] and volume_ratio[i] > 1.5:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
@@ -101,7 +102,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: 1d trend turns up or price breaks above R3
@@ -109,6 +110,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
