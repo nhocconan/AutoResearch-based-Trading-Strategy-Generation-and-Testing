@@ -1,16 +1,10 @@
-# 6h_Camarilla_R3S3_Fade_1dTrend_Confirm
-# Strategy type: Counter-trend fade at Camarilla R3/S3 with 1d trend confirmation
-# Rationale: Camarilla R3/S3 act as strong reversal zones; 1d trend filters direction to avoid counter-trend trades in strong trends; volume confirms rejection.
-# Works in bull/bear by fading extremes only when higher timeframe trend is overextended.
-# Target: 20-40 trades/year per symbol with strict entry conditions.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Fade_1dTrend_Confirm"
-timeframe = "6h"
+name = "12h_DailyCamarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,89 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
+    # Get daily data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Using standard formula based on previous day's OHLC
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate daily Camarilla pivot levels (standard formula)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Camarilla levels
-    # R4 = Close + (High - Low) * 1.5
-    # R3 = Close + (High - Low) * 1.25
-    # S3 = Close - (High - Low) * 1.25
-    # S4 = Close - (High - Low) * 1.5
-    r4 = prev_close + (prev_high - prev_low) * 1.5
-    r3 = prev_close + (prev_high - prev_low) * 1.25
-    s3 = prev_close - (prev_high - prev_low) * 1.25
-    s4 = prev_close - (prev_high - prev_low) * 1.5
+    # Pivot Point = (H + L + C) / 3
+    pp = (daily_high + daily_low + daily_close) / 3.0
+    # R3 = C + (H-L)*1.1/2
+    r3 = daily_close + (daily_high - daily_low) * 1.1 / 2.0
+    # S3 = C - (H-L)*1.1/2
+    s3 = daily_close - (daily_high - daily_low) * 1.1 / 2.0
     
-    # Align daily Camarilla levels to 6h timeframe (with 1-bar delay for completed day)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align daily Camarilla levels to 12h timeframe (with 1-bar delay for completed daily bar)
+    pp_12h = align_htf_to_ltf(prices, df_1d, pp)
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
     # Daily EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: spike above 2x 24-period average (more stringent for 6h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: spike above 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # Wait for EMA50 and volume MA
+    start_idx = max(50, 20)  # Wait for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_6h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i])):
+        if (np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(pp_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation spike
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
-        # Pre-compute hour for session filter (UTC 0-24)
+        # Pre-compute hour for session filter (UTC 0-24, 12h bars less sensitive)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        # Trade during active hours: 8 AM - 8 PM UTC
+        # Session filter: trade during active hours (8-20 UTC)
         in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Fade long at S3: price below S3, 1d uptrend (price > EMA50), volume spike
-            if (close[i] < s3_6h[i] and 
-                close[i] > ema_50_6h[i] and 
+            # Long: price above daily S3, 1d uptrend (price > EMA50), volume breakout
+            if (close[i] > s3_12h[i] and 
+                close[i] > ema_50_12h[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Fade short at R3: price above R3, 1d downtrend (price < EMA50), volume spike
-            elif (close[i] > r3_6h[i] and 
-                  close[i] < ema_50_6h[i] and 
+            # Short: price below daily R3, 1d downtrend (price < EMA50), volume breakdown
+            elif (close[i] < r3_12h[i] and 
+                  close[i] < ema_50_12h[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above S4 (stop) or reaches R3 (target)
-            if close[i] > s4_6h[i] or close[i] > r3_6h[i]:
+            # Exit long: price below daily PP or trend reversal
+            if close[i] < pp_12h[i] or close[i] < ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below S4 (stop) or reaches R3 (target)
-            if close[i] < s4_6h[i] or close[i] < s3_6h[i]:
+            # Exit short: price above daily PP or trend reversal
+            if close[i] > pp_12h[i] or close[i] > ema_50_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
