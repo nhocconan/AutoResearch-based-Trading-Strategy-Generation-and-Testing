@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Channels strategy using 1-day ATR-based channels with 1-week trend filter and volume confirmation.
-# Enters long when price breaks above upper channel with weekly uptrend and volume spike, short when price breaks below lower channel with weekly downtrend and volume spike.
-# Uses daily timeframe for channel calculation to avoid look-ahead and weekly trend for filter to avoid whipsaw.
-# Designed to work in both bull and bear markets by aligning with weekly trend. Target: 15-30 trades/year to minimize fee drag.
+# Hypothesis: 6h strategy using weekly pivot levels (calculated from 1w high/low/close) with 1d trend filter and volume confirmation.
+# Enters long when price breaks above weekly R3 with daily uptrend and volume spike, short when price breaks below weekly S3 with daily downtrend and volume spike.
+# Weekly pivots provide stronger support/resistance than daily, reducing false breaks. Trend filter ensures alignment with higher timeframe momentum.
+# Volume spike confirms institutional interest. Designed for low frequency (12-30 trades/year) to minimize fee drag in 6s timeframe.
 
-name = "1d_ATR_Channel_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_WeeklyPivot_R3S3_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,42 +22,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR channel calculation
+    # Get 1w data for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points from previous week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot: P = (H + L + C) / 3
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly R3 and S3: R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    r3 = high_1w + 2.0 * (pivot - low_1w)
+    s3 = low_1w - 2.0 * (high_1w - pivot)
+    
+    # Align weekly levels to 6h timeframe (wait for weekly close)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate ATR(14) on 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA20 on 1d close for trend filter
     close_1d = df_1d['close'].values
-    
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Calculate ATR-based channels (similar to Keltner)
-    ma20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    upper_channel = ma20 + (2.0 * atr14)
-    lower_channel = ma20 - (2.0 * atr14)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Calculate EMA20 on 1w close for trend filter
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Align daily indicators to 1d timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    ma20_aligned = align_htf_to_ltf(prices, df_1d, ma20)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
     # Volume spike filter: current volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
@@ -67,47 +60,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20, 14)  # Need enough data for indicators
+    start_idx = max(20, 20)  # Need enough data for EMA20 (1d) and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema20_1w_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or
-            np.isnan(ma20_aligned[i]) or
+        if (np.isnan(ema20_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema20_1w_val = ema20_1w_aligned[i]
-        upper = upper_aligned[i]
-        lower = lower_aligned[i]
-        ma20_val = ma20_aligned[i]
+        ema20_1d_val = ema20_1d_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above upper channel + weekly uptrend + volume spike
-            if close[i] > upper and close[i] > ema20_1w_val and vol_spike:
+            # Enter long: Close breaks above R3 + 1d uptrend + volume spike
+            if close[i] > r3 and close[i] > ema20_1d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below lower channel + weekly downtrend + volume spike
-            elif close[i] < lower and close[i] < ema20_1w_val and vol_spike:
+            # Enter short: Close breaks below S3 + 1d downtrend + volume spike
+            elif close[i] < s3 and close[i] < ema20_1d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below middle line or weekly trend turns down
-            if close[i] < ma20_val or close[i] < ema20_1w_val:
+            # Exit long: Close falls below S3 or 1d trend turns down
+            if close[i] < s3 or close[i] < ema20_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above middle line or weekly trend turns up
-            if close[i] > ma20_val or close[i] > ema20_1w_val:
+            # Exit short: Close rises above R3 or 1d trend turns up
+            if close[i] > r3 or close[i] > ema20_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
