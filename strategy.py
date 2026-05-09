@@ -1,6 +1,12 @@
+# 4H_Donchian20_1dTrend_VolumeFilter
+# Based on the Turtle Trading System with a daily trend filter and volume confirmation.
+# Uses 20-day Donchian breakout on 4h timeframe, filtered by 1d EMA50 trend and volume confirmation.
+# The strategy aims to capture trends in both bull and bear markets while minimizing false breakouts.
+# Target: 20-50 trades per year to minimize fee drag.
+
 #!/usr/bin/env python3
-name = "12H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Donchian20_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,80 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Use previous day's data for today's levels
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # First day uses same day's data
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate 1-day EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla R1 and S1 levels
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1-day EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 2x 24-period average
-    volume_ma = np.zeros(n)
-    for i in range(24, n):
-        volume_ma[i] = np.mean(volume[i-24:i])
+    # Align 1-day EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):
-        # Skip if data not ready
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
+    # Start after we have enough data for 20-period high/low
+    start_idx = 20
+    
+    for i in range(start_idx, n):
+        # Skip if EMA data not ready
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend
-        uptrend = close[i] > ema34_1d_aligned[i]
-        downtrend = close[i] < ema34_1d_aligned[i]
+        # Calculate 20-period high and low for breakout levels
+        period_high = np.max(high[i-20:i])
+        period_low = np.min(low[i-20:i])
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Determine trend
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.5x 20-period average volume
+        avg_volume = np.mean(volume[i-20:i])
+        volume_confirm = volume[i] > avg_volume * 1.5
         
         if position == 0:
-            # Enter long: price crosses above Camarilla R1 + uptrend + volume spike
-            if close[i] > camarilla_r1_aligned[i] and uptrend and volume_confirm:
+            # Enter long: price breaks above 20-period high + uptrend + volume confirmation
+            if close[i] > period_high and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below Camarilla S1 + downtrend + volume spike
-            elif close[i] < camarilla_s1_aligned[i] and downtrend and volume_confirm:
+            # Enter short: price breaks below 20-period low + downtrend + volume confirmation
+            elif close[i] < period_low and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Camarilla S1
-            if close[i] < camarilla_s1_aligned[i]:
+            # Exit long: price breaks below 10-period low (Turtle exit rule)
+            exit_low = np.min(low[i-10:i])
+            if close[i] < exit_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Camarilla R1
-            if close[i] > camarilla_r1_aligned[i]:
+            # Exit short: price breaks above 10-period high
+            exit_high = np.max(high[i-10:i])
+            if close[i] > exit_high:
                 signals[i] = 0.0
                 position = 0
             else:
