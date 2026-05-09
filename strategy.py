@@ -1,22 +1,22 @@
-# 1h_MomentumReversal_VolumeSpike_4hTrend
-# Strategy type: 4h trend direction with 1h momentum reversal entries
-# Rationale: In strong 4h trends, 1h pullbacks with volume spikes offer high-probability entries.
-# Works in bull/bear by following the 4h trend direction, avoiding counter-trend trades.
-# Volume spike filters out low-conviction moves. Session filter (08-20 UTC) reduces noise.
-# Target: 15-30 trades/year per symbol by requiring 4h trend alignment + volume spike + momentum reversal.
+# 6h_WeeklyPivot_TrendFollowing_VolumeFilter
+# Strategy type: Weekly pivot levels with 1d trend filter and volume confirmation
+# Rationale: Weekly pivots capture long-term structure; 1d trend filters direction; volume confirms breakouts.
+# Works in bull/bear by following 1d trend direction at weekly support/resistance levels.
+# Volume filter ensures momentum; 6h timeframe balances trade frequency and signal quality.
+# Target: 20-40 trades/year per symbol with strict entry conditions.
 
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_MomentumReversal_VolumeSpike_4hTrend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_TrendFollowing_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,77 +24,103 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # RSI(14) for momentum reversal signal
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate weekly pivot points (standard formula)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Volume filter: spike above 2.0x 20-period average
+    # Pivot Point = (H + L + C) / 3
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    # Resistance 1 = (2 * PP) - L
+    r1 = (2 * pp) - weekly_low
+    # Support 1 = (2 * PP) - H
+    s1 = (2 * pp) - weekly_high
+    # Resistance 2 = PP + (H - L)
+    r2 = pp + (weekly_high - weekly_low)
+    # Support 2 = PP - (H - L)
+    s2 = pp - (weekly_high - weekly_low)
+    # Resistance 3 = H + 2*(PP - L)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    # Support 3 = L - 2*(H - PP)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    
+    # Align weekly pivots to 6h timeframe (with 1-bar delay for completed weekly bar)
+    pp_6h = align_htf_to_ltf(prices, df_1w, pp)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: spike above 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for EMA50 and volume MA
+    start_idx = max(50, 20)  # Wait for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1h[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_6h[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(pp_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume spike confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
-        # Pre-compute hour for session filter (UTC 8-20)
+        # Pre-compute hour for session filter (UTC 0-24, 6h bars less sensitive)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        in_session = 8 <= hour <= 20
+        # Less strict session for 6h: avoid only the quietest hours (0-6 UTC)
+        in_session = hour >= 6  # Start trading after 6 AM UTC
         
         if position == 0:
-            # Long: 4h uptrend (price > EMA50) + RSI < 30 (oversold) + volume spike + session
-            if (close[i] > ema_50_1h[i] and 
-                rsi[i] < 30 and 
+            # Long: price above weekly S1, 1d uptrend (price > EMA34), volume breakout
+            if (close[i] > s1_6h[i] and 
+                close[i] > ema_34_6h[i] and 
                 vol_ok and 
                 in_session):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend (price < EMA50) + RSI > 70 (overbought) + volume spike + session
-            elif (close[i] < ema_50_1h[i] and 
-                  rsi[i] > 70 and 
+            # Short: price below weekly R1, 1d downtrend (price < EMA34), volume breakdown
+            elif (close[i] < r1_6h[i] and 
+                  close[i] < ema_34_6h[i] and 
                   vol_ok and 
                   in_session):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 (momentum recovered) or trend reversal
-            if rsi[i] > 50 or close[i] < ema_50_1h[i]:
+            # Exit long: price below weekly S2 or trend reversal
+            if close[i] < s2_6h[i] or close[i] < ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 (momentum recovered) or trend reversal
-            if rsi[i] < 50 or close[i] > ema_50_1h[i]:
+            # Exit short: price above weekly R2 or trend reversal
+            if close[i] > r2_6h[i] or close[i] > ema_34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
