@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation.
-# Breakout above 20-period high signals bullish momentum; below low signals bearish momentum.
-# EMA50 on 1d confirms long-term trend direction. Volume > 1.8x average confirms institutional interest.
-# Designed for low trade frequency (<40/year) to minimize fee bear in bear markets.
-name = "4h_Donchian20_1dEMA50_VolumeSpike"
+# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation.
+# Williams Alligator (Jaw=13, Teeth=8, Lips=5) identifies trend absence when lines are intertwined.
+# Entry when Lips cross above Teeth (bullish) or below Teeth (bearish) with 1d EMA50 trend alignment.
+# Volume > 1.5x average confirms breakout strength. Designed for low trade frequency in ranging markets.
+name = "4h_WilliamsAlligator_1dEMA50_VolumeConfirm"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -31,55 +31,74 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Donchian channels (20-period high/low)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Williams Alligator lines on 4h data
+    # Jaw: 13-period SMMA (smoothed moving average) of median price
+    # Teeth: 8-period SMMA of median price
+    # Lips: 5-period SMMA of median price
+    median_price = (high + low) / 2
+    
+    def smma(arr, period):
+        """Smoothed Moving Average (SMMA) - equivalent to RMA/Wilder's smoothing"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(median_price, 13)
+    teeth = smma(median_price, 8)
+    lips = smma(median_price, 5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 for Donchian
+    start_idx = max(13, 50)  # Need 13 for Jaw, 50 for 1d EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        jaw_val = jaw[i]
+        teeth_val = teeth[i]
+        lips_val = lips[i]
         ema_1d = ema_50_1d_aligned[i]
-        upper = high_max[i]
-        lower = low_min[i]
         vol = volume[i]
         
-        # Calculate 20-period volume average for spike detection
+        # Calculate 20-period volume average for confirmation
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
         else:
             vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
         if position == 0:
-            # Enter long: Close > upper band AND price > 1d EMA50 (uptrend) AND volume > 1.8x average
-            if close[i] > upper and close[i] > ema_1d and vol > 1.8 * vol_ma:
+            # Enter long: Lips > Teeth (bullish alignment) AND price > 1d EMA50 (uptrend) AND volume > 1.5x average
+            if lips_val > teeth_val and close[i] > ema_1d and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < lower band AND price < 1d EMA50 (downtrend) AND volume > 1.8x average
-            elif close[i] < lower and close[i] < ema_1d and vol > 1.8 * vol_ma:
+            # Enter short: Lips < Teeth (bearish alignment) AND price < 1d EMA50 (downtrend) AND volume > 1.5x average
+            elif lips_val < teeth_val and close[i] < ema_1d and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < lower band OR trend reverses (price < 1d EMA50)
-            if close[i] < lower or close[i] < ema_1d:
+            # Exit long: Lips < Teeth (trend weakness) OR price < 1d EMA50 (trend reversal)
+            if lips_val < teeth_val or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > upper band OR trend reverses (price > 1d EMA50)
-            if close[i] > upper or close[i] > ema_1d:
+            # Exit short: Lips > Teeth (trend weakness) OR price > 1d EMA50 (trend reversal)
+            if lips_val > teeth_val or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
