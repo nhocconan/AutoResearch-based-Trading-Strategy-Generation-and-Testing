@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2
-# Hypothesis: Combine Camarilla R3/S3 breakouts with 12h EMA50 trend filter and volume spike filter.
-# Uses volume-weighted average price (VWAP) deviation as additional filter to avoid whipsaws.
-# Works in bull/bear: Trend filter prevents counter-trend trades, volume confirms institutional interest.
-# VWAP filter ensures trades align with institutional flow. Target: 20-40 trades/year.
+# 1h_Camarilla_R3_S3_Breakout_4hTrend_VolumeSpike_Session
+# Hypothesis: 1h strategy using 4h/1d for signal direction and 1h for entry timing.
+# Uses Camarilla R3/S3 from daily, 4h EMA50 trend filter, and volume spike confirmation.
+# Session filter (08-20 UTC) reduces noise. Designed to work in bull/bear markets.
+# Target: 15-37 trades/year (60-150 total over 4 years) to avoid fee drag.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_4hTrend_VolumeSpike_Session"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,13 +23,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP for intraday mean reversion filter
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Pre-compute session hours for filtering
+    hours = prices.index.hour
     
-    # Calculate Camarilla levels from previous day
+    # Calculate Camarilla levels from previous day (1d)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -47,23 +44,23 @@ def generate_signals(prices):
     camarilla_r3 = pc + (ph - pl) * 1.1 / 4
     camarilla_s3 = pc - (ph - pl) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Calculate 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
+    close_4h = df_4h['close'].values
+    ema_50_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 50:
+        ema_50_4h[49] = np.mean(close_4h[0:50])
+        for i in range(50, len(close_4h)):
+            ema_50_4h[i] = (ema_50_4h[i-1] * 49 + close_4h[i]) / 50
     
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -82,52 +79,50 @@ def generate_signals(prices):
     start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i]) or np.isnan(vwap[i])):
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # VWAP deviation filter: avoid trades too far from VWAP (mean reversion edge)
-        vwap_dev = abs(close[i] - vwap[i]) / vwap[i]
-        vwap_filter = vwap_dev < 0.02  # Within 2% of VWAP
+        # Skip if data not ready
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(volume_ratio[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Enter long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike AND near VWAP
+            # Enter long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike
             if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_ratio[i] > 1.5 and
-                vwap_filter):
-                signals[i] = 0.25
+                close[i] > ema_50_4h_aligned[i] and 
+                volume_ratio[i] > 1.5):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike AND near VWAP
+            # Enter short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike
             elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_ratio[i] > 1.5 and
-                  vwap_filter):
-                signals[i] = -0.25
+                  close[i] < ema_50_4h_aligned[i] and 
+                  volume_ratio[i] > 1.5):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 OR trend reversal (price < EMA50) OR VWAP deviation too high
-            if (close[i] < camarilla_s3_aligned[i] or 
-                close[i] < ema_50_12h_aligned[i] or
-                vwap_dev >= 0.025):  # Exit if >2.5% from VWAP
+            # Exit long: price breaks below S3 OR trend reversal (price < EMA50)
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price breaks above R3 OR trend reversal (price > EMA50) OR VWAP deviation too high
-            if (close[i] > camarilla_r3_aligned[i] or 
-                close[i] > ema_50_12h_aligned[i] or
-                vwap_dev >= 0.025):  # Exit if >2.5% from VWAP
+            # Exit short: price breaks above R3 OR trend reversal (price > EMA50)
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
