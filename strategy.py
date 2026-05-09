@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout from daily levels with volume confirmation.
-# Uses daily Camarilla levels (R3/S3 breakout for continuation, R4/S4 for reversal)
-# to capture intraday momentum in both trending and ranging markets.
-# Volume filter ensures breakouts have conviction. Designed for 60-100 trades/year.
-name = "6h_Camarilla_R3S4_Breakout_DailyTrend_Volume"
-timeframe = "6h"
+# Hypothesis: 4h price action strategy using 1d Keltner Channel breakout with volume confirmation and 1d trend filter.
+# Keltner Channel (based on ATR) adapts to volatility, providing dynamic support/resistance.
+# Long when price breaks above upper KC with volume and 1d EMA up; short when breaks below lower KC with volume and 1d EMA down.
+# Designed to capture breakouts in trending markets while avoiding whipsaw in ranging conditions.
+# Works in both bull and bear markets by following 1d EMA trend direction.
+name = "4h_KeltnerBreakout_1dEMA_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,31 +22,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla calculation
+    # 1d data for Keltner Channel and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Keltner Channel: 20-period EMA of typical price ± 2 * ATR(10)
+    typical_price = (high + low + close) / 3
+    ema_20 = pd.Series(typical_price).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Camarilla formulas
-    R4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    R3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    S3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    S4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
+    # ATR(10) for channel width
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align to 6t
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    kc_upper = ema_20 + 2 * atr_10
+    kc_lower = ema_20 - 2 * atr_10
     
-    # Daily trend filter: EMA34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d EMA trend filter (50-period)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -54,13 +53,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure enough data
+    start_idx = max(50, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(atr_10[i]) or np.isnan(kc_upper[i]) or 
+            np.isnan(kc_lower[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,36 +67,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long breakout: price > R3 with volume and above daily EMA34
-            if price > R3_aligned[i] and vol_confirm[i] and price > ema_34_aligned[i]:
-                # Strong breakout: reverse at R4
-                if price >= R4_aligned[i]:
-                    signals[i] = -0.25  # short reversal at R4
-                    position = -1
-                else:
-                    signals[i] = 0.25   # continue long
-                    position = 1
-            # Short breakdown: price < S3 with volume and below daily EMA34
-            elif price < S3_aligned[i] and vol_confirm[i] and price < ema_34_aligned[i]:
-                # Strong breakdown: reverse at S4
-                if price <= S4_aligned[i]:
-                    signals[i] = 0.25   # long reversal at S4
-                    position = 1
-                else:
-                    signals[i] = -0.25  # continue short
-                    position = -1
+            # Long: price breaks above upper KC + volume + 1d EMA up
+            if (price > kc_upper[i] and vol_confirm[i] and price > ema_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below lower KC + volume + 1d EMA down
+            elif (price < kc_lower[i] and vol_confirm[i] and price < ema_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price < R3 or strong reversal at R4
-            if price < R3_aligned[i] or price >= R4_aligned[i]:
+            # Exit long: price crosses below middle line (EMA20) or reverses below lower KC
+            if price < ema_20[i] or price < kc_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > S3 or strong reversal at S4
-            if price > S3_aligned[i] or price <= S4_aligned[i]:
+            # Exit short: price crosses above middle line (EMA20) or reverses above upper KC
+            if price > ema_20[i] or price > kc_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
