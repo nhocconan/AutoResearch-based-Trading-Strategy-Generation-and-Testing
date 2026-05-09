@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_1wTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_TrendFilter_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
+    # Get daily data for calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 10-period EMA on 1w close for trend filter
+    # Calculate 20-period EMA on weekly close for trend filter
     close_1w = df_1w['close'].values
-    ema_10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # Calculate daily CAMARILLA pivot levels from previous day's OHLC
+    prev_1d_high = df_1d['high'].shift(1).values
+    prev_1d_low = df_1d['low'].shift(1).values
+    prev_1d_close = df_1d['close'].shift(1).values
     
-    # Calculate 4h CAMARILLA R3 and S3 from previous 4h bar's OHLC
-    prev_4h_high = df_4h['high'].shift(1).values
-    prev_4h_low = df_4h['low'].shift(1).values
-    prev_4h_close = df_4h['close'].shift(1).values
-    
-    # Camarilla formula for R3 and S3
-    range_4h = prev_4h_high - prev_4h_low
+    # Camarilla formula for R1 and S1
+    range_1d = prev_1d_high - prev_1d_low
     camarilla_mult = 1.1 / 12  # ~0.0916667
-    r3_4h = prev_4h_close + range_4h * camarilla_mult * 3
-    s3_4h = prev_4h_close - range_4h * camarilla_mult * 3
+    r1_1d = prev_1d_close + range_1d * camarilla_mult * 1
+    s1_1d = prev_1d_close - range_1d * camarilla_mult * 1
     
-    # Align Camarilla levels to 4h timeframe (already aligned to 4h bars)
-    r3_4h_aligned = align_htf_to_ltf(prices, df_4h, r3_4h)
-    s3_4h_aligned = align_htf_to_ltf(prices, df_4h, s3_4h)
+    # Align Camarilla levels to daily timeframe (no extra delay needed)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 4-period volume average for spike detection
-    vol_ma = pd.Series(volume).rolling(window=4, min_periods=4).mean().values
+    # Calculate 20-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 4)  # Need 30 for 1w EMA and 4 for volume average
+    start_idx = max(30, 20)  # Need 30 for daily data and 20 for weekly EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_10_1w_aligned[i]) or np.isnan(r3_4h_aligned[i]) or 
-            np.isnan(s3_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1w = ema_10_1w_aligned[i]
-        r3_level = r3_4h_aligned[i]
-        s3_level = s3_4h_aligned[i]
+        ema_1w = ema_20_1w_aligned[i]
+        r1_level = r1_1d_aligned[i]
+        s1_level = s1_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Price breaks above R3 with volume AND price > 1w EMA10 (uptrend)
-            if close[i] > r3_level and vol > 2.5 * vol_ma_val and close[i] > ema_1w:
+            # Enter long: Price breaks above R1 with volume AND price > weekly EMA20 (uptrend)
+            if close[i] > r1_level and vol > 2.0 * vol_ma_val and close[i] > ema_1w:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S3 with volume AND price < 1w EMA10 (downtrend)
-            elif close[i] < s3_level and vol > 2.5 * vol_ma_val and close[i] < ema_1w:
+            # Enter short: Price breaks below S1 with volume AND price < weekly EMA20 (downtrend)
+            elif close[i] < s1_level and vol > 2.0 * vol_ma_val and close[i] < ema_1w:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below R3 OR trend reverses (price < 1w EMA10)
-            if close[i] < r3_level or close[i] < ema_1w:
+            # Exit long: Price breaks below R1 OR trend reverses (price < weekly EMA20)
+            if close[i] < r1_level or close[i] < ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above S3 OR trend reverses (price > 1w EMA10)
-            if close[i] > s3_level or close[i] > ema_1w:
+            # Exit short: Price breaks above S1 OR trend reverses (price > weekly EMA20)
+            if close[i] > s1_level or close[i] > ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
