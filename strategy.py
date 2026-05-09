@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_KAMA_Direction_RSI14_Filter"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1_S1_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,83 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 12h data for pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly KAMA direction (14-period)
-    close_1w = df_1w['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.sum(np.abs(np.diff(close_1w, axis=0)), axis=0)
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    kama_dir = np.where(kama > np.roll(kama, 1), 1, -1)
-    kama_dir[0] = 1
-    
-    # Align KAMA direction to 12h timeframe
-    kama_dir_aligned = align_htf_to_ltf(prices, df_1w, kama_dir.astype(float))
-    
-    # Daily RSI(14) for overbought/oversold filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Calculate 30-period EMA on 1d close for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # Align RSI to 12h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate 12h CAMARILLA pivot levels from previous 12h bar's OHLC
+    prev_12h_high = df_12h['high'].shift(1).values
+    prev_12h_low = df_12h['low'].shift(1).values
+    prev_12h_close = df_12h['close'].shift(1).values
+    
+    # Camarilla formula for R1 and S1
+    range_12h = prev_12h_high - prev_12h_low
+    camarilla_mult = 1.1 / 12  # ~0.0916667
+    r1_12h = prev_12h_close + range_12h * camarilla_mult * 1
+    s1_12h = prev_12h_close - range_12h * camarilla_mult * 1
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    
+    # Calculate 12-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Need 14 for RSI
+    start_idx = max(30, 12)  # Need 30 for 1d EMA and 12 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(kama_dir_aligned[i]) or np.isnan(rsi_aligned[i]):
+        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
+            np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_dir_val = kama_dir_aligned[i]
-        rsi_val = rsi_aligned[i]
+        ema_1d = ema_30_1d_aligned[i]
+        r1_level = r1_12h_aligned[i]
+        s1_level = s1_12h_aligned[i]
+        vol = volume[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: KAMA up AND RSI < 30 (oversold in uptrend)
-            if kama_dir_val > 0 and rsi_val < 30:
+            # Enter long: Price breaks above R1 with volume AND price > 1d EMA30 (uptrend)
+            if close[i] > r1_level and vol > 2.0 * vol_ma_val and close[i] > ema_1d:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA down AND RSI > 70 (overbought in downtrend)
-            elif kama_dir_val < 0 and rsi_val > 70:
+            # Enter short: Price breaks below S1 with volume AND price < 1d EMA30 (downtrend)
+            elif close[i] < s1_level and vol > 2.0 * vol_ma_val and close[i] < ema_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA turns down OR RSI > 70 (overbought)
-            if kama_dir_val < 0 or rsi_val > 70:
+            # Exit long: Price breaks below R1 OR trend reverses (price < 1d EMA30)
+            if close[i] < r1_level or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA turns up OR RSI < 30 (oversold)
-            if kama_dir_val > 0 or rsi_val < 30:
+            # Exit short: Price breaks above S1 OR trend reverses (price > 1d EMA30)
+            if close[i] > s1_level or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
