@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts at daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike.
-# Uses 12h timeframe for lower trade frequency and better trend alignment.
-# Works in bull markets by following uptrend breakouts, in bear markets by following downtrend breakdowns.
-# Volume confirmation ensures breakout strength. Designed for 12-37 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA100_Trend_Volume
+# Hypothesis: Tight breakout at Camarilla R1/S1 levels with 1d EMA100 trend filter and volume spike confirmation.
+# EMA100 provides stronger trend filter than EMA50, reducing whipsaws in choppy markets.
+# Volume spike (>2x 20-period average) confirms breakout strength.
+# Designed for low trade frequency (<30/year) to minimize fee drag in BTC/ETH.
+# Works in both bull and bear markets by following the daily trend direction.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA100_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,18 +43,18 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    # Calculate 1d EMA100 for trend filter
+    ema_100_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 100:
+        ema_100_1d[99] = np.mean(close_1d[0:100])
+        for i in range(100, len(close_1d)):
+            ema_100_1d[i] = (ema_100_1d[i-1] * 99 + close_1d[i]) / 100
     
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -69,42 +70,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 100)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+            np.isnan(ema_100_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
+            # Enter long: price breaks above R1 AND uptrend (price > EMA100) AND volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+                close[i] > ema_100_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
+            # Enter short: price breaks below S1 AND downtrend (price < EMA100) AND volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < ema_100_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below S1 OR trend reversal (price < EMA100)
+            if close[i] < s1_aligned[i] or close[i] < ema_100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above R1 OR trend reversal (price > EMA100)
+            if close[i] > r1_aligned[i] or close[i] > ema_100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
