@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 4h timeframe with Donchian breakout combined with 1d EMA50 trend filter and volume confirmation.
-# Uses Donchian(20) for breakout entries, 1d EMA50 for trend filter, and volume spike for confirmation.
-# Designed to work in both bull and bear markets by filtering breakouts with higher timeframe trend.
-# Target: 80-160 total trades over 4 years (20-40/year) with size 0.25.
-# Volume confirmation reduces false breakouts, trend filter aligns with higher timeframe momentum.
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation.
+# Uses 20-period Donchian channels for breakout entries and 1d EMA50 for trend filter.
+# Volume confirmation requires current volume > 1.5x 20-period average.
+# Designed to capture strong trends in both bull and bear markets with filtered entries.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
 name = "4h_Donchian20_1dEMA50_Trend_Volume"
 timeframe = "4h"
@@ -24,20 +24,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels (20-period)
-    # Upper band: highest high of last 20 periods
-    # Lower band: lowest low of last 20 periods
-    # Using rolling window with min_periods to avoid look-ahead
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Breakout conditions: price must close beyond the band
-    breakout_up = close > donchian_upper
-    breakout_down = close < donchian_lower
+    # Breakout conditions: price must close beyond the level
+    breakout_up = close > highest_high
+    breakout_down = close < lowest_low
     
-    # Get daily data for EMA50 trend filter
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -80,7 +75,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit long: price returns to lower Donchian band or trend reversal
-            if close[i] <= donchian_lower[i] or not trend_up[i]:
+            if close[i] <= lowest_low[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -88,7 +83,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns to upper Donchian band or trend reversal
-            if close[i] >= donchian_upper[i] or not trend_down[i]:
+            if close[i] >= highest_high[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
