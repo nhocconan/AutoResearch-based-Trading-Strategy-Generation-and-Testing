@@ -1,6 +1,14 @@
+# 6H_WeeklyPivot_DailyTrend_VolumeBreakout
+# Weekly pivot levels from 1-week high/low, with daily trend filter and volume confirmation
+# Long: break above weekly high + daily uptrend + volume spike
+# Short: break below weekly low + daily downtrend + volume spike
+# Uses 1-week data for pivot points and 1-day for trend filter
+# Designed to work in both bull and bear markets by following weekly structure
+# Target: 20-50 trades per year to minimize fee drag
+
 #!/usr/bin/env python3
-name = "1H_Camarilla_R3S3_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6H_WeeklyPivot_DailyTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,93 +25,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for Camarilla calculation (HIGH, LOW, CLOSE from previous day)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get weekly data for pivot points (weekly high/low)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 1d data for trend filter and volume filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
+    
+    # Calculate weekly high and low (pivot levels)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
     # Calculate 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly and daily data to 6h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # Calculate 1-day average volume for volume filter
-    vol_1d = df_1d['volume'].values
-    avg_vol_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
-    
-    # Pre-calculate Camarilla levels for each 4h bar
-    # Camarilla R3, R3, S3, S3 levels based on previous day's H, L, C
-    # Using 4h data to get daily OHLC (last 4h bar of each day)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate daily OHLC from 4h bars (simplified: use last 4h bar of each day)
-    # For simplicity, we'll use the 4h bar's OHLC as proxy for daily (acceptable for this strategy)
-    camarilla_r3 = close_4h + (high_4h - low_4h) * 1.1/4
-    camarilla_r4 = close_4h + (high_4h - low_4h) * 1.1/2
-    camarilla_s3 = close_4h - (high_4h - low_4h) * 1.1/4
-    camarilla_s4 = close_4h - (high_4h - low_4h) * 1.1/2
-    
-    # Align Camarilla levels to 1h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    r4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r4)
-    s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or \
-           np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or \
-           np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price > EMA50 for long, < EMA50 for short
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
-        
-        # Volume filter: current volume > 1.5x 20-day average volume
-        volume_filter = volume[i] > avg_vol_1d_aligned[i] * 1.5
+        # Volume confirmation: current volume > 2x 24-period average volume (4 days)
+        avg_volume = np.mean(volume[max(0, i-24):i])
+        volume_confirm = volume[i] > avg_volume * 2.0
         
         if position == 0:
-            # Enter long: price breaks above R4 + uptrend + volume
-            if close[i] > r4_aligned[i] and uptrend and volume_filter:
-                signals[i] = 0.20
+            # Enter long: break above weekly high + daily uptrend + volume confirmation
+            if (close[i] > weekly_high_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume_confirm):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S4 + downtrend + volume
-            elif close[i] < s4_aligned[i] and downtrend and volume_filter:
-                signals[i] = -0.20
+            # Enter short: break below weekly low + daily downtrend + volume confirmation
+            elif (close[i] < weekly_low_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume_confirm):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 (reversion to mean)
-            if close[i] < s3_aligned[i]:
+            # Exit long: break below weekly low or lose daily uptrend
+            if (close[i] < weekly_low_aligned[i] or 
+                close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3 (reversion to mean)
-            if close[i] > r3_aligned[i]:
+            # Exit short: break above weekly high or lose daily downtrend
+            if (close[i] > weekly_high_aligned[i] or 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
