@@ -3,86 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_PairsTrading_BTC_ETH_Zscore"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
-    """
-    Pairs trading strategy using BTC-ETH spread z-score.
-    Long when spread is significantly undervalued (ETH cheap vs BTC).
-    Short when spread is significantly overvalued (ETH expensive vs BTC).
-    Uses 60-period z-score with entry at ±2.0 and exit at ±0.5.
-    Works in both bull and bear markets as market-neutral strategy.
-    """
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Get BTC and ETH data for spread calculation
-    # Note: This strategy assumes prices DataFrame contains ETHUSDT data
-    # We need to load BTCUSDT data separately for the spread
-    try:
-        # Load BTC data (same timeframe)
-        btc_prices = pd.read_parquet('data/cache/compressed/btcusdt.parquet')
-        # Align to same index as ETH data
-        btc_close = btc_prices.set_index('open_time')['close']
-        # Reindex to match ETH prices index
-        btc_close_aligned = btc_close.reindex(prices.set_index('open_time')['close'].index, method='ffill').values
-    except:
-        # Fallback: if BTC data not available, return zeros
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Get weekly data for EMA50 trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    eth_close = prices['close'].values
+    # Calculate 1w EMA50 for trend
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate log spread: log(ETH) - log(BTC)
-    spread = np.log(eth_close) - np.log(btc_close_aligned)
+    # Get daily data for Camarilla pivot levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate rolling z-score of spread (60-period)
-    spread_series = pd.Series(spread)
-    spread_mean = spread_series.rolling(window=60, min_periods=60).mean().values
-    spread_std = spread_series.rolling(window=60, min_periods=60).std().values
-    # Avoid division by zero
-    zscore = np.where(spread_std > 0, (spread - spread_mean) / spread_std, 0)
+    # Calculate daily Camarilla levels
+    prev_close = df_1d['close'].shift(1)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
+    
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
+    
+    # Volume filter: current 12h volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long spread (long ETH, short BTC), -1: short spread
+    position = 0
     
-    start_idx = 60
+    start_idx = max(50, 20)  # EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(zscore[i]):
+        if (np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        z = zscore[i]
+        ema50_val = ema50_1w_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long spread (ETH undervalued vs BTC)
-            if z < -2.0:
-                signals[i] = 0.25  # 25% position size
+            # Enter long: close above R3 + above 1w EMA50 trend + volume filter
+            if close[i] > r3 and close[i] > ema50_val and vol_filter:
+                signals[i] = 0.30
                 position = 1
-            # Enter short spread (ETH overvalued vs BTC)
-            elif z > 2.0:
-                signals[i] = -0.25
+            # Enter short: close below S3 + below 1w EMA50 trend + volume filter
+            elif close[i] < s3 and close[i] < ema50_val and vol_filter:
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long spread when z-score reverts to zero
-            if z > -0.5:
+            # Exit long: close below 1w EMA50 trend
+            if close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short spread when z-score reverts to zero
-            if z < 0.5:
+            # Exit short: close above 1w EMA50 trend
+            if close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
