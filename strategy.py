@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_DailyCamarilla_R3S3_Breakout_Trend_Volume_v3"
-timeframe = "12h"
+name = "4H_DailyCamarilla_R3S3_Breakout_Trend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels (once before loop)
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 12h
+    # Align to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 2x 20-period average (12h)
+    # Volume confirmation: current volume > 2x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 2.0)
     
