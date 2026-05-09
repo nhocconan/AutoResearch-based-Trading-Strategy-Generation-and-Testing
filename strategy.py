@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1d_WeeklyDonchian20_Breakout_1dVolume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    12h Camarilla R1/S1 breakout with 1w trend filter and volume confirmation.
-    Long: Close breaks above R1 AND close > 1w EMA(34) AND volume > 1.5x 12h avg volume
-    Short: Close breaks below S1 AND close < 1w EMA(34) AND volume > 1.5x 12h avg volume
-    Exit: Opposite signal or price reverts to Camarilla pivot
-    Uses 1d data for Camarilla levels (HLC from previous day)
-    Target: 15-35 trades/year on 12h timeframe
+    1d Donchian breakout with 1d volume confirmation and 1w trend filter.
+    - Long: Close > 20-day high + volume > 1.2x 20-day avg volume + weekly close > weekly SMA(10)
+    - Short: Close < 20-day low + volume > 1.2x 20-day avg volume + weekly close < weekly SMA(10)
+    - Exit: Opposite signal or price crosses weekly SMA(10)
+    - Target: 10-20 trades/year on 1d timeframe
     """
     n = len(prices)
     if n < 50:
@@ -25,87 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (previous day's HLC)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Get 1w data for trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # 20-day Donchian channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate average volume for volume confirmation (20-period SMA)
-    volume_s = pd.Series(volume)
-    vol_ma20 = volume_s.rolling(window=20, min_periods=20).mean().values
+    # 20-day average volume
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Weekly SMA(10) for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    sma10_1w = close_1w.rolling(window=10, min_periods=10).mean().values
+    sma10_1w_aligned = align_htf_to_ltf(prices, df_1w, sma10_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # ensure sufficient warmup
+    start_idx = 30  # ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        # Skip if trend or volume data not ready
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
+        # Skip if weekly SMA data not ready
+        if np.isnan(sma10_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get previous day's HLC for Camarilla calculation
-        prev_idx_1d = i // 16  # Approximate: 16x 12h bars per day
-        if prev_idx_1d < 1 or prev_idx_1d >= len(df_1d):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Previous day's high, low, close
-        prev_high = df_1d['high'].iloc[prev_idx_1d - 1]
-        prev_low = df_1d['low'].iloc[prev_idx_1d - 1]
-        prev_close = df_1d['close'].iloc[prev_idx_1d - 1]
-        
-        # Calculate Camarilla levels
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Camarilla R1 and S1 levels
-        r1 = prev_close + (range_val * 1.1 / 12)
-        s1 = prev_close - (range_val * 1.1 / 12)
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > (1.5 * vol_ma20[i])
+        # Volume condition
+        vol_condition = volume[i] > 1.2 * vol_avg_20[i]
         
         if position == 0:
-            # Long: Break above R1 with trend and volume confirmation
-            if close[i] > r1 and close[i] > ema34_1w_aligned[i] and vol_confirm:
+            # Long: Price breaks above Donchian high + volume + weekly trend up
+            if close[i] > high_20[i] and vol_condition and close[i] > sma10_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with trend and volume confirmation
-            elif close[i] < s1 and close[i] < ema34_1w_aligned[i] and vol_confirm:
+            # Short: Price breaks below Donchian low + volume + weekly trend down
+            elif close[i] < low_20[i] and vol_condition and close[i] < sma10_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below S1 or trend fails
-            if close[i] < s1 or close[i] < ema34_1w_aligned[i]:
+            # Exit long: Price crosses below weekly SMA or opposite signal
+            if close[i] < sma10_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above R1 or trend fails
-            if close[i] > r1 or close[i] > ema34_1w_aligned[i]:
+            # Exit short: Price crosses above weekly SMA or opposite signal
+            if close[i] > sma10_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
