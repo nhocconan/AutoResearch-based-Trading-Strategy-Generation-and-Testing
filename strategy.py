@@ -1,18 +1,10 @@
-# For 12h: test with 1d HTF for trend filter and volatility filter
-# Strategy: 12h Donchian(20) breakout + 1d trend filter + volatility filter (ATR ratio)
-# Entry: Price breaks above/below 12h Donchian channel with 1d EMA trend and ATR ratio < 0.8 (low volatility)
-# Exit: Price returns to 12h Donchian midline or ATR ratio > 1.2 (high volatility)
-# Position size: 0.25
-# Expect ~15-25 trades/year per symbol, low frequency to avoid fee drag
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_Breakout_1dTrend_VolatilityFilter"
-timezone = "UTC"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,82 +15,83 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for trend filter and volatility filter
+    # Get daily data for trend filter and Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h Donchian channel (20 periods)
-    # Calculate on 12h data directly
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # Previous 1d bar's OHLC (for Camarilla calculation)
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
     
-    # 1d EMA34 for trend filter
+    # Calculate Camarilla levels R1 and S1 (inner bounds)
+    camarilla_pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range_1d = prev_high_1d - prev_low_1d
+    camarilla_r1_1d = camarilla_pivot_1d + camarilla_range_1d * 1.1 / 12
+    camarilla_s1_1d = camarilla_pivot_1d - camarilla_range_1d * 1.1 / 12
+    
+    # Align Camarilla levels to 4h
+    camarilla_pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
+    camarilla_r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
+    
+    # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR for volatility filter (14-period ATR on 12h)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # ATR ratio: current ATR / 50-period ATR average (to detect low/high volatility regimes)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / np.where(atr_ma > 0, atr_ma, np.nan)  # Avoid division by zero
+    # Volume filter: above 1.5x 12-period average (12*4h = 2 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for ATR MA
+    start_idx = 12  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_34_12h[i]) or np.isnan(atr_ratio[i])):
+        if (np.isnan(camarilla_r1_4h[i]) or np.isnan(camarilla_s1_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
+        
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
         # Session filter: 08-20 UTC (reduce noise trades)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long entry: price breaks above Donchian high with daily uptrend and low volatility
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_34_12h[i] and  # daily uptrend
-                atr_ratio[i] < 0.8 and      # low volatility regime
+            # Long breakout: price breaks above camarilla R1 with daily uptrend
+            if (close[i] > camarilla_r1_4h[i] and 
+                close[i] > ema_34_4h[i] and  # daily uptrend
+                vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low with daily downtrend and low volatility
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_34_12h[i] and  # daily downtrend
-                  atr_ratio[i] < 0.8 and      # low volatility regime
+            # Short breakdown: price breaks below camarilla S1 with daily downtrend
+            elif (close[i] < camarilla_s1_4h[i] and 
+                  close[i] < ema_34_4h[i] and  # daily downtrend
+                  vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to midline OR volatility expands
-            if (close[i] < donchian_mid[i] or atr_ratio[i] > 1.2):
+            # Exit long: price falls back below camarilla pivot (mean reversion)
+            if close[i] < camarilla_pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to midline OR volatility expands
-            if (close[i] > donchian_mid[i] or atr_ratio[i] > 1.2):
+            # Exit short: price rises back above camarilla pivot (mean reversion)
+            if close[i] > camarilla_pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
