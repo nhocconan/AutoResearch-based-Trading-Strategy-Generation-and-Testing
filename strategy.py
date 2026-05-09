@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d EMA50 trend filter and volume spike
-# Bull Power = High - EMA13, Bear Power = Low - EMA13
-# Long when Bull Power > 0 and rising, EMA50 uptrend, volume > 1.5x average
-# Short when Bear Power < 0 and falling, EMA50 downtrend, volume > 1.5x average
-# Exit when power crosses zero or reverses
-# Uses Elder Ray to measure bull/bear strength relative to EMA, EMA for trend, volume for conviction
-# Designed to work in both trending and ranging markets with controlled frequency
-# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
+# Hypothesis: 12h Williams Alligator with 1w trend filter and volume confirmation
+# Long when price > Alligator's Jaw (TEMA13) with 1w EMA50 uptrend and volume > 1.5x average
+# Short when price < Alligator's Jaw with 1w EMA50 downtrend and volume > 1.5x average
+# Exit when price crosses back to Alligator's Teeth (TEMA8)
+# Williams Alligator uses smoothed moving averages (SMMA) to identify trends
+# Williams Alligator: Jaw=TEMA13, Teeth=TEMA8, Lips=TEMA5
+# Designed to capture trends with low frequency suitable for 12h timeframe
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "6h_ElderRay_EMA50_Trend_VolumeSpike"
-timeframe = "6h"
+name = "12h_WilliamsAlligator_1wEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(data, period):
+    """Smoothed Moving Average (SMMA) - also called Wilder's Smoothing"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=np.float64)
+    result = np.empty_like(data, dtype=np.float64)
+    result[:] = np.nan
+    # First value is simple average
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CURRENT_VALUE) / N
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,66 +39,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 13-period EMA for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Williams Alligator components (using close prices)
+    # Jaw: SMMA(13), Teeth: SMMA(8), Lips: SMMA(5)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # Calculate Bull Power and Bear Power
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # Calculate 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Calculate 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Volume confirmation: current volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean()
     vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA calculation
+    start_idx = 50  # Need enough data for SMMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Bull Power > 0 and rising, EMA50 uptrend, volume spike
-            if (bull_power[i] > 0 and 
-                bull_power[i] > bull_power[i-1] and  # Bull Power rising
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA50 rising
+            # Enter long: price > Jaw, EMA50 uptrend, volume confirmation
+            if (close[i] > jaw[i] and 
+                ema50_1w_aligned[i] > ema50_1w_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0 and falling, EMA50 downtrend, volume spike
-            elif (bear_power[i] < 0 and 
-                  bear_power[i] < bear_power[i-1] and  # Bear Power falling
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA50 falling
+            # Enter short: price < Jaw, EMA50 downtrend, volume confirmation
+            elif (close[i] < jaw[i] and 
+                  ema50_1w_aligned[i] < ema50_1w_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power crosses below zero or reverses
-            if (bull_power[i] <= 0) or (bull_power[i] < bull_power[i-1]):
+            # Exit long: price crosses back to Teeth (or below)
+            if close[i] <= teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power crosses above zero or reverses
-            if (bear_power[i] >= 0) or (bear_power[i] > bear_power[i-1]):
+            # Exit short: price crosses back to Teeth (or above)
+            if close[i] >= teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
