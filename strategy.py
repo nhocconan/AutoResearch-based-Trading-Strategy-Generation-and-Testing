@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot (R1/S1) breakout with 1d VWAP trend filter and volume spike.
-# Uses daily VWAP for trend direction, Camarilla levels for precise breakout entries,
-# and volume surge for confirmation. Designed to work in both bull (breakouts above R1)
-# and bear (breakdowns below S1). Target: 20-40 trades/year to avoid fee drag.
-name = "4h_Camarilla_R1_S1_Breakout_1dVWAP_Trend_Volume"
+# Hypothesis: 4h Camarilla pivot level (R3/S3) bounce with 1d EMA34 trend filter and volume spike.
+# Uses daily EMA34 for trend direction (price > EMA34 = bullish, < EMA34 = bearish),
+# Camarilla R3/S3 levels for mean-reversion entries, and volume surge for confirmation.
+# In bull trend: buy at S3 bounce; in bear trend: sell at R3 rejection.
+# Designed for low trade frequency (<400 total) to minimize fee drag.
+name = "4h_Camarilla_R3S3_Bounce_1dEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,64 +22,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for VWAP trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate VWAP for daily timeframe
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    pv = typical_price_1d * df_1d['volume'].values
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(df_1d['volume'].values)
-    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
+    # Calculate 34-period EMA for daily timeframe
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels for 4h timeframe (based on previous day's OHLC)
-    # We need daily OHLC to calculate Camarilla levels for intraday periods
-    # Since we're on 4h timeframe, we'll use the previous day's OHLC for all 4h bars of current day
-    # Extract daily OHLC from 1d data
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate Camarilla pivot levels for each day (based on previous day OHLC)
+    # Camarilla formulas:
+    # R4 = close + ((high - low) * 1.5000)
+    # R3 = close + ((high - low) * 1.2500)
+    # R2 = close + ((high - low) * 1.1666)
+    # R1 = close + ((high - low) * 1.0833)
+    # PP = (high + low + close) / 3
+    # S1 = close - ((high - low) * 1.0833)
+    # S2 = close - ((high - low) * 1.1666)
+    # S3 = close - ((high - low) * 1.2500)
+    # S4 = close - ((high - low) * 1.5000)
+    # We use R3 and S3 for entries
     
-    # Calculate Camarilla levels for each day
-    camarilla_r1 = np.zeros_like(daily_close)
-    camarilla_s1 = np.zeros_like(daily_close)
-    camarilla_r2 = np.zeros_like(daily_close)
-    camarilla_s2 = np.zeros_like(daily_close)
+    # We need previous day's OHLC to calculate today's Camarilla levels
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    close_prev = np.roll(close, 1)
+    # Set first day's previous values to current day's (no look-ahead)
+    high_prev[0] = high[0]
+    low_prev[0] = low[0]
+    close_prev[0] = close[0]
     
-    for i in range(len(daily_close)):
-        # Camarilla formulas
-        range_val = daily_high[i] - daily_low[i]
-        camarilla_r1[i] = daily_close[i] + range_val * 1.1 / 12
-        camarilla_s1[i] = daily_close[i] - range_val * 1.1 / 12
-        camarilla_r2[i] = daily_close[i] + range_val * 1.1 / 6
-        camarilla_s2[i] = daily_close[i] - range_val * 1.1 / 6
+    # Calculate Camarilla R3 and S3
+    R3 = close_prev + ((high_prev - low_prev) * 1.2500)
+    S3 = close_prev - ((high_prev - low_prev) * 1.2500)
     
-    # Align daily Camarilla levels to 4h timeframe
-    # Each 4h bar gets the Camarilla levels from the same day
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    
-    # VWAP trend: price above/below VWAP indicates trend
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
-    
-    # Volume confirmation: volume > 1.8x 20-period EMA (moderate threshold)
+    # Volume confirmation: volume > 2.0x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.8 * vol_ema20)
+    vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 0  # Can start from first bar as Camarilla levels are available
-    
-    for i in range(start_idx, n):
-        # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(vwap_aligned[i]) or np.isnan(vol_ema20[i])):
+    for i in range(1, n):  # Start from 1 to have valid previous day data
+        # Skip if required data unavailable
+        if (np.isnan(ema34_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,26 +77,30 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 + price > VWAP (uptrend) + volume spike
-            if (price > r1_aligned[i] and price > vwap_aligned[i] and vol_confirm[i]):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below S1 + price < VWAP (downtrend) + volume spike
-            elif (price < s1_aligned[i] and price < vwap_aligned[i] and vol_confirm[i]):
-                signals[i] = -0.25
-                position = -1
+            # In bull trend (price > EMA34): look for long at S3 bounce
+            # In bear trend (price < EMA34): look for short at R3 rejection
+            if close[i] > ema34_aligned[i]:  # Bull trend
+                if price <= S3[i] * 1.001 and price >= S3[i] * 0.999:  # Near S3 level (within 0.1%)
+                    if vol_confirm[i]:
+                        signals[i] = 0.25
+                        position = 1
+            else:  # Bear trend
+                if price <= R3[i] * 1.001 and price >= R3[i] * 0.999:  # Near R3 level (within 0.1%)
+                    if vol_confirm[i]:
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:
-            # Exit long: price returns below R1 or VWAP turns down
-            if price < r1_aligned[i] or price < vwap_aligned[i]:
+            # Exit long: price reaches R3 or trend changes to bear
+            if price >= R3[i] * 0.999 or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S1 or VWAP turns up
-            if price > s1_aligned[i] or price > vwap_aligned[i]:
+            # Exit short: price reaches S3 or trend changes to bull
+            if price <= S3[i] * 1.001 or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
