@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend filter
+    # Get daily data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (R1, S1, R2, S2)
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla pivot calculation (based on previous day's range)
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels (standard)
-    R1 = close_1d + (range_1d * 1.1 / 12)
-    S1 = close_1d - (range_1d * 1.1 / 12)
-    R2 = close_1d + (range_1d * 1.1 / 6)
-    S2 = close_1d - (range_1d * 1.1 / 6)
+    # Camarilla levels (most significant for breakouts)
+    R1 = pivot_1d + (range_1d * 1.0) / 4
+    S1 = pivot_1d - (range_1d * 1.0) / 4
+    R4 = pivot_1d + (range_1d * 1.5) / 2
+    S4 = pivot_1d - (range_1d * 1.5) / 2
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R2_1d_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_1d_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
     # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
+    close_1d_series = pd.Series(df_1d['close'].values)
     ema_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike detection (12h timeframe)
+    # Volume spike detection (4h timeframe)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
