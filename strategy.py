@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_WeeklyDonchian_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "6H_Minimal_Trend_With_Volume_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,66 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for 20-day EMA trend filter (1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 20-week EMA for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate 1-day EMA20 for trend filter
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate daily Donchian channels (20-day)
-    if len(prices) < 20:
-        return np.zeros(n)
-    
-    # Rolling max/min for Donchian channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Daily volume confirmation
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 1-day EMA20 to 6h timeframe
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
+    # Start after we have enough data for indicators
     start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if EMA data not ready
-        if np.isnan(ema20_1w_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(avg_volume[i]):
+        if np.isnan(ema20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_confirm = volume[i] > avg_volume[i] * 1.5
+        # Volume confirmation: current volume > 1.5x 20-period average volume
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+            volume_confirm = volume[i] > avg_volume * 1.5
+        else:
+            volume_confirm = False
         
         if position == 0:
-            # Enter long: price breaks above 20-day high + uptrend + volume confirmation
-            if high[i] >= high_max[i-1] and close[i] > ema20_1w_aligned[i] and volume_confirm:
+            # Enter long: price above EMA20 + volume confirmation
+            if close[i] > ema20_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below 20-day low + downtrend + volume confirmation
-            elif low[i] <= low_min[i-1] and close[i] < ema20_1w_aligned[i] and volume_confirm:
+            # Enter short: price below EMA20 + volume confirmation
+            elif close[i] < ema20_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 20-day low or trend reverses
-            if low[i] <= low_min[i-1] or close[i] < ema20_1w_aligned[i]:
+            # Exit long: price below EMA20
+            if close[i] < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 20-day high or trend reverses
-            if high[i] >= high_max[i-1] or close[i] > ema20_1w_aligned[i]:
+            # Exit short: price above EMA20
+            if close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
