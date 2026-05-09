@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime
-Hypothesis: Trade breakouts at Camarilla R1/S1 levels on 12h timeframe with 1d EMA trend filter and volume spike confirmation.
-Uses 1d Choppiness Index regime filter to avoid whipsaw in sideways markets. Designed for low trade frequency (12-37/year)
-to minimize fee drag. Works in both bull and bear markets by following 1d trend direction and avoiding range-bound periods.
+6h_RSI_Divergence_Pattern_1wTrend
+Hypothesis: Detect RSI divergence patterns on 6h timeframe with weekly trend filter to capture reversals in both bull and bear markets.
+Uses RSI(14) for momentum and weekly EMA(50) for trend direction. Looks for bullish/bearish divergence where price makes new high/low but RSI does not.
+Adds volume confirmation to reduce false signals. Designed for low trade frequency (<30/year) to minimize fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime"
-timeframe = "12h"
+name = "6h_RSI_Divergence_Pattern_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,72 +24,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter, Choppiness Index, and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[0:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = ema_50_1w[i-1] * 0.9607843137 + close_1w[i] * 0.0392156863  # EMA alpha = 2/(50+1)
     
-    # Calculate Choppiness Index (14-period)
-    def calculate_choppiness(high, low, close, period=14):
-        n = len(high)
-        atr = np.full(n, np.nan)
-        if n >= 1:
-            tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
-            tr = np.concatenate([[np.inf], tr])  # first TR undefined
-            atr_period = np.full(n, np.nan)
-            if n >= period:
-                atr_period[period-1] = np.mean(tr[1:period+1])  # skip first undefined TR
-                for i in range(period, n):
-                    atr_period[i] = (atr_period[i-1] * (period-1) + tr[i]) / period
-                atr = atr_period
-        # Sum of true ranges over period
-        sum_tr = np.full(n, np.nan)
-        if n >= period:
-            for i in range(period-1, n):
-                start_idx = i - period + 1
-                sum_tr[i] = np.sum(tr[start_idx:i+1])
-        # Highest high and lowest low over period
-        highest_high = np.full(n, np.nan)
-        lowest_low = np.full(n, np.nan)
-        if n >= period:
-            for i in range(period-1, n):
-                start_idx = i - period + 1
-                highest_high[i] = np.max(high[start_idx:i+1])
-                lowest_low[i] = np.min(low[start_idx:i+1])
-        # Choppiness Index
-        chop = np.full(n, np.nan)
-        valid = (~np.isnan(sum_tr)) & (~np.isnan(highest_high)) & (~np.isnan(lowest_low)) & ((highest_high - lowest_low) > 0)
-        chop[valid] = 100 * np.log10(sum_tr[valid] / ((highest_high[valid] - lowest_low[valid]) * period)) / np.log10(period)
-        return chop
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    chop_1d = calculate_choppiness(high_1d, low_1d, close_1d, 14)
+    # Calculate RSI(14) on 6h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    # Wilder's smoothing (alpha = 1/14)
+    alpha = 1.0 / 14
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
     
-    # Calculate Camarilla levels (R1, S1)
-    rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[0:14])
+        avg_loss[13] = np.mean(loss[0:14])
+        for i in range(14, len(gain)):
+            avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+            avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
     
-    # Align 1d indicators to 12h timeframe
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -106,12 +75,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(34, 20)  # Ensure EMA and volume MA are ready
+    start_idx = max(30, 50)  # Ensure RSI and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chop_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -120,30 +89,37 @@ def generate_signals(prices):
         
         bars_since_entry += 1
         
-        # Regime filter: only trade when market is trending (Choppiness Index < 38.2)
-        is_trending = chop_1d_aligned[i] < 38.2
-        
-        if position == 0 and is_trending:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_ratio[i] > 2.0):
-                signals[i] = 0.25
-                position = 1
-                bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0):
-                signals[i] = -0.25
-                position = -1
-                bars_since_entry = 0
+        if position == 0:
+            # Look for bullish divergence: price makes new low, RSI makes higher low
+            # Bearish divergence: price makes new high, RSI makes lower high
+            lookback = 10
+            if i >= lookback:
+                price_low = np.min(low[i-lookback:i+1])
+                price_high = np.max(high[i-lookback:i+1])
+                rsi_low = np.min(rsi[i-lookback:i+1])
+                rsi_high = np.max(rsi[i-lookback:i+1])
+                
+                # Current price at recent extremes
+                is_at_low = low[i] <= price_low * 1.001  # within 0.1% of recent low
+                is_at_high = high[i] >= price_high * 0.999  # within 0.1% of recent high
+                
+                bullish_div = is_at_low and (rsi[i] > rsi_low + 5) and (rsi[i-lookback:i+1].argmin() == 0)
+                bearish_div = is_at_high and (rsi[i] < rsi_high - 5) and (rsi[i-lookback:i+1].argmax() == 0)
+                
+                # Enter long on bullish divergence in uptrend (price > weekly EMA50)
+                if bullish_div and close[i] > ema_50_1w_aligned[i] and volume_ratio[i] > 1.5:
+                    signals[i] = 0.25
+                    position = 1
+                    bars_since_entry = 0
+                # Enter short on bearish divergence in downtrend (price < weekly EMA50)
+                elif bearish_div and close[i] < ema_50_1w_aligned[i] and volume_ratio[i] > 1.5:
+                    signals[i] = -0.25
+                    position = -1
+                    bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend reversal (price < EMA34) OR market becomes ranging
-            if (chop_1d_aligned[i] >= 38.2 or  # regime change to ranging
-                close[i] < s1_aligned[i] or 
-                close[i] < ema_34_1d_aligned[i]):
+            # Exit conditions: RSI overbought or trend reversal
+            if rsi[i] > 70 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -151,10 +127,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend reversal (price > EMA34) OR market becomes ranging
-            if (chop_1d_aligned[i] >= 38.2 or  # regime change to ranging
-                close[i] > r1_aligned[i] or 
-                close[i] > ema_34_1d_aligned[i]):
+            # Exit conditions: RSI oversold or trend reversal
+            if rsi[i] < 30 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
