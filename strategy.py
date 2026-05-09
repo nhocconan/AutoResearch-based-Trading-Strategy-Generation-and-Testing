@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1D_1W_Triple_Confirmation"
-timeframe = "1d"
+name = "6H_LR_Slope_1dTrend_Confirm"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,91 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 50-period EMA for weekly trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Get daily data for Donchian channel and volume
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period Donchian channel (previous day)
-    donchian_high = np.full_like(close_1d, np.nan)
-    donchian_low = np.full_like(close_1d, np.nan)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    for i in range(len(close_1d)):
-        if i >= 20:
-            donchian_high[i] = np.max(high_1d[i-20:i])
-            donchian_low[i] = np.min(low_1d[i-20:i])
-    
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Calculate 20-period volume average (previous day)
-    vol_ma20 = np.full_like(volume_1d, np.nan)
-    
-    for i in range(len(volume_1d)):
-        if i >= 20:
-            vol_ma20[i] = np.mean(volume_1d[i-20:i])
-    
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+    # Linear regression slope on 6h close (36 periods = 9 days)
+    window = 36
+    slope = np.full(n, np.nan)
+    for i in range(window-1, n):
+        y = close[i-window+1:i+1]
+        x = np.arange(window)
+        if np.all(np.isnan(y)) or np.all(np.isnan(x)):
+            continue
+        # Remove NaNs if any (shouldn't happen with proper data)
+        valid = ~np.isnan(y)
+        if np.sum(valid) < 2:
+            continue
+        y_valid = y[valid]
+        x_valid = x[valid]
+        slope[i] = np.polyfit(x_valid, y_valid, 1)[0]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
-    start_idx = max(50, 20)
+    # Start after we have enough data
+    start_idx = max(window, 50)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma20_aligned[i])):
+        if np.isnan(slope[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market conditions
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
-        # Volume confirmation: current volume > 1.5x 20-day average
-        volume_surge = volume[i] > vol_ma20_aligned[i] * 1.5
+        # Determine trend from 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Enter long: Weekly uptrend + price breaks above Donchian high + volume surge
-            if weekly_uptrend and close[i] > donchian_high_aligned[i] and volume_surge:
+            # Enter long: Uptrend + positive LR slope
+            if uptrend and slope[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Weekly downtrend + price breaks below Donchian low + volume surge
-            elif weekly_downtrend and close[i] < donchian_low_aligned[i] and volume_surge:
+            # Enter short: Downtrend + negative LR slope
+            elif downtrend and slope[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Weekly trend turns down OR price breaks below Donchian low
-            if not weekly_uptrend or close[i] < donchian_low_aligned[i]:
+            # Exit long: Downtrend OR negative LR slope
+            if not uptrend or slope[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Weekly trend turns up OR price breaks above Donchian high
-            if not weekly_downtrend or close[i] > donchian_high_aligned[i]:
+            # Exit short: Uptrend OR positive LR slope
+            if not downtrend or slope[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
