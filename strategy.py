@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6H_1W_1D_Ichimoku_Cloud_Filter_TK_Cross_Volume
-# Hypothesis: Use Ichimoku cloud from daily timeframe for trend filter and weekly timeframe for stronger trend confirmation,
-# with Tenkan/Kijun cross on 6h for entry timing and volume confirmation. The Ichimoku cloud provides dynamic support/resistance
-# and future cloud (Kumo) acts as leading indicator. TK cross captures momentum shifts while cloud filter ensures
-# trades are in direction of higher timeframe trend. Works in bull/bear via multi-timeframe trend alignment.
+# 12H_1W_1D_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Use weekly trend filter (price > weekly SMA50) with weekly and daily
+# Camarilla R3/S3 breakouts for stronger signals. Volume confirmation ensures
+# breakout conviction. Weekly trend filter reduces whipsaws in bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) for 12h timeframe.
 
-name = "6H_1W_1D_Ichimoku_Cloud_Filter_TK_Cross_Volume"
-timeframe = "6h"
+name = "12H_1W_1D_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,60 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Ichimoku (primary trend filter)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Ichimoku components on daily
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    max_high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_tenkan + min_low_tenkan) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    max_high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_kijun + min_low_kijun) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 plotted 26 periods ahead
-    period_senkou_b = 52
-    max_high_senkou = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_senkou = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_senkou + min_low_senkou) / 2)
-    
-    # Get weekly data for stronger trend confirmation
+    # Get weekly data for trend filter and Camarilla levels
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 26:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly Kijun-sen for trend filter
-    max_high_kijun_w = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    min_low_kijun_w = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_weekly = (max_high_kijun_w + min_low_kijun_w) / 2
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align Ichimoku components to 6h
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    kijun_weekly_aligned = align_htf_to_ltf(prices, df_1w, kijun_weekly)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly SMA50 trend filter
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    
+    # Weekly Camarilla levels (R3, S3)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r3_1w = pivot_1w + range_1w * 1.1  # R3 = pivot + (range * 1.1)
+    s3_1w = pivot_1w - range_1w * 1.1  # S3 = pivot - (range * 1.1)
+    
+    # Daily Camarilla levels (R3, S3)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3_1d = pivot_1d + range_1d * 1.1  # R3 = pivot + (range * 1.1)
+    s3_1d = pivot_1d - range_1d * 1.1  # S3 = pivot - (range * 1.1)
+    
+    # Align all to 12h
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    
+    # Volume confirmation: current volume > 1.5x 30-period average
+    volume_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
     signals = np.zeros(n)
@@ -87,45 +75,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or 
-            np.isnan(kijun_weekly_aligned[i])):
+        if np.isnan(sma50_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or \
+           np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        
         if position == 0:
-            # Enter long: price above cloud + TK cross bullish + price above weekly Kijun + volume confirmation
-            if (close[i] > cloud_top and 
-                tenkan_aligned[i] > kijun_aligned[i] and 
-                close[i] > kijun_weekly_aligned[i] and 
-                volume_confirm[i]):
+            # Enter long: price breaks above weekly R3 AND daily R3 + above weekly SMA50 + volume confirmation
+            if close[i] > r3_1w_aligned[i] and close[i] > r3_1d_aligned[i] and close[i] > sma50_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below cloud + TK cross bearish + price below weekly Kijun + volume confirmation
-            elif (close[i] < cloud_bottom and 
-                  tenkan_aligned[i] < kijun_aligned[i] and 
-                  close[i] < kijun_weekly_aligned[i] and 
-                  volume_confirm[i]):
+            # Enter short: price breaks below weekly S3 AND daily S3 + below weekly SMA50 + volume confirmation
+            elif close[i] < s3_1w_aligned[i] and close[i] < s3_1d_aligned[i] and close[i] < sma50_1w_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below cloud OR TK cross bearish
-            if close[i] < cloud_bottom or tenkan_aligned[i] < kijun_aligned[i]:
+            # Exit long: price below weekly S3 (trend weakness)
+            if close[i] < s3_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above cloud OR TK cross bullish
-            if close[i] > cloud_top or tenkan_aligned[i] > kijun_aligned[i]:
+            # Exit short: price above weekly R3 (trend strength)
+            if close[i] > r3_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
