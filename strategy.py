@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d trend and 12h momentum for entries.
-# Uses 1d EMA50 for trend filter and 12h RSI(14) for momentum confirmation.
-# Designed for low trade frequency (12-37/year) to avoid fee drag in 12h timeframe.
-# Works in both bull/bear markets by requiring alignment with 1d trend and momentum confirmation.
-name = "12h_RSI14_1dEMA50_Trend"
-timeframe = "12h"
+# Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation
+# Designed for low trade frequency (19-50/year) to avoid fee drag.
+# Works in bull/bear markets by requiring alignment with 12h trend and volume confirmation.
+name = "4h_Donchian20_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,63 +20,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA50 trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 12h RSI(14) for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: current volume > 1.5x 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = 20  # Wait for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_12h[i]) or np.isnan(rsi_values[i]):
+        if np.isnan(ema_50_4h[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Momentum filters
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
+        # Entry conditions
+        bullish_breakout = close[i] > highest_high[i-1]  # Break above previous period's high
+        bearish_breakout = close[i] < lowest_low[i-1]    # Break below previous period's low
+        trend_up = close[i] > ema_50_4h[i]
+        trend_down = close[i] < ema_50_4h[i]
         
         if position == 0:
-            # Long: price above 1d EMA50 and RSI oversold
-            if close[i] > ema_50_12h[i] and rsi_oversold:
+            # Long: bullish breakout + uptrend + volume confirmation
+            if bullish_breakout and trend_up and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below 1d EMA50 and RSI overbought
-            elif close[i] < ema_50_12h[i] and rsi_overbought:
+            # Short: bearish breakout + downtrend + volume confirmation
+            elif bearish_breakout and trend_down and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below 1d EMA50 or RSI overbought
-            if close[i] < ema_50_12h[i] or rsi_values[i] > 70:
+            # Exit long: bearish breakout or trend reversal
+            if bearish_breakout or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 1d EMA50 or RSI oversold
-            if close[i] > ema_50_12h[i] or rsi_values[i] < 30:
+            # Exit short: bullish breakout or trend reversal
+            if bullish_breakout or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
