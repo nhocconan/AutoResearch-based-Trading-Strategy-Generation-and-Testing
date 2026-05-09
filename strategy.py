@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h volume-weighted RSI with 12h trend filter and 24h ATR stoploss.
-# Uses RSI(14) weighted by volume to filter false signals, combined with 12h EMA trend.
-# Long when volume-RSI < 30 and price > 12h EMA; short when volume-RSI > 70 and price < 12h EMA.
-# Designed to work in both bull (follow 12h uptrend) and bear (follow 12h downtrend) markets.
-# Target: 20-40 trades/year to avoid fee drag.
-name = "4h_VolumeRSI_12hEMA_ATRStop"
-timeframe = "4h"
+# Hypothesis: 1h Bollinger Band squeeze breakout with 4h trend filter and volume spike.
+# Uses Bollinger Bands (20,2) squeeze detection (<20th percentile width) followed by breakout.
+# Long when price breaks above upper band with 4h uptrend and volume spike.
+# Short when price breaks below lower band with 4h downtrend and volume spike.
+# Designed to work in both bull (follow 4h uptrend) and bear (follow 4h downtrend) markets.
+# Target: 15-37 trades/year to avoid fee drag.
+name = "1h_Bollinger_Squeeze_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,94 +23,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Bollinger Bands (20,2) on 1h
+    bb_period = 20
+    bb_mult = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
+    upper = sma + bb_mult * std
+    lower = sma - bb_mult * std
+    bb_width = upper - lower
+    
+    # Bollinger Band squeeze: width < 20th percentile of last 50 periods
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20)
+    squeeze = bb_width < bb_width_percentile.values
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate volume-weighted RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 4h EMA(50) for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Weight gains and losses by volume
-    vol_weight = volume / (np.mean(volume) + 1e-8)
-    weighted_gain = gain * vol_weight
-    weighted_loss = loss * vol_weight
-    
-    # Calculate smoothed averages
-    avg_gain = pd.Series(weighted_gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(weighted_loss).ewm(alpha=1/14, adjust=False).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    vwrsi = 100 - (100 / (1 + rs))
-    
-    # 12h EMA(50) for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    start_idx = 14  # Need enough data for RSI and ATR
+    start_idx = 50  # Need sufficient data for indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(vwrsi[i]) or np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ema20[i]) or 
+            np.isnan(sma.iloc[i]) or np.isnan(std.iloc[i]) or np.isnan(bb_width_percentile.iloc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        upper_val = upper.iloc[i]
+        lower_val = lower.iloc[i]
+        squeeze_val = squeeze.iloc[i]
         
         if position == 0:
-            # Enter long: vwrsi < 30 (oversold) + price > 12h EMA (uptrend)
-            if vwrsi[i] < 30 and price > ema_50_12h_aligned[i]:
-                signals[i] = 0.25
+            # Enter long: BB squeeze breakout above upper band + 4h uptrend + volume spike
+            if squeeze_val and price > upper_val and price > ema_50_4h_aligned[i] and vol_confirm[i]:
+                signals[i] = 0.20
                 position = 1
-                entry_price = price
-            # Enter short: vwrsi > 70 (overbought) + price < 12h EMA (downtrend)
-            elif vwrsi[i] > 70 and price < ema_50_12h_aligned[i]:
-                signals[i] = -0.25
+            # Enter short: BB squeeze breakout below lower band + 4h downtrend + volume spike
+            elif squeeze_val and price < lower_val and price < ema_50_4h_aligned[i] and vol_confirm[i]:
+                signals[i] = -0.20
                 position = -1
-                entry_price = price
         
         elif position == 1:
-            # Check stoploss: price < entry - 2*ATR
-            if price < entry_price - 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit long: vwrsi > 50 (mean reversion) or trend reverse
-            elif vwrsi[i] > 50 or price < ema_50_12h_aligned[i]:
+            # Exit long: price returns below middle Bollinger Band or trend reverses
+            if price < sma.iloc[i] or price < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Check stoploss: price > entry + 2*ATR
-            if price > entry_price + 2.0 * atr[i]:
-                signals[i] = 0.0
-                position = 0
-            # Exit short: vwrsi < 50 (mean reversion) or trend reverse
-            elif vwrsi[i] < 50 or price > ema_50_12h_aligned[i]:
+            # Exit short: price returns above middle Bollinger Band or trend reverses
+            if price > sma.iloc[i] or price > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
