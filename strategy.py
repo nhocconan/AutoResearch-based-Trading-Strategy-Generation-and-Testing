@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeFilter"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -16,51 +16,37 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = prices['open_time'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d EMA21 for trend filter
+    ema_21_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_6h = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = high
-    low_1d = low
-    close_1d = close
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (on 6h)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Smooth the power values (EMA8)
+    bull_power_smooth = pd.Series(bull_power).ewm(span=8, adjust=False, min_periods=8).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=8, adjust=False, min_periods=8).mean().values
     
-    # First day: use first values
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Camarilla levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Volume filter: above 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above 1.5x 24-period average (24*6h = 144h ~ 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for EMA and volume MA
+    start_idx = max(21, 24)  # Wait for EMA21 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1d[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(R3[i]) or np.isnan(S3[i])):
+        if (np.isnan(ema_21_6h[i]) or np.isnan(bull_power_smooth[i]) or 
+            np.isnan(bear_power_smooth[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,36 +55,38 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
         # Pre-compute hour for session filter (UTC 8-20)
-        hour = pd.Timestamp(open_time[i]).hour
+        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: Price breaks above R1 + 1w uptrend + volume + session
-            if (close[i] > R1[i] and      # Break above R1
-                close[i] > ema_50_1d[i] and  # 1w uptrend filter
+            # Long: Bull Power > 0 + Bear Power < 0 + price above EMA21 + volume + session
+            if (bull_power_smooth[i] > 0 and 
+                bear_power_smooth[i] < 0 and 
+                close[i] > ema_21_6h[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + 1w downtrend + volume + session
-            elif (close[i] < S1[i] and    # Break below S1
-                  close[i] < ema_50_1d[i] and  # 1w downtrend filter
+            # Short: Bull Power < 0 + Bear Power > 0 + price below EMA21 + volume + session
+            elif (bull_power_smooth[i] < 0 and 
+                  bear_power_smooth[i] > 0 and 
+                  close[i] < ema_21_6h[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price closes below S1 (reversion to mean)
-            if close[i] < S1[i]:
+            # Exit long: Bull Power <= 0 (momentum fading)
+            if bull_power_smooth[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price closes above R1 (reversion to mean)
-            if close[i] > R1[i]:
+            # Exit short: Bear Power >= 0 (momentum fading)
+            if bear_power_smooth[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
