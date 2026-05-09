@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Camarilla_R3S3_Breakout_VolumeTrend_1d"
-timeframe = "4h"
+name = "6H_ADX_DMI_Momentum_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,71 +17,99 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for ADX and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate ADX (14) on daily data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Camarilla levels (R3, S3)
-    r3_1d = pivot_1d + (range_1d * 1.1 / 2)
-    s3_1d = pivot_1d - (range_1d * 1.1 / 2)
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Align to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Smooth TR, +DM, -DM using Wilder's smoothing (EMA with alpha=1/period)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        # First value is simple average
+        if len(data) >= period:
+            result[period-1] = np.nanmean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    atr = wilder_smooth(tr, 14)
+    plus_di = 100 * wilder_smooth(plus_dm, 14) / atr
+    minus_di = 100 * wilder_smooth(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilder_smooth(dx, 14)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Align ADX and DI to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: current volume > 1.3x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    volume_confirm = volume > (volume_avg * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]):
+        if (np.isnan(adx_aligned[i]) or np.isnan(plus_di_aligned[i]) or 
+            np.isnan(minus_di_aligned[i]) or np.isnan(ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation
-            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
+            # Enter long: ADX > 25, +DI > -DI, price above EMA50, volume confirmation
+            if (adx_aligned[i] > 25 and plus_di_aligned[i] > minus_di_aligned[i] and 
+                close[i] > ema50_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation
-            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
+            # Enter short: ADX > 25, -DI > +DI, price below EMA50, volume confirmation
+            elif (adx_aligned[i] > 25 and minus_di_aligned[i] > plus_di_aligned[i] and 
+                  close[i] < ema50_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily EMA34
-            if close[i] < ema34_aligned[i]:
+            # Exit long: ADX < 20 or price below EMA50
+            if adx_aligned[i] < 20 or close[i] < ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above daily EMA34
-            if close[i] > ema34_aligned[i]:
+            # Exit short: ADX < 20 or price above EMA50
+            if adx_aligned[i] < 20 or close[i] > ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
