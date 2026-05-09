@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6H_12H_Donchian20_Breakout_12hTrend_Volume
-# Hypothesis: On 6h timeframe, enter long when price breaks above 12h Donchian upper channel (20) with 12h uptrend and volume confirmation.
-# Short when price breaks below 12h Donchian lower channel with 12h downtrend and volume confirmation.
-# Uses 12h trend filter to avoid counter-trend trades and Donchian breakouts from 12h for precise entries.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# 4H_1D_RSIBreakout_TrendVolume
+# Hypothesis: On 4h timeframe, enter long when RSI(14) crosses above 30 from below with 1d uptrend and volume confirmation.
+# Enter short when RSI(14) crosses below 70 from above with 1d downtrend and volume confirmation.
+# Uses 1d trend filter (EMA34) to avoid counter-trend trades and RSI for mean-reversion entries.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
 
-name = "6H_12H_Donchian20_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_1D_RSIBreakout_TrendVolume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,71 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian channels and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    # Upper = max(high, lookback=20)
-    # Lower = min(low, lookback=20)
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 12h trend: EMA(34) on close
-    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_12h > ema_34
+    # 1d trend: EMA(34) on close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema_34
     
-    # Volume confirmation: current volume > 1.5x 20-period average (using 6h volume)
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align 12h indicators to 6h
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
+    # Align 1d indicators to 4h
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(trend_up_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(trend_up_aligned[i]) or np.isnan(volume_confirm[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian upper + 12h uptrend + volume confirmation
-            if close[i] > donchian_upper_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: RSI crosses above 30 + 1d uptrend + volume confirmation
+            if rsi[i] > 30 and rsi[i-1] <= 30 and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian lower + 12h downtrend + volume confirmation
-            elif close[i] < donchian_lower_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: RSI crosses below 70 + 1d downtrend + volume confirmation
+            elif rsi[i] < 70 and rsi[i-1] >= 70 and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian lower (reversal) or trend changes
-            if close[i] < donchian_lower_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: RSI crosses above 70 or trend changes to down
+            if rsi[i] >= 70 or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian upper (reversal) or trend changes
-            if close[i] > donchian_upper_aligned[i] or trend_up_aligned[i]:
+            # Exit short: RSI crosses below 30 or trend changes to up
+            if rsi[i] <= 30 or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
