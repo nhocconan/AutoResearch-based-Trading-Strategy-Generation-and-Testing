@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R4S4_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Previous day OHLC for Camarilla calculation
+    # Previous day's OHLC for Camarilla calculation
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -27,11 +27,11 @@ def generate_signals(prices):
     prev_close[0] = close[0]
     prev_open[0] = prices['open'].values[0]
     
-    # Calculate Camarilla R1 and S1 levels
+    # Calculate Camarilla R4 and S4 levels
     range_ = prev_high - prev_low
     close_prev = prev_close
-    r1 = close_prev + range_ * 1.1 / 4
-    s1 = close_prev - range_ * 1.1 / 4
+    r4 = close_prev + range_ * 1.1 / 2
+    s4 = close_prev - range_ * 1.1 / 2
     
     # Daily trend: EMA34 on 1d
     df_1d = get_htf_data(prices, '1d')
@@ -51,7 +51,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(r1[i]) or np.isnan(s1[i]) or \
+        if np.isnan(r4[i]) or np.isnan(s4[i]) or \
            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -61,16 +61,16 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R1 with daily uptrend and volume
-            if (price > r1[i] and 
+            # Long: breakout above R4 with daily uptrend and volume
+            if (price > r4[i] and 
                 price > ema34_1d_aligned[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S1 with daily downtrend and volume
-            elif (price < s1[i] and 
+            # Short: breakdown below S4 with daily downtrend and volume
+            elif (price < s4[i] and 
                   price < ema34_1d_aligned[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
