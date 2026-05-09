@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_TailRisk_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,40 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 12h timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Tail risk: price near extreme of range (top/bottom 10%)
-    range_size = highest_high - lowest_low
-    upper_zone = lowest_low + 0.9 * range_size  # top 10%
-    lower_zone = lowest_low + 0.1 * range_size  # bottom 10%
-    
-    # Volatility filter: ATR(14) > 1.5 * SMA of ATR(20)
-    tr1 = high[1:] - low[:-1]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[:-1] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr14 > 1.5 * atr_ma20  # elevated volatility regime
-    
-    # Daily trend filter: EMA50 on 1d timeframe (not weekly to reduce lag)
+    # Daily Camarilla pivot levels (from previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    prev_close = df_1d['close'].values[:-1]
+    prev_high = df_1d['high'].values[:-1]
+    prev_low = df_1d['low'].values[:-1]
+    
+    # Calculate Camarilla levels for previous day
+    R1 = prev_close + 0.1167 * (prev_high - prev_low)
+    S1 = prev_close - 0.1167 * (prev_high - prev_low)
+    R2 = prev_close + 0.2750 * (prev_high - prev_low)
+    S2 = prev_close - 0.2750 * (prev_high - prev_low)
+    R3 = prev_close + 0.4083 * (prev_high - prev_low)
+    S3 = prev_close - 0.4083 * (prev_high - prev_low)
+    
+    # Align to 4h timeframe (previous day's levels available at start of day)
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 1d EMA34 trend filter
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume spike filter: current volume > 2.0 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 2.0 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr_ma20[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,37 +65,35 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band + in upper zone + elevated vol + daily uptrend
-            if (price > highest_high[i] and  # Donchian breakout
-                price > upper_zone[i] and    # in top 10% of range
-                vol_filter[i] and            # volatility expansion
-                price > ema50_1d_aligned[i]): # daily uptrend
+            # Long: price breaks above R1 with volume spike + in uptrend
+            if (price > R1_4h[i] and 
+                vol_spike[i] and 
+                price > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: price breaks below lower Donchian band + in lower zone + elevated vol + daily downtrend
-            elif (price < lowest_low[i] and   # Donchian breakdown
-                  price < lower_zone[i] and   # in bottom 10% of range
-                  vol_filter[i] and           # volatility expansion
-                  price < ema50_1d_aligned[i]): # daily downtrend
+            # Short: price breaks below S1 with volume spike + in downtrend
+            elif (price < S1_4h[i] and 
+                  vol_spike[i] and 
+                  price < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price retreats to middle of range or daily trend fails
-            if (price < (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
-                price < ema50_1d_aligned[i]):                     # daily trend fail
+            # Exit long: price reaches R3 or trend fails
+            if (price >= R3_4h[i] or 
+                price < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises to middle of range or daily trend fails
-            if (price > (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
-                price > ema50_1d_aligned[i]):                     # daily trend fail
+            # Exit short: price reaches S3 or trend fails
+            if (price <= S3_4h[i] or 
+                price > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
