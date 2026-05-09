@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r1 = pivot + (daily_high - daily_low) * 1.1 / 12
     s1 = pivot - (daily_high - daily_low) * 1.1 / 12
     
-    # Align to 12h timeframe (Camarilla levels from previous day)
+    # Align to 4h timeframe (Camarilla levels from previous day)
     r1_aligned = align_htf_to_ltf(prices, df_d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_d, s1)
     
@@ -51,7 +51,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 50  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
