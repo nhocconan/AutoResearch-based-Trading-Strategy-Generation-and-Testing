@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_ChopFilter_DonchianBreakout"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA200 for long-term trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    ema200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    
-    # Daily chop filter: Choppiness Index (14)
+    # 1d trend: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high_1d - low_1d
+    # 1w trend: EMA20
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # ATR(14)
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 4h Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Highest high and lowest low over 14 days
-    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    
-    # Chop = 100 * log10(sum(TR(14)) / (HH(14) - LL(14))) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh_ll = hh_1d - ll_1d
-    chop = 100 * np.log10(tr_sum / hh_ll) / np.log10(14)
-    chop = np.where(hh_ll == 0, 100, chop)  # avoid division by zero
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # 12h Donchian channels (20)
-    donchian_len = 20
-    highest_high = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
+    # 4h ATR for volatility filter (14-period)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume filter: volume > 1.5x 20-period SMA
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,13 +47,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(ema200_1w_aligned[i]) or np.isnan(chop_aligned[i]) or \
-           np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(vol_ma20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or \
+           np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(atr[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,37 +61,37 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above Donchian upper, weekly uptrend, not choppy, volume
-            if (price > highest_high[i] and 
-                price > ema200_1w_aligned[i] and 
-                chop_aligned[i] < 61.8 and  # not choppy (trending)
+            # Long: price breaks above upper Donchian, above both EMA trends, with volume
+            if (price > high_20[i] and 
+                price > ema34_1d_aligned[i] and 
+                price > ema20_1w_aligned[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: price breaks below Donchian lower, weekly downtrend, not choppy, volume
-            elif (price < lowest_low[i] and 
-                  price < ema200_1w_aligned[i] and 
-                  chop_aligned[i] < 61.8 and  # not choppy (trending)
+            # Short: price breaks below lower Donchian, below both EMA trends, with volume
+            elif (price < low_20[i] and 
+                  price < ema34_1d_aligned[i] and 
+                  price < ema20_1w_aligned[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price breaks below Donchian lower or chop increases
-            if (price < lowest_low[i] or 
-                chop_aligned[i] > 61.8):
+            # Exit long: price breaks below lower Donchian or loses volume
+            if (price < low_20[i] or 
+                not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian upper or chop increases
-            if (price > highest_high[i] or 
-                chop_aligned[i] > 61.8):
+            # Exit short: price breaks above upper Donchian or loses volume
+            if (price > high_20[i] or 
+                not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
