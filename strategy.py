@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "6h_ElderRay_BullBear_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
+    # Calculate EMA13 on 1d close for trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Calculate Camarilla R3, S3 levels from previous 1d bar
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Camarilla R3, S3 levels: (H-L)*1.1/4
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4
-    r3_level = close_1d_vals + camarilla_range
-    s3_level = close_1d_vals - camarilla_range
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
-    
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Volume spike filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Session filter: 08-20 UTC (covers major sessions)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)  # Need enough data for EMA34 (1d) and volume MA
+    start_idx = max(30, 20)  # Need enough data for EMA13 (1d) and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema13_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
+        ema13_1d_val = ema13_1d_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         vol_spike = volume_spike[i]
         in_session = session_mask[i]
         
         if position == 0:
-            # Enter long: Close breaks above R3 + 1d uptrend + volume spike + session
-            if close[i] > r3 and close[i] > ema34_1d_val and vol_spike and in_session:
+            # Enter long: Bull Power > 0 (strength) + 1d uptrend + volume spike + session
+            if bull_power_val > 0 and close[i] > ema13_1d_val and vol_spike and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below S3 + 1d downtrend + volume spike + session
-            elif close[i] < s3 and close[i] < ema34_1d_val and vol_spike and in_session:
+            # Enter short: Bear Power < 0 (weakness) + 1d downtrend + volume spike + session
+            elif bear_power_val < 0 and close[i] < ema13_1d_val and vol_spike and in_session:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below S3 or 1d trend turns down
-            if close[i] < s3 or close[i] < ema34_1d_val:
+            # Exit long: Bull Power turns negative or 1d trend turns down
+            if bull_power_val <= 0 or close[i] < ema13_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above R3 or 1d trend turns up
-            if close[i] > r3 or close[i] > ema34_1d_val:
+            # Exit short: Bear Power turns positive or 1d trend turns up
+            if bear_power_val >= 0 or close[i] > ema13_1d_val:
                 signals[i] = 0.0
                 position = 0
             else:
