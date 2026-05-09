@@ -1,105 +1,99 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with 1-day Williams %R extreme readings and 12-hour RSI momentum confirmation.
-# In oversold conditions (Williams %R < -80), price tends to revert upward; in overbought (Williams %R > -20), price tends to revert downward.
-# Uses 12-hour RSI to confirm momentum: only take longs when RSI > 50 (bullish momentum), shorts when RSI < 50 (bearish momentum).
-# Williams %R calculated on daily timeframe provides institutional-level overbought/oversold signals.
-# RSI on 12h provides entry timing aligned with the primary timeframe.
-# Exit when Williams %R returns to neutral range (-50 to -50) or RSI crosses 50 in opposite direction.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h Williams Fractal breakout with 1-day EMA trend filter and volume confirmation.
+# Williams Fractals identify potential reversal points; breaks above/below recent fractals with
+# trend alignment capture momentum moves. Volume filter ensures breakout legitimacy.
+# Works in bull markets via upside breaks and bear via downside breaks of fractal structure.
+# Target: 20-50 trades/year with size 0.25.
 
-name = "12h_WilliamsR_RSI_Momentum"
-timeframe = "12h"
+name = "4h_WilliamsFractal_EMA1d_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 1-day Williams %R (14-period)
+    # Get 1-day data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high']
-    low_1d = df_1d['low']
+    # Calculate 34-period EMA on 1-day close
     close_1d = df_1d['close']
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = high_1d.rolling(window=14, min_periods=14).max()
-    lowest_low = low_1d.rolling(window=14, min_periods=14).min()
-    williams_r = (highest_high - close_1d) / (highest_high - lowest_low) * -100
+    # Calculate Williams Fractals on 1-day data (requires 5-point pattern)
+    # Bearish fractal: high[n-2] < high[n] > high[n+2] and low[n-2] < low[n] > low[n+2]
+    # Bullish fractal: high[n-2] > high[n] < high[n+2] and low[n-2] > low[n] < low[n+2]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    williams_r_values = williams_r.values
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_values)
+    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
     
-    # Oversold/overbought conditions
-    williams_r_oversold = williams_r < -80
-    williams_r_overbought = williams_r > -20
-    williams_r_oversold_values = williams_r_oversold.values
-    williams_r_overbought_values = williams_r_overbought.values
-    williams_r_oversold_aligned = align_htf_to_ltf(prices, df_1d, williams_r_oversold_values)
-    williams_r_overbought_aligned = align_htf_to_ltf(prices, df_1d, williams_r_overbought_values)
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i-2] < high_1d[i] and high_1d[i] > high_1d[i+2] and
+            low_1d[i-2] < low_1d[i] and low_1d[i] > low_1d[i+2]):
+            bearish_fractal[i] = True
+        if (high_1d[i-2] > high_1d[i] and high_1d[i] < high_1d[i+2] and
+            low_1d[i-2] > low_1d[i] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = True
     
-    # 12-hour RSI (14-period) for momentum confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    # Williams fractals need 2 extra bars for confirmation (pattern completes 2 bars after center)
+    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
+    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
     
-    rsi_values = rsi.values
-    rsi_above_50 = rsi > 50
-    rsi_below_50 = rsi < 50
-    rsi_above_50_values = rsi_above_50.values
-    rsi_below_50_values = rsi_below_50.values
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r_aligned[i]) or
-            np.isnan(williams_r_oversold_aligned[i]) or np.isnan(williams_r_overbought_aligned[i]) or
-            np.isnan(rsi_values[i]) or np.isnan(rsi_above_50_values[i]) or np.isnan(rsi_below_50_values[i])):
+        if (np.isnan(ema_34_aligned[i]) or
+            np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Williams %R oversold + RSI > 50 (bullish momentum)
-            if williams_r_oversold_aligned[i] and rsi_above_50_values[i]:
+            # Enter long: bullish fractal breakout + price above 1d EMA + volume confirmation
+            if bullish_fractal_aligned[i] and close[i] > ema_34_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R overbought + RSI < 50 (bearish momentum)
-            elif williams_r_overbought_aligned[i] and rsi_below_50_values[i]:
+            # Enter short: bearish fractal breakout + price below 1d EMA + volume confirmation
+            elif bearish_fractal_aligned[i] and close[i] < ema_34_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R exits oversold OR RSI turns bearish (< 50)
-            if (not williams_r_oversold_aligned[i]) or (not rsi_above_50_values[i]):
+            # Exit long: price crosses below 1d EMA OR bearish fractal appears
+            if close[i] < ema_34_aligned[i] or bearish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R exits overbought OR RSI turns bullish (> 50)
-            if (not williams_r_overbought_aligned[i]) or (not rsi_below_50_values[i]):
+            # Exit short: price crosses above 1d EMA OR bullish fractal appears
+            if close[i] > ema_34_aligned[i] or bullish_fractal_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
