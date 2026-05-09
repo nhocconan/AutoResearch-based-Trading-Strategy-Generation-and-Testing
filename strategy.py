@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_WeeklyPivot_Breakout_Trend_Filter_Volume"
-timeframe = "12h"
+name = "6h_AngleOfAttack_Donchian_Slope"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,80 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get 1d data for Donchian and slope
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Weekly pivot points (using previous week's data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Daily Donchian channels (20 period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Daily EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Upper and lower bands
+    upper_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align weekly pivots to 12h
-    pivot_1w_12h = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_12h = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_12h = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_12h = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_12h = align_htf_to_ltf(prices, df_1w, s2_1w)
+    # Donchian width (normalized by price)
+    middle_20 = (upper_20 + lower_20) / 2
+    width_20 = upper_20 - lower_20
+    width_pct = width_20 / middle_20
     
-    # Align daily EMA50 to 12h
-    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Slope of the middle line (rate of change over 5 periods)
+    slope_5 = pd.Series(middle_20).diff(5).values / 5  # 5-day change per day
+    
+    # Align all to 6h
+    upper_20_6h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_6h = align_htf_to_ltf(prices, df_1d, lower_20)
+    width_pct_6h = align_htf_to_ltf(prices, df_1d, width_pct)
+    slope_5_6h = align_htf_to_ltf(prices, df_1d, slope_5)
+    
+    # 6-period RSI for overbought/oversold on 6h
+    delta = pd.Series(close).diff().values
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 100
+    start_idx = 60  # Ensure all indicators are valid
     
     for i in range(start_idx, n):
-        if (np.isnan(pivot_1w_12h[i]) or np.isnan(r1_1w_12h[i]) or np.isnan(s1_1w_12h[i]) or
-            np.isnan(r2_1w_12h[i]) or np.isnan(s2_1w_12h[i]) or np.isnan(ema50_1d_12h[i])):
+        if (np.isnan(upper_20_6h[i]) or np.isnan(lower_20_6h[i]) or 
+            np.isnan(width_pct_6h[i]) or np.isnan(slope_5_6h[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot = pivot_1w_12h[i]
-        r1 = r1_1w_12h[i]
-        s1 = s1_1w_12h[i]
-        r2 = r2_1w_12h[i]
-        s2 = s2_1w_12h[i]
-        trend = ema50_1d_12h[i]
-        
+        # Entry conditions
         if position == 0:
-            # Long: break above R1 with trend alignment
-            if close[i] > r1 and close[i] > trend:
+            # Long: price breaks above upper Donchian + positive slope + not overbought + volume
+            if (close[i] > upper_20_6h[i] and 
+                slope_5_6h[i] > 0 and 
+                rsi[i] < 70 and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with trend alignment
-            elif close[i] < s1 and close[i] < trend:
+            # Short: price breaks below lower Donchian + negative slope + not oversold + volume
+            elif (close[i] < lower_20_6h[i] and 
+                  slope_5_6h[i] < 0 and 
+                  rsi[i] > 30 and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below pivot or trend reversal
-            if close[i] < pivot or close[i] < trend:
+            # Exit long: price breaks below lower Donchian or slope turns negative
+            if close[i] < lower_20_6h[i] or slope_5_6h[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above pivot or trend reversal
-            if close[i] > pivot or close[i] > trend:
+            # Exit short: price breaks above upper Donchian or slope turns positive
+            if close[i] > upper_20_6h[i] or slope_5_6h[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
