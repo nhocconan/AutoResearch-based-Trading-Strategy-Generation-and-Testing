@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elders' Force Index with 12h EMA50 trend filter and volume spike
-# Long when EFI > 0, EMA50 rising, and volume > 2x average
-# Short when EFI < 0, EMA50 falling, and volume > 2x average
-# Exit when EFI crosses zero or volume drops below average
-# EFI combines price movement and volume to measure buying/selling pressure
-# EMA50 provides trend direction, volume spike confirms conviction
-# Designed to capture momentum shifts in both trending and ranging markets
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA34 trend filter and volume confirmation
+# Long when price breaks above 20-period high with EMA34 uptrend and volume > 2x average
+# Short when price breaks below 20-period low with EMA34 downtrend and volume > 2x average
+# Exit when price crosses 10-period EMA in opposite direction or reaches opposite Donchian band
+# Uses price structure for breakouts, EMA for trend, volume for conviction
+# Designed to capture breakouts in trending markets with controlled frequency
+# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
 
-name = "6h_EldersForceIndex_12hEMA50_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_1dEMA34_VolumeConfirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,18 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Elder's Force Index (EFI) = (close - close_prev) * volume
-    close_prev = np.roll(close, 1)
-    close_prev[0] = close[0]  # avoid NaN on first element
-    efi = (close - close_prev) * volume
+    # Calculate 4h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Calculate 4h EMA10 for exit
+    close_series = pd.Series(close)
+    ema10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
     # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -46,41 +50,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA calculation
+    start_idx = 50  # Need enough data for EMA and Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(efi[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(ema10[i]) or 
+            np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: EFI > 0, EMA50 rising, volume spike
-            if (efi[i] > 0 and 
-                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and  # EMA rising
+            # Enter long: price breaks above Donchian high, EMA34 uptrend, volume confirmation
+            if (close[i] > donchian_high[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: EFI < 0, EMA50 falling, volume spike
-            elif (efi[i] < 0 and 
-                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and  # EMA falling
+            # Enter short: price breaks below Donchian low, EMA34 downtrend, volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: EFI crosses zero or volume drops below average
-            if (efi[i] <= 0) or (not vol_confirm[i]):
+            # Exit long: price crosses below EMA10 or reaches Donchian low
+            if (close[i] < ema10[i]) or (close[i] <= donchian_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: EFI crosses zero or volume drops below average
-            if (efi[i] >= 0) or (not vol_confirm[i]):
+            # Exit short: price crosses above EMA10 or reaches Donchian high
+            if (close[i] > ema10[i]) or (close[i] >= donchian_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
