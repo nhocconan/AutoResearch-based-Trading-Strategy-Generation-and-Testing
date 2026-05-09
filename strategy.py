@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_Pivot_4dTrend_VolumeSpike"
-timeframe = "1h"
+name = "6H_RSI_Momentum_With_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,104 +17,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4d data for trend filter and Camarilla pivot levels
-    df_4d = get_htf_data(prices, '4d')
-    if len(df_4d) < 30:
+    # Get weekly data for RSI trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    close_4d = df_4d['close'].values
-    high_4d = df_4d['high'].values
-    low_4d = df_4d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4d EMA100 for trend filter
-    if len(close_4d) >= 100:
-        ema100_4d = pd.Series(close_4d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    # Calculate weekly RSI14 for trend filter
+    if len(close_1w) >= 14:
+        delta = np.diff(close_1w)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.zeros_like(close_1w)
+        avg_loss = np.zeros_like(close_1w)
+        
+        # First average
+        avg_gain[13] = np.mean(gain[:13])
+        avg_loss[13] = np.mean(loss[:13])
+        
+        # Wilder smoothing
+        for i in range(14, len(close_1w)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        
+        rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+        rsi_1w = 100 - (100 / (1 + rs))
+        rsi_1w[:13] = np.nan
     else:
-        ema100_4d = np.full_like(close_4d, np.nan)
+        rsi_1w = np.full_like(close_1w, np.nan)
     
-    # Align 4d EMA100 to 1h timeframe
-    ema100_4d_aligned = align_htf_to_ltf(prices, df_4d, ema100_4d)
+    # Align weekly RSI to 6h timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate Camarilla pivot levels from previous 4d
-    camarilla_h3 = np.full_like(close_4d, np.nan)
-    camarilla_l3 = np.full_like(close_4d, np.nan)
-    
-    for i in range(len(close_4d)):
-        if i >= 1:  # Need previous 4d's data
-            prev_high = high_4d[i-1]
-            prev_low = low_4d[i-1]
-            prev_close = close_4d[i-1]
-            range_ = prev_high - prev_low
-            camarilla_h3[i] = prev_close + 1.1 * range_ / 4
-            camarilla_l3[i] = prev_close - 1.1 * range_ / 4
-    
-    # Align Camarilla levels to 1h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_4d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_4d, camarilla_l3)
-    
-    # Get 1h data for volume confirmation
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    volume_1h = df_1h['volume'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1h volume EMA20
-    if len(volume_1h) >= 20:
-        vol_ema20_1h = pd.Series(volume_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate daily volume EMA20
+    if len(volume_1d) >= 20:
+        vol_ema20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     else:
-        vol_ema20_1h = np.full_like(volume_1h, np.nan)
+        vol_ema20_1d = np.full_like(volume_1d, np.nan)
     
-    # Align 1h volume EMA20 to 1h timeframe
-    vol_ema20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ema20_1h)
+    # Align daily volume EMA20 to 6h timeframe
+    vol_ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data for all indicators
-    start_idx = max(1, 100, 20)  # Need Camarilla (1 day), EMA100, volume EMA20
+    start_idx = max(14, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema100_4d_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(vol_ema20_1h_aligned[i])):
+        if np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_ema20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Uptrend: price above 4d EMA100
-        uptrend = close[i] > ema100_4d_aligned[i]
-        # Downtrend: price below 4d EMA100
-        downtrend = close[i] < ema100_4d_aligned[i]
-        # Volume surge: current volume > 1.5x 1h volume EMA20
-        volume_surge = volume[i] > vol_ema20_1h_aligned[i] * 1.5
+        # Weekly RSI > 50 = bullish bias, < 50 = bearish bias
+        bullish_bias = rsi_1w_aligned[i] > 50
+        bearish_bias = rsi_1w_aligned[i] < 50
+        # Volume surge: current volume > 1.5x daily volume EMA20
+        volume_surge = volume[i] > vol_ema20_1d_aligned[i] * 1.5
         
         if position == 0:
-            # Enter long: Uptrend + price touches/breaks above Camarilla H3 + volume surge
-            if uptrend and close[i] >= camarilla_h3_aligned[i] and volume_surge:
-                signals[i] = 0.20
+            # Enter long: Bullish bias + price above weekly RSI 50 level + volume surge
+            if bullish_bias and close[i] > close_1w[-1] if len(close_1w) > 0 else False and volume_surge:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + price touches/breaks below Camarilla L3 + volume surge
-            elif downtrend and close[i] <= camarilla_l3_aligned[i] and volume_surge:
-                signals[i] = -0.20
+            # Enter short: Bearish bias + price below weekly RSI 50 level + volume surge
+            elif bearish_bias and close[i] < close_1w[-1] if len(close_1w) > 0 else False and volume_surge:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR price touches/breaks below Camarilla L3
-            if not uptrend or close[i] <= camarilla_l3_aligned[i]:
+            # Exit long: Bearish bias OR volume drops below average
+            if bearish_bias or volume[i] <= vol_ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR price touches/breaks above Camarilla H3
-            if not downtrend or close[i] >= camarilla_h3_aligned[i]:
+            # Exit short: Bullish bias OR volume drops below average
+            if bullish_bias or volume[i] <= vol_ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
