@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r3 = close_1d + camarilla_range * 1.50
     s3 = close_1d - camarilla_range * 1.50
     
-    # Align Camarilla R3 and S3 to 12h timeframe
+    # Align Camarilla R3 and S3 to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -66,11 +66,11 @@ def generate_signals(prices):
         if position == 0:
             # Enter long: Close > R3 and price above 1d EMA34 with volume spike
             if close[i] > r3_aligned[i] and close[i] > ema_1d and vol_spike:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Enter short: Close < S3 and price below 1d EMA34 with volume spike
             elif close[i] < s3_aligned[i] and close[i] < ema_1d and vol_spike:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
@@ -79,7 +79,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
             # Exit short: Close > R3 or trend breaks (price > 1d EMA34)
@@ -87,6 +87,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
