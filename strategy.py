@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h long/short at 12h VWAP with 12h EMA trend filter and volume spike.
-# Uses VWAP as dynamic support/resistance and EMA for trend direction.
-# Designed to work in both bull (pullbacks to VWAP) and bear (rejections at VWAP).
-# Target: 20-50 trades/year to avoid fee drag.
-name = "4h_VWAP_Reversal_12hTrend_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 1h momentum with 4h trend filter and volume confirmation.
+# Uses 4h EMA(50) for trend direction and 1h RSI(14) for momentum entry.
+# Volume filter requires volume > 1.5x 20-period EMA to confirm strength.
+# Session filter (08-20 UTC) avoids low-liquidity periods.
+# Designed to work in bull (pullbacks in uptrend) and bear (bounces in downtrend).
+# Target: 15-35 trades/year to avoid fee drag.
+name = "1h_EMA50_RSI14_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,36 +23,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for VWAP and EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate 12-hour VWAP (typical price * volume) / cumulative volume
-    typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3.0
-    vwap_numerator = (typical_price * df_12h['volume']).cumsum()
-    vwap_denominator = df_12h['volume'].cumsum()
-    vwap = (vwap_numerator / vwap_denominator).values
+    # 4h EMA(50) for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # 12h EMA(34) for trend filter
-    ema_34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1h RSI(14) for momentum
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Align VWAP and EMA to 4h timeframe (use previous 12h bar's values)
-    vwap_aligned = align_htf_to_ltf(prices, df_12h, vwap)
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # Volume confirmation: volume > 2.0x 20-period EMA (high threshold for fewer trades)
+    # Volume confirmation: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
+    vol_confirm = volume > (1.5 * vol_ema20)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least 1 12h period of data for VWAP/EMA
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(vwap_aligned[i]) or np.isnan(ema_34_12h_aligned[i]) or 
+        # Skip if required data unavailable
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,30 +66,30 @@ def generate_signals(prices):
         
         price = close[i]
         
-        if position == 0:
-            # Enter long: price crosses above VWAP + 12h uptrend + volume spike
-            if (price > vwap_aligned[i] and price > ema_34_12h_aligned[i] and vol_confirm[i]):
-                signals[i] = 0.25
+        if position == 0 and session_filter[i]:
+            # Enter long: price above 4h EMA50 + RSI < 30 (oversold) + volume confirmation
+            if (price > ema_50_4h_aligned[i] and rsi[i] < 30 and vol_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price crosses below VWAP + 12h downtrend + volume spike
-            elif (price < vwap_aligned[i] and price < ema_34_12h_aligned[i] and vol_confirm[i]):
-                signals[i] = -0.25
+            # Enter short: price below 4h EMA50 + RSI > 70 (overbought) + volume confirmation
+            elif (price < ema_50_4h_aligned[i] and rsi[i] > 70 and vol_confirm[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below VWAP or trend reverses
-            if price < vwap_aligned[i] or price < ema_34_12h_aligned[i]:
+            # Exit long: price crosses below 4h EMA50 or RSI > 70
+            if price < ema_50_4h_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns above VWAP or trend reverses
-            if price > vwap_aligned[i] or price > ema_34_12h_aligned[i]:
+            # Exit short: price crosses above 4h EMA50 or RSI < 30
+            if price > ema_50_4h_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
