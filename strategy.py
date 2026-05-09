@@ -3,7 +3,7 @@
 # Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
 # Daily EMA50 provides robust trend filter that adapts to bull/bear markets. Volume spike (>2x 24-period average)
 # confirms breakout strength. Designed for low trade frequency (19-50/year) to minimize fee drift.
-# Version 4: Reduced position size to 0.20 and added momentum filter (price > open) to reduce false breakouts.
+# Version 4: Reduced position size to 0.20 and added minimum holding period of 6 bars to reduce churn.
 
 name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v4"
 timeframe = "4h"
@@ -22,7 +22,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
     # Get daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
@@ -86,19 +85,17 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike AND bullish candle
+            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike
             if (close[i] > r1_aligned[i] and 
                 close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 2.0 and
-                close[i] > open_price[i]):
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.20
                 position = 1
                 bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike AND bearish candle
+            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
             elif (close[i] < s1_aligned[i] and 
                   close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0 and
-                  close[i] < open_price[i]):
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.20
                 position = -1
                 bars_since_entry = 0
