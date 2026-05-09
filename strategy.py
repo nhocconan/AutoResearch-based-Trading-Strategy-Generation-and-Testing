@@ -3,19 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R1/S1 breakout with daily EMA trend filter and volume spike.
-# Uses 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years).
-# Long when price breaks above R1 with daily uptrend and volume spike.
-# Short when price breaks below S1 with daily downtrend and volume spike.
-# Exit when price returns to opposite side of pivot or trend fails.
-# Designed to work in both bull and bear markets via trend filter and volume confirmation.
-name = "12h_Camarilla_R1_S1_Breakout_1dEMA_Trend_Volume"
-timeframe = "12h"
+name = "6h_TRIX_ZeroCross_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,37 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter and Camarilla pivots
+    # Get 1d data for TRIX calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Get 1d data for Camarilla pivot levels (based on previous day's OHLC)
+    # Calculate TRIX (15,9,9) on daily close
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # EMA1: 15-period
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # EMA2: 9-period of EMA1
+    ema2 = pd.Series(ema1).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # EMA3: 9-period of EMA2
+    ema3 = pd.Series(ema2).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # TRIX: 9-period EMA of EMA3, expressed as percentage change
+    ema4 = pd.Series(ema3).ewm(span=9, adjust=False, min_periods=9).mean().values
+    trix = np.zeros_like(ema4)
+    trix[1:] = (ema4[1:] - ema4[:-1]) / ema4[:-1] * 100
     
-    # Calculate pivot and levels from previous day's OHLC
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # TRIX signal line: 9-period EMA of TRIX
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    prev_daily_range = prev_high_1d - prev_low_1d
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1 = pivot + 1.1 * prev_daily_range / 6
-    s1 = pivot - 1.1 * prev_daily_range / 6
+    # Align TRIX and signal to 6h
+    trix_6h = align_htf_to_ltf(prices, df_1d, trix)
+    trix_signal_6h = align_htf_to_ltf(prices, df_1d, trix_signal)
     
-    # Align Camarilla levels to 12h
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,41 +52,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(pivot_12h[i]) or 
-            np.isnan(ema34_12h[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(trix_6h[i]) or np.isnan(trix_signal_6h[i]) or 
+            np.isnan(ema34_6h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.5 x 20-period average
-        vol_spike = volume[i] > vol_avg[i] * 2.5
+        # Volume condition: current volume > 2.0 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: Break above R1 with uptrend and volume spike
-            if close[i] > r1_12h[i] and close[i] > ema34_12h[i] and vol_spike:
+            # Long: TRIX crosses above signal line with uptrend and volume spike
+            if trix_6h[i] > trix_signal_6h[i] and trix_6h[i-1] <= trix_signal_6h[i-1] and \
+               close[i] > ema34_6h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with downtrend and volume spike
-            elif close[i] < s1_12h[i] and close[i] < ema34_12h[i] and vol_spike:
+            # Short: TRIX crosses below signal line with downtrend and volume spike
+            elif trix_6h[i] < trix_signal_6h[i] and trix_6h[i-1] >= trix_signal_6h[i-1] and \
+                 close[i] < ema34_6h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below S1 OR trend turns down
-            if close[i] < s1_12h[i] or close[i] < ema34_12h[i]:
+            # Exit long: TRIX crosses below signal line OR trend turns down
+            if trix_6h[i] < trix_signal_6h[i] and trix_6h[i-1] >= trix_signal_6h[i-1] or \
+               close[i] < ema34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above R1 OR trend turns up
-            if close[i] > r1_12h[i] or close[i] > ema34_12h[i]:
+            # Exit short: TRIX crosses above signal line OR trend turns up
+            if trix_6h[i] > trix_signal_6h[i] and trix_6h[i-1] <= trix_signal_6h[i-1] or \
+               close[i] > ema34_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
