@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h timeframe with 1-day Williams Fractal reversal signals, filtered by 1-day EMA trend and volume spike confirmation.
-# In trending markets, price often reverses at fractal support/resistance levels. We use bearish fractals (sell signals) in downtrends
-# and bullish fractals (buy signals) in uptrends, confirmed by volume spikes to avoid false breakouts.
-# This strategy targets reversals in both bull and bear markets by aligning with higher timeframe trend.
+# Hypothesis: 12h timeframe with 1-day Williams %R (overbought/oversold) and 1-week EMA trend filter.
+# In oversold conditions (Williams %R < -80) with bullish trend (price > weekly EMA20), go long.
+# In overbought conditions (Williams %R > -20) with bearish trend (price < weekly EMA20), go short.
+# Uses Williams %R for mean-reversion signals and weekly EMA for trend filter to avoid counter-trend trades.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "6h_WilliamsFractal_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_WilliamsR_WeeklyEMA_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf  # Note: using align_ltf_to_htf as per actual function name in module
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,84 +23,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1-day data once before loop
+    # Calculate 1-day Williams %R (14-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1-day EMA34 for trend filter
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
     close_1d = df_1d['close']
-    ema_34 = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_ltf_to_htf(prices, df_1d, ema_34)
     
-    # Calculate Williams Fractals on 1D data
-    # Bearish fractal: high[n-2] < high[n] and high[n-1] < high[n] and high[n+1] < high[n] and high[n+2] < high[n]
-    # Bullish fractal: low[n-2] > low[n] and low[n-1] > low[n] and low[n+1] > low[n] and low[n+2] > low[n]
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    highest_high = high_1d.rolling(window=14, min_periods=14).max()
+    lowest_low = low_1d.rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close_1d) / (highest_high - lowest_low)
+    williams_r = williams_r.replace(0, np.nan)  # Avoid division by zero
     
-    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
-    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
+    williams_r_values = williams_r.values
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_values)
     
-    # Need at least 5 points for fractal calculation (2 on each side)
-    for i in range(2, len(high_1d) - 2):
-        if (high_1d[i-2] < high_1d[i] and 
-            high_1d[i-1] < high_1d[i] and 
-            high_1d[i+1] < high_1d[i] and 
-            high_1d[i+2] < high_1d[i]):
-            bearish_fractal[i] = True
-            
-        if (low_1d[i-2] > low_1d[i] and 
-            low_1d[i-1] > low_1d[i] and 
-            low_1d[i+1] > low_1d[i] and 
-            low_1d[i+2] > low_1d[i]):
-            bullish_fractal[i] = True
+    # Oversold/overbought thresholds
+    oversold = williams_r_aligned < -80
+    overbought = williams_r_aligned > -20
     
-    # Williams fractals need 2 extra bars for confirmation (as per rules)
-    bearish_fractal_aligned = align_ltf_to_htf(prices, df_1d, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_ltf_to_htf(prices, df_1d, bullish_fractal, additional_delay_bars=2)
+    # Calculate 1-week EMA (20-period) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Volume spike: current volume > 1.5 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    close_1w = df_1w['close']
+    ema_20 = close_1w.ewm(span=20, adjust=False, min_periods=20).mean()
+    ema_20_values = ema_20.values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_values)
+    
+    # Trend conditions: bullish if price > weekly EMA20, bearish if price < weekly EMA20
+    price_above_weekly_ema = close > ema_20_aligned
+    price_below_weekly_ema = close < ema_20_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need enough data for EMA and volume MA
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(williams_r_aligned[i]) or
+            np.isnan(ema_20_aligned[i]) or
+            np.isnan(price_above_weekly_ema[i]) or np.isnan(price_below_weekly_ema[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: bullish fractal + price above EMA34 (uptrend) + volume spike
-            if bullish_fractal_aligned[i] and close[i] > ema_34_aligned[i] and volume_spike[i]:
+            # Enter long: oversold (Williams %R < -80) + bullish trend (price > weekly EMA20)
+            if oversold[i] and price_above_weekly_ema[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish fractal + price below EMA34 (downtrend) + volume spike
-            elif bearish_fractal_aligned[i] and close[i] < ema_34_aligned[i] and volume_spike[i]:
+            # Enter short: overbought (Williams %R > -20) + bearish trend (price < weekly EMA20)
+            elif overbought[i] and price_below_weekly_ema[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA34 or bearish fractal with volume spike
-            if close[i] < ema_34_aligned[i] or (bearish_fractal_aligned[i] and volume_spike[i]):
+            # Exit long: overbought condition OR trend turns bearish
+            if overbought[i] or (not price_above_weekly_ema[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA34 or bullish fractal with volume spike
-            if close[i] > ema_34_aligned[i] or (bullish_fractal_aligned[i] and volume_spike[i]):
+            # Exit short: oversold condition OR trend turns bullish
+            if oversold[i] or (not price_below_weekly_ema[i]):
                 signals[i] = 0.0
                 position = 0
             else:
