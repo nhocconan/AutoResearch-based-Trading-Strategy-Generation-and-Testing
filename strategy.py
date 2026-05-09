@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 12h_TRIX_VolumeSpike_1wTrend
-# Hypothesis: TRIX momentum crossing zero with volume spike and weekly trend filter (price > weekly EMA20).
-# TRIX filters noise and captures momentum shifts. Weekly trend ensures trades align with higher timeframe direction.
-# Volume spike confirms institutional participation. Designed for 12-37 trades/year on 12h timeframe.
+# 1d_VWAP_Reversal_1wTrend
+# Hypothesis: Daily VWAP mean-reversion with weekly trend filter. In weekly uptrend (price > weekly VWAP), go long when price touches daily VWAP from below; in weekly downtrend (price < weekly VWAP), go short when price touches daily VWAP from above. Uses volume-weighted price for institutional-level support/resistance. Designed for 10-25 trades/year on 1d timeframe.
 
-name = "12h_TRIX_VolumeSpike_1wTrend"
-timeframe = "12h"
+name = "1d_VWAP_Reversal_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,100 +12,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 20:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
+    # Get weekly data for VWAP trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 1:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    # Calculate weekly EMA(20)
-    ema_20_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 20:
-        ema_20_1w[19] = np.mean(close_1w[0:20])
-        for i in range(20, len(close_1w)):
-            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20
+    volume_1w = df_1w['volume'].values
     
-    # Align weekly EMA to 12h timeframe
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate weekly VWAP (volume-weighted average price)
+    vwap_1w = np.full_like(close_1w, np.nan)
+    cumulative_volume = 0.0
+    cumulative_price_volume = 0.0
     
-    # Calculate TRIX(12) on 12h closes: triple EMA then percent change
-    # First EMA(12)
-    ema1 = np.full(n, np.nan)
-    if n >= 12:
-        ema1[11] = np.mean(close[0:12])
-        for i in range(12, n):
-            ema1[i] = (close[i] * 2 + ema1[i-1] * 10) / 12
-    # Second EMA(12)
-    ema2 = np.full(n, np.nan)
-    if n >= 24:
-        ema2[23] = np.mean(ema1[12:24]) if not np.any(np.isnan(ema1[12:24])) else np.nan
-        for i in range(24, n):
-            if not np.isnan(ema1[i]) and not np.isnan(ema2[i-1]):
-                ema2[i] = (ema1[i] * 2 + ema2[i-1] * 10) / 12
-    # Third EMA(12)
-    ema3 = np.full(n, np.nan)
-    if n >= 36:
-        ema3[35] = np.mean(ema2[24:36]) if not np.any(np.isnan(ema2[24:36])) else np.nan
-        for i in range(36, n):
-            if not np.isnan(ema2[i]) and not np.isnan(ema3[i-1]):
-                ema3[i] = (ema2[i] * 2 + ema3[i-1] * 10) / 12
-    # TRIX = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
-    trix = np.full(n, np.nan)
-    for i in range(1, n):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
-            trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
+    for i in range(len(close_1w)):
+        typical_price = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+        price_volume = typical_price * volume_1w[i]
+        cumulative_volume += volume_1w[i]
+        cumulative_price_volume += price_volume
+        if cumulative_volume > 0:
+            vwap_1w[i] = cumulative_price_volume / cumulative_volume
     
-    # Volume ratio: current volume / 20-period average
-    vol_ma = np.full(n, np.nan)
-    if n >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, n):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    # Align weekly VWAP to daily timeframe
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    volume_ratio = np.full(n, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Get daily data for VWAP calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate daily VWAP (resets daily)
+    vwap_1d = np.full_like(close_1d, np.nan)
+    cumulative_volume = 0.0
+    cumulative_price_volume = 0.0
+    
+    for i in range(len(close_1d)):
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3.0
+        price_volume = typical_price * volume_1d[i]
+        cumulative_volume += volume_1d[i]
+        cumulative_price_volume += price_volume
+        if cumulative_volume > 0:
+            vwap_1d[i] = cumulative_price_volume / cumulative_volume
+    
+    # Align daily VWAP to daily timeframe (no alignment needed as it's same timeframe)
+    vwap_1d_aligned = vwap_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(36, 20)
+    start_idx = 1
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(trix[i]) or np.isnan(trix[i-1]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(vwap_1w_aligned[i]) or np.isnan(vwap_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: TRIX crosses above zero AND volume spike AND weekly uptrend
-            if trix[i-1] <= 0 and trix[i] > 0 and volume_ratio[i] > 2.0 and close[i] > ema_20_1w_aligned[i]:
+            # Enter long: Price touches daily VWAP from below AND weekly uptrend (price > weekly VWAP)
+            if close[i] <= vwap_1d_aligned[i] and close[i] > vwap_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX crosses below zero AND volume spike AND weekly downtrend
-            elif trix[i-1] >= 0 and trix[i] < 0 and volume_ratio[i] > 2.0 and close[i] < ema_20_1w_aligned[i]:
+            # Enter short: Price touches daily VWAP from above AND weekly downtrend (price < weekly VWAP)
+            elif close[i] >= vwap_1d_aligned[i] and close[i] < vwap_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below zero or weekly trend turns down
-            if trix[i] < 0 or close[i] < ema_20_1w_aligned[i]:
+            # Exit long: Price crosses above daily VWAP or weekly trend turns down
+            if close[i] > vwap_1d_aligned[i] or close[i] < vwap_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above zero or weekly trend turns up
-            if trix[i] > 0 or close[i] > ema_20_1w_aligned[i]:
+            # Exit short: Price crosses below daily VWAP or weekly trend turns up
+            if close[i] < vwap_1d_aligned[i] or close[i] > vwap_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
