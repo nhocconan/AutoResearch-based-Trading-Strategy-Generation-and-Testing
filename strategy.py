@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6H_Daily_Keltner_Breakout_Trend_TrendFilter
-# Hypothesis: 6h Keltner breakout with 1d trend filter (EMA50) and volume confirmation.
-# Keltner channels (ATR-based) adapt to volatility, reducing false breakouts in low-volatility periods.
-# Trend filter ensures we only trade in the direction of the 1d trend, improving win rate in both bull and bear markets.
-# Volume confirmation adds conviction to breakouts. Target: 15-35 trades/year.
-
-name = "6H_Daily_Keltner_Breakout_Trend_TrendFilter"
-timeframe = "6h"
+# 4H_Daily_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_v2
+# Hypothesis: Combines Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses tighter volume threshold (2.0x average) and stricter entry conditions to reduce trade frequency
+# and avoid overtrading. Designed to work in both bull and bear markets by requiring trend alignment
+# and volume confirmation, reducing false breakouts. Targets 20-40 trades/year per symbol.
+name = "4H_Daily_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,37 +22,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter and ATR for Keltner channels
+    # Get 1d data for Camarilla pivot levels and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA50 for 1d trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Pivot point and Camarilla levels (R3, S3)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
+    r3 = pivot + range_ * 1.1
+    s3 = pivot - range_ * 1.1
     
-    # ATR(10) for Keltner channels (using 1d data)
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])  # First TR is NaN
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Keltner channels on 1d: EMA20 ± 2*ATR(10)
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema20_1d + 2 * atr10
-    lower_keltner = ema20_1d - 2 * atr10
+    # Align to 4h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align 1d indicators to 6t
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average (stricter)
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    volume_confirm = volume > (volume_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,38 +57,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
-            np.isnan(lower_keltner_aligned[i])):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper Keltner + above 1d EMA50 + volume confirmation
-            if (close[i] > upper_keltner_aligned[i] and 
-                close[i] > ema50_1d_aligned[i] and 
-                volume_confirm[i]):
+            # Enter long: price breaks above R3 + above 1d EMA34 + volume confirmation
+            if close[i] > r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Keltner + below 1d EMA50 + volume confirmation
-            elif (close[i] < lower_keltner_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i] and 
-                  volume_confirm[i]):
+            # Enter short: price breaks below S3 + below 1d EMA34 + volume confirmation
+            elif close[i] < s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below lower Keltner (reversal signal)
-            if close[i] < lower_keltner_aligned[i]:
+            # Exit long: price below 1d EMA34 (trend change)
+            if close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above upper Keltner (reversal signal)
-            if close[i] > upper_keltner_aligned[i]:
+            # Exit short: price above 1d EMA34 (trend change)
+            if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
