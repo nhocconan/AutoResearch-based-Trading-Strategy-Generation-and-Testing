@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
+# 6H_1W_1D_OrderBlock_Reversal_Trend
+# Hypothesis: On 6h timeframe, identify institutional order blocks from weekly candles and trade reversals
+# when price returns to these blocks with 1d trend confirmation. In bull markets, buy at demand zones;
+# in bear markets, sell at supply zones. Uses weekly structure for institutional levels and daily
+# trend filter to avoid counter-trend trades. Targets 15-35 trades/year per symbol.
+
+name = "6H_1W_1D_OrderBlock_Reversal_Trend"
+timeframe = "6h"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Keltner channel breakout with 1d trend filter and volume confirmation
-# The Keltner channel (EMA + ATR) identifies volatility breakouts. Combined with
-# daily EMA trend filter and volume confirmation, this strategy aims to capture
-# strong momentum moves in both bull and bear markets. The ATR-based stop loss
-# manages risk. Target: 20-30 trades/year per symbol.
-
-name = "4h_KeltnerBreakout_1dTrend_VolumeConfirm"
-timeframe = "4h"
-leverage = 1.0
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,79 +23,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for order blocks (institutional supply/demand zones)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate 40-period EMA for Keltner center line
-    ema40 = pd.Series(close).ewm(span=40, adjust=False, min_periods=40).mean().values
+    # Weekly order blocks: bullish (demand) and bearish (supply) zones
+    # Bullish OB: prior bearish candle followed by bullish candle - use low of bearish candle as demand zone
+    # Bearish OB: prior bullish candle followed by bearish candle - use high of bullish candle as supply zone
+    weekly_open = df_1w['open'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate ATR(20) for Keltner channel width
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Identify bullish order blocks (demand zones)
+    weekly_bearish = weekly_close < weekly_open  # prior candle bearish
+    weekly_bullish = weekly_close > weekly_open  # current candle bullish
+    bullish_ob = weekly_bearish & weekly_bullish  # bearish then bullish = demand zone
+    ob_demand = np.where(bullish_ob, weekly_low, np.nan)  # low of bearish candle
     
-    # Calculate Keltner channels (2.0 ATR multiplier)
-    keltner_upper = ema40 + 2.0 * atr20
-    keltner_lower = ema40 - 2.0 * atr20
+    # Identify bearish order blocks (supply zones)
+    weekly_bullish_prior = weekly_close > weekly_open  # prior candle bullish
+    weekly_bearish_curr = weekly_close < weekly_open   # current candle bearish
+    bearish_ob = weekly_bullish_prior & weekly_bearish_curr  # bullish then bearish = supply zone
+    ob_supply = np.where(bearish_ob, weekly_high, np.nan)  # high of bullish candle
     
-    # Calculate volume confirmation (20-period average)
-    vol_avg_20 = np.full(n, np.nan)
-    for i in range(n):
-        if i >= 19:
-            vol_avg_20[i] = np.mean(volume[i-19:i+1])
+    # Forward fill to create persistent zones until next OB of same type
+    ob_demand_series = pd.Series(ob_demand)
+    ob_demand_ffilled = ob_demand_series.ffill().values
     
-    # Align daily trend to 4h
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ob_supply_series = pd.Series(ob_supply)
+    ob_supply_ffilled = ob_supply_series.ffill().values
+    
+    # Daily trend filter: EMA(34) on close
+    daily_close = df_1d['close'].values
+    ema_34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = daily_close > ema_34
+    
+    # Align weekly order blocks and daily trend to 6h
+    ob_demand_aligned = align_htf_to_ltf(prices, df_1w, ob_demand_ffilled)
+    ob_supply_aligned = align_htf_to_ltf(prices, df_1w, ob_supply_ffilled)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    # Start after we have enough data
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i]) or np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
+        # Skip if data not ready
+        if (np.isnan(ob_demand_aligned[i]) or np.isnan(ob_supply_aligned[i]) or 
+            np.isnan(trend_up_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        vol_avg_today = vol_avg_20[i]
-        vol_current = volume[i]
-        
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = vol_current > 1.5 * vol_avg_today
-        
         if position == 0:
-            # Long entry: price breaks above upper Keltner band with volume and trend confirmation
-            if price > keltner_upper[i] and vol_confirmed and price > ema34_1d_aligned[i]:
+            # Enter long: price returns to weekly demand zone (bullish OB) with daily uptrend
+            if (close[i] <= ob_demand_aligned[i] * 1.005 and  # within 0.5% of demand zone
+                close[i] >= ob_demand_aligned[i] * 0.995 and
+                trend_up_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below lower Keltner band with volume and trend confirmation
-            elif price < keltner_lower[i] and vol_confirmed and price < ema34_1d_aligned[i]:
+            # Enter short: price returns to weekly supply zone (bearish OB) with daily downtrend
+            elif (close[i] <= ob_supply_aligned[i] * 1.005 and  # within 0.5% of supply zone
+                  close[i] >= ob_supply_aligned[i] * 0.995 and
+                  not trend_up_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price closes below center line or trend changes
-            if price < ema40[i] or price < ema34_1d_aligned[i]:
+            # Exit long: price reaches supply zone or trend turns down
+            if (close[i] >= ob_supply_aligned[i] * 0.995 or  # reached supply zone
+                not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price closes above center line or trend changes
-            if price > ema40[i] or price > ema34_1d_aligned[i]:
+            # Exit short: price reaches demand zone or trend turns up
+            if (close[i] <= ob_demand_aligned[i] * 1.005 or  # reached demand zone
+                trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
