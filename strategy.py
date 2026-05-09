@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Weekly_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R1S1_Breakout_1dEMA34_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,28 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for Camarilla pivot levels and EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Pivot point and Camarilla levels (R1, S1)
-    pivot = (high_1w + low_1w + close_1w) / 3
-    range_ = high_1w - low_1w
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_ = high_1d - low_1d
     r1 = pivot + (range_ * 1.1 / 12)
     s1 = pivot - (range_ * 1.1 / 12)
     
-    # EMA10 for weekly trend filter
-    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    # Align to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,33 +52,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema10_1w_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + above weekly EMA10 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema10_1w_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above R1 + above 1d EMA34 + volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.30
                 position = 1
-            # Enter short: price breaks below S1 + below weekly EMA10 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema10_1w_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below S1 + below 1d EMA34 + volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: price below weekly EMA10 (trend change)
-            if close[i] < ema10_1w_aligned[i]:
+            # Exit long: price below 1d EMA34 (trend change)
+            if close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price above weekly EMA10 (trend change)
-            if close[i] > ema10_1w_aligned[i]:
+            # Exit short: price above 1d EMA34 (trend change)
+            if close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
