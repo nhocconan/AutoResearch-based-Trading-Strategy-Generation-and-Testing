@@ -1,11 +1,11 @@
-# 4h_Camarilla_R3_S3_12hEMA50_Trend_Volume
-# Hypothesis: 4h Camarilla R3/S3 breakout with 12h EMA50 trend filter and volume confirmation
-# Combines precise support/resistance from Camarilla levels with trend filter from 12h EMA50
-# and volume confirmation to reduce false breakouts. Designed for 4h timeframe with
-# target of 75-200 trades over 4 years (19-50/year). Works in bull/bear markets by
-# requiring trend alignment and volume confirmation.
-name = "4h_Camarilla_R3_S3_12hEMA50_Trend_Volume"
-timeframe = "4h"
+#!/usr/bin/env python3
+# 1D_MultiTF_Confluence
+# Hypothesis: Daily timeframe strategy using weekly EMA trend filter, daily Donchian breakout with volume confirmation, and volatility regime filter. 
+# Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation to avoid false breakouts.
+# Targets 30-100 trades over 4 years (7-25/year) with low turnover to minimize fee drag.
+
+name = "1D_MultiTF_Confluence"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,84 +22,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate weekly EMA20 trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get 1d data for Camarilla levels
+    # Get daily data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d
-    # Using previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Donchian channels (20-period)
+    highest_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    R4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    S4 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    
-    # Align Camarilla levels to 4h
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
+    # Align Donchian levels to daily (they are already daily, but align for safety)
+    highest_high_1d = align_htf_to_ltf(prices, df_1d, highest_high)
+    lowest_low_1d = align_htf_to_ltf(prices, df_1d, lowest_low)
     
     # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
+    # Volatility filter: ATR(14) < ATR(50) to avoid high volatility periods
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    vol_filter = atr14 < atr50  # Only trade when short-term ATR is below long-term ATR
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and Camarilla calculations
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h[i]) or np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
-            np.isnan(R4_4h[i]) or np.isnan(S4_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_20_1d[i]) or np.isnan(highest_high_1d[i]) or np.isnan(lowest_low_1d[i]) or 
+            np.isnan(volume_filter[i]) or np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > R3_4h[i-1]  # Break above R3
-        short_breakout = close[i] < S3_4h[i-1]  # Break below S3
+        long_breakout = close[i] > highest_high_1d[i-1]  # Break above Donchian high
+        short_breakout = close[i] < lowest_low_1d[i-1]   # Break below Donchian low
         
-        trend_up = close[i] > ema_50_4h[i]
-        trend_down = close[i] < ema_50_4h[i]
+        trend_up = close[i] > ema_20_1d[i]
+        trend_down = close[i] < ema_20_1d[i]
         
         if position == 0:
-            # Long: bullish breakout + uptrend + volume confirmation
-            if long_breakout and trend_up and volume_filter[i]:
+            # Long: bullish breakout + uptrend + volume + volatility filter
+            if long_breakout and trend_up and volume_filter[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakout + downtrend + volume confirmation
-            elif short_breakout and trend_down and volume_filter[i]:
+            # Short: bearish breakout + downtrend + volume + volatility filter
+            elif short_breakout and trend_down and volume_filter[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout below S3 or trend reversal
-            if close[i] < S3_4h[i] or not trend_up:
+            # Exit long: bearish breakout below Donchian low or trend reversal
+            if close[i] < lowest_low_1d[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout above R3 or trend reversal
-            if close[i] > R3_4h[i] or not trend_down:
+            # Exit short: bullish breakout above Donchian high or trend reversal
+            if close[i] > highest_high_1d[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
