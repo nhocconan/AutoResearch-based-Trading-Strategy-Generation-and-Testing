@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h KAMA trend with 12h RSI filter and volume confirmation
-# Long when KAMA is rising and RSI < 60 (pullback in uptrend)
-# Short when KAMA is falling and RSI > 40 (bounce in downtrend)
-# Uses adaptive trend following with momentum filter to avoid whipsaws
-# Target: 80-120 total trades over 4 years (20-30/year) with size 0.25
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation
+# Long when price breaks above 20-period high with weekly pivot bullish and volume > 1.8x average
+# Short when price breaks below 20-period low with weekly pivot bearish and volume > 1.8x average
+# Exit when price retraces to 10-period EMA or reverses to opposite Donchian level
+# Uses Donchian for breakout structure, weekly pivot for market regime, volume for conviction
+# Designed to work in both bull and bear markets by filtering breakouts with weekly trend
+# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
 
-name = "4h_KAMA_RSI_Volume_Trend"
-timeframe = "4h"
+name = "6h_Donchian_20_WeeklyPivot_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,118 +17,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER = Efficiency Ratio, SC = Smoothing Constant
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly
-    # Recalculate volatility as sum of absolute changes over ER period
-    er_period = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
+    # Calculate Donchian channels (20-period)
+    high_roll = pd.Series(high)
+    low_roll = pd.Series(low)
+    donchian_high = high_roll.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_roll.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Vectorized ER calculation
-    abs_diff = np.abs(np.diff(close, prepend=close[0]))
-    change_abs = np.abs(np.diff(close, prepend=close[0]))
-    
-    # Initialize arrays
-    er = np.zeros(n)
-    sc = np.zeros(n)
-    kama = np.zeros(n)
-    
-    # Calculate Efficiency Ratio
-    for i in range(er_period, n):
-        direction = np.abs(close[i] - close[i - er_period])
-        volatility_sum = np.sum(np.abs(np.diff(close[i - er_period:i + 1], prepend=close[i - er_period])))
-        if volatility_sum > 0:
-            er[i] = direction / volatility_sum
-        else:
-            er[i] = 0
-    
-    # Calculate Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate 12h RSI for momentum filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
+    # Calculate weekly pivot point (using weekly OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # RSI calculation
-    delta = np.diff(df_12h['close'].values, prepend=df_12h['close'].values[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Previous week's OHLC for pivot calculation
+    prev_week_high = df_1w['high'].shift(1)
+    prev_week_low = df_1w['low'].shift(1)
+    prev_week_close = df_1w['close'].shift(1)
     
-    avg_gain = np.zeros(len(gain))
-    avg_loss = np.zeros(len(loss))
+    # Calculate weekly pivot point
+    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    # Weekly pivot bullish if close > pivot, bearish if close < pivot
+    weekly_bullish = prev_week_close > weekly_pivot
+    weekly_bearish = prev_week_close < weekly_pivot
     
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align weekly pivot and bias to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot.values)
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.values.astype(float))
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.values.astype(float))
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Calculate 10-period EMA for exit
+    close_series = pd.Series(close)
+    ema_10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(np.isnan(rsi), 50, rsi)  # handle division by zero
-    
-    # Align RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = volume > (1.8 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need enough data for KAMA and volume
+    start_idx = 20  # Need enough data for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_bullish_aligned[i]) or
+            np.isnan(weekly_bearish_aligned[i]) or np.isnan(ema_10[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA rising, RSI < 60 (not overbought), volume confirmation
-            if (kama[i] > kama[i-1] and 
-                rsi_aligned[i] < 60 and 
+            # Enter long: price breaks above Donchian high, weekly bullish, volume spike
+            if (close[i] > donchian_high[i] and 
+                weekly_bullish_aligned[i] > 0.5 and  # Weekly pivot bullish
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling, RSI > 40 (not oversold), volume confirmation
-            elif (kama[i] < kama[i-1] and 
-                  rsi_aligned[i] > 40 and 
+            # Enter short: price breaks below Donchian low, weekly bearish, volume spike
+            elif (close[i] < donchian_low[i] and 
+                  weekly_bearish_aligned[i] > 0.5 and  # Weekly pivot bearish
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA falling or RSI > 70 (overbought)
-            if (kama[i] < kama[i-1]) or (rsi_aligned[i] > 70):
+            # Exit long: price retraces to 10 EMA or reverses to Donchian low
+            if (close[i] <= ema_10[i]) or (close[i] < donchian_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA rising or RSI < 30 (oversold)
-            if (kama[i] > kama[i-1]) or (rsi_aligned[i] < 30):
+            # Exit short: price retraces to 10 EMA or reverses to Donchian high
+            if (close[i] >= ema_10[i]) or (close[i] > donchian_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
