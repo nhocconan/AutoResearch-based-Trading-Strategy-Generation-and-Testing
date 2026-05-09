@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_RSI_2_Trend_Volume
-# Hypothesis: RSI(2) on 4h with extreme thresholds (<10 for long, >90 for short) + 1d EMA trend filter + volume confirmation.
-# Works in both bull and bear markets by capturing mean-reversion extremes in strong trends.
-# Low trade frequency due to strict RSI thresholds and trend alignment requirement.
+# 1d_KAMA_Trend_RSI_MeanReversion
+# Hypothesis: On daily timeframe, KAMA identifies trend direction while RSI identifies
+# mean-reversion entries within that trend. Long when trend up and RSI < 30 (oversold),
+# short when trend down and RSI > 70 (overbought). This captures trend continuation
+# after pullbacks in both bull and bear markets. Uses volume confirmation to avoid
+# false signals and ATR-based stoploss via signal=0 when trend breaks.
 
-name = "4h_RSI_2_Trend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,46 +24,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter (more stable than daily)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
+    # Calculate KAMA on weekly data
+    def kama(price, er_period=10, fast=2, slow=30):
+        n = len(price)
+        kama_arr = np.full(n, np.nan)
+        if n < er_period:
+            return kama_arr
+        
+        # Efficiency Ratio
+        change = np.abs(np.diff(price, er_period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=1)
+        er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+        er = np.concatenate([np.full(er_period-1, np.nan), er])
+        
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        
+        # KAMA calculation
+        kama_arr[er_period-1] = np.mean(price[:er_period])
+        for i in range(er_period, n):
+            if not np.isnan(sc[i]):
+                kama_arr[i] = kama_arr[i-1] + sc[i] * (price[i] - kama_arr[i-1])
+        return kama_arr
     
-    # Calculate RSI(2) on 4h close
-    rsi2 = np.full_like(close, np.nan)
-    if len(close) >= 2:
-        change = np.diff(close, prepend=close[0])
-        gain = np.where(change > 0, change, 0.0)
-        loss = np.where(change < 0, -change, 0.0)
-        
-        avg_gain = np.full_like(close, np.nan)
-        avg_loss = np.full_like(close, np.nan)
-        
-        avg_gain[1] = gain[1]
-        avg_loss[1] = loss[1]
-        
-        for i in range(2, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
-            avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi2 = 100 - (100 / (1 + rs))
-        rsi2[avg_loss == 0] = 100
-        rsi2[avg_gain == 0] = 0
+    kama_1w = kama(close_1w)
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Volume filter: current volume vs 20-period average
+    # Daily RSI for mean reversion
+    def rsi(price, period=14):
+        n = len(price)
+        rsi_arr = np.full(n, np.nan)
+        if n < period + 1:
+            return rsi_arr
+        
+        delta = np.diff(price)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        
+        for i in range(period+1, n):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        
+        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+        rsi_arr = 100 - (100 / (1 + rs))
+        return rsi_arr
+    
+    rsi_14 = rsi(close)
+    
+    # Volume filter: current vs 20-day average
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
+        vol_ma[19] = np.mean(volume[:20])
         for i in range(20, len(volume)):
             vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
@@ -69,46 +95,45 @@ def generate_signals(prices):
     valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
-    # Align 1d EMA to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 2, 20)  # Need 1d EMA, RSI(2), and volume MA
+    start_idx = max(20, 14)  # Need volume MA and RSI
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(rsi2[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama_1w_aligned[i]) or np.isnan(rsi_14[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close[i] > ema34_1d_aligned[i]
+        # Determine weekly trend from KAMA
+        # Trend up when price above KAMA, trend down when below
+        trend_up = close[i] > kama_1w_aligned[i]
         
         if position == 0:
-            # Enter long: 1d trend up + RSI(2) < 10 + volume confirmation
-            if trend_up and rsi2[i] < 10 and volume_ratio[i] > 1.5:
+            # Enter long: weekly trend up + RSI oversold + volume confirmation
+            if trend_up and rsi_14[i] < 30 and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + RSI(2) > 90 + volume confirmation
-            elif not trend_up and rsi2[i] > 90 and volume_ratio[i] > 1.5:
+            # Enter short: weekly trend down + RSI overbought + volume confirmation
+            elif not trend_up and rsi_14[i] > 70 and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI(2) > 50 (mean reversion complete) or trend turns down
-            if rsi2[i] > 50 or not trend_up:
+            # Exit long: weekly trend turns down or RSI overbought
+            if not trend_up or rsi_14[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI(2) < 50 (mean reversion complete) or trend turns up
-            if rsi2[i] < 50 or trend_up:
+            # Exit short: weekly trend turns up or RSI oversold
+            if trend_up or rsi_14[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
