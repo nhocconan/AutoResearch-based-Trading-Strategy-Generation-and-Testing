@@ -3,13 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_12h_Camarilla_R1_S1_1dTrend_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 12h timeframe strategy using 1d Camarilla pivot breakouts with volume confirmation and 1d EMA trend filter.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing sustained trends in both bull and bear markets.
+# Uses discrete position sizing (0.25) and strict entry conditions to avoid overtrading.
+name = "12h_Camarilla_R1_S1_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,12 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots and trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -32,41 +30,41 @@ def generate_signals(prices):
     ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
     ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # Calculate 12h CAMARILLA pivot levels from previous 12h bar's OHLC
-    prev_12h_high = df_12h['high'].shift(1).values
-    prev_12h_low = df_12h['low'].shift(1).values
-    prev_12h_close = df_12h['close'].shift(1).values
+    # Calculate 1d CAMARILLA pivot levels (R1, S1) from previous 1d bar's OHLC
+    prev_1d_high = df_1d['high'].shift(1).values
+    prev_1d_low = df_1d['low'].shift(1).values
+    prev_1d_close = df_1d['close'].shift(1).values
     
     # Camarilla formula for R1 and S1
-    range_12h = prev_12h_high - prev_12h_low
+    range_1d = prev_1d_high - prev_1d_low
     camarilla_mult = 1.1 / 12  # ~0.0916667
-    r1_12h = prev_12h_close + range_12h * camarilla_mult * 1
-    s1_12h = prev_12h_close - range_12h * camarilla_mult * 1
+    r1_1d = prev_1d_close + range_1d * camarilla_mult * 1
+    s1_1d = prev_1d_close - range_1d * camarilla_mult * 1
     
     # Align Camarilla levels to 12h timeframe
-    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 12-period volume average for spike detection
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 20-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 12)  # Need 30 for 1d EMA and 12 for volume average
+    start_idx = max(30, 20)  # Need 30 for 1d EMA and 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
-            np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         ema_1d = ema_30_1d_aligned[i]
-        r1_level = r1_12h_aligned[i]
-        s1_level = s1_12h_aligned[i]
+        r1_level = r1_1d_aligned[i]
+        s1_level = s1_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
