@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Keltner_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,92 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Keltner calculation
+    # Get 1d data for Camarilla levels, trend, and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Keltner Channels (20-period)
-    high_series = pd.Series(df_1d['high'])
-    low_series = pd.Series(df_1d['low'])
-    close_series = pd.Series(df_1d['close'])
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # EMA20 of typical price for middle line
-    typical_price = (high_series + low_series + close_series) / 3
-    ema20_tp = typical_price.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # ATR(20) for channel width
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr20 = tr.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Upper and lower bands
-    keltner_upper = ema20_tp + (2.0 * atr20)
-    keltner_lower = ema20_tp - (2.0 * atr20)
-    
-    # Align to 1d
-    keltner_upper_1d = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_1d = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    ema20_tp_1d = align_htf_to_ltf(prices, df_1d, ema20_tp)
-    
-    # Trend filter: 20-week EMA on close
-    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_1d = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Volume filter: current volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'])
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
-    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    
+    # Align all to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Need enough data for calculations
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(keltner_upper_1d[i]) or np.isnan(keltner_lower_1d[i]) or
-            np.isnan(ema20_tp_1d[i]) or np.isnan(ema20_1w_1d[i]) or
-            np.isnan(volume_filter_1d_aligned[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = keltner_upper_1d[i]
-        lower = keltner_lower_1d[i]
-        middle = ema20_tp_1d[i]
-        trend = ema20_1w_1d[i]
-        vol_filter = volume_filter_1d_aligned[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema34_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
-            # Enter long: break above upper band with volume and above weekly trend
-            if close[i] > upper and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower band with volume and below weekly trend
-            elif close[i] < lower and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below middle line (mean reversion)
-            if close[i] < middle:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above middle line (mean reversion)
-            if close[i] > middle:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
