@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Moderate"
 timeframe = "4h"
 leverage = 1.0
 
@@ -70,12 +70,12 @@ def generate_signals(prices):
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Close > R1 AND price > 1d EMA20 (uptrend) AND volume > 1.5x average
-            if close[i] > r1 and close[i] > ema_1d and vol > 1.5 * vol_ma_val:
+            # Enter long: Close > R1 AND price > 1d EMA20 (uptrend) AND volume > 2.0x average
+            if close[i] > r1 and close[i] > ema_1d and vol > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S1 AND price < 1d EMA20 (downtrend) AND volume > 1.5x average
-            elif close[i] < s1 and close[i] < ema_1d and vol > 1.5 * vol_ma_val:
+            # Enter short: Close < S1 AND price < 1d EMA20 (downtrend) AND volume > 2.0x average
+            elif close[i] < s1 and close[i] < ema_1d and vol > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
