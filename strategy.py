@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_12hTrend_VolumeSpike"
+name = "6h_ElderRay_ForceIndex_WeeklyTrend"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,81 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla pivot and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Previous 12h bar's OHLC (for Camarilla calculation)
-    prev_close_12h = df_12h['close'].shift(1).values
-    prev_high_12h = df_12h['high'].shift(1).values
-    prev_low_12h = df_12h['low'].shift(1).values
+    # Weekly EMA13 for trend
+    ema_13_1w = pd.Series(df_1w['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_6h = align_htf_to_ltf(prices, df_1w, ema_13_1w)
     
-    # Calculate Camarilla levels
-    camarilla_pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3
-    camarilla_range_12h = prev_high_12h - prev_low_12h
-    camarilla_r3_12h = camarilla_pivot_12h + camarilla_range_12h * 1.1 / 4
-    camarilla_s3_12h = camarilla_pivot_12h - camarilla_range_12h * 1.1 / 4
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 (using 6h EMA13)
+    ema_13_6h_raw = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13_6h_raw
+    bear_power = low - ema_13_6h_raw
     
-    # Align Camarilla levels to 6h
-    camarilla_pivot_6h = align_htf_to_ltf(prices, df_12h, camarilla_pivot_12h)
-    camarilla_r3_6h = align_htf_to_ltf(prices, df_12h, camarilla_r3_12h)
-    camarilla_s3_6h = align_htf_to_ltf(prices, df_12h, camarilla_s3_12h)
-    
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume filter: above 2.0x 12-period average (12*6h = 3 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Force Index (13-period EMA of price change * volume)
+    price_change = np.diff(close, prepend=close[0])
+    fi_raw = price_change * volume
+    fi_13 = pd.Series(fi_raw).ewm(span=13, adjust=False, min_periods=13).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 12  # Wait for volume MA
+    start_idx = 13  # Wait for EMA13 and FI
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
-            np.isnan(ema_50_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_13_6h[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(fi_13[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation
-        
-        # Session filter: 08-20 UTC (reduce noise trades)
-        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        in_session = 8 <= hour <= 20
+        # Trend filter: weekly EMA13 slope (up if current > previous)
+        weekly_up = ema_13_6h[i] > ema_13_6h[i-1]
+        weekly_down = ema_13_6h[i] < ema_13_6h[i-1]
         
         if position == 0:
-            # Long breakout: price breaks above camarilla R3 with 12h uptrend
-            if (close[i] > camarilla_r3_6h[i] and 
-                close[i] > ema_50_6h[i] and  # 12h uptrend
-                vol_ok and 
-                in_session):
+            # Long: Bull Power > 0 AND Force Index > 0 AND weekly up
+            if (bull_power[i] > 0 and fi_13[i] > 0 and weekly_up):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below camarilla S3 with 12h downtrend
-            elif (close[i] < camarilla_s3_6h[i] and 
-                  close[i] < ema_50_6h[i] and  # 12h downtrend
-                  vol_ok and 
-                  in_session):
+            # Short: Bear Power < 0 AND Force Index < 0 AND weekly down
+            elif (bear_power[i] < 0 and fi_13[i] < 0 and weekly_down):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below camarilla pivot (mean reversion)
-            if close[i] < camarilla_pivot_6h[i]:
+            # Exit long: Bull Power <= 0 OR Force Index <= 0
+            if bull_power[i] <= 0 or fi_13[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above camarilla pivot (mean reversion)
-            if close[i] > camarilla_pivot_6h[i]:
+            # Exit short: Bear Power >= 0 OR Force Index >= 0
+            if bear_power[i] >= 0 or fi_13[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
