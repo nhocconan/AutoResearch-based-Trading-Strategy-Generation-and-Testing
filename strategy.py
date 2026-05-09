@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1d_ElderRay_Power_Trend_Volume"
-timeframe = "6h"
+name = "12h_1d_KAMA_Trend_RSI_Overbought_Oversold"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray, trend, and volume filter
+    # Get 1d data for KAMA trend and RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
+    # KAMA trend calculation
+    close_series = pd.Series(df_1d['close'])
+    change = abs(close_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = [close_series.iloc[0]]
+    for i in range(1, len(close_series)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_series.iloc[i] - kama[-1]))
+    kama = np.array(kama)
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # RSI calculation
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50)
     
-    # Volume filter: current 1d volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
-    
-    # Align all to 6h
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align KAMA and RSI to 12h
+    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
+    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi.values)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = 30  # Need enough data for KAMA and RSI
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or
-            np.isnan(ema34_1d_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if (np.isnan(kama_12h[i]) or np.isnan(rsi_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull = bull_power_6h[i]
-        bear = bear_power_6h[i]
-        trend = ema34_1d_6h[i]
-        vol_filter = volume_filter_6h[i]
+        kama_val = kama_12h[i]
+        rsi_val = rsi_12h[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0, Bear Power < 0, above trend, volume
-            if bull > 0 and bear < 0 and close[i] > trend and vol_filter:
+            # Enter long: price above KAMA and RSI oversold (<30)
+            if close[i] > kama_val and rsi_val < 30:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bull Power < 0, Bear Power > 0, below trend, volume
-            elif bull < 0 and bear > 0 and close[i] < trend and vol_filter:
+            # Enter short: price below KAMA and RSI overbought (>70)
+            elif close[i] < kama_val and rsi_val > 70:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bear Power > 0 (bearish pressure)
-            if bear > 0:
+            # Exit long: RSI overbought (>70) or price below KAMA
+            if rsi_val > 70 or close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bull Power > 0 (bullish pressure)
-            if bull > 0:
+            # Exit short: RSI oversold (<30) or price above KAMA
+            if rsi_val < 30 or close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
