@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 4h data for trend and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Previous day's high, low, close for Camarilla pivot
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels from previous 4h bar
+    # Camarilla uses previous bar's high, low, close
+    prev_close = df_4h['close'].shift(1).values
+    prev_high = df_4h['high'].shift(1).values
+    prev_low = df_4h['low'].shift(1).values
     
-    # Calculate Camarilla levels (R3, S3 are key levels)
-    # Camarilla: R3 = close + (high - low) * 1.1/2
-    #          S3 = close - (high - low) * 1.1/2
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Camarilla levels: R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    camarilla_range = prev_high - prev_low
+    camarilla_r1 = prev_close + camarilla_range * 1.1 / 12
+    camarilla_s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Align Camarilla levels to 12h
-    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 1h
+    camarilla_r1_1h = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    camarilla_s1_1h = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume filter: above 2.0x 50-period average (strict to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1d volume average (20-period)
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,51 +60,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
-            np.isnan(ema_34_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_1h[i]) or np.isnan(camarilla_s1_1h[i]) or 
+            np.isnan(ema_50_1h[i]) or np.isnan(vol_avg_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Strict volume confirmation
-        
-        # Session filter: 08-20 UTC (reduce noise trades)
-        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        in_session = 8 <= hour <= 20
+        vol_ok = volume[i] > 1.5 * vol_avg_1h[i]  # Volume confirmation
+        in_session = 8 <= hours[i] <= 20
         
         if position == 0:
-            # Long breakout: price breaks above Camarilla R3 with daily uptrend
-            if (close[i] > camarilla_r3_12h[i] and 
-                close[i] > ema_34_12h[i] and  # daily uptrend
+            # Long: price breaks above Camarilla R1 with 4h uptrend and volume
+            if (close[i] > camarilla_r1_1h[i] and 
+                close[i] > ema_50_1h[i] and  # 4h uptrend
                 vol_ok and 
                 in_session):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short breakdown: price breaks below Camarilla S3 with daily downtrend
-            elif (close[i] < camarilla_s3_12h[i] and 
-                  close[i] < ema_34_12h[i] and  # daily downtrend
+            # Short: price breaks below Camarilla S1 with 4h downtrend and volume
+            elif (close[i] < camarilla_s1_1h[i] and 
+                  close[i] < ema_50_1h[i] and  # 4h downtrend
                   vol_ok and 
                   in_session):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
             # Exit long: price falls back below Camarilla pivot (mean reversion)
-            camarilla_pivot = (camarilla_r3_12h[i] + camarilla_s3_12h[i]) / 2
+            camarilla_pivot = (camarilla_r1_1h[i] + camarilla_s1_1h[i]) / 2
             if close[i] < camarilla_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: price rises back above Camarilla pivot (mean reversion)
-            camarilla_pivot = (camarilla_r3_12h[i] + camarilla_s3_12h[i]) / 2
+            camarilla_pivot = (camarilla_r1_1h[i] + camarilla_s1_1h[i]) / 2
             if close[i] > camarilla_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
