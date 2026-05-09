@@ -1,8 +1,3 @@
-# 144421: 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume  
-# Hypothesis: Combine Camarilla R1/S1 breakout with daily EMA trend and volume confirmation.  
-# Works in bull markets via breakout continuation; in bear markets via mean-reversion to S1/R1.  
-# Target: 15-30 trades/year per symbol to avoid fee drag.  
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
@@ -33,6 +28,9 @@ def generate_signals(prices):
     daily_close = df_d['close'].values
     
     # Calculate Camarilla pivot levels (R1, S1) from previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = Pivot + (H - L) * 1.1 / 12
+    # S1 = Pivot - (H - L) * 1.1 / 12
     pivot = (daily_high + daily_low + daily_close) / 3
     r1 = pivot + (daily_high - daily_low) * 1.1 / 12
     s1 = pivot - (daily_high - daily_low) * 1.1 / 12
