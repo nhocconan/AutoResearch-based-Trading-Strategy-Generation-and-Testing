@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Filtered
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation, and price filter near 1d VWAP.
-# Uses a higher volume threshold (2.5x average) and tighter price-VWAP proximity to reduce trades and avoid overtrading.
-# Designed to generate ~20-30 trades/year on 4h to avoid fee drag while maintaining edge in bull/bear markets.
-# Long when 1d trend up (close > EMA34), price breaks above R3, volume > 2.5x average, and close within 0.5% of 1d VWAP.
-# Short when 1d trend down (close < EMA34), price breaks below S3, volume > 2.5x average, and close within 0.5% of 1d VWAP.
+# 1d_TRIX_9_0_VolumeSpike_Trend
+# Hypothesis: 1d TRIX(9,0) crosses above/below zero with volume spike and 1w trend filter.
+# Long when TRIX crosses above zero, volume > 2x average, and price > 1w EMA50.
+# Short when TRIX crosses below zero, volume > 2x average, and price < 1w EMA50.
+# Designed to generate 8-18 trades/year on 1d to avoid fee decay while capturing momentum.
+# Uses momentum (TRIX), volume confirmation, and higher timeframe trend for robustness.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Filtered"
-timeframe = "4h"
+name = "1d_TRIX_9_0_VolumeSpike_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,69 +24,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
+    # Calculate 1w EMA50 for trend filter
+    ema50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        ema50_1w[49] = np.mean(close_1w[0:50])
+        for i in range(50, len(close_1w)):
+            ema50_1w[i] = (close_1w[i] * 2 + ema50_1w[i-1] * 48) / 50
     
-    # Align 1d EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1w EMA50 to 1d timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Camarilla levels for each 1d bar: R3, S3
-    camarilla_r3_1d = np.full_like(close_1d, np.nan)
-    camarilla_s3_1d = np.full_like(close_1d, np.nan)
+    # Calculate TRIX(9,0): triple EMA of log returns
+    # Step 1: log returns
+    log_ret = np.full_like(close, np.nan)
+    log_ret[1:] = np.log(close[1:] / close[:-1])
     
-    for i in range(len(df_1d)):
-        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
-            camarilla_r3_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
-            camarilla_s3_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
+    # Step 2: EMA3 of log returns
+    ema1 = np.full_like(log_ret, np.nan)
+    if len(log_ret) >= 3:
+        ema1[2] = np.mean(log_ret[0:3])
+        for i in range(3, len(log_ret)):
+            ema1[i] = log_ret[i] * 0.5 + ema1[i-1] * 0.5  # EMA with alpha=2/(3+1)=0.5
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Step 3: EMA3 of ema1
+    ema2 = np.full_like(ema1, np.nan)
+    if len(ema1) >= 3:
+        ema2[2] = np.mean(ema1[0:3])
+        for i in range(3, len(ema1)):
+            ema2[i] = ema1[i] * 0.5 + ema2[i-1] * 0.5
     
-    # Calculate 1d VWAP for additional filter
-    vwap_1d = np.full_like(close_1d, np.nan)
-    cumulative_volume = np.full_like(close_1d, np.nan)
-    cumulative_price_volume = np.full_like(close_1d, np.nan)
+    # Step 4: EMA3 of ema2
+    ema3 = np.full_like(ema2, np.nan)
+    if len(ema2) >= 3:
+        ema3[2] = np.mean(ema2[0:3])
+        for i in range(3, len(ema2)):
+            ema3[i] = ema2[i] * 0.5 + ema3[i-1] * 0.5
     
-    for i in range(len(df_1d)):
-        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]) or np.isnan(volume_1d[i]):
-            if i > 0:
-                vwap_1d[i] = vwap_1d[i-1]
-                cumulative_volume[i] = cumulative_volume[i-1]
-                cumulative_price_volume[i] = cumulative_price_volume[i-1]
-            continue
-            
-        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
-        price_volume = typical_price * volume_1d[i]
-        
-        if i == 0:
-            cumulative_volume[i] = volume_1d[i]
-            cumulative_price_volume[i] = price_volume
-        else:
-            cumulative_volume[i] = cumulative_volume[i-1] + volume_1d[i]
-            cumulative_price_volume[i] = cumulative_price_volume[i-1] + price_volume
-            
-        if cumulative_volume[i] != 0:
-            vwap_1d[i] = cumulative_price_volume[i] / cumulative_volume[i]
-        else:
-            vwap_1d[i] = vwap_1d[i-1] if i > 0 else typical_price
-    
-    # Align 1d VWAP to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # TRIX = 100 * (ema3 - ema3_prev) / ema3_prev
+    trix = np.full_like(ema3, np.nan)
+    valid = ~np.isnan(ema3)
+    trix[valid & (np.roll(valid, 1))] = 100 * (ema3[valid & (np.roll(valid, 1))] - ema3[np.roll(valid, 1) & valid]) / ema3[np.roll(valid, 1) & valid]
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -102,44 +86,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
+    start_idx = max(50, 20)  # Need 1w EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
-            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(volume_ratio[i]) or
-            np.isnan(vwap_1d_aligned[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(trix[i-1]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend and price relative to VWAP (within 0.5%)
-        trend_up = close[i] > ema34_1d_aligned[i]
-        vwap_diff_pct = abs((close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i]) * 100
-        near_vwap = vwap_diff_pct <= 0.5
+        # TRIX zero cross signals
+        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
+        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
+        
+        # Trend filter
+        trend_up = close[i] > ema50_1w_aligned[i]
+        trend_down = close[i] < ema50_1w_aligned[i]
         
         if position == 0:
-            # Enter long: 1d trend up + price breaks above R3 + volume confirmation + near VWAP
-            if trend_up and close[i] > camarilla_r3_1d_aligned[i] and volume_ratio[i] > 2.5 and near_vwap:
+            # Enter long: TRIX crosses up + volume confirmation + uptrend
+            if trix_cross_up and volume_ratio[i] > 2.0 and trend_up:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + price breaks below S3 + volume confirmation + near VWAP
-            elif not trend_up and close[i] < camarilla_s3_1d_aligned[i] and volume_ratio[i] > 2.5 and near_vwap:
+            # Enter short: TRIX crosses down + volume confirmation + downtrend
+            elif trix_cross_down and volume_ratio[i] > 2.0 and trend_down:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 1d trend turns down or price breaks below S3 or price moves away from VWAP
-            if not trend_up or close[i] < camarilla_s3_1d_aligned[i] or not near_vwap:
+            # Exit long: TRIX crosses down or trend turns down
+            if trix_cross_down or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 1d trend turns up or price breaks above R3 or price moves away from VWAP
-            if trend_up or close[i] > camarilla_r3_1d_aligned[i] or not near_vwap:
+            # Exit short: TRIX crosses up or trend turns up
+            if trix_cross_up or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
