@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_DailyTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_KAMA_Direction_RSI_Filter_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,44 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for KAMA trend filter and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Using previous week's data (already complete when we get it)
-    prev_week_high = df_1w['high'].shift(1).values  # Previous week high
-    prev_week_low = df_1w['low'].shift(1).values    # Previous week low
-    prev_week_close = df_1w['close'].shift(1).values # Previous week close
-    
-    # Pivot point calculation
-    pivot_point = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot_point - prev_week_low
-    s1 = 2 * pivot_point - prev_week_high
-    r2 = pivot_point + (prev_week_high - prev_week_low)
-    s2 = pivot_point - (prev_week_high - prev_week_low)
-    r3 = prev_week_high + 2 * (pivot_point - prev_week_low)
-    s3 = prev_week_low - 2 * (prev_week_high - pivot_point)
-    
-    # Align weekly pivot levels to 1d timeframe
-    pivot_point_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Calculate 34-period EMA on daily close for trend filter
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)
+    # Handle first 9 values where we don't have 10-period difference
+    change = np.concatenate([np.full(9, np.nan), change])
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[9] = close_1d[9]  # Start after first 9 periods
+    for i in range(10, len(close_1d)):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close_1d[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close_1d, n=1)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # First average gain/loss
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    avg_gain[14] = np.mean(gain[1:15])  # indices 1 to 14
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = rsi
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Calculate 20-period volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,50 +70,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 34 for daily EMA and 20 for volume average
+    start_idx = 20  # Need 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(pivot_point_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        pivot = pivot_point_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        r2_level = r2_aligned[i]
-        s2_level = s2_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
-        ema_1d = ema_34_1d_aligned[i]
+        kama_val = kama_1d_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Price breaks above R1 with volume AND price > daily EMA34 (uptrend)
-            if close[i] > r1_level and vol > 1.5 * vol_ma_val and close[i] > ema_1d:
+            # Enter long: Price above KAMA AND RSI > 50 AND volume spike
+            if close[i] > kama_val and rsi_val > 50 and vol > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S1 with volume AND price < daily EMA34 (downtrend)
-            elif close[i] < s1_level and vol > 1.5 * vol_ma_val and close[i] < ema_1d:
+            # Enter short: Price below KAMA AND RSI < 50 AND volume spike
+            elif close[i] < kama_val and rsi_val < 50 and vol > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below pivot OR trend reverses (price < daily EMA34)
-            if close[i] < pivot or close[i] < ema_1d:
+            # Exit long: Price below KAMA OR RSI < 40
+            if close[i] < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above pivot OR trend reverses (price > daily EMA34)
-            if close[i] > pivot or close[i] > ema_1d:
+            # Exit short: Price above KAMA OR RSI > 60
+            if close[i] > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
