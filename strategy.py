@@ -1,12 +1,9 @@
-#!/usr/bin/env python3
-# 4H_Multi_Timeframe_Momentum_Combo
-# Hypothesis: Combines momentum from multiple timeframes (4h price action, 1d RSI, and 12h trend) with volume confirmation.
-# Long when: 4h close > 4h open (bullish candle) AND 1d RSI > 50 (bullish momentum) AND 12h EMA20 trending up AND volume > 1.5x average.
-# Short when: 4h close < 4h open (bearish candle) AND 1d RSI < 50 (bearish momentum) AND 12h EMA20 trending down AND volume > 1.5x average.
-# Uses discrete position sizing (0.25) to minimize churn and targets 20-40 trades/year.
-# Designed to work in both bull and bear markets by requiring alignment across multiple timeframes.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Breakout above/below daily Camarilla R1/S1 levels with volume >1.8x 20-bar average and trend filter from 12h EMA50.
+# Camarilla R1/S1 represent tighter breakout zones than R3/S3, leading to higher frequency but still filtered by volume and trend.
+# Designed for 25-40 trades/year on 4h timeframe, targeting BTC/ETH/USD pairs with balanced long/short logic.
 
-name = "4H_Multi_Timeframe_Momentum_Combo"
+name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,56 +13,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
-    close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # Get 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    # Calculate 12h EMA(20) with proper initialization
-    ema_20_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 20:
-        ema_20_12h[19] = np.mean(close_12h[0:20])
-        for i in range(20, len(close_12h)):
-            ema_20_12h[i] = (close_12h[i] * 2 + ema_20_12h[i-1] * 18) / 20
+    # Calculate 12h EMA(50) with proper initialization
+    ema_50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[0:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (close_12h[i] * 2 + ema_50_12h[i-1] * 48) / 50
     
     # Align 12h EMA to 4h timeframe
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get daily data for RSI
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 14:
-        avg_gain[13] = np.mean(gain[0:14])
-        avg_loss[13] = np.mean(loss[0:14])
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (gain[i] + avg_gain[i-1] * 13) / 14
-            avg_loss[i] = (loss[i] + avg_loss[i-1] * 13) / 14
+    # Calculate daily Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    daily_range = high_1d - low_1d
+    camarilla_R1 = close_1d + daily_range * 1.1 / 12
+    camarilla_S1 = close_1d - daily_range * 1.1 / 12
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_14_1d = np.where(avg_loss == 0, 100, 100 - (100 / (1 + rs)))
-    
-    # Align daily RSI to 4h timeframe
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # Align daily Camarilla levels to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
     # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -85,37 +73,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_20_12h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or \
+           np.isnan(camarilla_S1_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine candle direction
-        bullish_candle = close[i] > open_price[i]
-        bearish_candle = close[i] < open_price[i]
-        
         if position == 0:
-            # Enter long: Bullish candle AND bullish RSI (>50) AND uptrend (price > EMA20) AND volume confirmation
-            if bullish_candle and rsi_14_1d_aligned[i] > 50 and close[i] > ema_20_12h_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long: Price breaks above Camarilla R1 AND volume confirmation AND bullish trend (price > EMA50)
+            if close[i] > camarilla_R1_aligned[i] and volume_ratio[i] > 1.8 and close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bearish candle AND bearish RSI (<50) AND downtrend (price < EMA20) AND volume confirmation
-            elif bearish_candle and rsi_14_1d_aligned[i] < 50 and close[i] < ema_20_12h_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter short: Price breaks below Camarilla S1 AND volume confirmation AND bearish trend (price < EMA50)
+            elif close[i] < camarilla_S1_aligned[i] and volume_ratio[i] > 1.8 and close[i] < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bearish candle OR RSI turns bearish (<50) OR trend turns down (price < EMA20)
-            if bearish_candle or rsi_14_1d_aligned[i] < 50 or close[i] < ema_20_12h_aligned[i]:
+            # Exit long: Price breaks below Camarilla S1 (reversal signal) or trend turns bearish
+            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bullish candle OR RSI turns bullish (>50) OR trend turns up (price > EMA20)
-            if bullish_candle or rsi_14_1d_aligned[i] > 50 or close[i] > ema_20_12h_aligned[i]:
+            # Exit short: Price breaks above Camarilla R1 (reversal signal) or trend turns bullish
+            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
