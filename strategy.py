@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Williams Alligator with volume confirmation and 1d ADX trend filter.
-# Uses Alligator (Smoothed MA) for trend direction, reducing whipsaws in chop.
-# 1d ADX > 25 ensures strong trend context, avoiding sideways markets.
-# Volume > 1.5x 20-period EMA confirms institutional participation.
-# Designed for fewer, higher-quality trades in both bull and bear markets.
-name = "4h_WilliamsAlligator_Trend_Volume_ADX"
-timeframe = "4h"
+# Hypothesis: 1d Williams %R mean reversion with volume confirmation and weekly trend filter.
+# Williams %R identifies overbought/oversold conditions on daily timeframe.
+# Enter long when %R < -80 (oversold) and short when %R > -20 (overbought).
+# Volume > 1.5x 20-period EMA confirms participation.
+# Weekly EMA200 filter ensures trades align with higher timeframe trend.
+# Designed for mean reversion in ranging markets with trend filter to avoid counter-trend trades.
+name = "1d_WilliamsR_MeanReversion_Volume_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,102 +23,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Weekly data for EMA200 trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 200:
         return np.zeros(n)
     
-    # Williams Alligator components (Smoothed Moving Averages)
-    # Jaw: 13-period SMMA, shifted 8 bars
-    # Teeth: 8-period SMMA, shifted 5 bars
-    # Lips: 5-period SMMA, shifted 3 bars
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        sma = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return sma
-        sma[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
-        return sma
+    # Daily data for Williams %R calculation (14-period)
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 14:
+        return np.zeros(n)
     
-    # Calculate SMMA for Alligator
-    jaw = smma(close, 13)
-    teeth = smma(close, 8)
-    lips = smma(close, 5)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Shift as per Alligator definition
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Calculate Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high_daily).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_daily).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close_daily) / (highest_high - lowest_low) * -100
     
-    # Align Alligator components to 4h
-    jaw_4h = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_4h = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_4h = align_htf_to_ltf(prices, df_1d, lips_shifted)
+    # Use previous day's Williams %R (shift by 1 to avoid look-ahead)
+    williams_r_shifted = np.roll(williams_r, 1)
+    williams_r_shifted[0] = np.nan
     
-    # 1d ADX calculation (trend strength)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align Williams %R to daily timeframe (no additional shift needed as we already used previous day)
+    williams_r_daily = align_htf_to_ltf(prices, df_daily, williams_r_shifted)
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
+    # Weekly EMA200 trend filter
+    ema_200_weekly = pd.Series(df_weekly['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_200_weekly)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed TR and DM
-    def smooth_series(arr, period):
-        """Wilder's smoothing (similar to EMA but different factor)"""
-        smoothed = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return smoothed
-        smoothed[period-1] = np.nansum(arr[:period])
-        for i in range(period, len(arr)):
-            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
-    
-    atr = smooth_series(tr, 14)
-    dm_plus_smooth = smooth_series(dm_plus, 14)
-    dm_minus_smooth = smooth_series(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth_series(dx, 14)
-    
-    # Align ADX to 4h
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume spike filter
+    # Volume spike filter: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200  # Wait for weekly EMA200 to be ready
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(jaw_4h[i]) or np.isnan(teeth_4h[i]) or np.isnan(lips_4h[i]) or
-            np.isnan(adx_4h[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(williams_r_daily[i]) or np.isnan(ema_200_weekly_aligned[i]) or
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -126,28 +74,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) + ADX > 25 + volume spike
-            if (lips_4h[i] > teeth_4h[i] > jaw_4h[i] and 
-                adx_4h[i] > 25 and vol_spike[i]):
+            # Long: Williams %R < -80 (oversold) with volume spike and price above weekly EMA200
+            if (williams_r_daily[i] < -80 and vol_spike[i] and price > ema_200_weekly_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw (bearish alignment) + ADX > 25 + volume spike
-            elif (lips_4h[i] < teeth_4h[i] < jaw_4h[i] and 
-                  adx_4h[i] > 25 and vol_spike[i]):
+            # Short: Williams %R > -20 (overbought) with volume spike and price below weekly EMA200
+            elif (williams_r_daily[i] > -20 and vol_spike[i] and price < ema_200_weekly_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator alignment breaks (Lips < Teeth or Teeth < Jaw)
-            if lips_4h[i] < teeth_4h[i] or teeth_4h[i] < jaw_4h[i]:
+            # Exit long: Williams %R returns above -50 (mean reversion) or weekly trend turns bearish
+            if williams_r_daily[i] > -50 or price < ema_200_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator alignment breaks (Lips > Teeth or Teeth > Jaw)
-            if lips_4h[i] > teeth_4h[i] or teeth_4h[i] > jaw_4h[i]:
+            # Exit short: Williams %R returns below -50 (mean reversion) or weekly trend turns bullish
+            if williams_r_daily[i] < -50 or price > ema_200_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
