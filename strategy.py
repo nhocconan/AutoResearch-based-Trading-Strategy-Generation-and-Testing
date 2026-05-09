@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume spike confirmation
-# Works in both bull and bear markets by requiring alignment with daily trend and high-volume breakouts.
-# Uses proven Donchian breakout structure for trend continuation with low trade frequency.
-name = "4h_Donchian20_1dEMA50_Trend_Volume"
-timeframe = "4h"
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with 1d EMA21 trend filter and volume spike confirmation
+# Elder Ray measures bull/bear power relative to EMA. Works in both bull/bear markets by requiring
+# alignment with daily trend and high-volume spikes to confirm institutional participation.
+# Target: 50-150 trades over 4 years (12-37/year) with position size 0.25.
+name = "6h_ElderRay_1dEMA21_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,35 +21,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for EMA21 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA21 trend filter
+    ema_21_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_6h = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # Calculate Donchian channels from previous 1d bar (20-period high/low)
-    donchian_high = df_1d['high'].rolling(window=20, min_periods=20).max().values
-    donchian_low = df_1d['low'].rolling(window=20, min_periods=20).min().values
+    # Calculate Elder Ray components on 6h timeframe
+    # Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = ema_13 - low
     
-    # Align Donchian levels to 4h timeframe
-    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Volume filter: current volume > 2.0x 20-period average volume (strict to reduce trades)
+    # Volume filter: current volume > 2.0x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need previous day's data for Donchian levels
+    start_idx = 20  # Need enough data for EMA and volume calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h[i]) or np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or 
+        if (np.isnan(ema_21_6h[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,32 +55,36 @@ def generate_signals(prices):
             continue
         
         # Entry conditions
-        bullish_breakout = close[i] > donchian_high_4h[i]  # Break above upper band
-        bearish_breakout = close[i] < donchian_low_4h[i]   # Break below lower band
-        trend_up = close[i] > ema_50_4h[i]
-        trend_down = close[i] < ema_50_4h[i]
+        bullish_signal = bull_power[i] > 0 and bear_power[i] < 0  # Both positive and negative power present
+        bearish_signal = bull_power[i] < 0 and bear_power[i] > 0  # This condition is impossible, fixing logic
+        # Corrected: Bullish when Bull Power > 0, Bearish when Bear Power > 0
+        bullish_entry = bull_power[i] > 0
+        bearish_entry = bear_power[i] > 0
+        
+        trend_up = close[i] > ema_21_6h[i]
+        trend_down = close[i] < ema_21_6h[i]
         
         if position == 0:
-            # Long: bullish breakout + uptrend + volume confirmation
-            if bullish_breakout and trend_up and volume_filter[i]:
+            # Long: bullish power positive + uptrend + volume confirmation
+            if bullish_entry and trend_up and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakout + downtrend + volume confirmation
-            elif bearish_breakout and trend_down and volume_filter[i]:
+            # Short: bearish power positive + downtrend + volume confirmation
+            elif bearish_entry and trend_down and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout or trend reversal
-            if bearish_breakout or not trend_up:
+            # Exit long: bearish power becomes positive or trend reversal
+            if bearish_entry or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout or trend reversal
-            if bullish_breakout or not trend_down:
+            # Exit short: bullish power becomes positive or trend reversal
+            if bullish_entry or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
