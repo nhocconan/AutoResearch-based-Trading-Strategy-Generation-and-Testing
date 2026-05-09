@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,10 +26,8 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get daily data for Camarilla pivot levels (R3, S3) from previous day
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
+    # Get daily data for Camarilla pivot levels (R3, S3)
+    # Using previous day's OHLC to avoid look-ahead
     prev_close = df_1d['close'].shift(1)
     prev_high = df_1d['high'].shift(1)
     prev_low = df_1d['low'].shift(1)
@@ -37,6 +35,7 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
     camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
