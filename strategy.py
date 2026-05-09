@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d ADX > 25 trend filter and volume > 2x 20-period EMA.
-# Designed to capture trend continuations in both bull and bear markets.
-# Uses daily ADX for trend strength, avoiding choppy markets.
-# Volume surge confirms breakout validity.
-# Target: 20-50 trades/year to avoid fee drag.
-name = "4h_Donchian20_1dADX25_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 1d Donchian(20) breakout with 1w ADX25 trend filter and volume spike.
+# Uses weekly ADX for trend strength, daily Donchian channels for breakout signals,
+# and volume surge for confirmation. Designed to capture strong trends in both bull and bear markets.
+# Target: 15-25 trades/year to avoid excessive fee drag.
+name = "1d_Donchian20_1wADX25_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,26 +21,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for ADX trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 14-period ADX for weekly timeframe
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1 = np.abs(high_1w - low_1w)
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # First period
     
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
@@ -70,11 +69,7 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Donchian channels (20-period) for 4h timeframe
-    highest_high = np.maximum.accumulate(high)
-    lowest_low = np.minimum.accumulate(low)
-    
-    # For true Donchian, we need to reset the accumulation every 20 periods
+    # Calculate Donchian channels (20-period) for daily timeframe
     upper_channel = np.full_like(high, np.nan)
     lower_channel = np.full_like(low, np.nan)
     for i in range(len(high)):
@@ -85,8 +80,8 @@ def generate_signals(prices):
             upper_channel[i] = np.max(high[i-19:i+1])
             lower_channel[i] = np.min(low[i-19:i+1])
     
-    # Align 1d ADX to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align 1w ADX to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -109,11 +104,11 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + 1d ADX > 25 + volume spike
+            # Enter long: price breaks above upper channel + 1w ADX > 25 + volume spike
             if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + 1d ADX > 25 + volume spike
+            # Enter short: price breaks below lower channel + 1w ADX > 25 + volume spike
             elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
