@@ -3,13 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_KAMA_RSI_Trend_v1"
-timeframe = "12h"
+# Hypothesis: 4h Camarilla pivot breakout with volume confirmation and 1d EMA trend filter.
+# Camarilla levels provide clear support/resistance, volume confirms breakout validity,
+# and 1d EMA ensures we trade with the higher timeframe trend. Designed for 20-50 trades/year
+# with discrete sizing to minimize fee drag. Works in bull/bear via trend filter.
+
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,58 +22,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend: EMA34 for trend filter
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Weekly trend: EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Calculate Camarilla levels from previous 1d bar
+    # H, L, C from daily timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ph = df_1d['high'].values  # previous day high
+    pl = df_1d['low'].values   # previous day low
+    pc = df_1d['close'].values # previous day close
     
-    # 12h KAMA for trend direction
-    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
-    vol = np.sum(np.abs(np.diff(close, prepend=close[0])))
-    er = np.where(vol != 0, change / vol, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Camarilla formula: 
+    # Resistance: C + (H-L) * 1.1/12, C + (H-L) * 1.1/6, C + (H-L) * 1.1/4, C + (H-L) * 1.1/2
+    # Support:    C - (H-L) * 1.1/12, C - (H-L) * 1.1/6, C - (H-L) * 1.1/4, C - (H-L) * 1.1/2
+    # We use R3/S3 and R4/S4 for breakouts
+    rng = ph - pl
+    r3 = pc + (rng * 1.1 / 4)
+    s3 = pc - (rng * 1.1 / 4)
+    r4 = pc + (rng * 1.1 / 2)
+    s4 = pc - (rng * 1.1 / 2)
     
-    # 12h RSI(14) for momentum filter
-    delta = np.diff(close, prepend=close[0])
-    gain = np.maximum(delta, 0)
-    loss = np.maximum(-delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 4h timeframe (they change only when new 1d bar forms)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # 12h ATR(14) for volatility filter
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
-    
-    # Volume filter: volume > 1.1x 20-period SMA
+    # Volume filter: volume > 1.5x 20-period SMA
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.1 * vol_ma20
+    vol_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or \
-           np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
+           np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,38 +75,32 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price above KAMA, above daily/weekly EMA, RSI > 50, with volume
-            if (price > kama[i] and 
-                price > ema34_1d_aligned[i] and 
-                price > ema34_1w_aligned[i] and 
-                rsi[i] > 50 and 
-                vol_filter[i]):
+            # Long breakout: price closes above R3 with volume, in uptrend (price > EMA34)
+            if (close[i] > r3_aligned[i] and 
+                vol_filter[i] and 
+                price > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, below daily/weekly EMA, RSI < 50, with volume
-            elif (price < kama[i] and 
-                  price < ema34_1d_aligned[i] and 
-                  price < ema34_1w_aligned[i] and 
-                  rsi[i] < 50 and 
-                  vol_filter[i]):
+            # Short breakdown: price closes below S3 with volume, in downtrend (price < EMA34)
+            elif (close[i] < s3_aligned[i] and 
+                  vol_filter[i] and 
+                  price < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = 0.0
         
         elif position == 1:
-            # Exit long: price crosses below KAMA or RSI < 40
-            if (price < kama[i] or 
-                rsi[i] < 40):
+            # Exit long: price closes below S3 (re-test of support) or against trend
+            if (close[i] < s3_aligned[i] or 
+                price < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA or RSI > 60
-            if (price > kama[i] or 
-                rsi[i] > 60):
+            # Exit short: price closes above R3 (re-test of resistance) or against trend
+            if (close[i] > r3_aligned[i] or 
+                price > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
