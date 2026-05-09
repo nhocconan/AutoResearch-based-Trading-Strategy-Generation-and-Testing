@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA trend filter and volume spike confirmation.
-Designed for 12h timeframe to reduce trade frequency (target: 20-50 trades/year) and minimize fee drift.
-Uses daily timeframe for trend filter and breakout levels, with volume confirmation on 12h bars.
-Works in both bull and bear markets by requiring alignment with daily trend.
+4h_Donchian20_Breakout_1dEMA200_Trend_VolumeSpike
+Hypothesis: Donchian(20) breakout on 4h with daily EMA200 trend filter and volume spike confirmation.
+Works in both bull and bear markets by only taking long in uptrend (price > EMA200) and short in downtrend (price < EMA200).
+Volume spike (>2x 24-period average) confirms breakout strength. Designed for low trade frequency to minimize fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_1dEMA200_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,39 +24,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Calculate daily EMA200 for trend filter
+    ema_200_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 200:
+        ema_200_1d[199] = np.mean(close_1d[0:200])
+        for i in range(200, len(close_1d)):
+            ema_200_1d[i] = (ema_200_1d[i-1] * 199 + close_1d[i]) / 200
     
-    # Calculate daily Camarilla levels (R1, S1 are the key breakout levels)
-    rang = ph - pl
-    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
-    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Align daily Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Donchian(20) channels on 4h
+    highest_high = np.full_like(high, np.nan)
+    lowest_low = np.full_like(low, np.nan)
+    if len(high) >= 20:
+        for i in range(19, len(high)):
+            highest_high[i] = np.max(high[i-19:i+1])
+            lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
-    
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 24:
         vol_ma[23] = np.mean(volume[0:24])
@@ -72,12 +63,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(24, 34)  # Ensure volume MA and EMA are ready
+    start_idx = max(24, 20)  # Ensure volume MA and Donchian are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,28 +78,28 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+            # Enter long: price breaks above Donchian high AND uptrend (price > EMA200) AND volume spike
+            if (close[i] > highest_high[i] and 
+                close[i] > ema_200_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+            # Enter short: price breaks below Donchian low AND downtrend (price < EMA200) AND volume spike
+            elif (close[i] < lowest_low[i] and 
+                  close[i] < ema_200_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 2 bars
-            if bars_since_entry < 2:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = 0.25
             else:
-                # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
-                if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+                # Exit long: price breaks below Donchian low OR trend reversal (price < EMA200)
+                if close[i] < lowest_low[i] or close[i] < ema_200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -116,12 +107,12 @@ def generate_signals(prices):
                     signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 2 bars
-            if bars_since_entry < 2:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = -0.25
             else:
-                # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
-                if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+                # Exit short: price breaks above Donchian high OR trend reversal (price > EMA200)
+                if close[i] > highest_high[i] or close[i] > ema_200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
