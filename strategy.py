@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_4h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,7 +16,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = pd.DatetimeIndex(prices['open_time'])
     
     # Get daily data for trend filter and Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
@@ -43,7 +42,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: above 1.5x 20-period average
+    # Volume filter: above 1.5x 20-period average (20*4h = ~3.3 days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -63,7 +62,7 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
         # Session filter: 08-20 UTC (reduce noise trades)
-        hour = open_time.hour[i]
+        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
