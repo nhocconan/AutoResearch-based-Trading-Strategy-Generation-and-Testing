@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h breakout of daily high/low with volume confirmation and weekly trend filter
-# Long when price breaks above daily high, volume > 1.5x 20-period average, and price above weekly EMA20
-# Short when price breaks below daily low, volume > 1.5x 20-period average, and price below weekly EMA20
-# Exit when price returns inside daily range (below daily high for long, above daily low for short)
-# Position size: 0.25 (25% of capital) to balance return and drawdown
-# Designed to work in trending markets via weekly trend filter and in ranging markets via mean reversion to daily range
+# Hypothesis: 6h Donchian channel breakout with 1d trend filter and volume confirmation
+# Long when price breaks above 6h Donchian upper band (20), above 1d EMA50, and volume > 1.5x 20-period average
+# Short when price breaks below 6h Donchian lower band (20), below 1d EMA50, and volume > 1.5x 20-period average
+# Exit when price crosses back below/above Donchian midline OR trend contradicts position
+# Position size: 0.25 (25% of capital) to manage drawdown while maintaining sufficient exposure
+# Designed to work in trending markets via EMA filter and capture breakouts in both bull and bear markets
 
-name = "12h_DailyBreakout_Volume_WeeklyTrend"
-timeframe = "12h"
+name = "6h_Donchian_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,21 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA20 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    weekly_ema20 = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
+    # 6h Donchian channel (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    upper_band = high_roll.values
+    lower_band = low_roll.values
+    midline = (upper_band + lower_band) / 2
     
-    # Daily high/low for breakout levels
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -47,42 +46,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for weekly EMA20 and volume MA
+    start_idx = 50  # Need enough data for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_ema20_aligned[i]) or np.isnan(daily_high_aligned[i]) or 
-            np.isnan(daily_low_aligned[i]) or np.isnan(vol_spike[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(midline[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above daily high + volume spike + above weekly EMA20
-            if (close[i] > daily_high_aligned[i] and 
-                vol_spike[i] and 
-                close[i] > weekly_ema20_aligned[i]):
+            # Enter long: price breaks above upper band, above 1d EMA50, and volume spike
+            if (close[i] > upper_band[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below daily low + volume spike + below weekly EMA20
-            elif (close[i] < daily_low_aligned[i] and 
-                  vol_spike[i] and 
-                  close[i] < weekly_ema20_aligned[i]):
+            # Enter short: price breaks below lower band, below 1d EMA50, and volume spike
+            elif (close[i] < lower_band[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below daily high (mean reversion to daily range)
-            if close[i] < daily_high_aligned[i]:
+            # Exit long: price crosses below midline OR trend turns bearish
+            if (close[i] < midline[i]) or (close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above daily low (mean reversion to daily range)
-            if close[i] > daily_low_aligned[i]:
+            # Exit short: price crosses above midline OR trend turns bullish
+            if (close[i] > midline[i]) or (close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
