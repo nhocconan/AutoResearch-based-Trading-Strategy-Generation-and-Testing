@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivotBreakout_VolumeTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (using previous week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot = np.zeros(len(close_1w))
-    r1 = np.zeros(len(close_1w))
-    s1 = np.zeros(len(close_1w))
-    r2 = np.zeros(len(close_1w))
-    s2 = np.zeros(len(close_1w))
-    
-    for i in range(1, len(close_1w)):
-        H = high_1w[i-1]
-        L = low_1w[i-1]
-        C = close_1w[i-1]
-        pivot[i] = (H + L + C) / 3.0
-        r1[i] = 2 * pivot[i] - L
-        s1[i] = 2 * pivot[i] - H
-        r2[i] = pivot[i] + (H - L)
-        s2[i] = pivot[i] - (H - L)
-    
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Get daily data for trend filter and volume average
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate 1d EMA(34) for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
+    # Get 1d data for Camarilla pivot levels and volume average
     # Calculate 1d volume average (20-period)
     vol_1d = pd.Series(df_1d['volume'].values)
     vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
@@ -69,16 +37,36 @@ def generate_signals(prices):
     vol_series = pd.Series(volume)
     vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
     
+    # Calculate Camarilla levels from previous 1d bar (H, L, C)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_R1 = np.zeros(len(close_1d))
+    camarilla_S1 = np.zeros(len(close_1d))
+    
+    for i in range(1, len(close_1d)):
+        H = high_1d[i-1]  # Previous day high
+        L = low_1d[i-1]   # Previous day low
+        C = close_1d[i-1] # Previous day close
+        camarilla_R1[i] = C + (H - L) * 1.1 / 12
+        camarilla_S1[i] = C - (H - L) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # warmup for indicators
+    start_idx = 34  # warmup for EMA34
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(vol_ma20_current[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or 
+            np.isnan(vol_ma20_current[i]) or np.isnan(camarilla_R1_aligned[i]) or 
+            np.isnan(camarilla_S1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,26 +75,26 @@ def generate_signals(prices):
         vol_ok = volume[i] > 1.5 * vol_ma20_current[i]
         
         if position == 0:
-            # Long: Break above weekly R2 with volume and above daily EMA trend
-            if close[i] > r2_aligned[i] and vol_ok and close[i] > ema50_1d_aligned[i]:
+            # Long: Break above Camarilla R1 with volume and above 1d EMA trend
+            if close[i] > camarilla_R1_aligned[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below weekly S2 with volume and below daily EMA trend
-            elif close[i] < s2_aligned[i] and vol_ok and close[i] < ema50_1d_aligned[i]:
+            # Short: Break below Camarilla S1 with volume and below 1d EMA trend
+            elif close[i] < camarilla_S1_aligned[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below weekly R1 or trend reversal
-            if close[i] < r1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit long: Price falls below Camarilla S1 or trend reversal
+            if close[i] < camarilla_S1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above weekly S1 or trend reversal
-            if close[i] > s1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit short: Price rises above Camarilla R1 or trend reversal
+            if close[i] > camarilla_R1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
