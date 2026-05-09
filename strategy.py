@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
-Hypothesis: Breakouts from weekly Camarilla R1/S1 levels with 1w trend filter and volume spike confirmation.
-The weekly timeframe provides a strong trend filter that works in both bull and bear markets.
-Volume spike (>2x 24-period average) confirms breakout strength. Designed for low trade frequency (12-37/year)
-to minimize fee drag. Uses 12h timeframe for execution with weekly trend filter.
+1d_Weekly_Camarilla_R1_S1_Breakout_Trend_Volume
+Hypothesis: Breakouts from weekly Camarilla R1/S1 levels on daily timeframe with weekly trend filter and volume spike confirmation.
+Uses daily candles for execution with weekly trend filter to capture multi-day moves. Designed for low trade frequency (7-25/year)
+to minimize fee drag. Weekly trend filter works in both bull and bear markets by aligning with higher timeframe momentum.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_Weekly_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -44,7 +43,7 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align weekly Camarilla levels to 12h timeframe
+    # Align weekly Camarilla levels to daily timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
@@ -57,12 +56,12 @@ def generate_signals(prices):
     
     ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
+    # Volume spike filter: current volume / 20-day average volume
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 24:
-        vol_ma[23] = np.mean(volume[0:24])
-        for i in range(24, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
     volume_ratio = np.full_like(volume, np.nan)
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
@@ -72,7 +71,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(24, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -103,7 +102,7 @@ def generate_signals(prices):
                 bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 3 bars
+            # Minimum holding period: 3 days
             if bars_since_entry < 3:
                 signals[i] = 0.25
             else:
@@ -116,7 +115,7 @@ def generate_signals(prices):
                     signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 3 bars
+            # Minimum holding period: 3 days
             if bars_since_entry < 3:
                 signals[i] = -0.25
             else:
