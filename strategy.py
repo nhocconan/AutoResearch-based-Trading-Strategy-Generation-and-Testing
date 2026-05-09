@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "6h_Camarilla_R3_S3_1dEMA34_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,58 +32,54 @@ def generate_signals(prices):
     breakout_up = close > r3
     breakout_down = close < s3
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for trend filter (simple close vs open for trend)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d trend: bullish if close > open, bearish if close < open
+    trend_1d = df_1d['close'].values > df_1d['open'].values
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
-    
-    # Volume filter: current volume > 2.5x 30-period average volume (tighter to reduce trades)
-    avg_volume = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (2.5 * avg_volume)
+    # Volume filter: current volume > 2x 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(trend_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 1d uptrend + volume spike
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: breakout above R3 + 1d bullish trend + volume spike
+            if breakout_up[i] and trend_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 1d downtrend + volume spike
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: breakout below S3 + 1d bearish trend + volume spike
+            elif breakout_down[i] and (not trend_1d_aligned[i]) and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price returns to previous day's close or trend turns bearish
+            if close[i] <= prev_close[i] or (not trend_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price returns to previous day's close or trend turns bullish
+            if close[i] >= prev_close[i] or trend_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
