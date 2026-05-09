@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h price breaking above/below 1d high/low with volume confirmation.
-# Uses 1-day high/low as support/resistance levels, volume surge for breakout strength,
-# and avoids false breakouts with volume filter. Designed for low-frequency, high-conviction trades.
-# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
-name = "12h_DailyHighLow_Breakout_Volume"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX(14) trend filter and volume surge.
+# Uses daily ADX for trend strength, Donchian channels for breakout signals,
+# and volume surge for confirmation. Designed to work in both bull (breakouts above upper channel)
+# and bear (breakdowns below lower channel). Target: 20-50 trades/year to avoid fee drag.
+name = "4h_Donchian20_1dADX25_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,33 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily high/low levels
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get previous day's high and low (completed day only)
+    # Calculate 14-period ADX for daily timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1d high/low to 12h timeframe (previous day's levels)
-    daily_high_aligned = align_htf_to_ltf(prices, df_1d, high_1d)
-    daily_low_aligned = align_htf_to_ltf(prices, df_1d, low_1d)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Volume confirmation: volume > 1.5x 20-period EMA (moderate threshold)
+    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+    period = 14
+    alpha = 1.0 / period
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
+    
+    # Calculate +DI and -DI using Wilder's smoothing
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    plus_dm_smooth[0] = plus_dm[0]
+    minus_dm_smooth[0] = minus_dm[0]
+    for i in range(1, len(plus_dm)):
+        plus_dm_smooth[i] = (1 - alpha) * plus_dm_smooth[i-1] + alpha * plus_dm[i]
+        minus_dm_smooth[i] = (1 - alpha) * minus_dm_smooth[i-1] + alpha * minus_dm[i]
+    
+    plus_di = np.where(atr > 0, 100 * plus_dm_smooth / atr, 0)
+    minus_di = np.where(atr > 0, 100 * minus_dm_smooth / atr, 0)
+    
+    # Calculate DX and ADX
+    dx = np.where((plus_di + minus_di) > 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = np.zeros_like(dx)
+    adx[0] = dx[0]
+    for i in range(1, len(dx)):
+        adx[i] = (1 - alpha) * adx[i-1] + alpha * dx[i]
+    
+    # Calculate Donchian channels (20-period) for 4h timeframe
+    upper_channel = np.full_like(high, np.nan)
+    lower_channel = np.full_like(low, np.nan)
+    for i in range(len(high)):
+        if i < 20:
+            upper_channel[i] = np.nan
+            lower_channel[i] = np.nan
+        else:
+            upper_channel[i] = np.max(high[i-19:i+1])
+            lower_channel[i] = np.min(low[i-19:i+1])
+    
+    # Align 1d ADX to 4h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
+    vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for volume EMA
-    start_idx = 20
+    start_idx = 20  # Need 20 periods for Donchian channels
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
-            np.isnan(vol_ema20[i])):
+        # Skip if required data unavailable (NaN from indicators)
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,26 +107,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above previous day's high + volume confirmation
-            if price > daily_high_aligned[i] and vol_confirm[i]:
+            # Enter long: price breaks above upper channel + 1d ADX > 25 + volume spike
+            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below previous day's low + volume confirmation
-            elif price < daily_low_aligned[i] and vol_confirm[i]:
+            # Enter short: price breaks below lower channel + 1d ADX > 25 + volume spike
+            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below previous day's low or volume dries up
-            if price < daily_low_aligned[i] or not vol_confirm[i]:
+            # Exit long: price returns below upper channel or ADX drops below 20
+            if price < upper_channel[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above previous day's high or volume dries up
-            if price > daily_high_aligned[i] or not vol_confirm[i]:
+            # Exit short: price returns above lower channel or ADX drops below 20
+            if price > lower_channel[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
