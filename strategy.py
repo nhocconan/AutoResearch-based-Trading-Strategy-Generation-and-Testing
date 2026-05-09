@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_Daily_Alligator_Trend_Momentum"
-timeframe = "6h"
+name = "4H_Daily_Ichimoku_Cloud_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Alligator and momentum
+    # Get daily data for Ichimoku and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Calculate daily Alligator lines (Williams Alligator)
-    close_1d = df_1d['close'].values
+    # Calculate Ichimoku components (default periods: 9, 26, 52)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Jaw (Blue Line): 13-period SMMA, 8 bars ahead
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    # Teeth (Red Line): 8-period SMMA, 5 bars ahead
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    # Lips (Green Line): 5-period SMMA, 3 bars ahead
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Align to 6h
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Momentum: Daily ROC(5)
-    roc5_1d = np.diff(np.concatenate([[np.nan], close_1d])) / np.concatenate([[np.nan], close_1d[:-1]]) * 100
-    roc5_1d = pd.Series(roc5_1d).rolling(window=5, min_periods=5).mean().values
-    roc5_aligned = align_htf_to_ltf(prices, df_1d, roc5_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 4h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume confirmation: current volume > 1.8x 20-period average
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_avg * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,33 +67,41 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or np.isnan(roc5_aligned[i]):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(ema50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
         if position == 0:
-            # Enter long: Lips above Teeth above Jaw (bullish alignment) + positive momentum
-            if lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and roc5_aligned[i] > 0:
+            # Enter long: price breaks above cloud + above Tenkan + above EMA50 + volume confirmation
+            if (close[i] > cloud_top and close[i] > tenkan_sen_aligned[i] and 
+                close[i] > ema50_aligned[i] and volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips below Teeth below Jaw (bearish alignment) + negative momentum
-            elif lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and roc5_aligned[i] < 0:
+            # Enter short: price breaks below cloud + below Tenkan + below EMA50 + volume confirmation
+            elif (close[i] < cloud_bottom and close[i] < tenkan_sen_aligned[i] and 
+                  close[i] < ema50_aligned[i] and volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Lips cross below Teeth (trend weakening) or momentum turns negative
-            if lips_aligned[i] < teeth_aligned[i] or roc5_aligned[i] < 0:
+            # Exit long: price falls below cloud bottom (trend change)
+            if close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Lips cross above Teeth (trend weakening) or momentum turns positive
-            if lips_aligned[i] > teeth_aligned[i] or roc5_aligned[i] > 0:
+            # Exit short: price rises above cloud top (trend change)
+            if close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
