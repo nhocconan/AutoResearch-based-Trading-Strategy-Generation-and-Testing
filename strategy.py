@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-# Donchian channels provide clear breakout signals, EMA50 on weekly filters major trend direction,
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Donchian breakouts capture breakout momentum, EMA50 on 1d filters trend direction,
 # and volume > 1.5x 20-period average confirms institutional participation.
-# Designed for lower trade frequency on 12h timeframe to minimize fee drag while capturing major moves.
-name = "12h_Donchian20_1wEMA50_Trend_Volume"
-timeframe = "12h"
+# Works in bull/bear markets by requiring trend alignment. Target: 15-35 trades/year.
+name = "4h_Donchian20_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,27 +21,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get daily data for Donchian channels
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily Donchian channels (20-period)
-    donchian_high = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align Donchian levels to 12h
-    donchian_high_12h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_12h = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Calculate Donchian channels (20-period) on 4h data
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,7 +45,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h[i]) or np.isnan(donchian_high_12h[i]) or np.isnan(donchian_low_12h[i]) or 
+        if (np.isnan(ema_50_4h[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -62,11 +53,11 @@ def generate_signals(prices):
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > donchian_high_12h[i-1]  # Break above upper band
-        short_breakout = close[i] < donchian_low_12h[i-1]  # Break below lower band
+        long_breakout = close[i] > high_max[i-1]  # Break above 20-period high
+        short_breakout = close[i] < low_min[i-1]  # Break below 20-period low
         
-        trend_up = close[i] > ema_50_12h[i]
-        trend_down = close[i] < ema_50_12h[i]
+        trend_up = close[i] > ema_50_4h[i]
+        trend_down = close[i] < ema_50_4h[i]
         
         if position == 0:
             # Long: bullish breakout + uptrend + volume confirmation
@@ -79,16 +70,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout below lower band or trend reversal
-            if close[i] < donchian_low_12h[i] or not trend_up:
+            # Exit long: bearish breakout below 20-period low or trend reversal
+            if close[i] < low_min[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout above upper band or trend reversal
-            if close[i] > donchian_high_12h[i] or not trend_down:
+            # Exit short: bullish breakout above 20-period high or trend reversal
+            if close[i] > high_max[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
