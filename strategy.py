@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyTrend_DailyBreakout_12hVolume"
-timeframe = "1d"
+"""
+6h ADX + Williams Alligator System
+Trend strength + smoothed moving average crossover system
+Works in both bull/bear markets by filtering for strong trends
+"""
+
+name = "6h_ADX_Alligator_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(arr, period):
+    """Smoothed Moving Average"""
+    n = len(arr)
+    result = np.full(n, np.nan)
+    if n < period:
+        return result
+    sma = np.mean(arr[:period])
+    result[period-1] = sma
+    for i in range(period, n):
+        result[i] = (result[i-1] * (period-1) + arr[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -15,85 +33,114 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for ADX and Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate ADX on 1d
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    volume_12h = df_12h['volume'].values
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Calculate 50-period EMA on 1w close
-    ema50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = (close_1w[i] * 2 + ema50_1w[i-1] * 48) / 50
+    # Smoothed TR, +DM, -DM
+    period_adx = 14
+    tr_sum = np.full_like(tr, np.nan)
+    plus_dm_sum = np.full_like(plus_dm, np.nan)
+    minus_dm_sum = np.full_like(minus_dm, np.nan)
     
-    # Align 1w EMA50 to 1d timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    if len(tr) >= period_adx:
+        tr_sum[period_adx-1] = np.nansum(tr[1:period_adx+1])
+        plus_dm_sum[period_adx-1] = np.nansum(plus_dm[1:period_adx+1])
+        minus_dm_sum[period_adx-1] = np.nansum(minus_dm[1:period_adx+1])
+        
+        for i in range(period_adx, len(tr)):
+            tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / period_adx) + tr[i]
+            plus_dm_sum[i] = plus_dm_sum[i-1] - (plus_dm_sum[i-1] / period_adx) + plus_dm[i]
+            minus_dm_sum[i] = minus_dm_sum[i-1] - (minus_dm_sum[i-1] / period_adx) + minus_dm[i]
     
-    # Calculate 20-period SMA of volume on 12h
-    vol_ma_12h = np.full_like(volume_12h, np.nan)
-    if len(volume_12h) >= 20:
-        vol_ma_12h[19] = np.mean(volume_12h[0:20])
-        for i in range(20, len(volume_12h)):
-            vol_ma_12h[i] = (vol_ma_12h[i-1] * 19 + volume_12h[i]) / 20
+    # DI+ and DI-
+    plus_di = np.full_like(tr, np.nan)
+    minus_di = np.full_like(tr, np.nan)
+    valid_tr = tr_sum != 0
+    plus_di[valid_tr] = 100 * plus_dm_sum[valid_tr] / tr_sum[valid_tr]
+    minus_di[valid_tr] = 100 * minus_dm_sum[valid_tr] / tr_sum[valid_tr]
     
-    # Align 12h volume MA to 1d timeframe
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # DX and ADX
+    dx = np.full_like(tr, np.nan)
+    di_sum = plus_di + minus_di
+    valid_di = di_sum != 0
+    dx[valid_di] = 100 * np.abs(plus_di[valid_di] - minus_di[valid_di]) / di_sum[valid_di]
     
-    # Calculate volume ratio: current volume vs 12h volume MA
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma_12h_aligned)) & (vol_ma_12h_aligned != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma_12h_aligned[valid_vol]
+    adx = np.full_like(tr, np.nan)
+    if len(dx) >= period_adx:
+        adx[period_adx-1] = np.nanmean(dx[period_adx-1:2*period_adx-1])
+        for i in range(2*period_adx-1, len(dx)):
+            adx[i] = (adx[i-1] * (period_adx-1) + dx[i]) / period_adx
+    
+    # Align ADX to 6m
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Williams Alligator on 1d (SMA-based smoothed)
+    jaw = smma(close_1d, 13)  # Blue line
+    teeth = smma(close_1d, 8)  # Red line
+    lips = smma(close_1d, 5)   # Green line
+    
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(50, 20)  # Need 1w EMA50 and 12h volume MA
+    start_idx = max(period_adx*2-1, 13)  # Need ADX and Alligator ready
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market conditions
-        trend_up = close[i] > ema50_1w_aligned[i]
-        volume_surge = volume_ratio[i] > 1.5
+        # ADX trend strength filter (>25 = strong trend)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Enter long: Uptrend + volume surge
-            if trend_up and volume_surge:
+            # Long: Lips > Teeth > Jaw (bullish alignment) + strong trend
+            if lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + volume surge
-            elif not trend_up and volume_surge:
+            # Short: Jaws > Teeth > Lips (bearish alignment) + strong trend
+            elif jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i] and strong_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR volume normalizes
-            if not trend_up or volume_ratio[i] < 1.2:
+            # Exit long: Alligator alignment breaks or trend weakens
+            if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]) or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR volume normalizes
-            if trend_up or volume_ratio[i] < 1.2:
+            # Exit short: Alligator alignment breaks or trend weakens
+            if not (jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]) or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
