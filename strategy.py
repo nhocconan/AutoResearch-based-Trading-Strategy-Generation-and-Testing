@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with 1-day Williams %R for overbought/oversold conditions and 1-week EMA trend filter.
-# Enters long when Williams %R < -80 (oversold) and price > 1-week EMA, short when Williams %R > -20 (overbought) and price < 1-week EMA.
-# Exits when Williams %R returns to neutral range (-80 to -20) or price crosses EMA in opposite direction.
-# Williams %R identifies exhaustion points in both bull and bear markets, while EMA filter ensures trades align with higher-timeframe trend.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# 4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend
+# Hypothesis: 4h timeframe with Camarilla pivot levels (R3/S3) breakout and 12h EMA50 trend filter.
+# Enters long when price breaks above R3 and 12h EMA50 is rising, short when price breaks below S3 and 12h EMA50 is falling.
+# Uses volume confirmation (current volume > 1.5x 20-period average) to filter breakouts.
+# Exits when price returns to the Camarilla midpoint (P) or trend reverses.
+# Designed for low trade frequency (target: 20-50 trades/year) with size 0.25 to minimize fee drag.
+# Works in both bull and bear markets by following the 12h trend direction.
 
-name = "12h_WilliamsR_EMA_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,32 +23,51 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 1-day Williams %R(14)
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_rising = ema_50_12h > np.roll(ema_50_12h, 1)
+    ema_50_12h_falling = ema_50_12h < np.roll(ema_50_12h, 1)
+    ema_50_12h_rising = np.where(np.isnan(ema_50_12h_rising), False, ema_50_12h_rising)
+    ema_50_12h_falling = np.where(np.isnan(ema_50_12h_falling), False, ema_50_12h_falling)
+    ema_50_12h_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h_rising)
+    ema_50_12h_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h_falling)
+    
+    # Calculate Camarilla pivot levels from previous 1d
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Previous day's OHLC (use shift by 1 to avoid look-ahead)
+    prev_high = np.roll(df_1d['high'], 1)
+    prev_low = np.roll(df_1d['low'], 1)
+    prev_close = np.roll(df_1d['close'], 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Williams %R conditions: oversold < -80, overbought > -20
-    williams_oversold = williams_r < -80
-    williams_overbought = williams_r > -20
+    # Camarilla calculations
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # Calculate 1-week EMA(20) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Resistance and Support levels
+    r3 = pivot + (range_hl * 1.1 / 4)
+    s3 = pivot - (range_hl * 1.1 / 4)
+    # Midpoint (P) for exit
+    midpoint = pivot
     
-    ema_20 = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint)
     
-    # Align indicators to lower timeframe
-    williams_oversold_aligned = align_htf_to_ltf(prices, df_1d, williams_oversold)
-    williams_overbought_aligned = align_htf_to_ltf(prices, df_1d, williams_overbought)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,37 +76,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_oversold_aligned[i]) or np.isnan(williams_overbought_aligned[i]) or
-            np.isnan(ema_20_aligned[i])):
+        if (np.isnan(ema_50_12h_rising_aligned[i]) or np.isnan(ema_50_12h_falling_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(midpoint_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: oversold + price above EMA
-            if williams_oversold_aligned[i] and close[i] > ema_20_aligned[i]:
+            # Enter long: price breaks above R3, 12h EMA50 rising, volume confirmation
+            if close[i] > r3_aligned[i] and ema_50_12h_rising_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: overbought + price below EMA
-            elif williams_overbought_aligned[i] and close[i] < ema_20_aligned[i]:
+            # Enter short: price breaks below S3, 12h EMA50 falling, volume confirmation
+            elif close[i] < s3_aligned[i] and ema_50_12h_falling_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: oversold condition ends OR price crosses below EMA
-            if (not williams_oversold_aligned[i]) or (close[i] < ema_20_aligned[i]):
+            # Hold long: 0.25
+            signals[i] = 0.25
+            # Exit long: price returns to midpoint OR trend turns bearish
+            if close[i] <= midpoint_aligned[i] or not ema_50_12h_rising_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: overbought condition ends OR price crosses above EMA
-            if (not williams_overbought_aligned[i]) or (close[i] > ema_20_aligned[i]):
+            # Hold short: -0.25
+            signals[i] = -0.25
+            # Exit short: price returns to midpoint OR trend turns bullish
+            if close[i] >= midpoint_aligned[i] or not ema_50_12h_falling_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
