@@ -3,13 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_PivotPoint_MomentumReversal_1dTrend"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Works in bull/bear by trading with higher timeframe trend only
+# Target: 20-40 trades/year to avoid fee drag
+
+name = "4h_Donchian20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,80 +21,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily pivot points and trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot points (classic: PP = (H+L+C)/3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 50-period EMA on 1d close
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    pivot_point = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot_point - low_1d
-    s1 = 2 * pivot_point - high_1d
-    r2 = pivot_point + (high_1d - low_1d)
-    s2 = pivot_point - (high_1d - low_1d)
+    # Calculate Donchian channels (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Calculate EMA21 on 1d close for trend filter
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
-    
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Need enough data for EMA and volume MA
+    start_idx = 50  # Need enough data for EMA and Donchian
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_21_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i])):
+        # Skip if required data unavailable
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_21_aligned[i]
-        vol_spike = volume_spike[i]
+        ema_1d = ema_50_1d_aligned[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price below S1 (support) with volume spike and above daily EMA21
-            if close[i] < s1_aligned[i] and close[i] > ema_1d and vol_spike:
+            # Enter long: price breaks above Donchian high + above 1d EMA50 + volume
+            if close[i] > donchian_high[i] and close[i] > ema_1d and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price above R1 (resistance) with volume spike and below daily EMA21
-            elif close[i] > r1_aligned[i] and close[i] < ema_1d and vol_spike:
+            # Enter short: price breaks below Donchian low + below 1d EMA50 + volume
+            elif close[i] < donchian_low[i] and close[i] < ema_1d and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price reaches R1 (first resistance) or trend breaks below EMA21
-            if close[i] >= r1_aligned[i] or close[i] < ema_1d:
+            # Exit long: price breaks below Donchian low or trend breaks
+            if close[i] < donchian_low[i] or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price reaches S1 (first support) or trend breaks above EMA21
-            if close[i] <= s1_aligned[i] or close[i] > ema_1d:
+            # Exit short: price breaks above Donchian high or trend breaks
+            if close[i] > donchian_high[i] or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
