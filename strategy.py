@@ -3,110 +3,114 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h and 1d timeframes for direction, 1h for entry timing.
-# Uses 4h Donchian channel breakout (20-period) with 1d EMA50 trend filter and volume confirmation.
-# Designed to work in both bull and bear markets by requiring alignment with higher timeframe trend.
-# Target: 15-37 trades per year to minimize fee drag and improve generalization.
-name = "1h_Donchian20_1dEMA50_VolumeBreakout"
-timeframe = "1h"
+# Hypothesis: 6h strategy using 1w pivot direction and 1d ATR-based volatility filter.
+# Uses weekly Camarilla pivot levels (R3/S3) for mean reversion entries with 1d ATR filter to avoid low volatility periods.
+# Designed to work in both bull and bear markets by fading extremes in ranging conditions.
+# Target: 12-37 trades per year to minimize fee drag.
+name = "6h_WeeklyCamarilla_R3S3_MeanRev_1dATRFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for Donchian channel
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for Camarilla pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 4h Donchian channel (20-period high/low)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # R3 = Pivot + 1.1 * (H - L)
+    # S3 = Pivot - 1.1 * (H - L)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Upper band: highest high of last 20 periods
-    upper_4h = np.full(len(high_4h), np.nan)
-    for i in range(20, len(high_4h)):
-        upper_4h[i] = np.max(high_4h[i-20:i])
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r3 = pivot + 1.1 * (weekly_high - weekly_low)
+    s3 = pivot - 1.1 * (weekly_high - weekly_low)
     
-    # Lower band: lowest low of last 20 periods
-    lower_4h = np.full(len(low_4h), np.nan)
-    for i in range(20, len(low_4h)):
-        lower_4h[i] = np.min(low_4h[i-20:i])
+    # Align weekly R3/S3 to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Align 4h Donchian to 1h timeframe
-    upper_4h_1h = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_1h = align_htf_to_ltf(prices, df_4h, lower_4h)
-    
-    # Get 1d data for EMA50 trend filter
+    # Get daily data for ATR volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA50
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 14-day ATR
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: spike above 2.0x 24-period average (1 day of 1h bars)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period has no previous close
+    
+    atr_14 = np.zeros_like(tr)
+    for i in range(len(tr)):
+        if i < 14:
+            atr_14[i] = np.nan
+        else:
+            atr_14[i] = np.mean(tr[i-13:i+1])
+    
+    # Align ATR to 6h timeframe
+    atr_14_6h = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # ATR 20-period average for volatility regime filter
+    atr_ma = pd.Series(atr_14_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24, 20*4)  # Wait for EMA50, volume MA, and 4h Donchian
+    start_idx = max(20, 14)  # Wait for ATR MA and ATR calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(upper_4h_1h[i]) or np.isnan(lower_4h_1h[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(atr_14_6h[i]) or np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation
-        
-        # Pre-compute hour for session filter (UTC 0-24)
-        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        # Trade during active hours (8 AM - 8 PM UTC) to avoid low liquidity
-        in_session = (8 <= hour <= 20)
+        # Volatility filter: only trade when ATR > 1.5x its 20-period average
+        vol_filter = atr_14_6h[i] > 1.5 * atr_ma[i]
         
         if position == 0:
-            # Long: price above 4h upper band, 1d uptrend (price > EMA50), volume breakout
-            if (close[i] > upper_4h_1h[i] and 
-                close[i] > ema_50_1h[i] and 
-                vol_ok and 
-                in_session):
-                signals[i] = 0.20
+            # Long: price below S3 with volatility expansion (mean reversion long)
+            if close[i] < s3_6h[i] and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 4h lower band, 1d downtrend (price < EMA50), volume breakdown
-            elif (close[i] < lower_4h_1h[i] and 
-                  close[i] < ema_50_1h[i] and 
-                  vol_ok and 
-                  in_session):
-                signals[i] = -0.20
+            # Short: price above R3 with volatility expansion (mean reversion short)
+            elif close[i] > r3_6h[i] and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below 4h lower band or trend reversal
-            if close[i] < lower_4h_1h[i] or close[i] < ema_50_1h[i]:
+            # Exit long: price crosses above pivot or volatility collapses
+            if close[i] > pivot[-1 if len(pivot) == 1 else np.sum(~np.isnan(pivot))] or atr_14_6h[i] < atr_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 4h upper band or trend reversal
-            if close[i] > upper_4h_1h[i] or close[i] > ema_50_1h[i]:
+            # Exit short: price crosses below pivot or volatility collapses
+            if close[i] < pivot[-1 if len(pivot) == 1 else np.sum(~np.isnan(pivot))] or atr_14_6h[i] < atr_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
