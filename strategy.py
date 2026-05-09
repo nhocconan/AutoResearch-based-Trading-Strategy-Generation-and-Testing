@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_VolumeSpike_Trend_Filter"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,68 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume spike
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Get daily data for Camarilla levels and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # 1d volume spike: current volume > 2.0 * 20-day average
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    # Trend filter: weekly EMA34
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume filter: current daily volume > 1.5 * 20-day average
     vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = df_1d['volume'].values > (vol_ma * 2.0)
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # 4h Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Align 1d indicators to 4h
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_spike_4h = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Align all to daily
+    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1w_1d = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and Donchian
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_4h[i]) or np.isnan(volume_spike_4h[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
+            np.isnan(ema34_1w_1d[i]) or np.isnan(volume_filter_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_1d_4h[i]
-        vol_spike = volume_spike_4h[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        r1_val = r1_1d[i]
+        s1_val = s1_1d[i]
+        trend = ema34_1w_1d[i]
+        vol_filter = volume_filter_1d_aligned[i]
         
         if position == 0:
-            # Enter long: break above upper Donchian with volume spike and above trend
-            if close[i] > upper and close[i] > trend and vol_spike:
+            # Enter long: break above R1 with volume and above weekly trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower Donchian with volume spike and below trend
-            elif close[i] < lower and close[i] < trend and vol_spike:
+            # Enter short: break below S1 with volume and below weekly trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below lower Donchian (mean reversion)
-            if close[i] < lower:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above upper Donchian (mean reversion)
-            if close[i] > upper:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
