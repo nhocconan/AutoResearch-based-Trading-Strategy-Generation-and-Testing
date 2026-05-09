@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 12H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-# Hypothesis: Use daily EMA34 for trend filter with daily Camarilla R1/S1 breakouts on 12h timeframe.
-# Daily EMA34 provides smoother trend filtering suitable for daily pivot levels.
-# Volume confirmation ensures breakouts have conviction. Works in bull/bear via trend filter.
-# Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+# 4H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS_v2
+# Hypothesis: Daily EMA34 trend filter with daily Camarilla R1/S1 breakouts. Uses volume confirmation and stricter entry/exit to reduce trades. Target: 75-200 total trades over 4 years (19-50/year). Designed to work in bull/bear via trend filter.
 
-name = "12H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -41,7 +38,7 @@ def generate_signals(prices):
     # Get daily data for EMA34 trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h
+    # Align to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -54,7 +51,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
