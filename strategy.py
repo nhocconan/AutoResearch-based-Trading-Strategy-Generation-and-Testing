@@ -3,11 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h timeframe strategy using 1d Camarilla pivot breakouts with volume confirmation and 1d EMA trend filter.
-# Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing sustained trends in both bull and bear markets.
-# Uses discrete position sizing (0.25) and strict entry conditions to avoid overtrading.
-name = "12h_Camarilla_R1_S1_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_1d_Vortex_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,75 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter (HTF)
+    # Get 1d data for Vortex indicator and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 30-period EMA on 1d close for trend filter
+    # Calculate Vortex Indicator on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
-    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # Calculate 1d CAMARILLA pivot levels (R1, S1) from previous 1d bar's OHLC
-    prev_1d_high = df_1d['high'].shift(1).values
-    prev_1d_low = df_1d['low'].shift(1).values
-    prev_1d_close = df_1d['close'].shift(1).values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Camarilla formula for R1 and S1
-    range_1d = prev_1d_high - prev_1d_low
-    camarilla_mult = 1.1 / 12  # ~0.0916667
-    r1_1d = prev_1d_close + range_1d * camarilla_mult * 1
-    s1_1d = prev_1d_close - range_1d * camarilla_mult * 1
+    # Vortex components
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # Align Camarilla levels to 12h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Sum over 34 periods
+    tr_sum = pd.Series(tr).rolling(window=34, min_periods=34).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=34, min_periods=34).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=34, min_periods=34).sum().values
     
-    # Calculate 20-period volume average for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Vortex indicators
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # Align Vortex indicators to 4h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    
+    # Calculate 1d volume average for spike detection
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need 30 for 1d EMA and 20 for volume average
+    start_idx = max(34, 20)  # Need 34 for Vortex and 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(vi_plus_aligned[i]) or np.isnan(vi_minus_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_30_1d_aligned[i]
-        r1_level = r1_1d_aligned[i]
-        s1_level = s1_1d_aligned[i]
+        vi_plus_val = vi_plus_aligned[i]
+        vi_minus_val = vi_minus_aligned[i]
+        vol_ma_val = vol_ma_1d_aligned[i]
         vol = volume[i]
-        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Price breaks above R1 with volume AND price > 1d EMA30 (uptrend)
-            if close[i] > r1_level and vol > 2.0 * vol_ma_val and close[i] > ema_1d:
+            # Enter long: VI+ > VI- (bullish trend) with volume confirmation
+            if vi_plus_val > vi_minus_val and vol > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S1 with volume AND price < 1d EMA30 (downtrend)
-            elif close[i] < s1_level and vol > 2.0 * vol_ma_val and close[i] < ema_1d:
+            # Enter short: VI- > VI+ (bearish trend) with volume confirmation
+            elif vi_minus_val > vi_plus_val and vol > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below R1 OR trend reverses (price < 1d EMA30)
-            if close[i] < r1_level or close[i] < ema_1d:
+            # Exit long: Trend weakness (VI- > VI+) or volume drops
+            if vi_minus_val > vi_plus_val or vol < vol_ma_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above S1 OR trend reverses (price > 1d EMA30)
-            if close[i] > s1_level or close[i] > ema_1d:
+            # Exit short: Trend weakness (VI+ > VI-) or volume drops
+            if vi_plus_val > vi_minus_val or vol < vol_ma_val:
                 signals[i] = 0.0
                 position = 0
             else:
