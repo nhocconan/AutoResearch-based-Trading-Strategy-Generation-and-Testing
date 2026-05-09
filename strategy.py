@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_AdaptiveKeltnerBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,85 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get 1d data for ATR calculation
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 12h EMA50 for trend
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 1d Camarilla levels (R3, S3)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
+    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
     
-    # Calculate ATR(14) on 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1d volume average for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate EMA(20) on 1d for trend
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Calculate Keltner Channel on 6h using 1d ATR
-    # Upper = EMA(20) + 2 * ATR(14)
-    # Lower = EMA(20) - 2 * ATR(14)
-    keltner_upper = ema20_1d + 2 * atr_1d
-    keltner_lower = ema20_1d - 2 * atr_1d
-    
-    # Align all to 6h
-    ema20_1d_6h = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    keltner_upper_6h = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_6h = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    atr_1d_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Volume filter: 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align all to 4h
+    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20_1d_6h[i]) or np.isnan(keltner_upper_6h[i]) or 
-            np.isnan(keltner_lower_6h[i]) or np.isnan(atr_1d_6h[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema50_12h_4h[i]) or np.isnan(camarilla_high_4h[i]) or 
+            np.isnan(camarilla_low_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_trend = ema20_1d_6h[i]
-        upper = keltner_upper_6h[i]
-        lower = keltner_lower_6h[i]
-        atr_val = atr_1d_6h[i]
-        vol_ok = volume[i] > vol_avg[i] * 1.8
+        trend = ema50_12h_4h[i]
+        resistance = camarilla_high_4h[i]
+        support = camarilla_low_4h[i]
+        vol_avg = vol_avg_1d_4h[i]
+        vol_ok = volume[i] > vol_avg * 1.5
         
         if position == 0:
-            # Long: break above upper band with volume and uptrend
-            if close[i] > upper and vol_ok and close[i] > ema_trend:
+            # Long: break above R3 with volume and above 12h EMA50
+            if close[i] > resistance and vol_ok and close[i] > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume and downtrend
-            elif close[i] < lower and vol_ok and close[i] < ema_trend:
+            # Short: break below S3 with volume and below 12h EMA50
+            elif close[i] < support and vol_ok and close[i] < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below EMA or opposite band touch
-            if close[i] < ema_trend or close[i] < lower:
+            # Exit long: close below S3 or trend reversal
+            if close[i] < support or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above EMA or opposite band touch
-            if close[i] > ema_trend or close[i] > upper:
+            # Exit short: close above R3 or trend reversal
+            if close[i] > resistance or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
