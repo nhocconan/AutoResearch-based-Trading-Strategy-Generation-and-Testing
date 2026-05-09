@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,9 +22,9 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 4h data for volume filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 6h data for volume filter
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 50:
         return np.zeros(n)
     
     # Previous day's close for Camarilla calculation (R3, S3)
@@ -39,16 +39,16 @@ def generate_signals(prices):
     # Trend filter: 1d EMA50
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: current 4h volume > 1.5 * 20-period average
-    vol_series = pd.Series(df_4h['volume'].values)
+    # Volume filter: current 6h volume > 1.5 * 20-period average
+    vol_series = pd.Series(df_6h['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_4h = df_4h['volume'].values > (vol_ma * 1.5)
+    volume_filter_6h = df_6h['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 4h
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_filter_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_filter_4h)
+    # Align all to 6h
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_6h_aligned = align_htf_to_ltf(prices, df_6h, volume_filter_6h)
     
     signals = np.zeros(n)
     position = 0
@@ -56,17 +56,17 @@ def generate_signals(prices):
     start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter_4h_aligned[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
+            np.isnan(ema50_1d_6h[i]) or np.isnan(volume_filter_6h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_4h[i]
-        s3_val = s3_4h[i]
-        trend = ema50_1d_4h[i]
-        vol_filter = volume_filter_4h_aligned[i]
+        r3_val = r3_6h[i]
+        s3_val = s3_6h[i]
+        trend = ema50_1d_6h[i]
+        vol_filter = volume_filter_6h_aligned[i]
         
         if position == 0:
             # Enter long: break above R3 with volume and above trend
