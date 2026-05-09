@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot level (R3/S3) bounce with 1d EMA34 trend filter and volume spike.
-# Uses daily EMA34 for trend direction (price > EMA34 = bullish, < EMA34 = bearish),
-# Camarilla R3/S3 levels for mean-reversion entries, and volume surge for confirmation.
-# In bull trend: buy at S3 bounce; in bear trend: sell at R3 rejection.
-# Designed for low trade frequency (<400 total) to minimize fee drag.
-name = "4h_Camarilla_R3S3_Bounce_1dEMA34_VolumeSpike"
+# Hypothesis: 4h 34-period EMA trend filter with 1d RSI(14) mean reversion and volume confirmation.
+# Uses daily RSI for contrarian entries when extreme, 4h EMA for trend alignment,
+# and volume surge for confirmation. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+# Target: 20-50 trades/year to avoid fee drag.
+name = "4h_EMA34_1dRSI14_MeanRev_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,53 +21,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
+    # Get 1d data for RSI mean reversion filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 34-period EMA for daily timeframe
+    # Calculate 14-period RSI for daily timeframe
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Camarilla pivot levels for each day (based on previous day OHLC)
-    # Camarilla formulas:
-    # R4 = close + ((high - low) * 1.5000)
-    # R3 = close + ((high - low) * 1.2500)
-    # R2 = close + ((high - low) * 1.1666)
-    # R1 = close + ((high - low) * 1.0833)
-    # PP = (high + low + close) / 3
-    # S1 = close - ((high - low) * 1.0833)
-    # S2 = close - ((high - low) * 1.1666)
-    # S3 = close - ((high - low) * 1.2500)
-    # S4 = close - ((high - low) * 1.5000)
-    # We use R3 and S3 for entries
+    # Wilder's smoothing for RSI
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, len(gain)):
+        avg_gain[i] = (1 - alpha) * avg_gain[i-1] + alpha * gain[i]
+        avg_loss[i] = (1 - alpha) * avg_loss[i-1] + alpha * loss[i]
     
-    # We need previous day's OHLC to calculate today's Camarilla levels
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    close_prev = np.roll(close, 1)
-    # Set first day's previous values to current day's (no look-ahead)
-    high_prev[0] = high[0]
-    low_prev[0] = low[0]
-    close_prev[0] = close[0]
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla R3 and S3
-    R3 = close_prev + ((high_prev - low_prev) * 1.2500)
-    S3 = close_prev - ((high_prev - low_prev) * 1.2500)
+    # Calculate 34-period EMA for 4h timeframe
+    ema34 = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: volume > 2.0x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
+    # Volume confirmation: volume > 1.8x 34-period EMA (moderate threshold)
+    vol_ema34 = pd.Series(volume).ewm(span=34, adjust=False, min_periods=34).mean().values
+    vol_confirm = volume > (1.8 * vol_ema34)
+    
+    # Align 1d RSI to 4h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have valid previous day data
-        # Skip if required data unavailable
-        if (np.isnan(ema34_aligned[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(vol_ema20[i])):
+    start_idx = 34  # Need 34 periods for EMA
+    
+    for i in range(start_idx, n):
+        # Skip if required data unavailable (NaN from indicators)
+        if (np.isnan(rsi_aligned[i]) or np.isnan(ema34[i]) or np.isnan(vol_ema34[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,30 +71,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # In bull trend (price > EMA34): look for long at S3 bounce
-            # In bear trend (price < EMA34): look for short at R3 rejection
-            if close[i] > ema34_aligned[i]:  # Bull trend
-                if price <= S3[i] * 1.001 and price >= S3[i] * 0.999:  # Near S3 level (within 0.1%)
-                    if vol_confirm[i]:
-                        signals[i] = 0.25
-                        position = 1
-            else:  # Bear trend
-                if price <= R3[i] * 1.001 and price >= R3[i] * 0.999:  # Near R3 level (within 0.1%)
-                    if vol_confirm[i]:
-                        signals[i] = -0.25
-                        position = -1
+            # Enter long: price > EMA34 (uptrend) + RSI < 30 (oversold) + volume surge
+            if (price > ema34[i] and rsi_aligned[i] < 30 and vol_confirm[i]):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price < EMA34 (downtrend) + RSI > 70 (overbought) + volume surge
+            elif (price < ema34[i] and rsi_aligned[i] > 70 and vol_confirm[i]):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price reaches R3 or trend changes to bear
-            if price >= R3[i] * 0.999 or close[i] < ema34_aligned[i]:
+            # Exit long: price < EMA34 or RSI > 50 (mean reversion)
+            if price < ema34[i] or rsi_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches S3 or trend changes to bull
-            if price <= S3[i] * 1.001 or close[i] > ema34_aligned[i]:
+            # Exit short: price > EMA34 or RSI < 50 (mean reversion)
+            if price > ema34[i] or rsi_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
