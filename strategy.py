@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,16 +17,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA34 trend and Camarilla levels
+    # Get 1d data for EMA34 trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend
+    # Calculate 1d EMA34 for trend
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels from previous day's OHLC
+    # Get daily data for Camarilla pivot levels (R3, S3)
     prev_close = df_1d['close'].shift(1)
     prev_high = df_1d['high'].shift(1)
     prev_low = df_1d['low'].shift(1)
@@ -34,11 +34,11 @@ def generate_signals(prices):
     camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
     camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
-    # Volume filter: current 12h volume > 1.5 * 20-period average
+    # Volume filter: current 4h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
@@ -64,17 +64,17 @@ def generate_signals(prices):
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: close above R3 + above daily EMA34 trend + volume filter
+            # Enter long: close above R3 + above 1d EMA34 trend + volume filter
             if close[i] > r3 and close[i] > ema34_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: close below S3 + below daily EMA34 trend + volume filter
+            # Enter short: close below S3 + below 1d EMA34 trend + volume filter
             elif close[i] < s3 and close[i] < ema34_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below daily EMA34 trend
+            # Exit long: close below 1d EMA34 trend
             if close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
@@ -82,7 +82,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above daily EMA34 trend
+            # Exit short: close above 1d EMA34 trend
             if close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
