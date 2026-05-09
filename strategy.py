@@ -3,51 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from 1d data
-    # Using previous day's OHLC (shifted by 1 to avoid look-ahead)
-    ph = df_1d['high'].shift(1).values
-    pl = df_1d['low'].shift(1).values
-    pc = df_1d['close'].shift(1).values
+    # Calculate EMA50 on 12h close
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Camarilla levels: H/L = (H-L)*1.1/12, C +/- H/L
-    hl = ph - pl
-    h_l = hl * 1.1 / 12
-    r3 = pc + h_l * 3
-    s3 = pc - h_l * 3
-    r4 = pc + h_l * 4
-    s4 = pc - h_l * 4
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Calculate previous day's Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Get 1d EMA50 for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Camarilla R1 and S1 levels from previous day
+    # R1 = C + 1.1*(H-L)/12, S1 = C - 1.1*(H-L)/12
+    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    
+    # Align Camarilla levels to 4h timeframe (previous day's levels)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume filter: above average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(open_time).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,49 +59,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
-        
-        # Session filter: 08-20 UTC (reduce noise trades)
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        in_session = 8 <= hour <= 20
+        in_session = 8 <= hours[i] <= 20
         
         if position == 0:
-            # Long: Break above R4 with volume + above 1d EMA
-            if (close[i] > r4_aligned[i] and 
-                close[i-1] <= r4_aligned[i-1] and  # breakout
-                close[i] > ema_1d_aligned[i] and 
+            # Long: Close breaks above R1 + above 12h EMA + volume
+            if (close[i] > R1_aligned[i] and 
+                close[i] > ema_12h_aligned[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S4 with volume + below 1d EMA
-            elif (close[i] < s4_aligned[i] and 
-                  close[i-1] >= s4_aligned[i-1] and  # breakdown
-                  close[i] < ema_1d_aligned[i] and 
+            # Short: Close breaks below S1 + below 12h EMA + volume
+            elif (close[i] < S1_aligned[i] and 
+                  close[i] < ema_12h_aligned[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close below R3 (mean reversion)
-            if close[i] < r3_aligned[i]:
+            # Exit long: Close breaks below S1
+            if close[i] < S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close above S3 (mean reversion)
-            if close[i] > s3_aligned[i]:
+            # Exit short: Close breaks above R1
+            if close[i] > R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
