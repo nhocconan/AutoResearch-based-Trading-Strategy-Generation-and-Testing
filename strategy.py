@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h timeframe with 1-day Supertrend (ATR=10, multiplier=3) as trend filter and 1-day RSI(14) for mean-reversion entries.
-# In uptrend (price above Supertrend), go long when RSI crosses below 30 (oversold pullback).
-# In downtrend (price below Supertrend), go short when RSI crosses above 70 (overbought bounce).
-# Exits when price crosses Supertrend in opposite direction or RSI reaches opposite extreme (70 for long, 30 for short).
-# Supertrend provides objective trend direction that works in both bull and bear markets.
-# RSI extremes offer high-probability mean-reversion entries within the trend.
+# Hypothesis: 12h timeframe with 1-day Williams %R for overbought/oversold conditions and 1-week EMA trend filter.
+# Enters long when Williams %R < -80 (oversold) and price > 1-week EMA, short when Williams %R > -20 (overbought) and price < 1-week EMA.
+# Exits when Williams %R returns to neutral range (-80 to -20) or price crosses EMA in opposite direction.
+# Williams %R identifies exhaustion points in both bull and bear markets, while EMA filter ensures trades align with higher-timeframe trend.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "6h_Supertrend_RSI_MeanReversion"
-timeframe = "6h"
+name = "12h_WilliamsR_EMA_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,127 +22,67 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate 1-day Supertrend (ATR=10, multiplier=3)
+    # Calculate 1-day Williams %R(14)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # True Range
-    prev_close = np.roll(df_1d['close'], 1)
-    prev_close[0] = np.nan
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - prev_close)
-    tr3 = np.abs(df_1d['low'] - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - df_1d['close'].values) / (highest_high - lowest_low)
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
     
-    # ATR(10)
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Williams %R conditions: oversold < -80, overbought > -20
+    williams_oversold = williams_r < -80
+    williams_overbought = williams_r > -20
     
-    # Basic Upper and Lower Bands
-    hl2 = (df_1d['high'] + df_1d['low']) / 2.0
-    upper_basic = hl2 + 3.0 * atr
-    lower_basic = hl2 - 3.0 * atr
+    # Calculate 1-week EMA(20) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Final Upper and Lower Bands
-    upper = np.full_like(upper_basic, np.nan)
-    lower = np.full_like(lower_basic, np.nan)
+    ema_20 = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    for i in range(len(df_1d)):
-        if i == 0:
-            upper[i] = upper_basic[i]
-            lower[i] = lower_basic[i]
-        else:
-            if upper_basic[i] <= upper[i-1] or df_1d['close'].iloc[i-1] > upper[i-1]:
-                upper[i] = upper_basic[i]
-            else:
-                upper[i] = upper[i-1]
-            
-            if lower_basic[i] >= lower[i-1] or df_1d['close'].iloc[i-1] < lower[i-1]:
-                lower[i] = lower_basic[i]
-            else:
-                lower[i] = lower[i-1]
-    
-    # Supertrend
-    supertrend = np.full_like(close, np.nan)
-    for i in range(len(df_1d)):
-        if i == 0:
-            supertrend[i] = upper_basic[i]
-        else:
-            if supertrend[i-1] == upper[i-1]:
-                if df_1d['close'].iloc[i] <= upper[i]:
-                    supertrend[i] = upper[i]
-                else:
-                    supertrend[i] = lower[i]
-            else:
-                if df_1d['close'].iloc[i] >= lower[i]:
-                    supertrend[i] = lower[i]
-                else:
-                    supertrend[i] = upper[i]
-    
-    # Supertrend trend direction: 1 = uptrend (price above supertrend), -1 = downtrend
-    trend_dir = np.where(close > supertrend, 1, -1)
-    
-    # Calculate 1-day RSI(14)
-    delta = pd.Series(df_1d['close']).diff().values
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align HTF indicators to LTF
-    trend_dir_aligned = align_htf_to_ltf(prices, df_1d, trend_dir)
-    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # RSI crossover signals
-    rsi_prev = np.roll(rsi_aligned, 1)
-    rsi_prev[0] = 50  # neutral start
-    
-    rsi_cross_below_30 = (rsi_prev > 30) & (rsi_aligned <= 30)
-    rsi_cross_above_70 = (rsi_prev < 70) & (rsi_aligned >= 70)
-    rsi_cross_below_70 = (rsi_prev > 70) & (rsi_aligned <= 70)
-    rsi_cross_above_30 = (rsi_prev < 30) & (rsi_aligned >= 30)
+    # Align indicators to lower timeframe
+    williams_oversold_aligned = align_htf_to_ltf(prices, df_1d, williams_oversold)
+    williams_overbought_aligned = align_htf_to_ltf(prices, df_1d, williams_overbought)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trend_dir_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or 
-            np.isnan(rsi_prev[i])):
+        if (np.isnan(williams_oversold_aligned[i]) or np.isnan(williams_overbought_aligned[i]) or
+            np.isnan(ema_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: uptrend + RSI crosses below 30 (oversold pullback)
-            if trend_dir_aligned[i] == 1 and rsi_cross_below_30[i]:
+            # Enter long: oversold + price above EMA
+            if williams_oversold_aligned[i] and close[i] > ema_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: downtrend + RSI crosses above 70 (overbought bounce)
-            elif trend_dir_aligned[i] == -1 and rsi_cross_above_70[i]:
+            # Enter short: overbought + price below EMA
+            elif williams_overbought_aligned[i] and close[i] < ema_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: downtrend OR RSI crosses above 70 (overbought)
-            if trend_dir_aligned[i] == -1 or rsi_cross_above_70[i]:
+            # Exit long: oversold condition ends OR price crosses below EMA
+            if (not williams_oversold_aligned[i]) or (close[i] < ema_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: uptrend OR RSI crosses below 30 (oversold)
-            if trend_dir_aligned[i] == 1 or rsi_cross_below_30[i]:
+            # Exit short: overbought condition ends OR price crosses above EMA
+            if (not williams_overbought_aligned[i]) or (close[i] > ema_20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
