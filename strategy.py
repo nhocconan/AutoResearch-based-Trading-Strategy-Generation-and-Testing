@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend
-# Hypothesis: Buy when price breaks above Camarilla R1 and sell when price breaks below S1 on 12h timeframe,
-# filtered by 1d EMA34 trend (price > EMA34 bullish, price < EMA34 bearish) and volume > 1.5x average.
-# Designed for 12-37 trades/year on 12h timeframe with strict entry conditions to minimize fee drag.
-# Works in bull markets via breakouts in uptrend and bear markets via breakdowns in downtrend.
+# 4h_Trix_ZeroCross_1dTrend_VolumeConfirm
+# Hypothesis: TRIX (12) zero cross signals momentum shifts. Long when TRIX crosses above zero with 1d uptrend (close > EMA50) and volume > 1.5x average.
+# Short when TRIX crosses below zero with 1d downtrend (close < EMA50) and volume confirmation. Uses TRIX histogram for smoother zero-cross detection.
+# Designed for 20-40 trades per year on 4h timeframe. Works in bull markets via momentum continuation and in bear via momentum reversals.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend"
-timeframe = "12h"
+name = "4h_Trix_ZeroCross_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,50 +14,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA(34) with proper initialization
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Align 1d EMA to 12h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align 1d EMA to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily range from 1d data for Camarilla levels
-    close_1d_prev = np.roll(close_1d, 1)
-    close_1d_prev[0] = np.nan
+    # Calculate TRIX (12,12,12) - triple smoothed EMA of ROC
+    # TRIX = EMA(EMA(EMA(ROC, 12), 12), 12)
+    roc = np.full_like(close, np.nan)
+    roc[12:] = (close[12:] - close[:-12]) / close[:-12] * 100
     
-    # Calculate Camarilla levels for each day
-    camarilla_R1 = np.full_like(close_1d, np.nan)
-    camarilla_S1 = np.full_like(close_1d, np.nan)
+    # First EMA
+    ema1 = np.full_like(roc, np.nan)
+    if len(roc) >= 12:
+        ema1[11] = np.mean(roc[0:12])
+        for i in range(12, len(roc)):
+            ema1[i] = (roc[i] * 2 + ema1[i-1] * 10) / 12
     
-    valid = ~np.isnan(close_1d_prev)
-    camarilla_R1[valid] = close_1d_prev[valid] + (high_1d[valid] - low_1d[valid]) * 1.1 / 12
-    camarilla_S1[valid] = close_1d_prev[valid] - (high_1d[valid] - low_1d[valid]) * 1.1 / 12
+    # Second EMA
+    ema2 = np.full_like(ema1, np.nan)
+    if len(ema1) >= 12:
+        ema2[11] = np.mean(ema1[0:12])
+        for i in range(12, len(ema1)):
+            ema2[i] = (ema1[i] * 2 + ema2[i-1] * 10) / 12
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    # Third EMA (TRIX)
+    ema3 = np.full_like(ema2, np.nan)
+    if len(ema2) >= 12:
+        ema3[11] = np.mean(ema2[0:12])
+        for i in range(12, len(ema2)):
+            ema3[i] = (ema2[i] * 2 + ema3[i-1] * 10) / 12
     
-    # Volume filter: 12h volume / 20-period average volume
+    # TRIX histogram for zero-cross detection (smoother than raw TRIX)
+    trix_hist = ema3
+    
+    # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -72,38 +82,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(30, 20)  # Ensure TRIX and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or \
-           np.isnan(camarilla_S1_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(trix_hist[i]) or np.isnan(trix_hist[i-1]) or \
+           np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price breaks above R1 AND volume confirmation AND bullish trend (price > EMA)
-            if close[i] > camarilla_R1_aligned[i] and volume_ratio[i] > 1.5 and close[i] > ema_34_1d_aligned[i]:
+            # Enter long: TRIX crosses above zero AND volume confirmation AND bullish trend (close > EMA50)
+            if trix_hist[i-1] <= 0 and trix_hist[i] > 0 and volume_ratio[i] > 1.5 and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S1 AND volume confirmation AND bearish trend (price < EMA)
-            elif close[i] < camarilla_S1_aligned[i] and volume_ratio[i] > 1.5 and close[i] < ema_34_1d_aligned[i]:
+            # Enter short: TRIX crosses below zero AND volume confirmation AND bearish trend (close < EMA50)
+            elif trix_hist[i-1] >= 0 and trix_hist[i] < 0 and volume_ratio[i] > 1.5 and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below S1 (reversal signal) or trend turns bearish
-            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: TRIX crosses below zero (momentum reversal) or trend turns bearish
+            if trix_hist[i-1] > 0 and trix_hist[i] <= 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above R1 (reversal signal) or trend turns bullish
-            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: TRIX crosses above zero (momentum reversal) or trend turns bullish
+            if trix_hist[i-1] < 0 and trix_hist[i] >= 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
