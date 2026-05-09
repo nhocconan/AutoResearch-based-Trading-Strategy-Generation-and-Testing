@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_4WkHigh_Low_MeanReversion"
-timeframe = "6h"
+name = "12h_Wyckoff_Spring_1WeekTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,74 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 4-week high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-day high and low (4 weeks)
-    high_20d = pd.Series(close_1d).rolling(window=20, min_periods=20).max().values
-    low_20d = pd.Series(close_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate 20-period EMA for weekly trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align to 6h timeframe
-    high_20d_aligned = align_htf_to_ltf(prices, df_1d, high_20d)
-    low_20d_aligned = align_htf_to_ltf(prices, df_1d, low_20d)
+    # Align weekly EMA20 to 12h timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate 6-period RSI for mean reversion signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 12-period high and low for Wyckoff Spring pattern
+    period_high = np.zeros(n)
+    period_low = np.zeros(n)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    for i in range(12, n):
+        period_high[i] = np.max(high[i-12:i])
+        period_low[i] = np.min(low[i-12:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if 4-week data not ready
-        if np.isnan(high_20d_aligned[i]) or np.isnan(low_20d_aligned[i]):
+    for i in range(12, n):
+        # Skip if weekly EMA data not ready
+        if np.isnan(ema20_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Mean reversion: long near 4-week low, short near 4-week high
-        range_width = high_20d_aligned[i] - low_20d_aligned[i]
-        if range_width < 1e-10:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
-        # Position within the 4-week range (0 = at low, 1 = at high)
-        position_in_range = (close[i] - low_20d_aligned[i]) / range_width
+        # Determine weekly trend
+        uptrend = close[i] > ema20_1w_aligned[i]
+        downtrend = close[i] < ema20_1w_aligned[i]
+        
+        # Volume confirmation: current volume > 1.3x 12-period average volume
+        avg_volume = np.mean(volume[i-12:i])
+        volume_confirm = volume[i] > avg_volume * 1.3
         
         if position == 0:
-            # Enter long near bottom of range (oversold) with RSI confirmation
-            if position_in_range < 0.2 and rsi[i] < 35:
+            # Wyckoff Spring: price tests below recent low but closes back above it with volume
+            spring_long = (low[i] < period_low[i]) and (close[i] > period_low[i]) and volume_confirm
+            # Wyckoff Upthrust: price tests above recent high but closes back below it with volume
+            upthrust_short = (high[i] > period_high[i]) and (close[i] < period_high[i]) and volume_confirm
+            
+            if spring_long and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short near top of range (overbought) with RSI confirmation
-            elif position_in_range > 0.8 and rsi[i] > 65:
+            elif upthrust_short and downtrend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to middle of range or overbought
-            if position_in_range > 0.5 or rsi[i] > 65:
+            # Exit long: price breaks below 6-period low
+            exit_low = np.min(low[i-6:i])
+            if close[i] < exit_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to middle of range or oversold
-            if position_in_range < 0.5 or rsi[i] < 35:
+            # Exit short: price breaks above 6-period high
+            exit_high = np.max(high[i-6:i])
+            if close[i] > exit_high:
                 signals[i] = 0.0
                 position = 0
             else:
