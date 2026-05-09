@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 6h timeframe with daily pivot structure (from 1d) and weekly trend filter.
-# Uses daily Camarilla levels (R3/S3) for breakout entries and 1w EMA50 for trend filter.
-# Daily pivot provides structural support/resistance that works in both bull and bear markets.
-# Weekly trend filter reduces whipsaw and improves win rate by avoiding counter-trend trades.
-# Volume confirmation filters low-probability breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h timeframe with Donchian breakout combined with 1d EMA50 trend filter and volume confirmation.
+# Uses Donchian(20) for breakout entries, 1d EMA50 for trend filter, and volume spike for confirmation.
+# Designed to work in both bull and bear markets by filtering breakouts with higher timeframe trend.
+# Target: 80-160 total trades over 4 years (20-40/year) with size 0.25.
+# Volume confirmation reduces false breakouts, trend filter aligns with higher timeframe momentum.
 
-name = "6h_Camarilla_R3_S3_1wEMA50_Trend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,35 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
+    # Calculate Donchian channels (20-period)
+    # Upper band: highest high of last 20 periods
+    # Lower band: lowest low of last 20 periods
+    # Using rolling window with min_periods to avoid look-ahead
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
+    # Breakout conditions: price must close beyond the band
+    breakout_up = close > donchian_upper
+    breakout_down = close < donchian_lower
     
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r3
-    breakout_down = close < s3
-    
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    trend_up = close > ema_50_1w_aligned
-    trend_down = close < ema_50_1w_aligned
+    trend_up = close > ema_50_1d_aligned
+    trend_down = close < ema_50_1d_aligned
     
-    # Volume filter: current volume > 1.8x 20-period average volume (balanced to avoid overtrading)
+    # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * avg_volume)
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 1w uptrend + volume spike
+            # Long: breakout above upper band + 1d uptrend + volume spike
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 1w downtrend + volume spike
+            # Short: breakout below lower band + 1d downtrend + volume spike
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price returns to lower Donchian band or trend reversal
+            if close[i] <= donchian_lower[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price returns to upper Donchian band or trend reversal
+            if close[i] >= donchian_upper[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
