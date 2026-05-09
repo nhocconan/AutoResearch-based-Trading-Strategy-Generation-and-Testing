@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_VolumeSpike_EMATrend
-# Hypothesis: Keltner channel breakouts with EMA trend filter and volume spike confirmation.
-# Works in bull/bear: EMA trend filter avoids counter-trend trades, volume spike confirms institutional interest.
-# Keltner channels adapt to volatility, providing dynamic support/resistance for breakouts.
-# Uses EMA20 for trend and volume ratio (current/20-bar average) for confirmation.
-# Target: 20-40 trades/year per symbol to minimize fee drag.
+# 4h_RSI_Pullback_With_Volume_Spice
+# Hypothesis: RSI pullback strategy with volume spike confirmation and 4h EMA trend filter.
+# Works in bull/bear: Trend filter ensures trades align with higher timeframe momentum, 
+# RSI pullback (from overbought/oversold) provides mean reversion entries, volume spike confirms institutional interest.
+# Uses 4h EMA50 for trend, RSI(14) for mean reversion signals, and volume ratio (>2.0) for confirmation.
+# Designed for moderate trade frequency (~25-40 trades/year) to minimize fee drag.
 
-name = "4h_Keltner_Breakout_VolumeSpike_EMATrend"
+name = "4h_RSI_Pullback_With_Volume_Spice"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,46 +24,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Keltner Channel from 1h data (using 1h EMA and ATR)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
-        return np.zeros(n)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    close_1h = df_1h['close'].values
-    high_1h = df_1h['high'].values
-    low_1h = df_1h['low'].values
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
     
-    # EMA20 for middle line
-    ema_20 = np.full_like(close_1h, np.nan)
-    if len(close_1h) >= 20:
-        ema_20[19] = np.mean(close_1h[0:20])
-        for i in range(20, len(close_1h)):
-            ema_20[i] = (ema_20[i-1] * 19 + close_1h[i]) / 20
+    # Wilder's smoothing
+    avg_gain[13] = np.mean(gain[1:14]) if len(gain) >= 14 else 0
+    avg_loss[13] = np.mean(loss[1:14]) if len(loss) >= 14 else 0
     
-    # ATR(10) for channel width
-    tr1 = high_1h[1:] - low_1h[1:]
-    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
-    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[0], tr])  # first TR is 0
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    atr_10 = np.full_like(tr, np.nan)
-    if len(tr) >= 10:
-        atr_10[9] = np.mean(tr[0:10])
-        for i in range(10, len(tr)):
-            atr_10[i] = (atr_10[i-1] * 9 + tr[i]) / 10
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Keltner Bands: EMA20 ± 2 * ATR(10)
-    keltner_middle = ema_20
-    keltner_upper = keltner_middle + 2 * atr_10
-    keltner_lower = keltner_middle - 2 * atr_10
-    
-    # Align Keltner levels to 4h timeframe
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1h, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1h, keltner_lower)
-    keltner_middle_aligned = align_htf_to_ltf(prices, df_1h, keltner_middle)
-    
-    # EMA50 trend filter from 4h data
+    # Calculate 4h EMA50 for trend filter
     ema_50 = np.full_like(close, np.nan)
     if len(close) >= 50:
         ema_50[49] = np.mean(close[0:50])
@@ -84,42 +64,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure EMA50 and volume MA are ready
+    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
-            np.isnan(ema_50[i]) or np.isnan(volume_ratio[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema_50[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper Keltner AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > keltner_upper_aligned[i] and 
+            # Enter long: RSI < 30 (oversold) AND price > EMA50 (uptrend) AND volume spike
+            if (rsi[i] < 30 and 
                 close[i] > ema_50[i] and 
-                volume_ratio[i] > 1.5):
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower Keltner AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < keltner_lower_aligned[i] and 
+            # Enter short: RSI > 70 (overbought) AND price < EMA50 (downtrend) AND volume spike
+            elif (rsi[i] > 70 and 
                   close[i] < ema_50[i] and 
-                  volume_ratio[i] > 1.5):
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below middle Keltner OR trend reversal (price < EMA50)
-            if close[i] < keltner_middle_aligned[i] or close[i] < ema_50[i]:
+            # Exit long: RSI > 50 (mean reversion complete) OR trend reversal (price < EMA50)
+            if rsi[i] > 50 or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above middle Keltner OR trend reversal (price > EMA50)
-            if close[i] > keltner_middle_aligned[i] or close[i] > ema_50[i]:
+            # Exit short: RSI < 50 (mean reversion complete) OR trend reversal (price > EMA50)
+            if rsi[i] < 50 or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
