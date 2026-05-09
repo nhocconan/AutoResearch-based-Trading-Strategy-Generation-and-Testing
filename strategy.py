@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_ChoppinessIndex_Regime_MeanReversion"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,99 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for choppiness index calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot calculation (resistance/support)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 14-period ATR for Choppiness Index
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points from previous week
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with index 0
+    # Weekly pivot: (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Resistance 1: 2*P - L
+    r1_1w = 2 * pivot_1w - low_1w
+    # Support 1: 2*P - H
+    s1_1w = 2 * pivot_1w - high_1w
+    # Resistance 2: P + (H - L)
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    # Support 2: P - (H - L)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align weekly pivots to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Calculate highest high and lowest low over 14 periods
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Get daily data for trend filter and volume average
+    df_1d = get_htf_data(prices, '1d')
     
-    # Choppiness Index: CI = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
-    sum_atr14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    hh_ll_diff = highest_high - lowest_low
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Avoid division by zero
-    chop_raw = np.full_like(sum_atr14, np.nan)
-    mask = (hh_ll_diff > 0) & (~np.isnan(sum_atr14)) & (~np.isnan(hh_ll_diff))
-    chop_raw[mask] = 100 * np.log10(sum_atr14[mask] / hh_ll_diff[mask]) / np.log10(14)
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    chop_1d = chop_raw
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # Calculate 1d volume average (20-period)
+    vol_1d = pd.Series(df_1d['volume'].values)
+    vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Calculate 12-period RSI for mean reversion signals
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    
-    avg_gain = gain.ewm(alpha=1/12, adjust=False, min_periods=12).mean()
-    avg_loss = loss.ewm(alpha=1/12, adjust=False, min_periods=12).mean()
-    
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Current volume for confirmation
     vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 100  # warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chop_1d_aligned[i]) or np.isnan(rsi_values[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(vol_ma20_current[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        chop = chop_1d_aligned[i]
-        rsi_val = rsi_values[i]
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20_current[i]
         
         if position == 0:
-            # Chop > 61.8 indicates ranging market (good for mean reversion)
-            if chop > 61.8 and vol_ok:
-                # RSI oversold -> long
-                if rsi_val < 30:
-                    signals[i] = 0.25
-                    position = 1
-                # RSI overbought -> short
-                elif rsi_val > 70:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Break above weekly R2 with volume and above 1d EMA trend
+            if close[i] > r2_1w_aligned[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Break below weekly S2 with volume and below 1d EMA trend
+            elif close[i] < s2_1w_aligned[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral or chop drops (trending market)
-            if rsi_val > 50 or chop < 50:
+            # Exit long: Price falls below weekly R1 or trend reversal
+            if close[i] < r1_1w_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral or chop drops (trending market)
-            if rsi_val < 50 or chop < 50:
+            # Exit short: Price rises above weekly S1 or trend reversal
+            if close[i] > s1_1w_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
