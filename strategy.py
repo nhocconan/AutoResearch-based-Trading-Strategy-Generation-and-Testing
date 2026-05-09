@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_RSI_EMA_Trend_1dFilter
-# Strategy: Trade RSI extremes with EMA trend filter on 1d timeframe
-# Long when RSI(14) < 30 and price > 1d EMA(50)
-# Short when RSI(14) > 70 and price < 1d EMA(50)
-# Exit when RSI returns to neutral zone (40-60)
-# Uses mean reversion in ranging markets with trend filter to avoid counter-trend trades
-# Designed for 6h timeframe with selective entries to minimize trade frequency
+# 4h_Vortex_Trend_Filter_Signal
+# Strategy: Uses Vortex Indicator to detect trend direction, filtered by 1d EMA(50) and volume confirmation.
+# Long when VI+ > VI- and price > 1d EMA50 and volume > 1.5x 20-period average.
+# Short when VI- > VI+ and price < 1d EMA50 and volume > 1.5x 20-period average.
+# Exit when Vortex crossover reverses or volume condition fails.
+# Designed for 4h timeframe with low trade frequency to avoid fee drag, works in both bull and bear markets via trend-following logic.
 
-name = "6h_RSI_EMA_Trend_1dFilter"
-timeframe = "6h"
+name = "4h_Vortex_Trend_Filter_Signal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,9 +19,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 1d EMA(50) for trend filter
+    # Get 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -31,60 +33,72 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Vortex Indicator (VI) over 14 periods
+    # True Range components
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with original index
     
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[1:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus = np.concatenate([[np.nan], vm_plus[1:]])
+    vm_minus = np.concatenate([[np.nan], vm_minus[1:]])
     
-    gain_smooth = wilders_smooth(gain, 14)
-    loss_smooth = wilders_smooth(loss, 14)
+    # Sum over 14 periods
+    n_period = 14
+    tr_sum = np.full_like(tr, np.nan)
+    vm_plus_sum = np.full_like(vm_plus, np.nan)
+    vm_minus_sum = np.full_like(vm_minus, np.nan)
     
-    rs = np.where(loss_smooth != 0, gain_smooth / loss_smooth, 0)
-    rsi = 100 - (100 / (1 + rs))
+    for i in range(n_period, len(tr)):
+        tr_sum[i] = np.nansum(tr[i-n_period+1:i+1])
+        vm_plus_sum[i] = np.nansum(vm_plus[i-n_period+1:i+1])
+        vm_minus_sum[i] = np.nansum(vm_minus[i-n_period+1:i+1])
+    
+    vi_plus = np.where(tr_sum != 0, vm_plus_sum / tr_sum, 0)
+    vi_minus = np.where(tr_sum != 0, vm_minus_sum / tr_sum, 0)
+    
+    # Volume filter: current volume > 1.5 x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(20, len(volume)):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = max(50, n_period)  # ensure indicators are ready
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i])):
+        if np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(ema_50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: RSI oversold and above 1d EMA50 (uptrend filter)
-            if rsi[i] < 30 and close[i] > ema_50_aligned[i]:
+            # Long: VI+ > VI-, price above EMA50, volume confirmation
+            if vi_plus[i] > vi_minus[i] and close[i] > ema_50_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI overbought and below 1d EMA50 (downtrend filter)
-            elif rsi[i] > 70 and close[i] < ema_50_aligned[i]:
+            # Short: VI- > VI+, price below EMA50, volume confirmation
+            elif vi_minus[i] > vi_plus[i] and close[i] < ema_50_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral zone
-            if rsi[i] >= 40:
+            # Exit long: VI- crosses above VI+ or volume filter fails
+            if vi_minus[i] >= vi_plus[i] or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral zone
-            if rsi[i] <= 60:
+            # Exit short: VI+ crosses above VI- or volume filter fails
+            if vi_plus[i] >= vi_minus[i] or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
