@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
-# 4h_AngleBased_Trend_Scalp
-# Hypothesis: Uses 4h price angle (slope of 10-bar linear regression) to detect strong momentum bursts,
-# confirmed by volume >2x 20-bar average and filtered by 1d EMA50 trend direction.
-# Works in bull/bear by only taking trades in direction of higher timeframe trend.
-# Target: 20-40 trades/year on 4h timeframe.
+# 4h_RelativeStrength_Index_Extremes_VolumeConfirmation
+# Hypothesis: Enter long when RSI(14) < 30 with volume > 1.8x 20-bar average, short when RSI > 70 with volume confirmation.
+# Uses RSI mean reversion in ranging markets and momentum in trending markets. Volume filter ensures conviction.
+# Designed for 15-25 trades/year on 4h timeframe to minimize fee drag while capturing reversals and continuations.
 
-name = "4h_AngleBased_Trend_Scalp"
+name = "4h_RelativeStrength_Index_Extremes_VolumeConfirmation"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,47 +21,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    close_1d = df_1d['close'].values
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
     
-    # Calculate 1d EMA(50)
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
+    # Initialize first average
+    if len(gain) >= 14:
+        avg_gain[13] = np.mean(gain[0:14])
+        avg_loss[13] = np.mean(loss[0:14])
+        
+        # Wilder's smoothing
+        for i in range(14, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align 1d EMA to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    rs = np.full_like(close, np.nan)
+    rsi = np.full_like(close, np.nan)
+    valid = (avg_loss != 0) & ~np.isnan(avg_loss)
+    rs[valid] = avg_gain[valid] / avg_loss[valid]
+    rsi[valid] = 100 - (100 / (1 + rs[valid]))
+    rsi[avg_loss == 0] = 100  # No loss = RSI 100
     
-    # Calculate 4h price angle (slope of 10-bar linear regression) - last 10 bars
-    def linreg_slope(y, x=None):
-        if x is None:
-            x = np.arange(len(y))
-        n_reg = len(y)
-        if n_reg < 2:
-            return np.nan
-        sum_x = np.sum(x)
-        sum_y = np.sum(y)
-        sum_xy = np.sum(x * y)
-        sum_x2 = np.sum(x * x)
-        denominator = n_reg * sum_x2 - sum_x * sum_x
-        if denominator == 0:
-            return np.nan
-        return (n_reg * sum_xy - sum_x * sum_y) / denominator
-    
-    price_slope = np.full(n, np.nan)
-    lookback = 10
-    for i in range(lookback - 1, n):
-        y_segment = close[i - lookback + 1:i + 1]
-        slope = linreg_slope(y_segment)
-        price_slope[i] = slope
-    
-    # Volume filter: 4h volume / 20-period average volume
+    # Volume filter: 20-period average
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -77,37 +60,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, lookback - 1)
+    start_idx = 20  # Need volume MA and RSI ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(price_slope[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(rsi[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Strong upward price angle + volume confirmation + bullish 1d trend
-            if price_slope[i] > 0.1 and volume_ratio[i] > 2.0 and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: RSI < 30 (oversold) with volume confirmation
+            if rsi[i] < 30 and volume_ratio[i] > 1.8:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Strong downward price angle + volume confirmation + bearish 1d trend
-            elif price_slope[i] < -0.1 and volume_ratio[i] > 2.0 and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: RSI > 70 (overbought) with volume confirmation
+            elif rsi[i] > 70 and volume_ratio[i] > 1.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price angle turns negative or trend turns bearish
-            if price_slope[i] < 0 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: RSI > 50 (mean reversion) or RSI > 70 (overbought)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price angle turns positive or trend turns bullish
-            if price_slope[i] > 0 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: RSI < 50 (mean reversion) or RSI < 30 (oversold)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
