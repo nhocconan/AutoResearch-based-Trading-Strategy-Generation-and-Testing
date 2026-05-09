@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Three_Sigma_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_MeanRev_2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,37 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volatility calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly KAMA for trend filter (ER=10, fast=2, slow=30)
+    close_1w = pd.Series(df_1w['close'].values)
+    # Efficiency Ratio
+    change = abs(close_1w.diff(10))
+    volatility = close_1w.diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama_1w = np.zeros_like(close_1w)
+    kama_1w[0] = close_1w.iloc[0]
+    for i in range(1, len(close_1w)):
+        if not np.isnan(sc.iloc[i]):
+            kama_1w[i] = kama_1w[i-1] + sc.iloc[i] * (close_1w.iloc[i] - kama_1w[i-1])
+        else:
+            kama_1w[i] = kama_1w[i-1]
+    kama_1w = kama_1w[~np.isnan(kama_1w)] if np.any(np.isnan(kama_1w)) else kama_1w
+    # Ensure same length
+    if len(kama_1w) != len(close_1w):
+        kama_1w = pd.Series(kama_1w).reindex_like(close_1w, method='ffill').bfill().values
+    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
     
-    # Calculate 1d ATR(14) for volatility
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    # Daily RSI for mean reversion (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Calculate 1d Bollinger Bands (20, 3) for volatility envelope
-    sma_20 = pd.Series(close_1d_arr).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d_arr).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 3 * std_20
-    lower_band = sma_20 - 3 * std_20
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    
-    # Volume spike detection (4h timeframe)
+    # Daily volume spike detection
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -58,37 +65,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or 
-            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above upper band with uptrend and volume spike
-            if close[i] > upper_aligned[i] and close[i] > ema_1d_aligned[i] and vol_ok:
+            # Long: KAMA uptrend + RSI oversold + volume
+            if close[i] > kama_1w_aligned[i] and rsi[i] < 30 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band with downtrend and volume spike
-            elif close[i] < lower_aligned[i] and close[i] < ema_1d_aligned[i] and vol_ok:
+            # Short: KAMA downtrend + RSI overbought + volume
+            elif close[i] < kama_1w_aligned[i] and rsi[i] > 70 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below lower band OR trend reverses
-            if close[i] < lower_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit long: RSI overbought or trend reversal
+            if rsi[i] > 70 or close[i] < kama_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above upper band OR trend reverses
-            if close[i] > upper_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit short: RSI oversold or trend reversal
+            if rsi[i] < 30 or close[i] > kama_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
