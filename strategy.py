@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6H_Camarilla_R3_S3_Fade_1dTrend_Volume"
-timeframe = "6h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,35 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for Camarilla pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Pivot point
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    pivot = (high_prev + low_prev + close_prev) / 3
+    range_val = high_prev - low_prev
     
-    # Camarilla levels
-    R3_1d = pivot_1d + 1.1 * range_1d / 2.0
-    S3_1d = pivot_1d - 1.1 * range_1d / 2.0
-    R4_1d = pivot_1d + 1.1 * range_1d
-    S4_1d = pivot_1d - 1.1 * range_1d
+    R1 = pivot + (range_val * 1.1 / 12)
+    S1 = pivot - (range_val * 1.1 / 12)
     
-    # Align Camarilla levels to 6h timeframe
-    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    R4_1d_aligned = align_htf_to_ltf(prices, df_1d, R4_1d)
-    S4_1d_aligned = align_htf_to_ltf(prices, df_1d, S4_1d)
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Get daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1-day EMA34 for trend filter
+    ema34_1d = pd.Series(close_prev).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average volume
+    avg_volume = np.zeros(n)
+    for i in range(20, n):
+        avg_volume[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,51 +53,36 @@ def generate_signals(prices):
     start_idx = 34
     
     for i in range(start_idx, n):
-        # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        # Skip if data not ready
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(avg_volume[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 30-period average volume
-        if i >= 30:
-            avg_volume = np.mean(volume[i-30:i])
-            volume_confirm = volume[i] > avg_volume * 1.5
-        else:
-            volume_confirm = False
+        volume_confirm = volume[i] > avg_volume[i] * 1.5
         
         if position == 0:
-            # Fade at R3/S3 when price is outside trend
-            # Long: price < S3 and price > EMA34 (fade in uptrend)
-            if close[i] < S3_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
+            # Enter long: price breaks above R1 + above EMA34 + volume confirmation
+            if close[i] > R1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price > R3 and price < EMA34 (fade in downtrend)
-            elif close[i] > R3_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
-                signals[i] = -0.25
-                position = -1
-            # Breakout continuation at R4/S4 in direction of trend
-            # Long breakout: price > R4 and price > EMA34
-            elif close[i] > R4_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price < S4 and price < EMA34
-            elif close[i] < S4_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
+            # Enter short: price breaks below S1 + below EMA34 + volume confirmation
+            elif close[i] < S1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA34 or reaches R3 (fade level)
-            if close[i] < ema34_1d_aligned[i] or close[i] > R3_1d_aligned[i]:
+            # Exit long: price closes below S1
+            if close[i] < S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA34 or reaches S3 (fade level)
-            if close[i] > ema34_1d_aligned[i] or close[i] < S3_1d_aligned[i]:
+            # Exit short: price closes above R1
+            if close[i] > R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
