@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with 1-week RSI mean reversion and 1-day volume confirmation.
-# In overbought/oversold conditions (weekly RSI >70 or <30), price tends to revert to the mean.
-# Uses daily volume spike (volume > 1.5x 20-day average) to confirm the reversal.
-# Enters long when weekly RSI <30 and daily volume spike, short when weekly RSI >70 and daily volume spike.
-# Exits when weekly RSI returns to neutral range (40-60).
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: Daily price crosses above/below 1-week VWAP with volume confirmation and trend filter.
+# Uses weekly VWAP as dynamic support/resistance: long when price > VWAP with increasing volume,
+# short when price < VWAP with decreasing volume. Trend filter uses daily EMA50 to avoid counter-trend trades.
+# Target: 20-60 total trades over 4 years (5-15/year) with size 0.25.
 
-name = "12h_WeeklyRSI_Volume_MeanReversion"
-timeframe = "12h"
+name = "1d_VWAP_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,81 +14,69 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly RSI (14-period)
+    # Get weekly data for VWAP calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close']
-    delta = close_1w.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_values = rsi_1w.values
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    # Calculate VWAP for each weekly bar
+    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    vwap_1w = (typical_price_1w * df_1w['volume']).cumsum() / df_1w['volume'].cumsum()
+    vwap_1w_values = vwap_1w.values
     
-    # Calculate daily volume average (20-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align VWAP to daily timeframe (waits for weekly close)
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w_values)
     
-    volume_1d = df_1d['volume']
-    vol_ma_20 = volume_1d.rolling(window=20, min_periods=20).mean()
-    vol_ma_20_values = vol_ma_20.values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_values)
+    # Daily EMA50 for trend filter
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
     
-    # Volume spike: current daily volume > 1.5x 20-day average
-    volume_spike = volume > 1.5 * vol_ma_20_aligned
-    
-    # RSI conditions
-    rsi_overbought = rsi_1w_aligned > 70
-    rsi_oversold = rsi_1w_aligned < 30
-    rsi_neutral = (rsi_1w_aligned >= 40) & (rsi_1w_aligned <= 60)
+    # Volume change: current vs previous day
+    volume_change = volume - np.roll(volume, 1)
+    volume_change[0] = 0  # First value has no previous
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 50  # Need enough data for EMA
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(rsi_1w_aligned[i]) or
-            np.isnan(vol_ma_20_aligned[i])):
+        # Skip if VWAP not available (first weekly bar)
+        if np.isnan(vwap_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: oversold RSI + volume spike
-            if rsi_oversold[i] and volume_spike[i]:
+            # Enter long: price > weekly VWAP AND volume increasing AND price > EMA50 (uptrend)
+            if close[i] > vwap_1w_aligned[i] and volume_change[i] > 0 and close[i] > ema_50[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: overbought RSI + volume spike
-            elif rsi_overbought[i] and volume_spike[i]:
+            # Enter short: price < weekly VWAP AND volume decreasing AND price < EMA50 (downtrend)
+            elif close[i] < vwap_1w_aligned[i] and volume_change[i] < 0 and close[i] < ema_50[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral range
-            if rsi_neutral[i]:
+            # Exit long: price crosses below VWAP OR trend turns down (price < EMA50)
+            if close[i] < vwap_1w_aligned[i] or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral range
-            if rsi_neutral[i]:
+            # Exit short: price crosses above VWAP OR trend turns up (price > EMA50)
+            if close[i] > vwap_1w_aligned[i] or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
