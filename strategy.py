@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RVI_Signal_1dTrend_ETF_Style"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,31 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and ETF-style RVI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate RVI (Relative Vigor Index) on 6h timeframe
-    # RVI = (Close - Open) / (High - Low) smoothed
-    num = close - prices['open'].values
-    den = high - low
-    # Avoid division by zero
-    den = np.where(den == 0, 1e-10, den)
-    rvi_raw = num / den
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Smooth RVI with 10-period SMA
-    rvi_series = pd.Series(rvi_raw)
-    rvi = rvi_series.rolling(window=10, min_periods=10).mean().values
+    # Calculate 1w EMA50 for trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Signal line: EMA of RVI
-    rvi_ema = pd.Series(rvi).ewm(span=4, adjust=False, min_periods=4).mean().values
+    # Calculate Camarilla pivot levels from previous day
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Get 1d EMA50 for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align Camarilla levels to 12h timeframe (using previous day's data)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: above average
+    # Volume filter: above 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -51,8 +53,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rvi[i]) or np.isnan(rvi_ema[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,34 +67,32 @@ def generate_signals(prices):
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: RVI crosses above signal line + above 1d EMA + volume
-            if (rvi[i] > rvi_ema[i] and 
-                rvi[i-1] <= rvi_ema[i-1] and  # crossover
-                close[i] > ema_1d_aligned[i] and 
+            # Long: Close above R1 + above 1w EMA50 + volume
+            if (close[i] > camarilla_r1_aligned[i] and 
+                close[i] > ema_1w_aligned[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: RVI crosses below signal line + below 1d EMA + volume
-            elif (rvi[i] < rvi_ema[i] and 
-                  rvi[i-1] >= rvi_ema[i-1] and  # crossover
-                  close[i] < ema_1d_aligned[i] and 
+            # Short: Close below S1 + below 1w EMA50 + volume
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  close[i] < ema_1w_aligned[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RVI crosses below signal line
-            if rvi[i] < rvi_ema[i] and rvi[i-1] >= rvi_ema[i-1]:
+            # Exit long: Close below S1 (opposite level)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RVI crosses above signal line
-            if rvi[i] > rvi_ema[i] and rvi[i-1] <= rvi_ema[i-1]:
+            # Exit short: Close above R1 (opposite level)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
