@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 6H_1D_ElderRay_BullBearPower_Trend_Follow
-# Hypothesis: Use daily Elder Ray (bull/bear power) with 13-day EMA for trend direction.
-# Bull power = High - EMA13, Bear power = EMA13 - Low.
-# Long when bull power > 0 and rising + price above EMA13.
-# Short when bear power > 0 and rising + price below EMA13.
-# Works in bull/bear markets by following the trend via Elder Ray.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 4H_12H_Camarilla_R2_S2_Breakout_12hEMA50_Trend_Volume
+# Hypothesis: Combine 4h breakouts at 12h Camarilla R2/S2 levels with 12h EMA50 trend filter and volume confirmation.
+# The 12h timeframe filters noise while capturing major swings. R2/S2 levels provide stronger breakout signals than R1/S1.
+# EMA50 on 12h offers robust trend filtering suitable for swing trading. Volume ensures breakouts have conviction.
+# Designed to work in both bull and bear markets via trend filter. Target: 20-50 trades/year per symbol.
 
-name = "6H_1D_ElderRay_BullBearPower_Trend_Follow"
-timeframe = "6h"
+name = "4H_12H_Camarilla_R2_S2_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,73 +15,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Elder Ray calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for Camarilla pivot levels and EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:  # Need enough data for EMA50
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA13 on daily close
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Pivot point and Camarilla levels (R2, S2)
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_ = high_12h - low_12h
+    r2 = pivot + range_ * 1.1 / 2  # R2 = pivot + (range * 1.1 / 2)
+    s2 = pivot - range_ * 1.1 / 2  # S2 = pivot - (range * 1.1 / 2)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high_1d - ema13_1d
-    bear_power = ema13_1d - low_1d
+    # Get 12h EMA50 for trend filter
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 6h timeframe
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Align to 4h
+    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate 6-period change in power for momentum confirmation
-    bull_power_change = np.diff(bull_power_aligned, prepend=bull_power_aligned[0])
-    bear_power_change = np.diff(bear_power_aligned, prepend=bear_power_aligned[0])
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for calculations
-    start_idx = 30
+    # Start after we have enough data
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]):
+        if np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: bull power positive AND rising + price above EMA13
-            if bull_power_aligned[i] > 0 and bull_power_change[i] > 0 and close[i] > ema13_1d_aligned[i]:
+            # Enter long: price breaks above R2 + above 12h EMA50 + volume confirmation
+            if close[i] > r2_aligned[i] and close[i] > ema50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bear power positive AND rising + price below EMA13
-            elif bear_power_aligned[i] > 0 and bear_power_change[i] > 0 and close[i] < ema13_1d_aligned[i]:
+            # Enter short: price breaks below S2 + below 12h EMA50 + volume confirmation
+            elif close[i] < s2_aligned[i] and close[i] < ema50_12h_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bull power turns negative OR price below EMA13
-            if bull_power_aligned[i] <= 0 or close[i] < ema13_1d_aligned[i]:
+            # Exit long: price below 12h EMA50 (trend change)
+            if close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bear power turns negative OR price above EMA13
-            if bear_power_aligned[i] <= 0 or close[i] > ema13_1d_aligned[i]:
+            # Exit short: price above 12h EMA50 (trend change)
+            if close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
