@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
-# Donchian channels provide clear breakout levels, EMA50 on 12h filters trend direction,
+# Hypothesis: 6h Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation
+# Donchian channels provide clear breakout levels, weekly EMA50 filters long-term trend direction,
 # and volume > 1.5x 20-period average confirms institutional participation.
-# Works in bull/bear markets by requiring trend alignment. Target: 75-200 trades over 4 years.
-name = "4h_Donchian20_12hEMA50_Trend_Volume"
-timeframe = "4h"
+# Works in bull/bear markets by requiring trend alignment with weekly timeframe.
+# Target: 50-150 total trades over 4 years = 12-37/year.
+name = "6h_Donchian20_1wEMA50_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,16 +22,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Donchian(20) channels on 4h
+    # Calculate Donchian(20) channels on 6h
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -45,7 +46,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+        if (np.isnan(ema_50_6h[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,8 +57,8 @@ def generate_signals(prices):
         long_breakout = close[i] > highest_high[i-1]  # Break above previous 20-period high
         short_breakout = close[i] < lowest_low[i-1]   # Break below previous 20-period low
         
-        trend_up = close[i] > ema_50_4h[i]
-        trend_down = close[i] < ema_50_4h[i]
+        trend_up = close[i] > ema_50_6h[i]
+        trend_down = close[i] < ema_50_6h[i]
         
         if position == 0:
             # Long: bullish breakout + uptrend + volume confirmation
