@@ -1,10 +1,18 @@
+# 4h_RSI_MeanReversion_4hTrend_Volume
+# Strategy uses 4-hour RSI with mean reversion logic and 4-hour trend filter.
+# Enters long when RSI < 30 and price above 4h EMA50 with volume confirmation.
+# Enters short when RSI > 70 and price below 4h EMA50 with volume confirmation.
+# Exits when RSI crosses back to neutral (40-60) or trend reverses.
+# Designed to work in both bull and bear markets by combining mean reversion with trend filter.
+# Target: 20-50 trades/year to minimize fee drag.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian20_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_RSI_MeanReversion_4hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,78 +25,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian channels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Donchian channels (20-period) on 1d high/low
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Use Wilder's smoothing (alpha = 1/14)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Upper band: max of last 20 highs
-    high_series = pd.Series(high_1d)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    # Lower band: min of last 20 lows
-    low_series = pd.Series(low_1d)
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Calculate EMA20 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = np.nan  # Not enough data
     
-    # Align all indicators to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # EMA50 on 4h close
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Volume spike filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for Donchian (20), EMA20 (1d), and volume MA
+    start_idx = 50  # Need enough data for EMA50 and RSI
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i]) or
-            np.isnan(ema20_1d_aligned[i]) or
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema50[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = donchian_high_aligned[i]
-        lower = donchian_low_aligned[i]
-        ema20_1d_val = ema20_1d_aligned[i]
+        rsi_val = rsi[i]
+        ema50_val = ema50[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above upper band + 1d uptrend + volume spike
-            if close[i] > upper and close[i] > ema20_1d_val and vol_spike:
+            # Enter long: RSI oversold + price above EMA50 + volume spike
+            if rsi_val < 30 and close[i] > ema50_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below lower band + 1d downtrend + volume spike
-            elif close[i] < lower and close[i] < ema20_1d_val and vol_spike:
+            # Enter short: RSI overbought + price below EMA50 + volume spike
+            elif rsi_val > 70 and close[i] < ema50_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below lower band or 1d trend turns down
-            if close[i] < lower or close[i] < ema20_1d_val:
+            # Exit long: RSI returns to neutral or price below EMA50
+            if rsi_val > 40 or close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above upper band or 1d trend turns up
-            if close[i] > upper or close[i] > ema20_1d_val:
+            # Exit short: RSI returns to neutral or price above EMA50
+            if rsi_val < 60 or close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
