@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS - Modified version with adjusted volume filter to reduce trade frequency
-Target: 20-40 trades/year (~80-160 total over 4 years)
-Uses breakout of R3/S3 levels with trend filter and volume confirmation to avoid whipsaws
+1d_WeeklyTrend_DailyBreakout_12hVolume
+Hypothesis: Weekly trend (using 20-week EMA on 1w) filters direction, daily breakout above/below 
+previous day's high/low (breakout of daily range) with volume confirmation (12h volume > 1.5x 20-period 
+average) provides edge in both bull and bear markets by capturing momentum after consolidation.
+Timeframe: 1d for fewer trades, lower fee drag. Uses 1w trend filter to avoid counter-trend trades.
+Target: 15-25 trades/year (~60-100 total over 4 years) to stay within fee limits.
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_WeeklyTrend_DailyBreakout_12hVolume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,114 +26,97 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1w data for trend filter (20-week EMA)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
+    # Calculate 20-period EMA on weekly close
+    ema20_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 20:
+        ema20_1w[19] = np.mean(close_1w[0:20])
+        for i in range(20, len(close_1w)):
+            ema20_1w[i] = (close_1w[i] * 2 + ema20_1w[i-1] * 18) / 20
     
-    # Align 1d EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align 1w EMA20 to daily timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate Camarilla levels for each 1d bar: R3, S3
-    camarilla_r3_1d = np.full_like(close_1d, np.nan)
-    camarilla_s3_1d = np.full_like(close_1d, np.nan)
+    # Get 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    for i in range(len(df_1d)):
-        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
-            camarilla_r3_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
-            camarilla_s3_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
+    volume_12h = df_12h['volume'].values
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Calculate 20-period average volume on 12h
+    vol_ma_12h = np.full_like(volume_12h, np.nan)
+    if len(volume_12h) >= 20:
+        vol_ma_12h[19] = np.mean(volume_12h[0:20])
+        for i in range(20, len(volume_12h)):
+            vol_ma_12h[i] = (vol_ma_12h[i-1] * 19 + volume_12h[i]) / 20
     
-    # Calculate 14-period RSI on 4h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align 12h volume MA to daily timeframe
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    
-    if len(close) >= 14:
-        avg_gain[13] = np.mean(gain[1:14])
-        avg_loss[13] = np.mean(loss[1:14])
-        for i in range(14, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.full_like(close, np.nan)
-    rsi = np.full_like(close, np.nan)
-    valid_avg_loss = avg_loss != 0
-    rs[valid_avg_loss] = avg_gain[valid_avg_loss] / avg_loss[valid_avg_loss]
-    rsi[valid_avg_loss] = 100 - (100 / (1 + rs[valid_avg_loss]))
-    
-    # Volume filter: current volume vs 40-period average (more stringent)
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 40:
-        vol_ma[39] = np.mean(volume[0:40])
-        for i in range(40, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 39 + volume[i]) / 40
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Daily range breakout: today's high > yesterday's high (for long) or today's low < yesterday's low (for short)
+    # We need yesterday's high/low, so shift by 1
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    # First bar has no previous, set to nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 14, 40)  # Need 1d EMA34, RSI, and volume MA
+    # Start after we have enough data: need EMA20_1w aligned, volume MA aligned, and prev high/low
+    start_idx = max(20, 20)  # EMA20 and vol MA both need 20 periods
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
-            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
+            np.isnan(prev_high[i]) or np.isnan(prev_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market conditions
-        trend_up = close[i] > ema34_1d_aligned[i]
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
-        # Increased volume threshold to reduce trades
-        volume_surge = volume_ratio[i] > 2.5
+        # Determine conditions
+        # Weekly trend: price above/below 20-week EMA
+        trend_up = close[i] > ema20_1w_aligned[i]
+        trend_down = close[i] < ema20_1w_aligned[i]
+        
+        # Daily breakout: today breaks above yesterday's high or below yesterday's low
+        breakout_up = high[i] > prev_high[i]
+        breakout_down = low[i] < prev_low[i]
+        
+        # Volume confirmation: 12h volume > 1.5x its 20-period average
+        # Note: vol_ma_12h_aligned gives the 20-period MA of 12h volume, aligned to daily
+        volume_surge = volume[i] > (vol_ma_12h_aligned[i] * 1.5)
         
         if position == 0:
-            # Enter long: Uptrend + RSI bullish + price breaks above R3 + volume surge
-            if trend_up and rsi_bullish and close[i] > camarilla_r3_1d_aligned[i] and volume_surge:
+            # Enter long: uptrend + upward breakout + volume surge
+            if trend_up and breakout_up and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + RSI bearish + price breaks below S3 + volume surge
-            elif not trend_up and rsi_bearish and close[i] < camarilla_s3_1d_aligned[i] and volume_surge:
+            # Enter short: downtrend + downward breakout + volume surge
+            elif trend_down and breakout_down and volume_surge:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR RSI turns bearish OR price breaks below S3
-            if not trend_up or not rsi_bullish or close[i] < camarilla_s3_1d_aligned[i]:
+            # Exit long: trend turns down OR price breaks below yesterday's low (mean reversion)
+            if not trend_up or low[i] < prev_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR RSI turns bullish OR price breaks above R3
-            if trend_up or rsi_bullish or close[i] > camarilla_r3_1d_aligned[i]:
+            # Exit short: trend turns up OR price breaks above yesterday's high
+            if trend_down or high[i] > prev_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
