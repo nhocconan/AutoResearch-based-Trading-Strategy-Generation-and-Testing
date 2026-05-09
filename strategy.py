@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12-hour Donchian breakout with 1-day trend filter and volume confirmation
-# Uses Donchian(20) breakout on 12h timeframe, filtered by 1d EMA(34) trend and volume spike
-# Volume spike defined as current volume > 1.5x 20-period average volume
-# Only takes longs when price > 12h Donchian upper AND 1d EMA(34) rising AND volume spike
-# Only takes shorts when price < 12h Donchian lower AND 1d EMA(34) falling AND volume spike
-# Exits when price crosses the 12h Donchian midpoint or trend reverses
-# Target: 12-37 trades per year with position size 0.25
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter and volume spike
+# Uses Camarilla pivot levels from 1d, filtered by 1d EMA(34) trend and volume spike (>1.5x avg volume)
+# Only takes longs when price > 1d Camarilla R3 AND 1d EMA(34) rising AND volume spike
+# Only takes shorts when price < 1d Camarilla S3 AND 1d EMA(34) falling AND volume spike
+# Exits when price crosses the 1d Camarilla midpoint (P) or trend reverses
+# Target: 20-50 trades per year with position size 0.25 (tight entry to avoid overtrading)
 
-name = "12h_Donchian_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -40,23 +39,23 @@ def generate_signals(prices):
     ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising)
     ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling)
     
-    # Get 12h data for Donchian channels
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate Camarilla pivot levels from 1d
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d_series = df_1d['close']
+    pivot = (high_1d + low_1d + close_1d_series) / 3
+    range_hl = high_1d - low_1d
+    r3 = pivot + (range_hl * 1.1 / 2)
+    s3 = pivot - (range_hl * 1.1 / 2)
+    # Camarilla midpoint is the pivot point (P)
+    mid = pivot
     
-    high_12h = df_12h['high']
-    low_12h = df_12h['low']
-    donchian_upper = high_12h.rolling(window=20, min_periods=20).max()
-    donchian_lower = low_12h.rolling(window=20, min_periods=20).min()
-    donchian_mid = (donchian_upper + donchian_lower) / 2
-    
-    donchian_upper_values = donchian_upper.values
-    donchian_lower_values = donchian_lower.values
-    donchian_mid_values = donchian_mid.values
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_values)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_values)
-    donchian_mid_aligned = align_htf_to_ltf(prices, df_12h, donchian_mid_values)
+    r3_values = r3.values
+    s3_values = s3.values
+    mid_values = mid.values
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_values)
+    mid_aligned = align_htf_to_ltf(prices, df_1d, mid_values)
     
     # Volume spike: current volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -70,38 +69,38 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(ema_rising_aligned[i]) or np.isnan(ema_falling_aligned[i]) or
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(donchian_mid_aligned[i]) or np.isnan(vol_spike[i])):
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(mid_aligned[i]) or
+            np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > 12h Donchian upper + 1d EMA rising + volume spike
-            if (close[i] > donchian_upper_aligned[i] and 
+            # Enter long: price > 1d Camarilla R3 + 1d EMA rising + volume spike
+            if (close[i] > r3_aligned[i] and 
                 ema_rising_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < 12h Donchian lower + 1d EMA falling + volume spike
-            elif (close[i] < donchian_lower_aligned[i] and 
+            # Enter short: price < 1d Camarilla S3 + 1d EMA falling + volume spike
+            elif (close[i] < s3_aligned[i] and 
                   ema_falling_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below 12h Donchian midpoint OR trend turns down
-            if (close[i] < donchian_mid_aligned[i]) or (not ema_rising_aligned[i]):
+            # Exit long: price crosses below 1d Camarilla midpoint OR trend turns down
+            if (close[i] < mid_aligned[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above 12h Donchian midpoint OR trend turns up
-            if (close[i] > donchian_mid_aligned[i]) or (not ema_falling_aligned[i]):
+            # Exit short: price crosses above 1d Camarilla midpoint OR trend turns up
+            if (close[i] > mid_aligned[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
