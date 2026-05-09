@@ -1,18 +1,16 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation. 
-# Uses 4h EMA20 for trend direction (bullish if close > EMA20, bearish if close < EMA20) 
-# and 1h RSI(14) for momentum entries (long when RSI < 30 and rising, short when RSI > 70 and falling).
-# Volume confirmation requires current volume > 1.5x 20 EMA volume. 
-# Session filter (08-20 UTC) reduces noise. 
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
-# Target: 15-37 trades/year to avoid fee drag.
-
-name = "1h_RSI_Momentum_4hEMA20_Volume"
-timeframe = "1h"
+# Hypothesis: 6h RSI divergence + 1w trend filter + volume spike
+# RSI divergence catches reversals at extremes; 1w trend ensures alignment with major trend;
+# volume spike confirms institutional participation. Works in both bull and bear markets
+# by capturing exhaustion moves and trend continuations with proper filtering.
+# Target: 50-150 trades over 4 years (12-37/year) with size 0.25.
+name = "6h_RSIDivergence_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,30 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1h RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
+    # RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
     
-    # Volume confirmation: volume > 1.5x 20 EMA volume
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # 1w EMA50 trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 2.0x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
+    vol_confirm = volume > (2.0 * vol_ema20)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Price structure for divergence: recent swing high/low
+    lookback = 10
+    highest_high = pd.Series(high).rolling(window=lookback, center=False).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, center=False).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,43 +57,49 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ema20[i]) or 
-            np.isnan(rsi[i-1])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ema20[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        price = close[i]
         
         if position == 0:
-            # Long: RSI < 30 and rising (RSI > previous RSI) + 4h EMA20 up + volume
-            if (rsi[i] < 30 and rsi[i] > rsi[i-1] and close[i] > ema_4h_aligned[i] and vol_confirm[i]):
-                signals[i] = 0.20
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            bull_div = (low[i] == lowest_low[i] and 
+                       rsi[i] > rsi[i-1] and 
+                       rsi[i] < 30 and  # oversold
+                       price > ema_1w_aligned[i])  # above weekly trend
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            bear_div = (high[i] == highest_high[i] and 
+                       rsi[i] < rsi[i-1] and 
+                       rsi[i] > 70 and  # overbought
+                       price < ema_1w_aligned[i])  # below weekly trend
+            
+            if bull_div and vol_confirm[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 and falling (RSI < previous RSI) + 4h EMA20 down + volume
-            elif (rsi[i] > 70 and rsi[i] < rsi[i-1] and close[i] < ema_4h_aligned[i] and vol_confirm[i]):
-                signals[i] = -0.20
+            elif bear_div and vol_confirm[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 70 or trend change
-            if rsi[i] > 70 or close[i] < ema_4h_aligned[i]:
+            # Exit long: RSI crosses above 50 or price breaks below weekly EMA
+            if rsi[i] > 50 or price < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 30 or trend change
-            if rsi[i] < 30 or close[i] > ema_4h_aligned[i]:
+            # Exit short: RSI crosses below 50 or price breaks above weekly EMA
+            if rsi[i] < 50 or price > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
