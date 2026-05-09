@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation
+    # Previous day OHLC for Camarilla calculation
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -27,23 +27,22 @@ def generate_signals(prices):
     prev_close[0] = close[0]
     prev_open[0] = prices['open'].values[0]
     
-    # Calculate Camarilla R1/S1 levels (tighter bands)
+    # Calculate Camarilla R1/S1 levels
     range_ = prev_high - prev_low
     close_prev = prev_close
-    
     r1 = close_prev + range_ * 1.1 / 12
     s1 = close_prev - range_ * 1.1 / 12
     
-    # Daily trend: EMA34 on 1d
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 12-hour trend: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Volume filter: volume > 1.3x 20-period SMA
+    # Volume filter: volume > 1.5x 20-period SMA
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.3 * vol_ma20
+    vol_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,7 +52,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if required data unavailable
         if np.isnan(r1[i]) or np.isnan(s1[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+           np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,25 +61,25 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R1 with daily uptrend and volume
+            # Long: breakout above R1 with 12h uptrend and volume
             if (price > r1[i] and 
-                price > ema34_1d_aligned[i] and 
+                price > ema50_12h_aligned[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S1 with daily downtrend and volume
+            # Short: breakdown below S1 with 12h downtrend and volume
             elif (price < s1[i] and 
-                  price < ema34_1d_aligned[i] and 
+                  price < ema50_12h_aligned[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price returns to daily EMA or loses volume
-            if (price < ema34_1d_aligned[i] or 
+            # Exit long: price returns to 12h EMA or loses volume
+            if (price < ema50_12h_aligned[i] or 
                 not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
@@ -88,8 +87,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to daily EMA or loses volume
-            if (price > ema34_1d_aligned[i] or 
+            # Exit short: price returns to 12h EMA or loses volume
+            if (price > ema50_12h_aligned[i] or 
                 not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
