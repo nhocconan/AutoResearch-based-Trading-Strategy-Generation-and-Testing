@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_Breakout_Volume_Trend_1dADX"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    4h Donchian(20) breakout with 1d ADX trend filter and volume confirmation.
-    - Long: Price breaks above Donchian(20) high with ADX>25 and volume spike
-    - Short: Price breaks below Donchian(20) low with ADX>25 and volume spike
-    - Exit: Price crosses back through Donchian(20) midpoint
-    - Volume spike: current volume > 2.0 x 20-period average
-    - Target: 20-50 trades/year on 4h timeframe
+    12h Camarilla R1/S1 breakout with 1d ADX trend filter and volume confirmation.
+    - Long: Price breaks above R1 with ADX>25 and volume spike
+    - Short: Price breaks below S1 with ADX>25 and volume spike
+    - Exit: Price crosses back through Camarilla pivot point
+    - Volume spike: current volume > 2.0 x 24-period average (24 * 12h = 12d)
+    - Target: 12-37 trades/year on 12h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -30,13 +30,18 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian(20) on 4h data
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
+    # Calculate Camarilla levels from previous 12h bar
+    # R1 = C + (H-L)*1.12, S1 = C - (H-L)*1.12, PP = (H+L+C)/3
+    camarilla_r1 = np.full(n, np.nan)
+    camarilla_s1 = np.full(n, np.nan)
+    camarilla_pp = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        if not (np.isnan(high[i-1]) or np.isnan(low[i-1]) or np.isnan(close[i-1])):
+            rng = high[i-1] - low[i-1]
+            camarilla_r1[i] = close[i-1] + rng * 1.12
+            camarilla_s1[i] = close[i-1] - rng * 1.12
+            camarilla_pp[i] = (high[i-1] + low[i-1] + close[i-1]) / 3.0
     
     # Calculate ADX(14) on 1d data
     high_1d = df_1d['high'].values
@@ -96,61 +101,58 @@ def generate_signals(prices):
         for i in range(2*period-1, len(dx)):
             adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
     
-    # Align ADX to 4h
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
+    # Align ADX to 12h
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Volume spike detection (20-period for 4h)
+    # Volume spike detection (24-period for 12h = 12 days)
     vol_avg = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
+    for i in range(24, n):
+        vol_avg[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 2*period)  # ensure sufficient warmup
+    start_idx = max(50, 2*period, 24)  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_4h[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(camarilla_pp[i]) or np.isnan(adx_12h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Donchian midpoint
-        midpoint = (highest_high[i] + lowest_low[i]) / 2
-        
-        # Volume condition: current volume > 2.0 x 20-period average
+        # Volume condition: current volume > 2.0 x 24-period average
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
         # ADX trend filter: only trade when trending (ADX > 25)
-        trending = adx_4h[i] > 25
+        trending = adx_12h[i] > 25
         
         if position == 0:
-            # Long: Break above Donchian high with trend and volume spike
-            if (close[i] > highest_high[i] and trending and vol_spike):
-                signals[i] = 0.30
+            # Long: Break above R1 with trend and volume spike
+            if (close[i] > camarilla_r1[i] and trending and vol_spike):
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low with trend and volume spike
-            elif (close[i] < lowest_low[i] and trending and vol_spike):
-                signals[i] = -0.30
+            # Short: Break below S1 with trend and volume spike
+            elif (close[i] < camarilla_s1[i] and trending and vol_spike):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below Donchian midpoint
-            if close[i] < midpoint:
+            # Exit long: Price crosses below pivot point
+            if close[i] < camarilla_pp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above Donchian midpoint
-            if close[i] > midpoint:
+            # Exit short: Price crosses above pivot point
+            if close[i] > camarilla_pp[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
