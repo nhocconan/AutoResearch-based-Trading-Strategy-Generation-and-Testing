@@ -1,9 +1,10 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Supertrend_KAMA_Trend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Targeted"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,77 +18,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Supertrend on 1d (ATR=10, multiplier=3) - robust trend filter
-    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr2 = np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Basic ATR calculation for Supertrend
-    hl2 = (high + low) / 2
-    upperband = hl2 + (3 * atr)
-    lowerband = hl2 - (3 * atr)
+    # Calculate pivot and levels from previous day's OHLC
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Initialize Supertrend
-    supertrend = np.full_like(close, np.nan)
-    dir = np.ones_like(close, dtype=int)  # 1 for uptrend, -1 for downtrend
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    for i in range(10, len(close)):
-        if np.isnan(atr[i]) or np.isnan(hl2[i]):
-            continue
-            
-        if close[i] > upperband[i-1]:
-            dir[i] = 1
-        elif close[i] < lowerband[i-1]:
-            dir[i] = -1
-        else:
-            dir[i] = dir[i-1]
-            
-        if dir[i] == 1:
-            lowerband[i] = max(lowerband[i], lowerband[i-1])
-            supertrend[i] = lowerband[i]
-        else:
-            upperband[i] = min(upperband[i], upperband[i-1])
-            supertrend[i] = upperband[i]
+    prev_daily_range = prev_high_1d - prev_low_1d
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1 = pivot + 1.1 * prev_daily_range / 6
+    s1 = pivot - 1.1 * prev_daily_range / 6
     
-    # Align 1d Supertrend to 4h
-    supertrend_1d = supertrend
-    dir_1d = dir
-    supertrend_4h = align_htf_to_ltf(prices, df_1d, supertrend_1d)
-    dir_4h = align_htf_to_ltf(prices, df_1d, dir_1d.astype(float))
+    # Align Camarilla levels to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # KAMA on 4h for entry timing (ER=10)
-    change = np.abs(np.diff(close, k=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1) if len(close) > 1 else np.array([])
-    # Proper ER calculation
-    er = np.zeros_like(close)
-    for i in range(9, len(close)):
-        if i >= 9:
-            price_change = np.abs(close[i] - close[i-9])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))
-            if volatility_sum > 0:
-                er[i] = price_change / volatility_sum
-            else:
-                er[i] = 0
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    sc[0] = 0
-    
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Volume condition: current volume > 2.0 x 20-period average
+    # Volume spike detection (20-period)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -97,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_4h[i]) or np.isnan(dir_4h[i]) or 
-            np.isnan(kama[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema34_4h[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -108,26 +69,26 @@ def generate_signals(prices):
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: Price above Supertrend (uptrend) AND price > KAMA AND volume spike
-            if dir_4h[i] == 1 and close[i] > kama[i] and vol_spike:
+            # Long: Break above Camarilla R1 with uptrend and volume spike
+            if close[i] > r1_4h[i] and close[i] > ema34_4h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below Supertrend (downtrend) AND price < KAMA AND volume spike
-            elif dir_4h[i] == -1 and close[i] < kama[i] and vol_spike:
+            # Short: Break below Camarilla S1 with downtrend and volume spike
+            elif close[i] < s1_4h[i] and close[i] < ema34_4h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR price falls below KAMA
-            if dir_4h[i] == -1 or close[i] < kama[i]:
+            # Exit long: Price falls back below Camarilla S1 OR trend turns down
+            if close[i] < s1_4h[i] or close[i] < ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR price rises above KAMA
-            if dir_4h[i] == 1 or close[i] > kama[i]:
+            # Exit short: Price rises back above Camarilla R1 OR trend turns up
+            if close[i] > r1_4h[i] or close[i] > ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
