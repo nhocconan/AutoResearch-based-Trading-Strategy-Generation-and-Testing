@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Stochastic RSI + 1d Williams %R for mean reversion in oversold/overbought zones
-# Long when StochRSI < 0.2, Williams %R < -80 (extreme oversold), and price > 6h EMA50 (trend filter)
-# Short when StochRSI > 0.8, Williams %R > -20 (extreme overbought), and price < 6h EMA50
-# Exit when StochRSI crosses above 0.5 (long) or below 0.5 (short)
-# Uses mean reversion with trend alignment to avoid counter-trend trades, targeting 60-120 trades over 4 years
-# Stochastic RSI identifies momentum extremes, Williams %R confirms overbought/oversold, EMA50 filters trend
+# Hypothesis: 6h ATR-based volatility breakout with 1d trend filter and volume confirmation
+# Long when price breaks above ATR-based upper band with 1d EMA50 uptrend and volume > 1.5x average
+# Short when price breaks below ATR-based lower band with 1d EMA50 downtrend and volume > 1.5x average
+# Exit when price reverses back to the 6-period average price (mean reversion)
+# Uses volatility breakout to capture momentum bursts in both trending and ranging markets
+# Designed to work in both bull and bear markets by filtering with daily trend
+# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
 
-name = "6h_StochRSI_WilliamsR_MeanReversion"
+name = "6h_ATR_Volatility_Breakout_1dEMA50_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -16,84 +17,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 6h Stochastic RSI
-    rsi_period = 14
-    stoch_period = 14
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    rsi_min = rsi.rolling(window=stoch_period, min_periods=stoch_period).min()
-    rsi_max = rsi.rolling(window=stoch_period, min_periods=stoch_period).max()
-    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min)
-    stoch_rsi = stoch_rsi.fillna(0.5)
-    stoch_rsi_values = stoch_rsi.values
-    
-    # Calculate 1d Williams %R
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max()
-    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
-    williams_r = williams_r.fillna(-50)
-    williams_r_values = williams_r.values
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r_values)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 6h EMA50 for trend filter
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate ATR(14) for volatility bands
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Calculate 6-period average price for mean reversion exit
+    avg_price = pd.Series(close).rolling(window=6, min_periods=6).mean().values
+    
+    # Volatility bands: ±2 * ATR from close
+    upper_band = close + 2.0 * atr
+    lower_band = close - 2.0 * atr
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for indicators
+    start_idx = 50  # Need enough data for ATR and EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(stoch_rsi_values[i]) or np.isnan(williams_r_aligned[i]) or 
-            np.isnan(ema50[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(atr[i]) or 
+            np.isnan(avg_price[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: extreme oversold with uptrend filter
-            if (stoch_rsi_values[i] < 0.2 and 
-                williams_r_aligned[i] < -80 and 
-                close[i] > ema50[i]):
+            # Enter long: price breaks above upper band, 1d EMA50 uptrend, volume spike
+            if (close[i] > upper_band[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA rising
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: extreme overbought with downtrend filter
-            elif (stoch_rsi_values[i] > 0.8 and 
-                  williams_r_aligned[i] > -20 and 
-                  close[i] < ema50[i]):
+            # Enter short: price breaks below lower band, 1d EMA50 downtrend, volume spike
+            elif (close[i] < lower_band[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA falling
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: StochRSI crosses above 0.5 (mean reversion complete)
-            if stoch_rsi_values[i] > 0.5:
+            # Exit long: price returns to average price (mean reversion)
+            if close[i] <= avg_price[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: StochRSI crosses below 0.5 (mean reversion complete)
-            if stoch_rsi_values[i] < 0.5:
+            # Exit short: price returns to average price (mean reversion)
+            if close[i] >= avg_price[i]:
                 signals[i] = 0.0
                 position = 0
             else:
