@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA50 trend filter
-# Long when price breaks above 20-period high + volume spike + above 12h EMA50
-# Short when price breaks below 20-period low + volume spike + below 12h EMA50
-# Exit when price crosses back below/above the 20-period opposite band or trend reverses
-# Position size: 0.25 to balance return and drawdown, designed for trending and ranging markets
+# Hypothesis: 1h EMA crossover (12/26) with 4h EMA50 trend filter and volume confirmation
+# Long when 1h EMA12 > EMA26, price > 4h EMA50, volume > 1.5x 20-period average
+# Short when 1h EMA12 < EMA26, price < 4h EMA50, volume > 1.5x 20-period average
+# Exit when EMA crossover reverses or volume condition fails
+# Uses 4h trend to avoid counter-trend whipsaws, volume to confirm momentum
+# Position size: 0.20 to limit drawdown and reduce frequency
+# Target: 15-37 trades/year (~60-150 over 4 years) by requiring trend + momentum + volume confluence
 
-name = "4h_Donchian_Volume_Trend_Filter_12h"
-timeframe = "4h"
+name = "1h_EMA12_26_4hEMA50_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,18 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 20-period Donchian channels
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    upper_band = high_roll.values
-    lower_band = low_roll.values
+    # 1h EMA12 and EMA26 for crossover signal
+    ema12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # 4h EMA50 for trend filter (loaded once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -43,12 +43,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA50 and Donchian
+    start_idx = 60  # Need enough data for EMA26
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
+        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
+            np.isnan(ema50_4h_aligned[i]) or 
             np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -56,33 +56,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: break above upper band + volume spike + above 12h EMA50
-            if (close[i] > upper_band[i] and 
-                vol_spike[i] and 
-                close[i] > ema50_12h_aligned[i]):
-                signals[i] = 0.25
+            # Enter long: bullish EMA crossover + above 4h EMA50 + volume spike
+            if (ema12[i] > ema26[i] and 
+                close[i] > ema50_4h_aligned[i] and 
+                vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: break below lower band + volume spike + below 12h EMA50
-            elif (close[i] < lower_band[i] and 
-                  vol_spike[i] and 
-                  close[i] < ema50_12h_aligned[i]):
-                signals[i] = -0.25
+            # Enter short: bearish EMA crossover + below 4h EMA50 + volume spike
+            elif (ema12[i] < ema26[i] and 
+                  close[i] < ema50_4h_aligned[i] and 
+                  vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below lower band OR 12h EMA50 turns bearish
-            if (close[i] < lower_band[i]) or (close[i] < ema50_12h_aligned[i]):
+            # Exit long: EMA crossover turns bearish OR price below 4h EMA50
+            if (ema12[i] < ema26[i]) or (close[i] < ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price crosses above upper band OR 12h EMA50 turns bullish
-            if (close[i] > upper_band[i]) or (close[i] > ema50_12h_aligned[i]):
+            # Exit short: EMA crossover turns bullish OR price above 4h EMA50
+            if (ema12[i] > ema26[i]) or (close[i] > ema50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
