@@ -1,15 +1,10 @@
-# [Hypothesis] 6h timeframe with 12h/1d multi-timeframe confirmation: 
-# Strategy uses 12h Donchian breakout for trend direction and 1d volume confirmation for momentum.
-# Works in bull/bear markets by trading with higher timeframe trend. Volume filter reduces whipsaw.
-# Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_DonchianBreakout_12hTrend_1dVolConfirm"
-timeframe = "6h"
+name = "4h_WilliamsAlligator_ElderRay_Stochastic"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,76 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend (Donchian channel)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Williams Alligator (13,8,5 SMAs shifted)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Calculate 12h Donchian channel (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Elder Ray: Bull/Bear Power (13-period EMA)
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Vectorized rolling max/min
-    high_series = pd.Series(high_12h)
-    low_series = pd.Series(low_12h)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Stochastic (14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    stoch_k = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    stoch_d = pd.Series(stoch_k).rolling(window=3, min_periods=3).mean().values
     
-    # Align Donchian levels to 6h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
-    
-    # Get 1d data for volume confirmation
+    # Daily trend filter: EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Volume spike: current > 2.0 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > 2.0 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_aligned[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
+           np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
+           np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vol_current = volume[i]
-        vol_ma_today = vol_ma_aligned[i]
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirmed = vol_current > 1.5 * vol_ma_today
         
         if position == 0:
-            # Long entry: price breaks above 12h Donchian high with volume confirmation
-            if price > donchian_high_aligned[i] and vol_confirmed:
+            # Long conditions: Alligator bullish alignment + Elder Ray bullish + Stoch oversold + Daily uptrend + Volume spike
+            if (lips[i] > teeth[i] > jaw[i] and  # Alligator bullish alignment
+                bull_power[i] > 0 and bear_power[i] < 0 and  # Elder Ray: bulls in control
+                stoch_k[i] < 30 and stoch_d[i] < 30 and  # Stoch oversold
+                price > ema34_1d_aligned[i] and  # Daily uptrend
+                vol_spike[i]):  # Volume confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below 12h Donchian low with volume confirmation
-            elif price < donchian_low_aligned[i] and vol_confirmed:
+                continue
+            
+            # Short conditions: Alligator bearish alignment + Elder Ray bearish + Stoch overbought + Daily downtrend + Volume spike
+            elif (lips[i] < teeth[i] < jaw[i] and  # Alligator bearish alignment
+                  bear_power[i] < 0 and bull_power[i] > 0 and  # Elder Ray: bears in control
+                  stoch_k[i] > 70 and stoch_d[i] > 70 and  # Stoch overbought
+                  price < ema34_1d_aligned[i] and  # Daily downtrend
+                  vol_spike[i]):  # Volume confirmation
                 signals[i] = -0.25
                 position = -1
+                continue
         
         elif position == 1:
-            # Exit long: price breaks below 12h Donchian low
-            if price < donchian_low_aligned[i]:
+            # Exit long: Alligator death cross or Elder Ray turns bearish or Stoch overbought
+            if (lips[i] < teeth[i] or  # Alligator death cross
+                bull_power[i] <= 0 or  # Elder Ray bullish momentum lost
+                stoch_k[i] > 70):  # Stoch overbought
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 12h Donchian high
-            if price > donchian_high_aligned[i]:
+            # Exit short: Alligator golden cross or Elder Ray turns bullish or Stoch oversold
+            if (lips[i] > teeth[i] or  # Alligator golden cross
+                bear_power[i] >= 0 or  # Elder Ray bearish momentum lost
+                stoch_k[i] < 30):  # Stoch oversold
                 signals[i] = 0.0
                 position = 0
             else:
