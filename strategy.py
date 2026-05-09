@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h price action with 1d Bollinger Bands width regime filter and 12h momentum confirmation
-# Long when price > 12h EMA(20), BB width > 0.05 (volatile regime), and close > open (bullish candle)
-# Short when price < 12h EMA(20), BB width > 0.05, and close < open (bearish candle)
-# Exit when BB width < 0.03 (low volatility) or price crosses 12h EMA(20)
-# Uses BB width to identify volatile regimes where breakouts are more likely to follow through
-# EMA(20) provides dynamic support/resistance in trending markets
-# Designed to capture momentum moves in volatile conditions while avoiding low-volume consolidations
-# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high, price > 1d EMA(50), and volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) low, price < 1d EMA(50), and volume > 1.5x 20-period average
+# Exit when price crosses Donchian midpoint or volume confirmation fails
+# Uses Donchian for breakout signals, EMA for trend filter, volume for conviction
+# Designed to capture strong trends while avoiding choppy markets with strict entry conditions
+# Target: 100-180 total trades over 4 years (25-45/year) with size 0.25
 
-name = "6h_BBWidth_Momentum_Regime"
-timeframe = "6h"
+name = "4h_Donchian_1dEMA_Volume_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,77 +20,67 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate Bollinger Bands for 1d timeframe (20-period, 2 std dev)
+    # Calculate Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Calculate 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:  # Need enough data for BB calculation
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Typical price for BB calculation
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Calculate SMA and standard deviation
-    sma = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
-    std_dev = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Upper and lower bands
-    upper_band = sma + (2 * std_dev)
-    lower_band = sma - (2 * std_dev)
-    
-    # Bollinger Band Width: (Upper - Lower) / Middle
-    bb_width = (upper_band - lower_band) / sma
-    bb_width = np.where(sma != 0, bb_width, 0)  # Avoid division by zero
-    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
-    
-    # Calculate EMA(20) for 12h timeframe
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:  # Need enough data for EMA calculation
-        return np.zeros(n)
-    
-    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_width_aligned[i]) or np.isnan(ema_20_12h_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price above EMA, volatile regime (BB width > 0.05), bullish candle
-            if (close[i] > ema_20_12h_aligned[i] and 
-                bb_width_aligned[i] > 0.05 and 
-                close[i] > open_price[i]):
+            # Enter long: price breaks above Donchian high, above 1d EMA, volume confirmation
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below EMA, volatile regime (BB width > 0.05), bearish candle
-            elif (close[i] < ema_20_12h_aligned[i] and 
-                  bb_width_aligned[i] > 0.05 and 
-                  close[i] < open_price[i]):
+            # Enter short: price breaks below Donchian low, below 1d EMA, volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: low volatility (BB width < 0.03) or price crosses below EMA
-            if (bb_width_aligned[i] < 0.03) or (close[i] < ema_20_12h_aligned[i]):
+            # Exit long: price crosses below Donchian midpoint or volume confirmation fails
+            if (close[i] < donchian_mid[i]) or (not vol_confirm[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: low volatility (BB width < 0.03) or price crosses above EMA
-            if (bb_width_aligned[i] < 0.03) or (close[i] > ema_20_12h_aligned[i]):
+            # Exit short: price crosses above Donchian midpoint or volume confirmation fails
+            if (close[i] > donchian_mid[i]) or (not vol_confirm[i]):
                 signals[i] = 0.0
                 position = 0
             else:
