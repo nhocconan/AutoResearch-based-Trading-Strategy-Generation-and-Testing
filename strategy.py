@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Breakout_Volume_Strength
-# Hypothesis: Breakout above/below Keltner Channel (ATR-based) with volume >2x 20-bar average and price strength (close > open).
-# Uses Keltner Channel as dynamic support/resistance that adapts to volatility.
-# In high volatility environments, breakouts are more significant.
-# Volume filter ensures only high-conviction moves trigger entries.
-# Designed for 10-25 trades/year on 6h timeframe.
+# 12h_WeeklyPivot_Breakout_1dTrend_Volume
+# Hypothesis: Breakout above/below weekly pivot levels (R2/S2) with volume >1.8x 30-bar average and trend filter from 1d EMA50.
+# Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA50), buy breakout above R2; in downtrend (price < EMA50), sell breakdown below S2.
+# Volume filter ensures only high-conviction moves trigger entries. Designed for 12-37 trades/year on 12h timeframe.
 
-name = "6h_Keltner_Breakout_Volume_Strength"
-timeframe = "6h"
+name = "12h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,79 +22,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR for Keltner Channel
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # First period has no previous close
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= 10:
-        atr[9] = np.mean(tr[0:10])
-        for i in range(10, len(tr)):
-            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
+    close_1d = df_1d['close'].values
+    # Calculate 1d EMA(50) with proper initialization
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Calculate EMA for Keltner Channel middle line
-    ema = np.full_like(close, np.nan)
-    if len(close) >= 20:
-        ema[19] = np.mean(close[0:20])
-        for i in range(20, len(close)):
-            ema[i] = (close[i] * 2 + ema[i-1] * 18) / 20
+    # Align 1d EMA to 12h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Keltner Channel: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
-    keltner_upper = ema + 2 * atr
-    keltner_lower = ema - 2 * atr
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
     
-    # Volume filter: 6h volume / 20-period average volume
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L, S2 = P-(H-L), R2 = P+(H-L)
+    pivot = (high_1w + low_1w + close_1w) / 3
+    weekly_range = high_1w - low_1w
+    weekly_R2 = pivot + weekly_range  # R2 = P + (H-L)
+    weekly_S2 = pivot - weekly_range  # S2 = P - (H-L)
+    
+    # Align weekly pivot levels to 12h timeframe
+    weekly_R2_aligned = align_htf_to_ltf(prices, df_1w, weekly_R2)
+    weekly_S2_aligned = align_htf_to_ltf(prices, df_1w, weekly_S2)
+    
+    # Volume filter: 12h volume / 30-period average volume
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    if len(volume) >= 30:
+        vol_ma[29] = np.mean(volume[0:30])
+        for i in range(30, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 29 + volume[i]) / 30
     
     volume_ratio = np.full_like(volume, np.nan)
     valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
-    # Price strength: close > open (bullish candle)
-    price_strength = close > prices['open'].values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(30, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or \
-           np.isnan(volume_ratio[i]) or np.isnan(price_strength[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(weekly_R2_aligned[i]) or \
+           np.isnan(weekly_S2_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price breaks above Keltner Upper AND volume confirmation AND bullish candle
-            if close[i] > keltner_upper[i] and volume_ratio[i] > 2.0 and price_strength[i]:
+            # Enter long: Price breaks above weekly R2 AND volume confirmation AND bullish trend (price > EMA50)
+            if close[i] > weekly_R2_aligned[i] and volume_ratio[i] > 1.8 and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below Keltner Lower AND volume confirmation AND bearish candle
-            elif close[i] < keltner_lower[i] and volume_ratio[i] > 2.0 and not price_strength[i]:
+            # Enter short: Price breaks below weekly S2 AND volume confirmation AND bearish trend (price < EMA50)
+            elif close[i] < weekly_S2_aligned[i] and volume_ratio[i] > 1.8 and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below Keltner Lower (reversal signal)
-            if close[i] < keltner_lower[i]:
+            # Exit long: Price breaks below weekly S2 (reversal signal) or trend turns bearish
+            if close[i] < weekly_S2_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above Keltner Upper (reversal signal)
-            if close[i] > keltner_upper[i]:
+            # Exit short: Price breaks above weekly R2 (reversal signal) or trend turns bullish
+            if close[i] > weekly_R2_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
