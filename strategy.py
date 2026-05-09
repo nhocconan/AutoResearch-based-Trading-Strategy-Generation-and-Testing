@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1D_WeeklyDonchian_Breakout_WickFilter_Volume
-# Hypothesis: On 1d timeframe, enter long when price breaks above weekly Donchian high with bullish candle close and volume confirmation.
-# Enter short when price breaks below weekly Donchian low with bearish candle close and volume confirmation.
-# Weekly trend filter avoids counter-trade trades. Target: 10-25 trades/year per symbol (40-100 total over 4 years).
-# Works in bull via breakouts, in bear via short breakdowns with trend filter.
+# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
+# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
+# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
 
-name = "1D_WeeklyDonchian_Breakout_WickFilter_Volume"
-timeframe = "1d"
+name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,72 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly Donchian channels (20-period)
-    donchian_high = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for 1d: R1, S1 based on previous day
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Weekly trend: EMA(34) on close
-    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_1w > ema_34
+    # 1d trend: EMA(34) on close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema_34
     
-    # Daily volume confirmation: current volume > 1.5x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
-    # Daily bullish/bearish candle: close > open for bull, close < open for bear
-    open_prices = prices['open'].values
-    bullish_candle = close > open_prices
-    bearish_candle = close < open_prices
-    
-    # Align weekly indicators to daily
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
+    # Align 1d indicators to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(trend_up_aligned[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly Donchian high + bullish candle + weekly uptrend + volume confirmation
-            if close[i] > donchian_high_aligned[i] and bullish_candle[i] and trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly Donchian low + bearish candle + weekly downtrend + volume confirmation
-            elif close[i] < donchian_low_aligned[i] and bearish_candle[i] and not trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below weekly Donchian low or trend changes to down
-            if close[i] < donchian_low_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
+            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above weekly Donchian high or trend changes to up
-            if close[i] > donchian_high_aligned[i] or trend_up_aligned[i]:
+            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
+            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
