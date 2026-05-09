@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,71 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA13 trend and Elder Ray calculations
+    # Get 1d data for trend and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA13 for 1d close (trend filter)
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get 1d data for Camarilla levels (previous day)
+    df_1d_prev = get_htf_data(prices, '1d')
+    if len(df_1d_prev) < 20:
+        return np.zeros(n)
     
-    # Calculate Elder Ray components for 1d
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = df_1d['low'].values - ema13_1d
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d_prev['close'].shift(1).values
+    prev_high = df_1d_prev['high'].shift(1).values
+    prev_low = df_1d_prev['low'].shift(1).values
     
-    # Volume filter: current 1d volume > 1.3 * 20-day average
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current 1d volume > 1.5 * 20-day average
     vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.3)
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 6h
-    ema13_1d_6h = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align all to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d_prev, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d_prev, s1)
+    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Need enough data for EMA13 and volume MA
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema13_1d_6h[i]) or np.isnan(bull_power_6h[i]) or
-            np.isnan(bear_power_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(ema50_1d_12h[i]) or np.isnan(volume_filter_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema13_1d_6h[i]
-        bull = bull_power_6h[i]
-        bear = bear_power_6h[i]
-        vol_filter = volume_filter_6h[i]
+        r1_val = r1_12h[i]
+        s1_val = s1_12h[i]
+        trend = ema50_1d_12h[i]
+        vol_filter = volume_filter_12h[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0 (bullish momentum) with volume and above EMA13
-            if bull > 0 and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power < 0 (bearish momentum) with volume and below EMA13
-            elif bear < 0 and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bear Power turns negative (momentum shift)
-            if bear < 0:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bull Power turns positive (momentum shift)
-            if bull > 0:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
