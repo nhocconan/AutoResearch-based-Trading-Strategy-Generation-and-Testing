@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h 12h KAMA trend with RSI confirmation and volume filter
-# Long when 12h KAMA is rising, RSI(14) > 50, and volume > 1.5x average
-# Short when 12h KAMA is falling, RSI(14) < 50, and volume > 1.5x average
-# Exit when RSI crosses back to neutral (40-60 range) or KAMA reverses
-# Uses KAMA for adaptive trend, RSI for momentum, volume for confirmation
-# Target: 80-120 total trades over 4 years (20-30/year) with size 0.25
+# Hypothesis: 1d Donchian(20) breakout with weekly ADX trend filter and volume spike
+# Long when price breaks above 20-day high with weekly ADX > 25 and volume > 1.5x average
+# Short when price breaks below 20-day low with weekly ADX > 25 and volume > 1.5x average
+# Exit when price retraces to 10-day EMA
+# Uses Donchian for breakout, ADX for trend strength, volume for confirmation
+# Designed to capture strong trends in both bull and bear markets with controlled frequency
+# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25
 
-name = "4h_KAMA_RSI_VolumeTrend"
-timeframe = "4h"
+name = "1d_Donchian20_1wADX_Trend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,75 +20,76 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h KAMA for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Calculate 1d Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20)
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20)
+    donchian_high = high_roll.max().values
+    donchian_low = low_roll.min().values
+    
+    # Calculate 10-day EMA for exit
+    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Get weekly data for ADX calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough data for ADX
         return np.zeros(n)
     
-    # KAMA calculation
-    close_12h = df_12h['close'].values
-    change = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    volatility = np.sum(np.abs(np.diff(close_12h)), axis=0)  # placeholder, will compute properly below
+    # Calculate ADX (14-period) on weekly data
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Proper ER and KAMA calculation
-    price_change = np.abs(np.diff(close_12h, n=10))  # 10-period change
-    total_change = np.abs(close_12h[-1] - close_12h[0]) if len(close_12h) >= 10 else 0
-    # For simplicity, use a simplified adaptive factor
-    er = np.zeros_like(close_12h)
-    for i in range(len(close_12h)):
-        if i >= 10:
-            price_change = np.abs(close_12h[i] - close_12h[i-10])
-            total_change = np.sum(np.abs(np.diff(close_12h[i-9:i+1])))
-            er[i] = price_change / total_change if total_change != 0 else 0
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value is NaN
     
-    # Smooth er
-    er = pd.Series(er).ewm(alpha=0.2).fillna(0).values  # using 0.2 as default ER smoothing
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # Alternative simpler approach: use EMA as proxy for trend direction
-    # But let's use actual KAMA with proper calculation
+    # Smooth TR, DM+, DM- (14-period)
+    tr_smooth = np.zeros_like(tr)
+    dm_plus_smooth = np.zeros_like(dm_plus)
+    dm_minus_smooth = np.zeros_like(dm_minus)
     
-    # Recalculate KAMA properly
-    window = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
+    # Initial values (simple average of first 14 periods)
+    tr_smooth[14] = np.nansum(tr[1:15])
+    dm_plus_smooth[14] = np.nansum(dm_plus[1:15])
+    dm_minus_smooth[14] = np.nansum(dm_minus[1:15])
     
-    change_10 = np.abs(np.diff(close_12h, n=window))
-    volatility_sum = np.zeros_like(close_12h)
-    for i in range(window, len(close_12h)):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close_12h[i-window+1:i+1])))
+    # Wilder's smoothing (equivalent to alpha = 1/14)
+    for i in range(15, len(tr)):
+        tr_smooth[i] = tr_smooth[i-1] - (tr_smooth[i-1] / 14) + tr[i]
+        dm_plus_smooth[i] = dm_plus_smooth[i-1] - (dm_plus_smooth[i-1] / 14) + dm_plus[i]
+        dm_minus_smooth[i] = dm_minus_smooth[i-1] - (dm_minus_smooth[i-1] / 14) + dm_minus[i]
     
-    er = np.zeros_like(close_12h)
-    for i in range(len(close_12h)):
-        if i >= window and volatility_sum[i] > 0:
-            er[i] = change_10[i] / volatility_sum[i]
-        else:
-            er[i] = 0
+    # Calculate DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
     
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    # Calculate DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
+    # Smooth DX to get ADX
+    adx = np.full_like(dx, np.nan)
+    adx[27] = np.nanmean(dx[14:28])  # First ADX value after 27 periods (14+13)
+    for i in range(28, len(dx)):
+        adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
-    # Calculate RSI(14) on 4h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -96,41 +98,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need enough data for RSI and volume MA
+    start_idx = 30  # Need enough data for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema10[i]) or np.isnan(adx_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA rising, RSI > 50, volume confirmation
-            if (kama_aligned[i] > kama_aligned[i-1] and 
-                rsi[i] > 50 and 
+            # Enter long: price breaks above Donchian high, ADX > 25, volume spike
+            if (close[i] > donchian_high[i] and 
+                adx_aligned[i] > 25 and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling, RSI < 50, volume confirmation
-            elif (kama_aligned[i] < kama_aligned[i-1] and 
-                  rsi[i] < 50 and 
+            # Enter short: price breaks below Donchian low, ADX > 25, volume spike
+            elif (close[i] < donchian_low[i] and 
+                  adx_aligned[i] > 25 and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI drops below 40 or KAMA reverses
-            if (rsi[i] < 40) or (kama_aligned[i] < kama_aligned[i-1]):
+            # Exit long: price retraces to 10-day EMA
+            if close[i] <= ema10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI rises above 60 or KAMA reverses
-            if (rsi[i] > 60) or (kama_aligned[i] > kama_aligned[i-1]):
+            # Exit short: price retraces to 10-day EMA
+            if close[i] >= ema10[i]:
                 signals[i] = 0.0
                 position = 0
             else:
