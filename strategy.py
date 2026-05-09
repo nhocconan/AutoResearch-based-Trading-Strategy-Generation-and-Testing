@@ -3,103 +3,92 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h volume-weighted reversal with 4h trend filter and 1d volatility regime.
-# Uses 1h VWAP for mean reversion entries, 4h EMA50 for trend direction, and 1d ATR ratio for volatility filtering.
-# Designed to capture short-term reversals within the dominant trend while avoiding high-volatility chop.
-# Target: 15-35 trades/year (60-140 total over 4 years) with strict entry conditions.
-name = "1h_VWAP_Reversal_4hEMA50_1dATR_Filter"
-timeframe = "1h"
+# Hypothesis: 6h Elder Ray Index with 1d trend filter and volume spike.
+# Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) measures bull/bear strength.
+# We go long when Bull Power > 0 and Bear Power < 0 (both bullish) with 1d EMA34 uptrend and volume spike.
+# Short when Bear Power > 0 and Bull Power < 0 (both bearish) with 1d EMA34 downtrend and volume spike.
+# Uses volume > 2x average to avoid false signals in low volume.
+# Designed to work in both bull and bear markets by requiring trend alignment.
+# Target: 50-150 total trades over 4 years (12-37/year).
+name = "6h_ElderRay_1dEMA34_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 50-period EMA on 4h close
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Get 1d data for ATR-based volatility regime
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 14-period ATR on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 34-period EMA on 1d close
     close_1d = df_1d['close'].values
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1h VWAP (typical price * volume)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, np.nan)
+    # Calculate EMA13 for Elder Ray (using 6h close)
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Elder Ray components
+    bull_power = high - ema_13  # Bull Power = High - EMA13
+    bear_power = ema_13 - low   # Bear Power = EMA13 - Low
+    
+    # Calculate volume average (20-period) for spike detection
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need 60 periods for indicators to stabilize
+    start_idx = max(34, 20)  # Need 34 for EMA and 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(vwap[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
-        ema = ema_50_4h_aligned[i]
-        atr = atr_14_1d_aligned[i]
-        vwap_val = vwap[i]
-        
-        # Volatility filter: avoid trading when ATR is too high (choppy market)
-        atr_ma = np.nanmean(atr_14_1d_aligned[max(0, i-20):i+1]) if i >= 20 else atr
-        vol_filter = atr < 1.5 * atr_ma  # Only trade when volatility is below 1.5x recent average
+        ema_1d = ema_34_1d_aligned[i]
+        bp = bull_power[i]
+        br = bear_power[i]
+        vol = volume[i]
+        vol_avg = vol_ma[i]
         
         if position == 0:
-            # Enter long: price below VWAP AND price > 4h EMA50 (uptrend) AND volatility filter
-            if price < vwap_val and price > ema and vol_filter:
-                signals[i] = 0.20
+            # Enter long: Bull Power > 0 AND Bear Power < 0 (both bullish) AND price > 1d EMA34 (uptrend) AND volume > 2x average
+            if bp > 0 and br < 0 and close[i] > ema_1d and vol > 2.0 * vol_avg:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price above VWAP AND price < 4h EMA50 (downtrend) AND volatility filter
-            elif price > vwap_val and price < ema and vol_filter:
-                signals[i] = -0.20
+            # Enter short: Bear Power > 0 AND Bull Power < 0 (both bearish) AND price < 1d EMA34 (downtrend) AND volume > 2x average
+            elif br > 0 and bp < 0 and close[i] < ema_1d and vol > 2.0 * vol_avg:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above VWAP OR trend reverses (price < 4h EMA50)
-            if price > vwap_val or price < ema:
+            # Exit long: Bull Power <= 0 OR Bear Power >= 0 (loss of bullish momentum) OR trend reverses (price < 1d EMA34)
+            if bp <= 0 or br >= 0 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below VWAP OR trend reverses (price > 4h EMA50)
-            if price < vwap_val or price > ema:
+            # Exit short: Bear Power <= 0 OR Bull Power >= 0 (loss of bearish momentum) OR trend reverses (price > 1d EMA34)
+            if br <= 0 or bp >= 0 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
