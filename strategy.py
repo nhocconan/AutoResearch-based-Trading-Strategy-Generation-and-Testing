@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,43 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend and Camarilla parameters
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 4h EMA for trend
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot points (using previous week's data)
+    # Pivot = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    high_w = df_1w['high'].values
+    low_w = df_1w['low'].values
+    close_w = df_1w['close'].values
     
-    # Calculate 4h ATR for Camarilla levels
-    tr1 = df_4h['high'] - df_4h['low']
-    tr2 = abs(df_4h['high'] - df_4h['close'].shift())
-    tr3 = abs(df_4h['low'] - df_4h['close'].shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_4h = tr.ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    pivot_w = (high_w + low_w + close_w) / 3
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
+    r2_w = pivot_w + (high_w - low_w)
+    s2_w = pivot_w - (high_w - low_w)
+    r3_w = high_w + 2 * (pivot_w - low_w)
+    s3_w = low_w - 2 * (high_w - pivot_w)
     
-    # Calculate 4h close for Camarilla pivot
-    close_4h = df_4h['close'].values
-    close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h)
+    # Align weekly pivot levels to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_1w, pivot_w)
+    r3_w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
     
-    # Camarilla levels: P = close, Range = high - low
-    # R1 = P + 1.1 * Range / 12, S1 = P - 1.1 * Range / 12
-    range_4h = df_4h['high'] - df_4h['low']
-    r1_4h = close_4h + 1.1 * range_4h / 12
-    s1_4h = close_4h - 1.1 * range_4h / 12
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Volume filter: current 1h volume > 1.5 * 20-period average
+    # Daily EMA for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Volume filter: current 6h volume > 1.8 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0
@@ -61,46 +64,46 @@ def generate_signals(prices):
     start_idx = max(50, 20)  # EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_4h_aligned[i]) or
-            np.isnan(r1_4h_aligned[i]) or
-            np.isnan(s1_4h_aligned[i]) or
-            np.isnan(volume_filter[i]) or
-            np.isnan(session_filter[i])):
+        if (np.isnan(pivot_w_aligned[i]) or
+            np.isnan(r3_w_aligned[i]) or
+            np.isnan(s3_w_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_4h_aligned[i]
-        r1 = r1_4h_aligned[i]
-        s1 = s1_4h_aligned[i]
+        pivot_val = pivot_w_aligned[i]
+        r3_val = r3_w_aligned[i]
+        s3_val = s3_w_aligned[i]
+        ema50_val = ema50_1d_aligned[i]
         vol_filter = volume_filter[i]
-        sess_filter = session_filter[i]
         
         if position == 0:
-            # Enter long: close above R1 + above 4h EMA trend + volume + session
-            if close[i] > r1 and close[i] > ema50_val and vol_filter and sess_filter:
-                signals[i] = 0.20
+            # Enter long: price above R3 weekly pivot + above daily EMA50 + volume filter
+            if close[i] > r3_val and close[i] > ema50_val and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: close below S1 + below 4h EMA trend + volume + session
-            elif close[i] < s1 and close[i] < ema50_val and vol_filter and sess_filter:
-                signals[i] = -0.20
+            # Enter short: price below S3 weekly pivot + below daily EMA50 + volume filter
+            elif close[i] < s3_val and close[i] < ema50_val and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below 4h EMA trend
-            if close[i] < ema50_val:
+            # Exit long: price below weekly pivot
+            if close[i] < pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above 4h EMA trend
-            if close[i] > ema50_val:
+            # Exit short: price above weekly pivot
+            if close[i] > pivot_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
