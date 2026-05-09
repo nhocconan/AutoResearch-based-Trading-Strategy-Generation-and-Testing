@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Breakout_DailyTrend
-# Hypothesis: On 6-hour chart, use weekly pivot points (from previous week) for breakout entries and daily EMA(34) for trend filter.
-# Long when price breaks above weekly R1 with daily EMA(34) upward slope; short when price breaks below weekly S1 with daily EMA(34) downward slope.
-# Exit when price returns to weekly pivot (PP) or trend reverses.
-# Weekly pivots provide structural support/resistance; daily EMA filters for institutional trend alignment.
-# Works in bull/bear: breaks capture momentum in trending markets, pivot exits prevent reversals in ranging markets.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+"""
+12h_RSI_Donchian_Breakout_Trend
+Strategy: RSI(14) momentum + Donchian(20) breakout with trend filter
+Timeframe: 12h
+Trend filter: EMA(50) on 1d
+Risk: Fixed position size 0.25, exits on trend reversal
+Logic:
+- Long: RSI > 55, price > 12h Donchian upper(20), price > 1d EMA(50)
+- Short: RSI < 45, price < 12h Donchian lower(20), price < 1d EMA(50)
+- Exit: Trend reversal (price crosses below/above 1d EMA(50))
+Designed for low turnover and high conviction trades.
+"""
 
-name = "6h_WeeklyPivot_Breakout_DailyTrend"
-timeframe = "6h"
+name = "12h_RSI_Donchian_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,81 +22,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for pivot points (previous week's H/L/C)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    
-    # Align weekly pivots to 6h timeframe (use values from previous week)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Get daily EMA(34) for trend filter
+    # Get 1-day EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily EMA slope (trend direction)
-    ema_slope = np.diff(ema_34_aligned, prepend=ema_34_aligned[0])
-    ema_up = ema_slope > 0
-    ema_down = ema_slope < 0
+    # Get 12h Donchian channel (20)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high']
+    low_12h = df_12h['low']
+    donchian_upper = high_12h.rolling(window=20, min_periods=20).max()
+    donchian_lower = low_12h.rolling(window=20, min_periods=20).min()
+    
+    donchian_upper_vals = donchian_upper.values
+    donchian_lower_vals = donchian_lower.values
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper_vals)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower_vals)
+    
+    # Calculate 12h RSI(14)
+    close_12h = pd.Series(df_12h['close'])
+    delta = close_12h.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_aligned = align_htf_to_ltf(prices, df_12h, rsi_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 100  # Warmup period
     
     for i in range(start_idx, n):
-        # Skip if any data is not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(ema_up[i]) or np.isnan(ema_down[i])):
+        # Skip if any data not ready
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
+            np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly R1 AND daily EMA trending up
-            if close[i] > r1_aligned[i] and ema_up[i]:
+            # Enter long: RSI > 55, price > 12h Donchian upper, price > 1d EMA(50)
+            if (rsi_aligned[i] > 55 and 
+                close[i] > donchian_upper_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S1 AND daily EMA trending down
-            elif close[i] < s1_aligned[i] and ema_down[i]:
+            # Enter short: RSI < 45, price < 12h Donchian lower, price < 1d EMA(50)
+            elif (rsi_aligned[i] < 45 and 
+                  close[i] < donchian_lower_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to weekly PP OR daily EMA trend turns down
-            if close[i] < pp_aligned[i] or not ema_up[i]:
+            # Exit long: trend reversal (price < 1d EMA(50))
+            if close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly PP OR daily EMA trend turns up
-            if close[i] > pp_aligned[i] or not ema_down[i]:
+            # Exit short: trend reversal (price > 1d EMA(50))
+            if close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
