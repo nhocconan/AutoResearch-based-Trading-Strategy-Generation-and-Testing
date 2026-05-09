@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 4H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-# Hypothesis: Camarilla R1/S1 breakout from daily levels with daily EMA34 trend filter and volume confirmation.
+# 4H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v3
+# Hypothesis: Refinement of Camarilla R1/S1 breakout with stricter volume confirmation and trend filter.
 # Uses 4h as primary timeframe for optimal trade frequency (20-50/year) and daily for trend/levels.
-# Works in bull/bear via trend filter: only trade long above EMA, short below EMA.
-# Volume confirmation reduces false breakouts. Target: 75-200 total trades over 4 years.
+# Improved volume filter: current volume > 2x 20-period average (more selective).
+# Only trade in direction of daily EMA34 trend: long above EMA, short below EMA.
+# Aims to reduce false breakouts and improve win rate while maintaining reasonable trade count.
 
-name = "4H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -46,9 +46,9 @@ def generate_signals(prices):
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2x 20-period average (stricter)
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    volume_confirm = volume > (volume_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
