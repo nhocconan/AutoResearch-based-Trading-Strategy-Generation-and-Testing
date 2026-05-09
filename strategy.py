@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Choppiness_Filtered_Keltner_Breakout"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    12h Keltner Channel breakout with 1d Choppiness filter.
-    - Long: Close > Upper Keltner Band (EMA20 + 2*ATR) and daily CHOP > 61.8 (ranging)
-    - Short: Close < Lower Keltner Band (EMA20 - 2*ATR) and daily CHOP > 61.8 (ranging)
-    - Exit: Opposite signal or price crosses EMA20
-    - Uses 20-period EMA and ATR for bands
-    - Target: 15-35 trades/year on 12h timeframe
+    4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike.
+    Long: price breaks above R1 with volume spike and uptrend (close > EMA50)
+    Short: price breaks below S1 with volume spike and downtrend (close < EMA50)
+    Exit: opposite signal or price crosses back through pivot point
+    Target: 20-50 trades/year on 4h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -23,98 +22,82 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Choppiness Index
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for Camarilla pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate 20-period EMA for Keltner
-    close_s = pd.Series(close)
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate Camarilla levels from previous 12h bar
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    # Pivot = (high + low + close)/3
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate ATR(20) for Keltner width
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate pivot levels using previous bar (to avoid look-ahead)
+    pivot = (high_12h[:-1] + low_12h[:-1] + close_12h[:-1]) / 3.0
+    r1 = close_12h[:-1] + 1.1 * (high_12h[:-1] - low_12h[:-1]) / 12.0
+    s1 = close_12h[:-1] - 1.1 * (high_12h[:-1] - low_12h[:-1]) / 12.0
     
-    # Keltner Bands
-    upper_keltner = ema20 + 2 * atr
-    lower_keltner = ema20 - 2 * atr
+    # Align to 4h timeframe (shifted by 1 to use previous bar's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
     
-    # Calculate Choppiness Index on daily
-    high_1d = pd.Series(df_1d['high'].values)
-    low_1d = pd.Series(df_1d['low'].values)
-    close_1d = pd.Series(df_1d['close'].values)
+    # Get 12h EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # True Range for 1d
-    tr1_1d = high_1d - low_1d
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = tr1_1d[0]
-    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Highest High and Lowest Low over 14 periods
-    highest_high = high_1d.rolling(window=14, min_periods=14).max().values
-    lowest_low = low_1d.rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(ATR_14) / (HH - LL)) / log10(14)
-    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr_14 / (highest_high - lowest_low)) / np.log10(14)
-    chop[np.isnan(chop) | np.isinf(chop)] = 50  # default to middle when invalid
-    
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # ensure sufficient warmup
+    start_idx = max(50, 20)  # ensure sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if CHOP data not ready
-        if np.isnan(chop_aligned[i]):
+        # Skip if pivot data not ready
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade in ranging markets (CHOP > 61.8)
-        if chop_aligned[i] > 61.8:
-            if position == 0:
-                # Long: Close above upper Keltner band
-                if close[i] > upper_keltner[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Close below lower Keltner band
-                elif close[i] < lower_keltner[i]:
-                    signals[i] = -0.25
-                    position = -1
-            
-            elif position == 1:
-                # Exit long: Close crosses below EMA20 or opposite signal
-                if close[i] < ema20[i] or close[i] < lower_keltner[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            
-            elif position == -1:
-                # Exit short: Close crosses above EMA20 or opposite signal
-                if close[i] > ema20[i] or close[i] > upper_keltner[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:
-            # Trending market: stay flat or exit
-            if position != 0:
+        if position == 0:
+            # Long: price breaks above R1 with volume spike and uptrend
+            if (close[i] > r1_aligned[i] and 
+                volume_spike[i] and 
+                close[i] > ema50_12h_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S1 with volume spike and downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_spike[i] and 
+                  close[i] < ema50_12h_aligned[i]):
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit long: price breaks below pivot or opposite signal
+            if close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: price breaks above pivot or opposite signal
+            if close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
