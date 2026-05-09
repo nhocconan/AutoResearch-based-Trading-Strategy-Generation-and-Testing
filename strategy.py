@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_Signal_With_Volume_Filter"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,74 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1d data for price (already have prices, but we need high/low/close for daily)
+    # Get 1w data for trend and volume filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # KAMA trend: 10-period, with efficiency ratio
-    close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    for i in range(len(close_1d)):
-        if i == 0:
-            er[i] = 0
-        else:
-            direction = np.abs(close_1d[i] - close_1d[0])
-            volatility_sum = np.sum(volatility[1:i+1]) if i > 0 else 1
-            er[i] = direction / volatility_sum if volatility_sum > 0 else 0
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Previous day's close for Camarilla calculation (using daily data from prices)
+    # Since we're on 1d timeframe, prices already contain daily OHLCV
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = np.nan  # First day has no previous
     
-    # Volume filter: current volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    # Trend filter: 1w EMA50
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current 1w volume > 1.5 * 20-week average
+    vol_series = pd.Series(df_1w['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
+    volume_filter_1w = df_1w['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 4h
-    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
-    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align all to 1d
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1)  # Note: r1 is already daily, but we align the calculation
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
+    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    volume_filter_1d = align_htf_to_ltf(prices, df_1w, volume_filter_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Need enough data for KAMA and volume MA
+    start_idx = 50  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_4h[i]) or np.isnan(volume_filter_4h[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
+            np.isnan(ema50_1w_1d[i]) or np.isnan(volume_filter_1d[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = kama_4h[i]
-        vol_filter = volume_filter_4h[i]
+        r1_val = r1_1d[i]
+        s1_val = s1_1d[i]
+        trend = ema50_1w_1d[i]
+        vol_filter = volume_filter_1d[i]
         
         if position == 0:
-            # Enter long: price above KAMA with volume filter
-            if close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA with volume filter
-            elif close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below KAMA
-            if close[i] < trend:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above KAMA
-            if close[i] > trend:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
