@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and daily trend filter.
-# Uses 12h timeframe to reduce trade frequency and avoid overtrading.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and daily trend filter.
+# Uses 4h timeframe to capture medium-term momentum with fewer trades.
 # Donchian breakouts capture strong momentum moves with volume confirmation.
 # Daily EMA50 filter ensures alignment with higher timeframe trend.
 # Designed to work in both bull and bear markets by following daily trend.
-name = "12h_Donchian20_1dEMA50_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,13 +27,13 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h Donchian(20) channels (highest high/lowest low of last 20 periods)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
     # Daily EMA50 trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 4h Donchian channels (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume spike filter: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -46,8 +46,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_ema20[i])):
+        if np.isnan(ema_50_4h[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(vol_ema20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,26 +55,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian with volume spike and above daily EMA50
-            if (price > high_20[i] and vol_spike[i] and price > ema_50_12h[i]):
+            # Long: price breaks above 20-period high with volume spike and above daily EMA50
+            if price > high_max[i] and vol_spike[i] and price > ema_50_4h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian with volume spike and below daily EMA50
-            elif (price < low_20[i] and vol_spike[i] and price < ema_50_12h[i]):
+            # Short: price breaks below 20-period low with volume spike and below daily EMA50
+            elif price < low_min[i] and vol_spike[i] and price < ema_50_4h[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below lower Donchian (mean reversion)
-            if price < low_20[i]:
+            # Exit long: price falls back below 20-period low (mean reversion to support)
+            if price < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above upper Donchian (mean reversion)
-            if price > high_20[i]:
+            # Exit short: price rises back above 20-period high (mean reversion to resistance)
+            if price > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
