@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 6h_IBS_Volume_Trend_1wTrend
-# Hypothesis: 6h IBS (Internal Bar Strength) with volume confirmation and weekly trend filter.
-# Long when: weekly trend up, IBS < 0.3 (oversold), volume > 1.3x average.
-# Short when: weekly trend down, IBS > 0.7 (overbought), volume > 1.3x average.
-# Exit when IBS reverses (long: IBS > 0.7, short: IBS < 0.3).
-# IBS = (close - low) / (high - low) measures intraday position; effective mean reversion tool.
-# Weekly trend filter avoids counter-trend trades in strong trends.
-# Target: 60-120 total trades over 4 years (15-30/year) with controlled turnover.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot breakout on 12h with 1d EMA34 trend filter and volume confirmation.
+# Long when 1d trend up and price breaks above R3 with volume > 1.5x average.
+# Short when 1d trend down and price breaks below S3 with volume > 1.5x average.
+# Trend filter reduces whipsaw in ranging markets, works in both bull and bear cycles.
+# Target: 12-37 trades/year per symbol with disciplined risk management.
 
-name = "6h_IBS_Volume_Trend_1wTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,27 +24,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA20 for trend filter
-    ema20_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[0:20])
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = (close_1w[i] * 2 + ema20_1w[i-1] * 18) / 20
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate IBS: (close - low) / (high - low)
-    ibs = np.zeros_like(close)
-    hl_range = high - low
-    valid_hl = hl_range != 0
-    ibs[valid_hl] = (close[valid_hl] - low[valid_hl]) / hl_range[valid_hl]
+    # Calculate Camarilla pivot levels for 12h
+    camarilla_high = np.full_like(close, np.nan)
+    camarilla_low = np.full_like(close, np.nan)
+    camarilla_R3 = np.full_like(close, np.nan)
+    camarilla_S3 = np.full_like(close, np.nan)
+    
+    for i in range(1, n):
+        # Calculate pivot from previous period
+        if i >= 1:
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            
+            pivot = (prev_high + prev_low + prev_close) / 3
+            range_val = prev_high - prev_low
+            
+            camarilla_high[i] = pivot + (range_val * 1.1 / 2)
+            camarilla_low[i] = pivot - (range_val * 1.1 / 2)
+            camarilla_R3[i] = pivot + (range_val * 1.1 * 3 / 8)
+            camarilla_S3[i] = pivot - (range_val * 1.1 * 3 / 8)
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -62,41 +75,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need weekly EMA and volume MA
+    start_idx = max(34, 1, 20)  # Need 1d EMA, pivot, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(ibs[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_R3[i]) or 
+            np.isnan(camarilla_S3[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        trend_up = close[i] > ema20_1w_aligned[i]
+        # Determine 1d trend
+        trend_up = close[i] > ema34_1d_aligned[i]
         
         if position == 0:
-            # Enter long: weekly trend up + IBS oversold + volume confirmation
-            if trend_up and ibs[i] < 0.3 and volume_ratio[i] > 1.3:
+            # Enter long: 1d trend up + price breaks above R3 + volume confirmation
+            if trend_up and close[i] > camarilla_R3[i] and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly trend down + IBS overbought + volume confirmation
-            elif not trend_up and ibs[i] > 0.7 and volume_ratio[i] > 1.3:
+            # Enter short: 1d trend down + price breaks below S3 + volume confirmation
+            elif not trend_up and close[i] < camarilla_S3[i] and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: IBS overbought (mean reversion complete)
-            if ibs[i] > 0.7:
+            # Exit long: 1d trend turns down or price breaks below S3
+            if not trend_up or close[i] < camarilla_S3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: IBS oversold (mean reversion complete)
-            if ibs[i] < 0.3:
+            # Exit short: 1d trend turns up or price breaks above R3
+            if trend_up or close[i] > camarilla_R3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
