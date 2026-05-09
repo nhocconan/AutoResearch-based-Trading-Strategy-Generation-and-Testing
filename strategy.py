@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h trend and daily volatility contraction breakout.
-# Uses 12h EMA20 for trend direction and daily Bollinger Band squeeze (low volatility) for entry timing.
-# Breakouts occur when price breaks above/below the 6h high/low of the prior 6-bar period
-# during low volatility regimes, filtered by 12h trend alignment.
-# Designed to capture explosive moves after consolidation in both bull and bear markets.
-# Target: 15-35 trades per year to minimize fee drag.
-name = "6h_BollingerSqueeze_12hEMA20_Breakout"
-timeframe = "6h"
+# Hypothesis: 4h strategy using 1d timeframe for direction and structure.
+# Uses 1d Camarilla pivot levels (S3 and R3) for breakouts with 1d EMA34 trend filter and volume confirmation.
+# Designed to work in both bull and bear markets by requiring alignment with daily trend.
+# Target: 25-40 trades per year to minimize fee drag and improve generalization.
+name = "4h_Camarilla_S3R3_1dEMA34_VolumeBreakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 50:
+    n = len(prices)
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,85 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA20 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA20
-    ema_20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_6h = align_htf_to_ltf(prices, df_12h, ema_20_12h)
-    
-    # Get daily data for Bollinger Bands (volatility contraction)
+    # Get 1d data for Camarilla pivot levels and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily Bollinger Bands (20, 2)
-    daily_close = df_1d['close'].values
-    sma_20 = pd.Series(daily_close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(daily_close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = (upper_bb - lower_bb) / sma_20  # Normalized bandwidth
+    # Calculate 1d EMA34 trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align daily Bollinger width to 6h
-    bb_width_6h = align_htf_to_ltf(prices, df_1d, bb_width)
+    # Calculate 1d Camarilla pivot levels (S3 and R3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 6-bar high/low for breakout levels (prior 6 periods)
-    high_6bar = np.full(n, np.nan)
-    low_6bar = np.full(n, np.nan)
-    for i in range(6, n):
-        high_6bar[i] = np.max(high[i-6:i])
-        low_6bar[i] = np.min(low[i-6:i])
+    # Pivot point = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Camarilla levels
+    # S3 = C - (H - L) * 1.1/2
+    # R3 = C + (H - L) * 1.1/2
+    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    
+    # Align 1d Camarilla levels to 4h timeframe
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    
+    # Volume filter: spike above 2.0x 24-period average (1 day of 4h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Wait for EMA20 and Bollinger Bands
+    start_idx = max(34, 24)  # Wait for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_20_6h[i]) or np.isnan(bb_width_6h[i]) or 
-            np.isnan(high_6bar[i]) or np.isnan(low_6bar[i])):
+        if (np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(s3_4h[i]) or np.isnan(r3_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility squeeze: Bollinger Band width below 20th percentile of last 50 days
-        if i >= 50:
-            bb_width_hist = bb_width_6h[max(0, i-50):i]
-            bb_width_percentile = (bb_width_6h[i] <= bb_width_hist).mean() * 100
-            vol_squeeze = bb_width_percentile <= 20  # Low volatility regime
-        else:
-            vol_squeeze = False
+        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation
+        
+        # Pre-compute hour for session filter (UTC 0-24)
+        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
+        # Trade during active hours (8 AM - 8 PM UTC) to avoid low liquidity
+        in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long: price breaks above 6-bar high, 12h uptrend (close > EMA20), volatility squeeze
-            if (close[i] > high_6bar[i] and 
-                close[i] > ema_20_6h[i] and 
-                vol_squeeze):
+            # Long: price above 1d R3, 1d uptrend (price > EMA34), volume breakout
+            if (close[i] > r3_4h[i] and 
+                close[i] > ema_34_4h[i] and 
+                vol_ok and 
+                in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 6-bar low, 12h downtrend (close < EMA20), volatility squeeze
-            elif (close[i] < low_6bar[i] and 
-                  close[i] < ema_20_6h[i] and 
-                  vol_squeeze):
+            # Short: price below 1d S3, 1d downtrend (price < EMA34), volume breakdown
+            elif (close[i] < s3_4h[i] and 
+                  close[i] < ema_34_4h[i] and 
+                  vol_ok and 
+                  in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 6-bar low or trend reversal
-            if close[i] < low_6bar[i] or close[i] < ema_20_6h[i]:
+            # Exit long: price below 1d S3 or trend reversal
+            if close[i] < s3_4h[i] or close[i] < ema_34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above 6-bar high or trend reversal
-            if close[i] > high_6bar[i] or close[i] > ema_20_6h[i]:
+            # Exit short: price above 1d R3 or trend reversal
+            if close[i] > r3_4h[i] or close[i] > ema_34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
