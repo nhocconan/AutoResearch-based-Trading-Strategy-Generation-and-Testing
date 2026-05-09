@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,19 +17,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA100 for trend filter
-    ema100_1w = pd.Series(close_1w).ewm(span=100, adjust=False, min_periods=100).mean().values
-    
-    # Align 1w EMA100 to 12h timeframe
-    ema100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema100_1w)
-    
     # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
@@ -40,70 +27,87 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     
     # Calculate Camarilla pivot levels from previous day
-    # H3 = C + 1.1*(H-L)/4, L3 = C - 1.1*(H-L)/4
-    camarilla_h3 = np.full_like(close_1d, np.nan)
-    camarilla_l3 = np.full_like(close_1d, np.nan)
+    # H1 = C + 1.1*(H-L)/12, L1 = C - 1.1*(H-L)/12
+    camarilla_h1 = np.full_like(close_1d, np.nan)
+    camarilla_l1 = np.full_like(close_1d, np.nan)
     
     for i in range(1, len(close_1d)):
         prev_high = high_1d[i-1]
         prev_low = low_1d[i-1]
         prev_close = close_1d[i-1]
         range_ = prev_high - prev_low
-        camarilla_h3[i] = prev_close + 1.1 * range_ / 4
-        camarilla_l3[i] = prev_close - 1.1 * range_ / 4
+        camarilla_h1[i] = prev_close + 1.1 * range_ / 12
+        camarilla_l1[i] = prev_close - 1.1 * range_ / 12
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
     
-    # Get 12h volume for volume confirmation
-    # Use 12h volume EMA20
-    volume_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get 1d data for trend filter
+    close_1d_series = pd.Series(close_1d)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Get 1h data for volume confirmation
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
+        return np.zeros(n)
+    
+    volume_1h = df_1h['volume'].values
+    
+    # Calculate 1h volume EMA20
+    vol_ema20_1h = pd.Series(volume_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align 1h volume EMA20 to 4h timeframe
+    vol_ema20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ema20_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data for all indicators
-    start_idx = max(100, 30)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema100_1w_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or 
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(volume_ema20[i])):
+        if (np.isnan(camarilla_h1_aligned[i]) or np.isnan(camarilla_l1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ema20_1h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Uptrend: price above 1w EMA100
-        uptrend = close[i] > ema100_1w_aligned[i]
-        # Downtrend: price below 1w EMA100
-        downtrend = close[i] < ema100_1w_aligned[i]
-        # Volume surge: current volume > 1.5x 12h volume EMA20
-        volume_surge = volume[i] > volume_ema20[i] * 1.5
+        # Uptrend: price above 1d EMA34
+        uptrend = close[i] > ema34_1d_aligned[i]
+        # Downtrend: price below 1d EMA34
+        downtrend = close[i] < ema34_1d_aligned[i]
+        # Volume surge: current volume > 2.0x 1h volume EMA20
+        volume_surge = volume[i] > vol_ema20_1h_aligned[i] * 2.0
         
         if position == 0:
-            # Enter long: Uptrend + price breaks above Camarilla H3 + volume surge
-            if uptrend and close[i] > camarilla_h3_aligned[i] and volume_surge:
+            # Enter long: Uptrend + price breaks above Camarilla H1 + volume surge
+            if uptrend and close[i] > camarilla_h1_aligned[i] and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + price breaks below Camarilla L3 + volume surge
-            elif downtrend and close[i] < camarilla_l3_aligned[i] and volume_surge:
+            # Enter short: Downtrend + price breaks below Camarilla L1 + volume surge
+            elif downtrend and close[i] < camarilla_l1_aligned[i] and volume_surge:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR price breaks below Camarilla L3
-            if not uptrend or close[i] < camarilla_l3_aligned[i]:
+            # Exit long: Trend turns down OR price breaks below Camarilla L1
+            if not uptrend or close[i] < camarilla_l1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR price breaks above Camarilla H3
-            if not downtrend or close[i] > camarilla_h3_aligned[i]:
+            # Exit short: Trend turns up OR price breaks above Camarilla H1
+            if not downtrend or close[i] > camarilla_h1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
