@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Supertrend_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,86 +22,98 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Previous 1d close for trend filter
-    prev_close_1d = df_1d['close'].shift(1).values
-    
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous 12h bar's OHLC for Camarilla calculation
-    prev_close_12h = df_12h['close'].shift(1).values
-    prev_high_12h = df_12h['high'].shift(1).values
-    prev_low_12h = df_12h['low'].shift(1).values
+    # Calculate Supertrend on 6h data (ATR=10, multiplier=3)
+    atr_period = 10
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
+    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
     
-    # Calculate Camarilla levels (using previous 12h bar's range)
-    range_12h = prev_high_12h - prev_low_12h
-    camarilla_h4 = prev_close_12h + 1.5 * range_12h  # Resistance level 4
-    camarilla_l4 = prev_close_12h - 1.5 * range_12h  # Support level 4
-    camarilla_h3 = prev_close_12h + 1.125 * range_12h  # Resistance level 3
-    camarilla_l3 = prev_close_12h - 1.125 * range_12h  # Support level 3
+    # Basic upper and lower bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + 3 * atr
+    lower_band = hl2 - 3 * atr
     
-    # Align Camarilla levels to 12h
-    camarilla_h4_12h = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-    camarilla_l4_12h = align_htf_to_ltf(prices, df_12h, camarilla_l4)
-    camarilla_h3_12h = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-    camarilla_l3_12h = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    # Initialize Supertrend
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
     
-    # Volume filter: above 2x 24-period average (24*12h = 12d)
+    for i in range(1, n):
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
+                lower_band[i] = lower_band[i-1]
+            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
+                upper_band[i] = upper_band[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = lower_band[i]
+        else:
+            supertrend[i] = upper_band[i]
+    
+    # Align Supertrend to 6h (already on 6h, but ensure alignment)
+    supertrend_6h = supertrend  # already aligned to 6h
+    
+    # Volume filter: above 1.5x 24-period average (24*6h = 144h ~ 6 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Wait for volume MA
+    start_idx = max(50, 24)  # Wait for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_12h[i]) or np.isnan(camarilla_l4_12h[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(supertrend_6h[i]) or np.isnan(ema_50_6h[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Strong volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
         
-        # Pre-compute hour for session filter
+        # Pre-compute hour for session filter (UTC 8-20)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: price breaks above Camarilla H4 with 1d uptrend
-            if (close[i] > camarilla_h4_12h[i] and 
-                close[i] > ema_50_12h[i] and  # 1d uptrend
+            # Long: Supertrend uptrend + price above EMA50 + volume + session
+            if (supertrend_6h[i] < close[i] and  # price above Supertrend (uptrend)
+                close[i] > ema_50_6h[i] and     # 1d uptrend filter
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla L4 with 1d downtrend
-            elif (close[i] < camarilla_l4_12h[i] and 
-                  close[i] < ema_50_12h[i] and  # 1d downtrend
+            # Short: Supertrend downtrend + price below EMA50 + volume + session
+            elif (supertrend_6h[i] > close[i] and  # price below Supertrend (downtrend)
+                  close[i] < ema_50_6h[i] and      # 1d downtrend filter
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Camarilla H3 (strong resistance)
-            if not np.isnan(camarilla_h3_12h[i]) and close[i] < camarilla_h3_12h[i]:
+            # Exit long: price crosses below Supertrend (trend change)
+            if supertrend_6h[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Camarilla L3 (strong support)
-            if not np.isnan(camarilla_l3_12h[i]) and close[i] > camarilla_l3_12h[i]:
+            # Exit short: price crosses above Supertrend (trend change)
+            if supertrend_6h[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
