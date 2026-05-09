@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,18 +23,15 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d bar (H1, L1, C1)
-    # These are the key levels for R3 and S3
     H1 = df_1d['high'].values
     L1 = df_1d['low'].values
     C1 = df_1d['close'].values
     
     # Camarilla R3 and S3 levels
-    # R3 = C + (H - L) * 1.1 / 4
-    # S3 = C - (H - L) * 1.1 / 4
     R3 = C1 + (H1 - L1) * 1.1 / 4
     S3 = C1 - (H1 - L1) * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
@@ -42,7 +39,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike detection (6h timeframe)
+    # Volume spike detection (12h timeframe)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
