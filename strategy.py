@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_HTF_RangeBreakout_With_Volume"
+name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,27 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for range and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for EMA trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Daily range (high-low) average
-    daily_range = df_1d['high'].values - df_1d['low'].values
-    avg_daily_range = pd.Series(daily_range).rolling(window=20, min_periods=20).mean().values
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Daily volume average
-    daily_vol = df_1d['volume'].values
-    avg_daily_vol = pd.Series(daily_vol).rolling(window=20, min_periods=20).mean().values
+    # 12h EMA50 for trend
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily close for trend context
-    daily_close = df_1d['close'].values
-    ema20_daily = pd.Series(daily_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 1d Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
+    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
+    
+    # 1d volume average for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
     # Align all to 4h
-    avg_range_4h = align_htf_to_ltf(prices, df_1d, avg_daily_range)
-    avg_vol_4h = align_htf_to_ltf(prices, df_1d, avg_daily_vol)
-    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20_daily)
+    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -45,55 +54,40 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(avg_range_4h[i]) or np.isnan(avg_vol_4h[i]) or np.isnan(ema20_4h[i])):
+        if (np.isnan(ema50_12h_4h[i]) or np.isnan(camarilla_high_4h[i]) or 
+            np.isnan(camarilla_low_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current day's range reference (from previous day's close)
-        day_open_idx = i - (i % 16)  # Start of current day in 4h bars
-        if day_open_idx < 0:
-            continue
-            
-        # Get the daily reference values for this day
-        day_idx = day_open_idx // 16
-        if day_idx >= len(df_1d):
-            continue
-            
-        # Use previous day's close as anchor for range
-        prev_close = daily_close[day_idx - 1] if day_idx > 0 else daily_close[0]
-        prev_range = avg_daily_range[day_idx - 1] if day_idx > 0 else avg_daily_range[0]
-        prev_vol_avg = avg_daily_vol[day_idx - 1] if day_idx > 0 else avg_daily_vol[0]
-        
-        # Calculate bands based on previous day
-        upper_band = prev_close + 0.5 * prev_range
-        lower_band = prev_close - 0.5 * prev_range
-        vol_threshold = prev_vol_avg * 1.8
+        trend = ema50_12h_4h[i]
+        resistance = camarilla_high_4h[i]
+        support = camarilla_low_4h[i]
+        vol_avg = vol_avg_1d_4h[i]
+        vol_ok = volume[i] > vol_avg * 1.5
         
         if position == 0:
-            # Long: break above upper band with volume surge
-            if close[i] > upper_band and volume[i] > vol_threshold:
+            # Long: break above R3 with volume and above 12h EMA50
+            if close[i] > resistance and vol_ok and close[i] > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower band with volume surge
-            elif close[i] < lower_band and volume[i] > vol_threshold:
+            # Short: break below S3 with volume and below 12h EMA50
+            elif close[i] < support and vol_ok and close[i] < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to mid-point or volume drops
-            mid_point = prev_close
-            if close[i] < mid_point or volume[i] < vol_threshold * 0.5:
+            # Exit long: close below S3 or trend reversal
+            if close[i] < support or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to mid-point or volume drops
-            mid_point = prev_close
-            if close[i] > mid_point or volume[i] < vol_threshold * 0.5:
+            # Exit short: close above R3 or trend reversal
+            if close[i] > resistance or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
