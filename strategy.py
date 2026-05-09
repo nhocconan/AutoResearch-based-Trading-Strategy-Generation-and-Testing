@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_1W_Camarilla_R1_S1_Breakout
-# Strategy: Use weekly Camarilla pivot levels for long-term trend direction, enter on 1d breakouts of R1/S1 with volume confirmation.
-# Long when price breaks above weekly R1 with volume > 1.5x 20-period average.
-# Short when price breaks below weekly S1 with volume > 1.5x 20-period average.
-# Exit when price returns to weekly pivot (PP) or opposite 1/2 level.
-# Weekly trend filter ensures we only trade in direction of higher timeframe momentum.
-# Designed for 1d timeframe with low frequency to minimize fee drag and work in both bull and bear markets.
+# 4h_TRIX_Trend_Filter
+# Strategy: TRIX(12) momentum with 1d EMA(50) trend filter
+# Long when TRIX crosses above 0 and price > 1d EMA50
+# Short when TRIX crosses below 0 and price < 1d EMA50
+# Exit when TRIX crosses back through zero
+# Uses momentum confirmation with trend filter to avoid counter-trend trades
+# Designed for 4h timeframe with selective entries to minimize trade frequency
 
-name = "1d_1W_Camarilla_R1_S1_Breakout"
-timeframe = "1d"
+name = "4h_TRIX_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,102 +21,60 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels (using 1w as HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly Camarilla levels: based on previous week's OHLC
-    # Camarilla equations:
-    # H4 = Close + 1.5 * (High - Low)
-    # H3 = Close + 1.1 * (High - Low)
-    # H2 = Close + 0.6 * (High - Low)
-    # H1 = Close + 0.318 * (High - Low)
-    # L1 = Close - 0.318 * (High - Low)
-    # L2 = Close - 0.6 * (High - Low)
-    # L3 = Close - 1.1 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # Pivot (PP) = (High + Low + Close) / 3
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # We use the previous week's data to avoid lookahead
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate TRIX(12): Triple EMA of percentage change
+    # TRIX = EMA(EMA(EMA(roc, 12), 12), 12) where roc = (close - close_prev) / close_prev * 100
+    roc = np.diff(close, prepend=close[0]) / np.where(close == 0, 1, close) * 100
     
-    # Calculate Camarilla levels for each week
-    rng = weekly_high - weekly_low
-    H1 = weekly_close + 0.318 * rng
-    H2 = weekly_close + 0.6 * rng
-    H3 = weekly_close + 1.1 * rng
-    H4 = weekly_close + 1.5 * rng
-    L1 = weekly_close - 0.318 * rng
-    L2 = weekly_close - 0.6 * rng
-    L3 = weekly_close - 1.1 * rng
-    L4 = weekly_close - 1.5 * rng
-    PP = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Align weekly levels to daily timeframe (shifted by one week to avoid lookahead)
-    H1_aligned = align_htf_to_ltf(prices, df_1w, H1)
-    H2_aligned = align_htf_to_ltf(prices, df_1w, H2)
-    H3_aligned = align_htf_to_ltf(prices, df_1w, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1w, H4)
-    L1_aligned = align_htf_to_ltf(prices, df_1w, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1w, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1w, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1w, L4)
-    PP_aligned = align_htf_to_ltf(prices, df_1w, PP)
-    
-    # Volume confirmation: 20-period average volume
-    vol_ma = np.zeros(n)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma[i] = vol_sum / 20
-        else:
-            vol_ma[i] = np.nan
+    # Triple EMA smoothing
+    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = ema3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after enough data for weekly alignment and volume MA
-    start_idx = 20
+    start_idx = 36  # Need enough data for triple EMA (12*3)
     
     for i in range(start_idx, n):
-        # Skip if weekly data not ready
-        if (np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or np.isnan(PP_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if data not ready
+        if (np.isnan(trix[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long signal: break above H1 with volume confirmation
-            if high[i] > H1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Enter long: TRIX crosses above 0 and price above 1d EMA50 (uptrend filter)
+            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short signal: break below L1 with volume confirmation
-            elif low[i] < L1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Enter short: TRIX crosses below 0 and price below 1d EMA50 (downtrend filter)
+            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: return to pivot or below L1 (mean reversion)
-            if close[i] <= PP_aligned[i] or close[i] < L1_aligned[i]:
+            # Exit long: TRIX crosses back below 0
+            if trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: return to pivot or above H1
-            if close[i] >= PP_aligned[i] or close[i] > H1_aligned[i]:
+            # Exit short: TRIX crosses back above 0
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
