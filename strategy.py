@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+# 12h_Camarilla_R1_S1_1wEMA34_Trend_Volume
 # Hypothesis: 12h timeframe with weekly pivot structure (from 1w) and weekly trend filter.
 # Uses weekly Camarilla levels (R1/S1) for breakout entries and weekly EMA34 for trend filter.
 # Weekly pivot provides structural support/resistance that works in both bull and bear markets.
