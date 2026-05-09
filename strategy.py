@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_1wTrendFilter
-# Strategy: Trade KAMA direction on 1d with 1w trend filter
-# Long when KAMA direction up and price > 1w KAMA(30)
-# Short when KAMA direction down and price < 1w KAMA(30)
-# Exit when KAMA reverses
-# Uses adaptive trend following with weekly filter to avoid counter-trend trades
-# Designed for 1d timeframe with selective entries to minimize trade frequency
+# 6h_Camarilla_R3S3_Reversal_1dTrend
+# Strategy: Fade at Camarilla R3/S3 levels from 1d timeframe with 1d trend filter
+# Long when price touches S3 and 1d trend is up (price > 1d EMA50)
+# Short when price touches R3 and 1d trend is down (price < 1d EMA50)
+# Exit when price reaches opposite Camarilla level (R1/S1) or mean (Pivot)
+# Uses mean reversion at extreme intraday levels with trend filter to avoid counter-trend trades
+# Designed for 6h timeframe with selective entries to minimize trade frequency
 
-name = "1d_KAMA_Trend_1wTrendFilter"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Reversal_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,78 +17,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate 1w KAMA(30) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # Calculate Camarilla levels from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Efficiency Ratio (ER) for KAMA
-    def calculate_kama(price, period=30):
-        change = np.abs(np.diff(price, n=period))
-        volatility = np.sum(np.abs(np.diff(price)), axis=0)
-        # Handle volatility = 0 case
-        er = np.where(volatility != 0, change / volatility, 0)
-        # Smoothing constants
-        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-        # Initialize KAMA
-        kama = np.full_like(price, np.nan)
-        kama[period] = price[period]
-        for i in range(period+1, len(price)):
-            kama[i] = kama[i-1] + sc[i] * (price[i] - kama[i-1])
-        return kama
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    kama_30 = calculate_kama(close_1w, 30)
-    kama_30_aligned = align_htf_to_ltf(prices, df_1w, kama_30)
+    # Calculate Camarilla levels for each 1d bar: H, L, C from previous day
+    # Camarilla formulas:
+    # H4 = Close + 1.5*(High-Low)
+    # H3 = Close + 1.125*(High-Low)
+    # H2 = Close + 0.75*(High-Low)
+    # H1 = Close + 0.375*(High-Low)
+    # L1 = Close - 0.375*(High-Low)
+    # L2 = Close - 0.75*(High-Low)
+    # L3 = Close - 1.125*(High-Low)
+    # L4 = Close - 1.5*(High-Low)
+    # Pivot = (High + Low + Close)/3
+    # We'll use R3 = H3 and S3 = L3 for fade
     
-    # Calculate KAMA on 1d for direction
-    kama_1d = calculate_kama(close, 30)
+    # Shift to get previous day's values (lookback by 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # First bar has no previous day
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
     
-    # Determine KAMA direction (1 = up, -1 = down, 0 = flat)
-    kama_dir = np.zeros_like(kama_1d)
-    kama_dir[30:] = np.where(kama_1d[30:] > kama_1d[29:-1], 1, 
-                            np.where(kama_1d[30:] < kama_1d[29:-1], -1, 0))
+    # Calculate Camarilla levels for previous day
+    camarilla_H3 = prev_close_1d + 1.125 * (prev_high_1d - prev_low_1d)
+    camarilla_L3 = prev_close_1d - 1.125 * (prev_high_1d - prev_low_1d)
+    camarilla_H1 = prev_close_1d + 0.375 * (prev_high_1d - prev_low_1d)
+    camarilla_L1 = prev_close_1d - 0.375 * (prev_high_1d - prev_low_1d)
+    camarilla_P = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    
+    # Align Camarilla levels to 6h timeframe
+    H3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
+    L3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
+    H1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H1)
+    L1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L1)
+    P_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_P)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 31  # Ensure enough data for indicators
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_30_aligned[i]) or np.isnan(kama_1d[i])):
+        if (np.isnan(H3_1d_aligned[i]) or np.isnan(L3_1d_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: KAMA direction up and price > 1w KAMA30 (uptrend filter)
-            if kama_dir[i] == 1 and close[i] > kama_30_aligned[i]:
+            # Enter long: price touches or goes below S3 and 1d trend is up
+            if low[i] <= L3_1d_aligned[i] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA direction down and price < 1w KAMA30 (downtrend filter)
-            elif kama_dir[i] == -1 and close[i] < kama_30_aligned[i]:
+            # Enter short: price touches or goes above R3 and 1d trend is down
+            elif high[i] >= H3_1d_aligned[i] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA direction turns down
-            if kama_dir[i] == -1:
+            # Exit long: price reaches H1 or mean (Pivot)
+            if high[i] >= H1_1d_aligned[i] or low[i] <= P_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA direction turns up
-            if kama_dir[i] == 1:
+            # Exit short: price reaches L1 or mean (Pivot)
+            if low[i] <= L1_1d_aligned[i] or high[i] >= P_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
