@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtr_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeFilter"
-timeframe = "4h"
+name = "1d_WideChannel_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,73 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels, trend, and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get weekly data for trend and channel
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Weekly EMA34 for trend
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Weekly Donchian(40) for channel (wider channel for fewer trades)
+    high_20w = pd.Series(df_1w['high']).rolling(window=40, min_periods=40).max().values
+    low_20w = pd.Series(df_1w['low']).rolling(window=40, min_periods=40).min().values
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align weekly indicators to daily
+    ema34_1w_d = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    high_20w_d = align_htf_to_ltf(prices, df_1w, high_20w)
+    low_20w_d = align_htf_to_ltf(prices, df_1w, low_20w)
     
-    # Volume filter: current 1d volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
+    # Daily volume filter: volume > 1.5 * 20-day average
+    vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
-    
-    # Align all to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = 40  # Need enough data for Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
+        if (np.isnan(ema34_1w_d[i]) or np.isnan(high_20w_d[i]) or 
+            np.isnan(low_20w_d[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
-        trend = ema34_1d_4h[i]
-        vol_filter = volume_filter_4h[i]
+        trend = ema34_1w_d[i]
+        upper = high_20w_d[i]
+        lower = low_20w_d[i]
+        vol_ok = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: break above upper channel with volume and above trend
+            if close[i] > upper and close[i] > trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: break below lower channel with volume and below trend
+            elif close[i] < lower and close[i] < trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: close below midpoint of channel
+            midpoint = (upper + lower) * 0.5
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: close above midpoint of channel
+            midpoint = (upper + lower) * 0.5
+            if close[i] > midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
