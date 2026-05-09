@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h price action relative to 1d VWAP with 1w ADX trend strength and 1d volume confirmation
-# Long when price > 1d VWAP, ADX > 25 (trending), and volume > 1.5x 20-period average
-# Short when price < 1d VWAP, ADX > 25, and volume > 1.5x 20-period average
-# Exit when ADX < 20 (trend weakening) or price crosses VWAP
-# Uses ADX for trend filter, VWAP for dynamic support/resistance, volume for conviction
-# Designed to capture strong trends while avoiding choppy markets
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above R3 with EMA34 uptrend and volume > 2x average
+# Short when price breaks below S3 with EMA34 downtrend and volume > 2x average
+# Exit when price retouches the central pivot (PP) or reverses to opposite S1/R1
+# Uses Camarilla levels for institutional support/resistance, EMA for trend, volume for conviction
+# Designed to capture breakouts in both trending and ranging markets with controlled frequency
+# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
 
-name = "12h_1dVWAP_1wADX_1dVolume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,92 +25,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP for 1d timeframe
+    # Calculate 1d Camarilla levels (PP, R1, R2, R3, S1, S2, S3)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Typical price for VWAP
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # VWAP calculation: cumulative(TP * Volume) / cumulative(Volume)
-    vwap_1d = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
+    prev_close = df_1d['close'].shift(1)
     
-    # Calculate ADX for 1w timeframe (14-period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:  # Need enough data for ADX calculation
-        return np.zeros(n)
+    # Calculate pivot point
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Calculate Camarilla levels
+    r1 = pp + (prev_high - prev_low) * 1.0833
+    r2 = pp + (prev_high - prev_low) * 1.1666
+    r3 = pp + (prev_high - prev_low) * 1.2500
+    s1 = pp - (prev_high - prev_low) * 1.0833
+    s2 = pp - (prev_high - prev_low) * 1.1666
+    s3 = pp - (prev_high - prev_low) * 1.2500
     
-    # True Range
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Align Camarilla levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     
-    # Directional Movement
-    up_move = df_1w['high'] - df_1w['high'].shift(1)
-    down_move = df_1w['low'].shift(1) - df_1w['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Smoothed values
-    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    plus_di_1w = 100 * plus_dm_14 / tr_14
-    minus_di_1w = 100 * minus_dm_14 / tr_14
-    
-    # DX and ADX
-    dx = 100 * abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
-    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    vol_confirm = volume > (2.0 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for ADX calculation
+    start_idx = 50  # Need enough data for EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price above VWAP, strong trend (ADX > 25), volume confirmation
-            if (close[i] > vwap_1d_aligned[i] and 
-                adx_1w_aligned[i] > 25 and 
+            # Enter long: price breaks above R3, EMA34 uptrend, volume spike
+            if (close[i] > r3_aligned[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below VWAP, strong trend (ADX > 25), volume confirmation
-            elif (close[i] < vwap_1d_aligned[i] and 
-                  adx_1w_aligned[i] > 25 and 
+            # Enter short: price breaks below S3, EMA34 downtrend, volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend weakening (ADX < 20) or price crosses below VWAP
-            if (adx_1w_aligned[i] < 20) or (close[i] < vwap_1d_aligned[i]):
+            # Exit long: price retouches central pivot or reverses to S1
+            if (close[i] <= pp_aligned[i]) or (close[i] < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend weakening (ADX < 20) or price crosses above VWAP
-            if (adx_1w_aligned[i] < 20) or (close[i] > vwap_1d_aligned[i]):
+            # Exit short: price retouches central pivot or reverses to R1
+            if (close[i] >= pp_aligned[i]) or (close[i] > r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
