@@ -22,11 +22,6 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 12h data for volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
     # Previous day's close for Camarilla calculation (R3, S3)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
@@ -39,25 +34,19 @@ def generate_signals(prices):
     # Trend filter: 1d EMA50
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: current 12h volume > 1.5 * 20-period average
-    vol_series = pd.Series(df_12h['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_12h = df_12h['volume'].values > (vol_ma * 1.5)
-    
     # Align all to 12h
     r3_12h = align_htf_to_ltf(prices, df_1d, r3)
     s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_filter_12h_aligned = align_htf_to_ltf(prices, df_12h, volume_filter_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = 50  # Need enough data for EMA50
     
     for i in range(start_idx, n):
         if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(ema50_1d_12h[i]) or np.isnan(volume_filter_12h_aligned[i])):
+            np.isnan(ema50_1d_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,7 +55,13 @@ def generate_signals(prices):
         r3_val = r3_12h[i]
         s3_val = s3_12h[i]
         trend = ema50_1d_12h[i]
-        vol_filter = volume_filter_12h_aligned[i]
+        
+        # Volume filter: current 12h volume > 1.5 * 20-period average
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            vol_filter = volume[i] > (vol_ma * 1.5)
+        else:
+            vol_filter = False
         
         if position == 0:
             # Enter long: break above R3 with volume and above trend
