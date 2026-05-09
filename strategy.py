@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_4H_Supertrend_Trend_Filter_1dVWAP_Mean_Reversion
-# Hypothesis: In ranging markets (identified by ADX < 25), price tends to revert to the daily VWAP.
-# Supertrend (ATR=10, multiplier=3) on 4h provides trend direction to avoid counter-trend trades in strong trends.
-# Combines mean reversion in ranging markets with trend filter to avoid whipsaws.
-# Works in bull/bear: VWAP acts as dynamic support/resistance, Supertrend avoids false signals in trends.
+# 1D_KAMA_Trend_With_RSI_Filter_and_Volume
+# Hypothesis: Daily KAMA trend direction filtered by RSI momentum and volume confirmation. 
+# Works in bull/bear: KAMA adapts to volatility, avoiding whipsaws; RSI ensures momentum alignment; volume filters weak breakouts.
+# Focus on low-frequency, high-probability trades to minimize fee drag and maximize edge.
 
-name = "4h_4H_Supertrend_Trend_Filter_1dVWAP_Mean_Reversion"
-timeframe = "4h"
+name = "1D_KAMA_Trend_With_RSI_Filter_and_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,147 +22,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate daily VWAP
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3
-    vwap_num = np.cumsum(typical_price_1d * volume_1d)
-    vwap_den = np.cumsum(volume_1d)
-    vwap_1d = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
+    # Calculate KAMA ( Kaufman Adaptive Moving Average ) on daily close
+    # Parameters: ER period=10, Fast EMA=2, Slow EMA=30
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    # Align VWAP to 4h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_period))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # Will fix below
     
-    # Calculate ADX for regime filtering (14-period)
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # Directional Movement
-        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                           np.maximum(high[1:] - high[:-1], 0), 0)
-        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                            np.maximum(low[:-1] - low[1:], 0), 0)
-        dm_plus = np.concatenate([[np.nan], dm_plus])
-        dm_minus = np.concatenate([[np.nan], dm_minus])
-        
-        # Smoothed values
-        atr = np.full_like(tr, np.nan)
-        dm_plus_smooth = np.full_like(dm_plus, np.nan)
-        dm_minus_smooth = np.full_like(dm_minus, np.nan)
-        
-        if len(tr) >= period:
-            # Initial average
-            atr[period-1] = np.nanmean(tr[1:period+1])
-            dm_plus_smooth[period-1] = np.nanmean(dm_plus[1:period+1])
-            dm_minus_smooth[period-1] = np.nanmean(dm_minus[1:period+1])
-            
-            # Wilder smoothing
-            for i in range(period, len(tr)):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-                dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-        
-        # DI+ and DI-
-        di_plus = np.full_like(dm_plus_smooth, np.nan)
-        di_minus = np.full_like(dm_minus_smooth, np.nan)
-        valid = (~np.isnan(atr)) & (atr != 0)
-        di_plus[valid] = (dm_plus_smooth[valid] / atr[valid]) * 100
-        di_minus[valid] = (dm_minus_smooth[valid] / atr[valid]) * 100
-        
-        # DX and ADX
-        dx = np.full_like(di_plus, np.nan)
-        di_sum = di_plus + di_minus
-        valid_dx = (~np.isnan(di_plus)) & (~np.isnan(di_minus)) & (di_sum != 0)
-        dx[valid_dx] = (np.abs(di_plus[valid_dx] - di_minus[valid_dx]) / di_sum[valid_dx]) * 100
-        
-        adx = np.full_like(dx, np.nan)
-        if len(dx) >= period:
-            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
-            for i in range(2*period-1, len(dx)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Proper volatility calculation: sum of absolute changes over er_period
+    volatility = np.zeros_like(close)
+    for i in range(er_period, len(close)):
+        volatility[i] = np.sum(np.abs(np.diff(close[i-er_period:i])))
     
-    adx = calculate_adx(high, low, close, 14)
+    # Avoid division by zero
+    er = np.zeros_like(close)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
     
-    # Calculate Supertrend (ATR=10, multiplier=3)
-    def calculate_supertrend(high, low, close, atr_period=10, multiplier=3):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])
-        
-        # ATR
-        atr = np.full_like(tr, np.nan)
-        if len(tr) >= atr_period:
-            atr[atr_period-1] = np.nanmean(tr[1:atr_period+1])
-            for i in range(atr_period, len(tr)):
-                atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
-        
-        # Basic Upper and Lower Bands
-        hl_avg = (high + low) / 2
-        upper_basic = hl_avg + multiplier * atr
-        lower_basic = hl_avg - multiplier * atr
-        
-        # Final Upper and Lower Bands
-        final_upper = np.full_like(upper_basic, np.nan)
-        final_lower = np.full_like(lower_basic, np.nan)
-        
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    if len(close) > 0:
+        kama[0] = close[0]
         for i in range(1, len(close)):
-            if np.isnan(upper_basic[i]) or np.isnan(lower_basic[i]):
-                final_upper[i] = np.nan
-                final_lower[i] = np.nan
-            else:
-                if (close[i-1] <= final_upper[i-1] or np.isnan(final_upper[i-1])) and \
-                   (close[i-1] >= final_lower[i-1] or np.isnan(final_lower[i-1])):
-                    final_upper[i] = upper_basic[i]
-                    final_lower[i] = lower_basic[i]
-                elif close[i-1] > final_upper[i-1]:
-                    final_upper[i] = upper_basic[i]
-                    final_lower[i] = final_lower[i-1]
-                else:  # close[i-1] < final_lower[i-1]
-                    final_upper[i] = final_upper[i-1]
-                    final_lower[i] = lower_basic[i]
-        
-        # Supertrend
-        supertrend = np.full_like(close, np.nan)
-        for i in range(len(close)):
-            if np.isnan(final_upper[i]) or np.isnan(final_lower[i]):
-                supertrend[i] = np.nan
-            elif i == 0:
-                supertrend[i] = final_upper[i]
-            else:
-                if supertrend[i-1] == final_upper[i-1]:
-                    if close[i] <= final_upper[i]:
-                        supertrend[i] = final_upper[i]
-                    else:
-                        supertrend[i] = final_lower[i]
-                else:  # supertrend[i-1] == final_lower[i-1]
-                    if close[i] >= final_lower[i]:
-                        supertrend[i] = final_lower[i]
-                    else:
-                        supertrend[i] = final_upper[i]
-        
-        return supertrend, atr
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    supertrend, atr = calculate_supertrend(high, low, close, 10, 3)
+    # Calculate RSI(14)
+    rsi_period = 14
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume filter: current volume / 20-period average volume
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    if len(close) > rsi_period:
+        avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+        avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
+        for i in range(rsi_period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rsi = np.full_like(close, np.nan)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Handle division by zero case (when avg_loss is 0, RSI=100)
+    rsi[avg_loss == 0] = 100
+    
+    # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -174,49 +92,48 @@ def generate_signals(prices):
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
+    # Align weekly close for trend filter
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 28)  # Ensure volume MA, ADX, and Supertrend are ready
+    start_idx = max(er_period, rsi_period, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(adx[i]) or 
-            np.isnan(supertrend[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(close_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price below VWAP AND ranging market (ADX < 25) AND volume spike
-            if (close[i] < vwap_1d_aligned[i] and 
-                adx[i] < 25 and 
+            # Enter long: price > KAMA (uptrend) AND RSI > 50 (bullish momentum) AND volume spike
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
                 volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price above VWAP AND ranging market (ADX < 25) AND volume spike
-            elif (close[i] > vwap_1d_aligned[i] and 
-                  adx[i] < 25 and 
+            # Enter short: price < KAMA (downtrend) AND RSI < 50 (bearish momentum) AND volume spike
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
                   volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above VWAP OR trend emerges (ADX >= 25) OR Supertrend flips
-            if (close[i] > vwap_1d_aligned[i] or 
-                adx[i] >= 25 or 
-                supertrend[i] > close[i]):  # Supertrend flipped to down
+            # Exit long: price < KAMA OR RSI < 40 (loss of momentum)
+            if close[i] < kama[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below VWAP OR trend emerges (ADX >= 25) OR Supertrend flips
-            if (close[i] < vwap_1d_aligned[i] or 
-                adx[i] >= 25 or 
-                supertrend[i] < close[i]):  # Supertrend flipped to up
+            # Exit short: price > KAMA OR RSI > 60 (loss of momentum)
+            if close[i] > kama[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
