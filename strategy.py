@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_TRIX_Trend_Volume_Filter_v3"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla calculation
+    # Get 1d data for TRIX and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R1, S1)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # TRIX calculation: TRIX = EMA(EMA(EMA(close, 15), 15), 15)
+    close_series = pd.Series(df_1d['close'])
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100  # Percentage change
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
+    # Trend filter: 1d EMA50
+    ema50_1d = close_series.ewm(span=50, adjust=False, min_periods=50).mean()
     
-    # Trend filter: 12h EMA34
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Volume filter: current 4h volume > 1.3 * 30-period average
+    # Volume filter: current 6h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
+    volume_filter = volume > (vol_ma * 1.5)
     
-    # Align all to 4h (primary timeframe)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_12h_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Align all to 6h (primary timeframe)
+    trix_6h = align_htf_to_ltf(prices, df_1d, trix.values)
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d.values)
+    vol_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter.values)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
+    start_idx = max(45, 20)  # Need enough data for TRIX (3*15) and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34_12h_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(trix_6h[i]) or np.isnan(ema50_1d_6h[i]) or 
+            np.isnan(vol_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
-        trend = ema34_12h_4h[i]
-        vol_filter = volume_filter[i]
+        trix_val = trix_6h[i]
+        trend = ema50_1d_6h[i]
+        vol_filter = vol_filter_6h[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: TRIX crosses above zero with volume and above trend
+            if trix_val > 0 and trix_6h[i-1] <= 0 and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: TRIX crosses below zero with volume and below trend
+            elif trix_val < 0 and trix_6h[i-1] >= 0 and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: TRIX crosses below zero
+            if trix_val < 0 and trix_6h[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: TRIX crosses above zero
+            if trix_val > 0 and trix_6h[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
