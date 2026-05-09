@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Monthly_Pivot_Reversion_with_Volume
-# Hypothesis: Combines monthly pivot levels with mean reversion at support/resistance and volume confirmation.
-# Uses monthly pivot S2/R2 for mean reversion entries and monthly pivot S3/R3 for breakout continuation.
-# Volume filter ensures participation. Designed to work in both trending and ranging markets by capturing
-# reversals at key monthly levels and breakouts with confirmation. Target: 15-25 trades/year per symbol.
+# 4h_Bollinger_Breakout_Volume_Trend
+# Hypothesis: Uses Bollinger Band breakout with volume confirmation and 12h EMA trend filter.
+# Designed to capture high-probability breakouts during volatility expansion in the direction of the higher timeframe trend.
+# Works in bull and bear markets by filtering breakouts with 12h EMA to avoid counter-trend trades.
+# Target: 20-35 trades/year per symbol with disciplined risk control.
 
-name = "6h_Monthly_Pivot_Reversion_with_Volume"
-timeframe = "6h"
+name = "4h_Bollinger_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,38 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get monthly data for pivot levels
-    df_1m = get_htf_data(prices, '1M')
-    if len(df_1m) < 2:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1m = df_1m['high'].values
-    low_1m = df_1m['low'].values
-    close_1m = df_1m['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate monthly pivot points and support/resistance levels
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    pivot = (high_1m + low_1m + close_1m) / 3.0
-    r1 = 2 * pivot - low_1m
-    s1 = 2 * pivot - high_1m
-    r2 = pivot + (high_1m - low_1m)
-    s2 = pivot - (high_1m - low_1m)
-    r3 = high_1m + 2 * (pivot - low_1m)
-    s3 = low_1m - 2 * (high_1m - pivot)
+    # Calculate 12h EMA(50) for trend filter
+    ema_50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[0:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (close_12h[i] * 2 + ema_50_12h[i-1] * 49) / 50
     
-    # Align monthly levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1m, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1m, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1m, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1m, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1m, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1m, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1m, s3)
+    # Align 12h EMA to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter: 6h volume / 20-period average volume
+    # Calculate Bollinger Bands (20, 2) on 4h close
+    sma_20 = np.full_like(close, np.nan)
+    std_20 = np.full_like(close, np.nan)
+    
+    if len(close) >= 20:
+        sma_20[19] = np.mean(close[0:20])
+        std_20[19] = np.std(close[0:20])
+        for i in range(20, len(close)):
+            sma_20[i] = (sma_20[i-1] * 19 + close[i]) / 20
+            std_20[i] = np.sqrt((std_20[i-1]**2 * 19 + (close[i] - sma_20[i])**2) / 20)
+    
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
+    
+    # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -72,43 +72,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(s2_aligned[i]) or np.isnan(r2_aligned[i]) or \
-           np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or \
-           np.isnan(volume_ratio[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long at S2 with volume confirmation (mean reversion)
-            if close[i] <= s2_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long: Price breaks above upper BB AND volume confirmation AND price above 12h EMA50
+            if close[i] > upper_bb[i] and volume_ratio[i] > 2.0 and close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short at R2 with volume confirmation (mean reversion)
-            elif close[i] >= r2_aligned[i] and volume_ratio[i] > 1.5:
-                signals[i] = -0.25
-                position = -1
-            # Enter long on break above R3 with volume (breakout continuation)
-            elif close[i] > r3_aligned[i] and volume_ratio[i] > 2.0:
-                signals[i] = 0.25
-                position = 1
-            # Enter short on break below S3 with volume (breakout continuation)
-            elif close[i] < s3_aligned[i] and volume_ratio[i] > 2.0:
+            # Enter short: Price breaks below lower BB AND volume confirmation AND price below 12h EMA50
+            elif close[i] < lower_bb[i] and volume_ratio[i] > 2.0 and close[i] < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches R1 (take profit) or breaks below S2 (stop)
-            if close[i] >= r1_aligned[i] or close[i] < s2_aligned[i]:
+            # Exit: Price closes below middle Bollinger Band (SMA20)
+            if close[i] < sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches S1 (take profit) or breaks above R2 (stop)
-            if close[i] <= s1_aligned[i] or close[i] > r2_aligned[i]:
+            # Exit: Price closes above middle Bollinger Band (SMA20)
+            if close[i] > sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
