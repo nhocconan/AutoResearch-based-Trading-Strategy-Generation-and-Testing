@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with 1-day ADX trend filter and volume spike.
-# Uses daily ADX for trend strength, 12h Donchian channels for breakout signals,
-# and volume surge for confirmation. Designed to work in both bull (breakouts above upper channel)
-# and bear (breakdowns below lower channel). Target: 15-30 trades/year to avoid fee drag.
-name = "12h_Donchian20_1dADX25_VolumeSpike"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d ADX > 25 trend filter and volume > 2x 20-period EMA.
+# Designed to capture trend continuations in both bull and bear markets.
+# Uses daily ADX for trend strength, avoiding choppy markets.
+# Volume surge confirms breakout validity.
+# Target: 20-50 trades/year to avoid fee drag.
+name = "4h_Donchian20_1dADX25_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -52,48 +53,39 @@ def generate_signals(prices):
     for i in range(1, len(tr)):
         atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
     
-    plus_di = np.zeros_like(tr)
-    minus_di = np.zeros_like(tr)
-    for i in range(len(tr)):
-        if atr[i] > 0:
-            # Use Wilder's smoothing for DI
-            if i < period:
-                plus_di[i] = np.nan
-                minus_di[i] = np.nan
-            elif i == period:
-                plus_di[i] = 100 * np.sum(plus_dm[1:period+1]) / (atr[i] * period)
-                minus_di[i] = 100 * np.sum(minus_dm[1:period+1]) / (atr[i] * period)
-            else:
-                plus_di[i] = 100 * ((plus_di[i-1] * (period-1) + plus_dm[i]) / (atr[i] * period))
-                minus_di[i] = 100 * ((minus_di[i-1] * (period-1) + minus_dm[i]) / (atr[i] * period))
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
+    plus_di = 100 * np.where(atr > 0, 
+                             np.convolve(plus_dm, np.ones(period)/period, mode='full')[:len(plus_dm)] / atr, 0)
+    minus_di = 100 * np.where(atr > 0,
+                              np.convolve(minus_dm, np.ones(period)/period, mode='full')[:len(minus_dm)] / atr, 0)
     
     # Calculate DX and ADX
     dx = np.where((plus_di + minus_di) > 0, 
                   100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.full_like(dx, np.nan)
+    adx = np.zeros_like(dx)
     for i in range(len(dx)):
-        if i < 2 * period - 1:
+        if i < period:
             adx[i] = np.nan
-        elif i == 2 * period - 1:
-            adx[i] = np.nanmean(dx[period:2*period])
+        elif i == period:
+            adx[i] = np.mean(dx[1:period+1])
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Donchian channels (20-period) for 12h timeframe
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
+    # Calculate Donchian channels (20-period) for 4h timeframe
+    highest_high = np.maximum.accumulate(high)
+    lowest_low = np.minimum.accumulate(low)
+    
+    # For true Donchian, we need to reset the accumulation every 20 periods
+    upper_channel = np.full_like(high, np.nan)
+    lower_channel = np.full_like(low, np.nan)
     for i in range(len(high)):
         if i < 20:
-            highest_high[i] = np.nan
-            lowest_low[i] = np.nan
+            upper_channel[i] = np.nan
+            lower_channel[i] = np.nan
         else:
-            highest_high[i] = np.max(high[i-19:i+1])
-            lowest_low[i] = np.min(low[i-19:i+1])
+            upper_channel[i] = np.max(high[i-19:i+1])
+            lower_channel[i] = np.min(low[i-19:i+1])
     
-    # Align 1d ADX to 12h timeframe
+    # Align 1d ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
@@ -107,8 +99,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -118,17 +110,17 @@ def generate_signals(prices):
         
         if position == 0:
             # Enter long: price breaks above upper channel + 1d ADX > 25 + volume spike
-            if (price > highest_high[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
             # Enter short: price breaks below lower channel + 1d ADX > 25 + volume spike
-            elif (price < lowest_low[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price returns below upper channel or ADX drops below 20
-            if price < highest_high[i] or adx_aligned[i] < 20:
+            if price < upper_channel[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -136,7 +128,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price returns above lower channel or ADX drops below 20
-            if price > lowest_low[i] or adx_aligned[i] < 20:
+            if price > lower_channel[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
