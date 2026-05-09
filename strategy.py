@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,12 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -36,44 +31,44 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
     s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Trend filter: 1w EMA50
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Trend filter: 1d EMA200
+    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Volume filter: current 1d volume > 1.5 * 20-day average
     vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 12h
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema50_1w_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align all to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema200_1d_4h = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(200, 20)  # Need enough data for EMA200 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema50_1w_12h[i]) or np.isnan(volume_filter_12h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema200_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
-        trend = ema50_1w_12h[i]
-        vol_filter = volume_filter_12h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema200_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above weekly trend
+            # Enter long: break above R1 with volume and above trend
             if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below weekly trend
+            # Enter short: break below S1 with volume and below trend
             elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
