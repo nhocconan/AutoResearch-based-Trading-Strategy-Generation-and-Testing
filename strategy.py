@@ -1,10 +1,9 @@
-# US Equities: MACD + Volume + Trend Filter Strategy
-# Hypothesis: Combines MACD momentum with volume confirmation and trend filter for robust entries in both bull and bear markets
-# Uses 6h timeframe with 1d trend filter to capture multi-timeframe confluence
-# Designed to avoid overtrading with strict entry conditions targeting 12-37 trades/year
+#!/usr/bin/env python3
+# 4h_KAMA_Trend_RSI_Extremes_ChopFilter
+# Hypothesis: Kaufman Adaptive Moving Average (KAMA) defines trend direction, RSI extremes provide entry signals in trending markets, and Choppiness Index filter avoids ranging conditions. Works in bull/bear: KAMA adapts to volatility, RSI extremes capture mean-reversion within trend, chop filter prevents whipsaws in sideways markets.
 
-name = "6h_MACD_Volume_Trend_Filter"
-timeframe = "6h"
+name = "4h_KAMA_Trend_RSI_Extremes_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,100 +20,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
+    # Calculate KAMA (10, 2, 30) for trend
+    def calculate_kama(close, fast=2, slow=30, length=10):
+        change = np.abs(np.diff(close, n=length))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.zeros_like(close)
+        for i in range(length, len(close)):
+            if volatility[i] != 0:
+                er[i] = change[i] / volatility[i]
+            else:
+                er[i] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.zeros_like(close)
+        kama[length] = close[length]
+        for i in range(length+1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    close_1d = df_1d['close'].values
-    ema_200_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        ema_200_1d[199] = np.mean(close_1d[0:200])
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = (ema_200_1d[i-1] * 199 + close_1d[i]) / 200
+    kama = calculate_kama(close, fast=2, slow=30, length=10)
     
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate RSI (14)
+    def calculate_rsi(close, length=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[length] = np.mean(gain[0:length])
+        avg_loss[length] = np.mean(loss[0:length])
+        for i in range(length+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Calculate MACD (12,26,9)
-    ema_12 = np.full_like(close, np.nan)
-    ema_26 = np.full_like(close, np.nan)
+    rsi = calculate_rsi(close, length=14)
     
-    if len(close) >= 12:
-        ema_12[11] = np.mean(close[0:12])
-        for i in range(12, len(close)):
-            ema_12[i] = (close[i] * 2/13) + (ema_12[i-1] * 11/13)
+    # Calculate Choppiness Index (14)
+    def calculate_chop(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        tr1 = np.abs(high[1:] - low[1:])
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr[1:] = tr
+        for i in range(length+1, len(close)):
+            atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
+        
+        hh = np.zeros_like(close)
+        ll = np.zeros_like(close)
+        hh[length] = np.max(high[0:length+1])
+        ll[length] = np.min(low[0:length+1])
+        for i in range(length+1, len(close)):
+            hh[i] = max(hh[i-1], high[i])
+            ll[i] = min(ll[i-1], low[i])
+        
+        sum_atr = np.zeros_like(close)
+        for i in range(length, len(close)):
+            sum_atr[i] = np.sum(atr[i-length+1:i+1])
+        
+        chop = 100 * np.log10(sum_atr / (hh - ll)) / np.log10(length)
+        return chop
     
-    if len(close) >= 26:
-        ema_26[25] = np.mean(close[0:26])
-        for i in range(26, len(close)):
-            ema_26[i] = (close[i] * 2/27) + (ema_26[i-1] * 25/27)
-    
-    macd_line = np.full_like(close, np.nan)
-    valid_macd = (~np.isnan(ema_12)) & (~np.isnan(ema_26))
-    macd_line[valid_macd] = ema_12[valid_macd] - ema_26[valid_macd]
-    
-    signal_line = np.full_like(close, np.nan)
-    valid_signal = ~np.isnan(macd_line)
-    if np.sum(valid_signal) >= 9:
-        signal_line[8] = np.mean(macd_line[0:9])
-        for i in range(9, len(close)):
-            if valid_signal[i]:
-                signal_line[i] = (macd_line[i] * 2/10) + (signal_line[i-1] * 8/10)
-    
-    macd_histogram = np.full_like(close, np.nan)
-    valid_hist = (~np.isnan(macd_line)) & (~np.isnan(signal_line))
-    macd_histogram[valid_hist] = macd_line[valid_hist] - signal_line[valid_hist]
-    
-    # Volume ratio: current / 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    chop = calculate_chop(high, low, close, length=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(26, 20, 200)  # Ensure MACD, volume MA, and trend filter are ready
+    start_idx = 50  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(macd_histogram[i]) or np.isnan(signal_line[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: MACD histogram crosses above zero AND uptrend (price > EMA200) AND volume spike
-            if (macd_histogram[i] > 0 and macd_histogram[i-1] <= 0 and 
-                close[i] > ema_200_1d_aligned[i] and 
-                volume_ratio[i] > 1.5):
+            # Enter long: price above KAMA (uptrend) AND RSI < 30 (oversold) AND chop < 61.8 (trending)
+            if (close[i] > kama[i] and 
+                rsi[i] < 30 and 
+                chop[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: MACD histogram crosses below zero AND downtrend (price < EMA200) AND volume spike
-            elif (macd_histogram[i] < 0 and macd_histogram[i-1] >= 0 and 
-                  close[i] < ema_200_1d_aligned[i] and 
-                  volume_ratio[i] > 1.5):
+            # Enter short: price below KAMA (downtrend) AND RSI > 70 (overbought) AND chop < 61.8 (trending)
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 70 and 
+                  chop[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: MACD histogram crosses below zero OR trend reversal (price < EMA200)
-            if (macd_histogram[i] < 0 and macd_histogram[i-1] >= 0) or close[i] < ema_200_1d_aligned[i]:
+            # Exit long: price below KAMA OR RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: MACD histogram crosses above zero OR trend reversal (price > EMA200)
-            if (macd_histogram[i] > 0 and macd_histogram[i-1] <= 0) or close[i] > ema_200_1d_aligned[i]:
+            # Exit short: price above KAMA OR RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
