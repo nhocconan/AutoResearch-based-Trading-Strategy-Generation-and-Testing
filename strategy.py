@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Range_Breakout_With_Volume
-# Hypothesis: Uses weekly price range (high-low) from prior week to set breakout levels.
-# Long when price breaks above prior week's high with volume confirmation.
-# Short when price breaks below prior week's low with volume confirmation.
-# Weekly timeframe provides stable structure; daily execution captures timely entries.
-# Designed to work in both trending and ranging markets by capturing breakouts from consolidation.
-# Target: 15-25 trades/year per symbol with disciplined risk (0.25 position size).
+# 6h_KAMA_Adaptive_Trend
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) with efficiency ratio to filter market noise.
+# In trending markets (ER > 0.3), follows KAMA direction; in ranging markets (ER < 0.2), reverses at Bollinger Bands.
+# Uses 1d EMA34 as higher timeframe trend filter for robustness. Designed for 6H timeframe with target 15-25 trades/year.
 
-name = "1d_Weekly_Range_Breakout_With_Volume"
-timeframe = "1d"
+name = "6h_KAMA_Adaptive_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,73 +14,130 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 10:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for range calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for higher timeframe trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34  # EMA with alpha=2/(34+1)
     
-    # Calculate weekly high and low (prior complete week)
-    weekly_high = high_1w
-    weekly_low = low_1w
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly levels to daily timeframe (using prior week's values)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Calculate KAMA components
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[i] - close[i-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[i] - close[i-1]| over 10 periods
     
-    # Volume filter: current volume vs 20-day average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    # Pad arrays for alignment
+    change_padded = np.full(n, np.nan)
+    volatility_padded = np.full(n, np.nan)
+    change_padded[10:] = change
+    volatility_padded[10:] = volatility
     
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Avoid division by zero
+    er = np.full(n, np.nan)
+    valid_vol = volatility_padded > 0
+    er[valid_vol] = change_padded[valid_vol] / volatility_padded[valid_vol]
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # for EMA2
+    slow_sc = 2 / (30 + 1)  # for EMA30
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    if n > 0:
+        kama[0] = close[0]
+        for i in range(1, n):
+            if not np.isnan(er[i]):
+                sc = (er[i] * (fast_sc - slow_sc) + slow_sc) ** 2
+                kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+            else:
+                kama[i] = kama[i-1]
+    
+    # Bollinger Bands (20, 2) for mean reversion signals
+    sma_20 = np.full(n, np.nan)
+    std_20 = np.full(n, np.nan)
+    
+    if n >= 20:
+        sma_20[19] = np.mean(close[0:20])
+        std_20[19] = np.std(close[0:20])
+        for i in range(20, n):
+            sma_20[i] = np.mean(close[i-19:i+1])
+            std_20[i] = np.std(close[i-19:i+1])
+    
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(20, 10)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or np.isnan(volume_ratio[i]):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(upper_bb[i]) or np.isnan(lower_bb[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine market regime using Efficiency Ratio
+        trending = er[i] > 0.3
+        ranging = er[i] < 0.2
+        
         if position == 0:
-            # Enter long: Price breaks above weekly high with volume confirmation
-            if close[i] > weekly_high_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long conditions
+            long_signal = False
+            if trending and close[i] > kama[i]:
+                # In trend, go long when price above KAMA
+                long_signal = True
+            elif ranging and close[i] < lower_bb[i]:
+                # In range, go long at lower Bollinger Band
+                long_signal = True
+            
+            # Enter short conditions
+            short_signal = False
+            if trending and close[i] < kama[i]:
+                # In trend, go short when price below KAMA
+                short_signal = True
+            elif ranging and close[i] > upper_bb[i]:
+                # In range, go short at upper Bollinger Band
+                short_signal = True
+            
+            # Apply 1d EMA34 trend filter: only take longs in uptrend, shorts in downtrend
+            if long_signal and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below weekly low with volume confirmation
-            elif close[i] < weekly_low_aligned[i] and volume_ratio[i] > 1.5:
+            elif short_signal and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below weekly low (reversal signal)
-            if close[i] < weekly_low_aligned[i]:
+            # Exit long: price crosses below KAMA OR 1d trend turns against position
+            if close[i] < kama[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above weekly high (reversal signal)
-            if close[i] > weekly_high_aligned[i]:
+            # Exit short: price crosses above KAMA OR 1d trend turns against position
+            if close[i] > kama[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
