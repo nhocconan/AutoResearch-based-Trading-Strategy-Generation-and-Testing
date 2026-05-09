@@ -1,7 +1,6 @@
-pytorch
 #!/usr/bin/env python3
-name = "1D_1W_Camarilla_R1S1_Breakout_Trend_Volume_v3"
-timeframe = "1d"
+name = "12H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,20 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align weekly EMA50 to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Get daily data for Camarilla pivot levels (using previous day)
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -53,15 +39,29 @@ def generate_signals(prices):
         camarilla_h1[i] = prev_close + 1.1 * range_ / 12
         camarilla_l1[i] = prev_close - 1.1 * range_ / 12
     
-    # Align Camarilla levels to daily timeframe (no shift needed as they're already for current day)
-    camarilla_h1_aligned = camarilla_h1  # Already aligned to daily
-    camarilla_l1_aligned = camarilla_l1  # Already aligned to daily
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
+    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
     
-    # Get daily volume for confirmation
-    volume_1d = df_1d['volume'].values
+    # Get daily data for trend filter
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 20-day volume EMA for confirmation
-    vol_ema20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Get 1h data for volume confirmation
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
+        return np.zeros(n)
+    
+    volume_1h = df_1h['volume'].values
+    
+    # Calculate 1h volume EMA20
+    vol_ema20_1h = pd.Series(volume_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Align 1h volume EMA20 to 12h timeframe
+    vol_ema20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ema20_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,20 +71,20 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(camarilla_h1_aligned[i]) or 
-            np.isnan(camarilla_l1_aligned[i]) or np.isnan(vol_ema20_1d[i])):
+        if (np.isnan(camarilla_h1_aligned[i]) or np.isnan(camarilla_l1_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ema20_1h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Uptrend: price above weekly EMA50
-        uptrend = close[i] > ema50_1w_aligned[i]
-        # Downtrend: price below weekly EMA50
-        downtrend = close[i] < ema50_1w_aligned[i]
-        # Volume surge: current volume > 2.0x 20-day volume EMA (stricter to reduce trades)
-        volume_surge = volume[i] > vol_ema20_1d[i] * 2.0
+        # Uptrend: price above 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        # Downtrend: price below 1d EMA50
+        downtrend = close[i] < ema50_1d_aligned[i]
+        # Volume surge: current volume > 2.0x 1h volume EMA20
+        volume_surge = volume[i] > vol_ema20_1h_aligned[i] * 2.0
         
         if position == 0:
             # Enter long: Uptrend + price breaks above Camarilla H1 + volume surge
