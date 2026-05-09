@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Elder Ray Power (Bull/Bear) with 1d EMA50 trend filter and volume confirmation
-# Long when Bull Power > 0 AND Bear Power < 0 AND price > 1d EMA50 AND volume > 1.5x average
-# Short when Bear Power < 0 AND Bull Power > 0 AND price < 1d EMA50 AND volume > 1.5x average
-# Exit when power signals weaken or price crosses EMA50 in opposite direction
-# Elder Ray measures bull/bear power relative to EMA, effective in both trending and ranging markets
-# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
+# Hypothesis: 12h Williams %R mean reversion with 1d trend filter and volume confirmation
+# Long when Williams %R < -80 (oversold) with 1d EMA50 uptrend and volume > 1.5x average
+# Short when Williams %R > -20 (overbought) with 1d EMA50 downtrend and volume > 1.5x average
+# Exit when Williams %R crosses above -50 (long) or below -50 (short)
+# Williams %R identifies overextended moves; EMA50 filters trend direction; volume confirms conviction
+# Designed for 12h timeframe to capture mean reversions in both bull and bear markets with low frequency
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "6h_ElderRay_Power_EMA50_Volume"
-timeframe = "6h"
+name = "12h_WilliamsR_MeanRev_1dEMA50_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,20 +25,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 13-period EMA for Elder Ray (standard setting)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Calculate Elder Ray Power components
-    bull_power = high - ema13  # Bull Power: High - EMA
-    bear_power = low - ema13   # Bear Power: Low - EMA
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 12h Williams %R (14-period)
+    period = 14
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values
     
     # Calculate 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
@@ -48,42 +47,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA calculation
+    start_idx = 50  # Need enough data for indicator calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Bull Power positive, Bear Power negative, price above EMA50, volume spike
-            if (bull_power[i] > 0 and bear_power[i] < 0 and 
-                close[i] > ema50_1d_aligned[i] and vol_confirm[i]):
+            # Enter long: Williams %R < -80 (oversold), EMA50 uptrend, volume confirmation
+            if (williams_r[i] < -80 and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA rising
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power negative, Bull Power positive, price below EMA50, volume spike
-            elif (bear_power[i] < 0 and bull_power[i] > 0 and 
-                  close[i] < ema50_1d_aligned[i] and vol_confirm[i]):
+            # Enter short: Williams %R > -20 (overbought), EMA50 downtrend, volume confirmation
+            elif (williams_r[i] > -20 and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA falling
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Power weakens or price crosses below EMA50
-            if (bull_power[i] <= 0 or bear_power[i] >= 0 or 
-                close[i] < ema50_1d_aligned[i]):
+            # Exit long: Williams %R crosses above -50 (mean reversion complete)
+            if williams_r[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Power weakens or price crosses above EMA50
-            if (bear_power[i] >= 0 or bull_power[i] <= 0 or 
-                close[i] > ema50_1d_aligned[i]):
+            # Exit short: Williams %R crosses below -50 (mean reversion complete)
+            if williams_r[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
