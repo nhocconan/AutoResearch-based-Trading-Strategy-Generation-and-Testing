@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Choppiness_Keltner_Breakout"
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend (EMA34) and volume filter.
+# In bull markets: breaks above R1 in uptrend capture momentum.
+# In bear markets: breaks below S1 in downtrend capture short-side moves.
+# Volume filter reduces false breakouts. Low trade frequency (~20-50/year) avoids fee drag.
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,79 +21,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR, EMA, and Choppiness
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # True Range components
+    # Previous day's OHLC for Camarilla calculation
     prev_close = df_1d['close'].shift(1).values
-    tr1 = df_1d['high'].values - df_1d['low'].values
-    tr2 = np.abs(df_1d['high'].values - prev_close)
-    tr3 = np.abs(df_1d['low'].values - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # ATR(14)
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # EMA(20) for Keltner mid
-    ema20 = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Choppiness Index (14)
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = df_1d['high'].rolling(window=14, min_periods=14).max().values
-    ll = df_1d['low'].rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+    # Volume filter: current 1d volume > 1.3 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.3)
     
-    # Keltner Bands
-    upper = ema20 + 2.0 * atr
-    lower = ema20 - 2.0 * atr
-    
-    # Align to 4h
-    upper_4h = align_htf_to_ltf(prices, df_1d, upper)
-    lower_4h = align_htf_to_ltf(prices, df_1d, lower)
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
-    ema20_4h = align_htf_to_ltf(prices, df_1d, ema20)
+    # Align all to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 14  # Need enough for ATR and Choppiness
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_4h[i]) or np.isnan(lower_4h[i]) or
-            np.isnan(chop_4h[i]) or np.isnan(ema20_4h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        up = upper_4h[i]
-        low = lower_4h[i]
-        chop_val = chop_4h[i]
-        mid = ema20_4h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema34_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
-            # Enter long: price above upper Keltner in low chop (trending)
-            if close[i] > up and chop_val < 38.2:
+            # Enter long: break above R1 with volume and above trend (bullish)
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below lower Keltner in low chop (trending)
-            elif close[i] < low and chop_val < 38.2:
+            # Enter short: break below S1 with volume and below trend (bearish)
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below EMA (trend end) or high chop (range)
-            if close[i] < mid or chop_val > 61.8:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above EMA (trend end) or high chop (range)
-            if close[i] > mid or chop_val > 61.8:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
