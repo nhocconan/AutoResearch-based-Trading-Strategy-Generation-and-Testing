@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-name = "1D_Keltner_Channel_RSI_Extreme_Trend"
-timeframe = "1d"
-leverage = 1.0
+# 6H_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Based on Camarilla pivot levels from daily data: breakout at R4/S4 with trend filter and volume confirmation
+# Works in both bull and bear markets by following the daily trend and requiring volume to avoid false breakouts
+# Timeframe: 6h as required
+# Target: 15-30 trades per year to minimize fee drag
 
 import numpy as np
 import pandas as pd
@@ -9,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +19,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla pivots and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla levels using previous day's OHLC
+    # R4 = Close + 1.5 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA20 for trend filter
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    camarilla_r4 = close_1d + 1.5 * (high_1d - low_1d)
+    camarilla_s4 = close_1d - 1.5 * (high_1d - low_1d)
     
-    # Align weekly EMA20 to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily ATR(10) for Keltner channels
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Calculate daily EMA20 for Keltner center
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner channels
-    upper = ema20 + 2 * atr
-    lower = ema20 - 2 * atr
-    
-    # Calculate daily RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align daily data to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if weekly EMA data not ready
-        if np.isnan(ema20_1w_aligned[i]):
+    # Start after we have enough data
+    start_idx = 50
+    
+    for i in range(start_idx, n):
+        # Skip if data not ready
+        if np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend from weekly EMA20
-        uptrend = close[i] > ema20_1w_aligned[i]
-        downtrend = close[i] < ema20_1w_aligned[i]
+        # Determine trend
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.8x 20-period average volume
-        avg_volume = np.mean(volume[max(0, i-20):i])
+        # Volume confirmation: current volume > 1.8x 30-period average volume
+        avg_volume = np.mean(volume[i-30:i])
         volume_confirm = volume[i] > avg_volume * 1.8
         
         if position == 0:
-            # Enter long: price touches lower Keltner + RSI oversold (<30) + uptrend + volume confirmation
-            if close[i] <= lower[i] and rsi[i] < 30 and uptrend and volume_confirm:
+            # Enter long: price breaks above R4 + uptrend + volume confirmation
+            if close[i] > camarilla_r4_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches upper Keltner + RSI overbought (>70) + downtrend + volume confirmation
-            elif close[i] >= upper[i] and rsi[i] > 70 and downtrend and volume_confirm:
+            # Enter short: price breaks below S4 + downtrend + volume confirmation
+            elif close[i] < camarilla_s4_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above EMA20 (middle line) or RSI > 70
-            if close[i] > ema20[i] or rsi[i] > 70:
+            # Exit long: price closes below EMA50 (trend reversal)
+            if close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below EMA20 (middle line) or RSI < 30
-            if close[i] < ema20[i] or rsi[i] < 30:
+            # Exit short: price closes above EMA50 (trend reversal)
+            if close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+name = "6H_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
+leverage = 1.0
