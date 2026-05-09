@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Liquidity_Capture_Reversal
-# Hypothesis: Liquidity sweeps precede mean reversion in crypto markets. Identify when price sweeps
-# liquidity (equal highs/lows) then reverses, confirmed by volume exhaustion and higher timeframe trend.
-# Works in bull/bear by fading liquidity grabs that often trap retail. Target: 15-35 trades/year on 6h.
+# 12h_TRIX_VolumeSpike_1wTrend
+# Hypothesis: TRIX momentum crossing zero with volume spike and weekly trend filter (price > weekly EMA20).
+# TRIX filters noise and captures momentum shifts. Weekly trend ensures trades align with higher timeframe direction.
+# Volume spike confirms institutional participation. Designed for 12-37 trades/year on 12h timeframe.
 
-name = "6h_Liquidity_Capture_Reversal"
-timeframe = "6h"
+name = "12h_TRIX_VolumeSpike_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,80 +14,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and liquidity context
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
+    close_1w = df_1w['close'].values
+    # Calculate weekly EMA(20)
+    ema_20_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 20:
+        ema_20_1w[19] = np.mean(close_1w[0:20])
+        for i in range(20, len(close_1w)):
+            ema_20_1w[i] = (close_1w[i] * 2 + ema_20_1w[i-1] * 18) / 20
     
-    # Align 1d EMA to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align weekly EMA to 12h timeframe
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Identify equal highs/lows (liquidity zones) on 6h
-    # Equal high: current high within 0.1% of previous high
-    equal_high = np.abs(high - np.roll(high, 1)) / np.roll(high, 1) < 0.001
-    equal_low = np.abs(low - np.roll(low, 1)) / np.roll(low, 1) < 0.001
+    # Calculate TRIX(12) on 12h closes: triple EMA then percent change
+    # First EMA(12)
+    ema1 = np.full(n, np.nan)
+    if n >= 12:
+        ema1[11] = np.mean(close[0:12])
+        for i in range(12, n):
+            ema1[i] = (close[i] * 2 + ema1[i-1] * 10) / 12
+    # Second EMA(12)
+    ema2 = np.full(n, np.nan)
+    if n >= 24:
+        ema2[23] = np.mean(ema1[12:24]) if not np.any(np.isnan(ema1[12:24])) else np.nan
+        for i in range(24, n):
+            if not np.isnan(ema1[i]) and not np.isnan(ema2[i-1]):
+                ema2[i] = (ema1[i] * 2 + ema2[i-1] * 10) / 12
+    # Third EMA(12)
+    ema3 = np.full(n, np.nan)
+    if n >= 36:
+        ema3[35] = np.mean(ema2[24:36]) if not np.any(np.isnan(ema2[24:36])) else np.nan
+        for i in range(36, n):
+            if not np.isnan(ema2[i]) and not np.isnan(ema3[i-1]):
+                ema3[i] = (ema2[i] * 2 + ema3[i-1] * 10) / 12
+    # TRIX = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
+    trix = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
+            trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
     
-    # Volume exhaustion: current volume < 50% of 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
+    # Volume ratio: current volume / 20-period average
+    vol_ma = np.full(n, np.nan)
+    if n >= 20:
         vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
+        for i in range(20, n):
             vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    volume_ratio = np.full_like(volume, np.nan)
+    volume_ratio = np.full(n, np.nan)
     valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)
+    start_idx = max(36, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(trix[i]) or np.isnan(trix[i-1]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: swept low (liquidity grab below) + volume exhaustion + bullish 1d trend
-            if equal_low[i-1] and volume_ratio[i] < 0.5 and close[i] > ema_50_1d_aligned[i]:
+            # Enter long: TRIX crosses above zero AND volume spike AND weekly uptrend
+            if trix[i-1] <= 0 and trix[i] > 0 and volume_ratio[i] > 2.0 and close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: swept high (liquidity grab above) + volume exhaustion + bearish 1d trend
-            elif equal_high[i-1] and volume_ratio[i] < 0.5 and close[i] < ema_50_1d_aligned[i]:
+            # Enter short: TRIX crosses below zero AND volume spike AND weekly downtrend
+            elif trix[i-1] >= 0 and trix[i] < 0 and volume_ratio[i] > 2.0 and close[i] < ema_20_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: mean reversion complete or trend turns bearish
-            if close[i] > np.max(high[i-3:i]) or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: TRIX crosses below zero or weekly trend turns down
+            if trix[i] < 0 or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: mean reversion complete or trend turns bullish
-            if close[i] < np.min(low[i-3:i]) or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: TRIX crosses above zero or weekly trend turns up
+            if trix[i] > 0 or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
