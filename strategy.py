@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_1w_RSI_40_60_TrendFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,76 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for RSI and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Get daily data for volume confirmation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 30-period EMA on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
     
-    # Calculate weekly EMA(50) for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Get 12h data for pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
-    # Calculate daily volume average for spike confirmation
-    vol_ma_d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_d)
+    # Calculate 12h CAMARILLA pivot levels from previous 12h bar's OHLC
+    prev_12h_high = df_12h['high'].shift(1).values
+    prev_12h_low = df_12h['low'].shift(1).values
+    prev_12h_close = df_12h['close'].shift(1).values
+    
+    # Camarilla formula for R1 and S1
+    range_12h = prev_12h_high - prev_12h_low
+    camarilla_mult = 1.1 / 12  # ~0.0916667
+    r1_12h = prev_12h_close + range_12h * camarilla_mult * 1
+    s1_12h = prev_12h_close - range_12h * camarilla_mult * 1
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    
+    # Calculate 12-period volume average for spike detection
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need 50 for weekly EMA, 20 for volume
+    start_idx = max(30, 12)  # Need 30 for 1d EMA and 12 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(rsi_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(vol_ma_d_aligned[i])):
+        if (np.isnan(ema_30_1d_aligned[i]) or np.isnan(r1_12h_aligned[i]) or 
+            np.isnan(s1_12h_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi = rsi_1w_aligned[i]
-        ema_50 = ema_50_1w_aligned[i]
-        vol_ma = vol_ma_d_aligned[i]
-        price = close[i]
+        ema_1d = ema_30_1d_aligned[i]
+        r1_level = r1_12h_aligned[i]
+        s1_level = s1_12h_aligned[i]
         vol = volume[i]
+        vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: RSI between 40-60 (neutral) + price above weekly EMA50 + volume spike
-            if 40 <= rsi <= 60 and price > ema_50 and vol > 1.5 * vol_ma:
+            # Enter long: Price breaks above R1 with volume AND price > 1d EMA30 (uptrend)
+            if close[i] > r1_level and vol > 2.0 * vol_ma_val and close[i] > ema_1d:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI between 40-60 + price below weekly EMA50 + volume spike
-            elif 40 <= rsi <= 60 and price < ema_50 and vol > 1.5 * vol_ma:
+            # Enter short: Price breaks below S1 with volume AND price < 1d EMA30 (downtrend)
+            elif close[i] < s1_level and vol > 2.0 * vol_ma_val and close[i] < ema_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 70 (overbought) OR price below weekly EMA50
-            if rsi > 70 or price < ema_50:
+            # Exit long: Price breaks below R1 OR trend reverses (price < 1d EMA30)
+            if close[i] < r1_level or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 30 (oversold) OR price above weekly EMA50
-            if rsi < 30 or price > ema_50:
+            # Exit short: Price breaks above S1 OR trend reverses (price > 1d EMA30)
+            if close[i] > s1_level or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
