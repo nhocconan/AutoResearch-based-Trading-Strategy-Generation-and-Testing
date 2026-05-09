@@ -1,20 +1,21 @@
-#!/usr/bin/env python3
+# 1d_GoldenCross_VolumeConfirm_1wTrend
+# Hypothesis: Daily golden cross (SMA50 > SMA200) with volume confirmation and weekly trend filter.
+# Golden cross indicates long-term bullish momentum; volume > 1.5x average confirms institutional participation.
+# Weekly EMA50 trend filter ensures alignment with higher timeframe momentum.
+# Designed for low trade frequency (<25/year) to minimize fee drag in ranging/bear markets.
+# Works in bull markets via trend continuation and in bear markets via mean-reversion pulls to support.
+
+name = "1d_GoldenCross_VolumeConfirm_1wTrend"
+timeframe = "1d"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R combined with 1d EMA50 trend filter and volume spike confirmation.
-# Williams %R identifies overbought/oversold conditions; readings below -80 indicate oversold (long setup),
-# readings above -20 indicate overbought (short setup). EMA50 on 1d confirms the primary trend direction.
-# Volume > 2x average confirms institutional participation. Designed for low trade frequency to minimize fee drag.
-# Works in bull markets by buying oversold dips in uptrends and in bear markets by selling overbought rallies in downtrends.
-name = "6h_WilliamsR_1dEMA50_VolumeSpike"
-timeframe = "6h"
-leverage = 1.0
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,68 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on 1d close
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 50-period EMA on weekly close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Williams %R (14-period) on 6h data
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
-    # Handle division by zero (when high == low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # Calculate daily SMA50 and SMA200 for golden cross
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    
+    # Calculate 20-day volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # Need 50 for EMA50 and 14 for Williams %R
+    start_idx = max(200, 20)  # Need 200 for SMA200 and 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]):
+        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_50_1d_aligned[i]
-        wr = williams_r[i]
+        sma50 = sma_50[i]
+        sma200 = sma_200[i]
+        vol_ma = vol_ma_20[i]
         vol = volume[i]
-        
-        # Calculate 20-period volume average for spike detection
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-        else:
-            vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
+        weekly_ema = ema_50_1w_aligned[i]
         
         if position == 0:
-            # Enter long: Williams %R < -80 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 2x average
-            if wr < -80 and close[i] > ema_1d and vol > 2.0 * vol_ma:
+            # Enter long: Golden cross (SMA50 > SMA200) AND volume > 1.5x average AND price above weekly EMA (uptrend)
+            if sma50 > sma200 and vol > 1.5 * vol_ma and close[i] > weekly_ema:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R > -20 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 2x average
-            elif wr > -20 and close[i] < ema_1d and vol > 2.0 * vol_ma:
+            # Enter short: Death cross (SMA50 < SMA200) AND volume > 1.5x average AND price below weekly EMA (downtrend)
+            elif sma50 < sma200 and vol > 1.5 * vol_ma and close[i] < weekly_ema:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R > -20 (overbought) OR trend reverses (price < 1d EMA50)
-            if wr > -20 or close[i] < ema_1d:
+            # Exit long: Death cross OR price below weekly EMA (trend reversal)
+            if sma50 < sma200 or close[i] < weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R < -80 (oversold) OR trend reverses (price > 1d EMA50)
-            if wr < -80 or close[i] > ema_1d:
+            # Exit short: Golden cross OR price above weekly EMA (trend reversal)
+            if sma50 > sma200 or close[i] > weekly_ema:
                 signals[i] = 0.0
                 position = 0
             else:
