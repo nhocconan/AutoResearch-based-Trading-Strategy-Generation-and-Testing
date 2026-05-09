@@ -3,12 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index regime filter + 1d Bollinger Band reversal
-# In choppy markets (CHOP > 61.8), price tends to revert to mean from Bollinger Bands
-# In trending markets (CHOP < 38.2), avoid trades to prevent whipsaw
-# Works in both bull/bear as regime adapts to market conditions
-name = "4h_Choppiness_BB_Reversal"
-timeframe = "4h"
+name = "6h_WilliamsAlligator_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,83 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands
+    # Get 1d data for Williams Alligator and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands on 1d close (20, 2)
+    # Williams Alligator: SMoothed Moving Average (SMA with period=3, then shift)
+    # Jaw (Blue): 13-period SMMA shifted by 8 bars
+    # Teeth (Red): 8-period SMMA shifted by 5 bars
+    # Lips (Green): 5-period SMMA shifted by 3 bars
     close_1d = df_1d['close'].values
-    sma_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
     
-    # Align Bollinger Bands to 4h timeframe
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    # SMMA calculation: SMA then shift
+    sma5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    sma8 = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    sma13 = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
     
-    # Calculate Choppiness Index on 4h data (14-period)
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
+    lips = np.roll(sma5, 3)   # shifted by 3
+    teeth = np.roll(sma8, 5)  # shifted by 5
+    jaw = np.roll(sma13, 8)   # shifted by 8
     
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    # Align to 6h timeframe
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
     
-    # Volume confirmation: current volume > 1.3 * 20-period average
+    # Volume spike filter: current volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14, 20)  # BB, CHOP, volume MA
+    start_idx = max(13, 20)  # Need enough data for Alligator and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or
-            np.isnan(chop[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(lips_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(jaw_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ch = chop[i]
-        upper = upper_bb_aligned[i]
-        lower = lower_bb_aligned[i]
-        vol_filt = volume_filter[i]
+        lips_val = lips_aligned[i]
+        teeth_val = teeth_aligned[i]
+        jaw_val = jaw_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: price touches lower BB in choppy market + volume
-            if ch > 61.8 and close[i] <= lower and vol_filt:
+            # Enter long: Lips > Teeth > Jaw (bullish alignment) + volume spike
+            if lips_val > teeth_val > jaw_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches upper BB in choppy market + volume
-            elif ch > 61.8 and close[i] >= upper and vol_filt:
+            # Enter short: Lips < Teeth < Jaw (bearish alignment) + volume spike
+            elif lips_val < teeth_val < jaw_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches middle (SMA) or chop drops (trend emerging)
-            # We don't have SMA aligned, so exit when price reaches upper BB or chop < 50
-            if close[i] >= upper or ch < 50:
+            # Exit long: Lips < Teeth (bullish alignment broken) or volume drops
+            if lips_val < teeth_val or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches middle or chop drops
-            if close[i] <= lower or ch < 50:
+            # Exit short: Lips > Teeth (bearish alignment broken) or volume drops
+            if lips_val > teeth_val or not vol_spike:
                 signals[i] = 0.0
                 position = 0
             else:
