@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate EMA34 on 1d close for trend filter
@@ -37,14 +37,14 @@ def generate_signals(prices):
     r3_level = close_1d_vals + camarilla_range * 4
     s3_level = close_1d_vals - camarilla_range * 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume spike filter: current volume > 1.5 * 20-period average
+    # Volume spike filter: current volume > 1.8 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,11 +94,3 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: Camarilla R3/S3 breakouts on 12h timeframe with 1d trend filter and volume confirmation.
-# Works in both bull and bear markets because:
-# 1. Trend filter (EMA34 on 1d) ensures we only trade in direction of higher timeframe trend
-# 2. Volume confirmation ensures breakouts have institutional participation
-# 3. Camarilla levels provide statistically significant support/resistance levels
-# 4. 12h timeframe reduces noise and overtrading while capturing significant moves
-# 5. Risk management via trend reversal exit (close < EMA34 or opposite S3/R3 break)
