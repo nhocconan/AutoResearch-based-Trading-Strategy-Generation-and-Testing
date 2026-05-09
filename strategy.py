@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6H_Donchian20_1wTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,101 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels from previous day
-    camarilla_h1 = np.full_like(close_1d, np.nan)
-    camarilla_l1 = np.full_like(close_1d, np.nan)
-    
-    for i in range(len(close_1d)):
-        if i >= 1:
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            prev_close = close_1d[i-1]
-            range_ = prev_high - prev_low
-            camarilla_h1[i] = prev_close + 1.1 * range_ / 12
-            camarilla_l1[i] = prev_close - 1.1 * range_ / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-    camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
-    
-    # Calculate 1d EMA34 for trend filter
-    if len(close_1d) >= 34:
-        ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate weekly EMA20 for trend filter
+    if len(close_1w) >= 20:
+        ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     else:
-        ema34_1d = np.full_like(close_1d, np.nan)
+        ema20_1w = np.full_like(close_1w, np.nan)
     
-    # Align 1d EMA34 to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align weekly EMA20 to 6h timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Get 1h data for volume confirmation
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
-        return np.zeros(n)
+    # Calculate Donchian(20) channels on 6h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    volume_1h = df_1h['volume'].values
-    
-    # Calculate 1h volume EMA20
-    if len(volume_1h) >= 20:
-        vol_ema20_1h = pd.Series(volume_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate volume filter: volume > 1.5x volume EMA20
+    if len(volume) >= 20:
+        vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     else:
-        vol_ema20_1h = np.full_like(volume_1h, np.nan)
-    
-    # Align 1h volume EMA20 to 4h timeframe
-    vol_ema20_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ema20_1h)
+        vol_ema20 = np.full_like(volume, np.nan)
+    volume_filter = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
-    start_idx = max(1, 34, 20)
+    # Start after we have enough data
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h1_aligned[i]) or np.isnan(camarilla_l1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ema20_1h_aligned[i])):
+        if np.isnan(ema20_1w_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ema20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Uptrend: price above 1d EMA34
-        uptrend = close[i] > ema34_1d_aligned[i]
-        # Downtrend: price below 1d EMA34
-        downtrend = close[i] < ema34_1d_aligned[i]
-        # Volume surge: current volume > 1.5x 1h volume EMA20
-        volume_surge = volume[i] > vol_ema20_1h_aligned[i] * 1.5
+        uptrend = close[i] > ema20_1w_aligned[i]
+        downtrend = close[i] < ema20_1w_aligned[i]
         
         if position == 0:
-            # Enter long: Uptrend + price touches/breaks above Camarilla H1 + volume surge
-            if uptrend and close[i] >= camarilla_h1_aligned[i] and volume_surge:
+            # Enter long: Uptrend + price breaks above Donchian high + volume filter
+            if uptrend and high[i] > high_20[i-1] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + price touches/breaks below Camarilla L1 + volume surge
-            elif downtrend and close[i] <= camarilla_l1_aligned[i] and volume_surge:
+            # Enter short: Downtrend + price breaks below Donchian low + volume filter
+            elif downtrend and low[i] < low_20[i-1] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR price touches/breaks below Camarilla L1
-            if not uptrend or close[i] <= camarilla_l1_aligned[i]:
+            # Exit long: Trend turns down OR price breaks below Donchian low
+            if not uptrend or low[i] < low_20[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR price touches/breaks above Camarilla H1
-            if not downtrend or close[i] >= camarilla_h1_aligned[i]:
+            # Exit short: Trend turns up OR price breaks above Donchian high
+            if not downtrend or high[i] > high_20[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
