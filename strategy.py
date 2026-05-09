@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,18 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation (use daily OHLC from 6h data)
-    # For 6h bars, we need the previous day's OHLC based on the day boundary
-    prev_high = np.roll(high, 4)  # 4 * 6h = 24h (previous day)
-    prev_low = np.roll(low, 4)
-    prev_close = np.roll(close, 4)
-    prev_open = np.roll(prices['open'].values, 4)
-    
-    # Handle first 4 bars (no previous day)
-    prev_high[:4] = high[:4]
-    prev_low[:4] = low[:4]
-    prev_close[:4] = close[:4]
-    prev_open[:4] = prices['open'].values[:4]
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_open = np.roll(prices['open'].values, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    prev_open[0] = prices['open'].values[0]
     
     # Calculate Camarilla R1 and S1 levels
     range_ = prev_high - prev_low
@@ -36,26 +33,26 @@ def generate_signals(prices):
     r1 = close_prev + range_ * 1.1 / 6
     s1 = close_prev - range_ * 1.1 / 6
     
-    # Daily trend: EMA34 on 1d (using proper 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Weekly trend: EMA34 on 1w
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Volume filter: volume spike > 2.0x 20-period SMA (higher threshold for fewer trades)
+    # Volume filter: volume > 1.3x 20-period SMA
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_ma20
+    vol_filter = volume > 1.3 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure we have enough data for calculations
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
         if np.isnan(r1[i]) or np.isnan(s1[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,35 +61,35 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R1 with daily uptrend and volume spike
+            # Long: breakout above R1 with weekly uptrend and volume
             if (price > r1[i] and 
-                price > ema34_1d_aligned[i] and 
-                vol_spike[i]):
+                price > ema34_1w_aligned[i] and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S1 with daily downtrend and volume spike
+            # Short: breakdown below S1 with weekly downtrend and volume
             elif (price < s1[i] and 
-                  price < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
+                  price < ema34_1w_aligned[i] and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price returns to daily EMA or loses volume spike
-            if (price < ema34_1d_aligned[i] or 
-                not vol_spike[i]):
+            # Exit long: price returns to weekly EMA or loses volume
+            if (price < ema34_1w_aligned[i] or 
+                not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to daily EMA or loses volume spike
-            if (price > ema34_1d_aligned[i] or 
-                not vol_spike[i]):
+            # Exit short: price returns to weekly EMA or loses volume
+            if (price > ema34_1w_aligned[i] or 
+                not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
