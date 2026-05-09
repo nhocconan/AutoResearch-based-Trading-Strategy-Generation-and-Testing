@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSqueeze"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,25 +28,24 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     prev_range = prev_high - prev_low
     
-    # Camarilla levels: R1, S1
+    # Camarilla levels
     R1 = prev_close + 1.1 * prev_range / 12
     S1 = prev_close - 1.1 * prev_range / 12
+    R2 = prev_close + 1.1 * prev_range / 6
+    S2 = prev_close - 1.1 * prev_range / 6
     
-    # Align to 12h timeframe
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    # Align to 4h timeframe
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    R2_4h = align_htf_to_ltf(prices, df_1d, R2)
+    S2_4h = align_htf_to_ltf(prices, df_1d, S2)
     
-    # Get weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Get daily trend filter (1d EMA34)
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    daily_ema_4h = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Weekly EMA20 for trend direction
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema_12h = align_htf_to_ltf(prices, df_1w, weekly_ema)
-    
-    # Volume filter: above 1.5x 20-period average
+    # Volume squeeze filter: volume < 0.5x 20-period average (low volume = consolidation)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -56,46 +55,47 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or 
-            np.isnan(weekly_ema_12h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
+            np.isnan(R2_4h[i]) or np.isnan(S2_4h[i]) or 
+            np.isnan(daily_ema_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        vol_squeeze = volume[i] < 0.5 * vol_ma[i]  # Volume squeeze = consolidation breakout
         
         # Session filter: 08-20 UTC (reduce noise trades)
         hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above R1 with weekly uptrend
-            if (close[i] > R1_12h[i] and 
-                close[i] > weekly_ema_12h[i] and  # weekly uptrend
-                vol_ok and 
+            # Long breakout: price breaks above R2 with daily uptrend and volume squeeze
+            if (close[i] > R2_4h[i] and 
+                close[i] > daily_ema_4h[i] and  # daily uptrend
+                vol_squeeze and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with weekly downtrend
-            elif (close[i] < S1_12h[i] and 
-                  close[i] < weekly_ema_12h[i] and  # weekly downtrend
-                  vol_ok and 
+            # Short breakdown: price breaks below S2 with daily downtrend and volume squeeze
+            elif (close[i] < S2_4h[i] and 
+                  close[i] < daily_ema_4h[i] and  # daily downtrend
+                  vol_squeeze and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below S1 (mean reversion)
-            if close[i] < S1_12h[i]:
+            # Exit long: price falls back below R1 (mean reversion to pivot)
+            if close[i] < R1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above R1 (mean reversion)
-            if close[i] > R1_12h[i]:
+            # Exit short: price rises back above S1 (mean reversion to pivot)
+            if close[i] > S1_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
