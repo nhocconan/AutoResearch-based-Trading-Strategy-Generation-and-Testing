@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RankVolume_Breakout_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,63 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume context
+    # Get 1d data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 1w data for long-term trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # 1d Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
+    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
+    
+    # 1w EMA10 for long-term trend filter
+    ema10_1w = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
     
     # 1d volume average for volume filter
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Rank volume: volume / average volume (normalized)
-    vol_ratio = volume / (pd.Series(volume).rolling(window=20, min_periods=20).mean().values + 1e-8)
-    
-    # Align all to 6h
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_avg_1d_6h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Align all to 12h
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    camarilla_high_12h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_12h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    ema10_1w_12h = align_htf_to_ltf(prices, df_1w, ema10_1w)
+    vol_avg_1d_12h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_6h[i]) or np.isnan(vol_avg_1d_6h[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema34_1d_12h[i]) or np.isnan(camarilla_high_12h[i]) or 
+            np.isnan(camarilla_low_12h[i]) or np.isnan(ema10_1w_12h[i]) or 
+            np.isnan(vol_avg_1d_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_1d_6h[i]
-        vol_avg = vol_avg_1d_6h[i]
-        vol_ratio_val = vol_ratio[i]
+        trend = ema34_1d_12h[i]
+        resistance = camarilla_high_12h[i]
+        support = camarilla_low_12h[i]
+        long_term_trend = ema10_1w_12h[i]
+        vol_avg = vol_avg_1d_12h[i]
+        vol_ok = volume[i] > vol_avg * 1.5
         
         if position == 0:
-            # Long: high volume breakout above 1d EMA50
-            if close[i] > trend and vol_ratio_val > 2.0:
+            # Long: break above R3 with volume, above 1d EMA34, and above 1w EMA10
+            if close[i] > resistance and vol_ok and close[i] > trend and close[i] > long_term_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: high volume breakdown below 1d EMA50
-            elif close[i] < trend and vol_ratio_val > 2.0:
+            # Short: break below S3 with volume, below 1d EMA34, and below 1w EMA10
+            elif close[i] < support and vol_ok and close[i] < trend and close[i] < long_term_trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below trend or volume drops
-            if close[i] < trend or vol_ratio_val < 1.2:
+            # Exit long: close below S3 or trend reversal (1d or 1w)
+            if close[i] < support or close[i] < trend or close[i] < long_term_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above trend or volume drops
-            if close[i] > trend or vol_ratio_val < 1.2:
+            # Exit short: close above R3 or trend reversal (1d or 1w)
+            if close[i] > resistance or close[i] > trend or close[i] > long_term_trend:
                 signals[i] = 0.0
                 position = 0
             else:
