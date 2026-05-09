@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "1D_WeeklyCamarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6H_WeeklyPivot_DailyTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,83 +18,98 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
+        return np.zeros(n)
+    
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Calculate daily Camarilla pivot levels from previous day
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
+    # Calculate weekly pivot levels from previous week
     # Pivot = (H + L + C) / 3
     # R1 = C + (H - L) * 1.1 / 12
     # S1 = C - (H - L) * 1.1 / 12
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12.0
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12.0
+    # R2 = C + (H - L) * 1.1 / 6
+    # S2 = C - (H - L) * 1.1 / 6
+    # R3 = C + (H - L) * 1.1 / 4
+    # S3 = C - (H - L) * 1.1 / 4
     
-    # Align Camarilla levels to daily timeframe (already daily, but using align for safety with gaps)
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
+    # Use previous week's data for current week's pivot levels
+    prev_high_w = df_1w['high'].shift(1).values
+    prev_low_w = df_1w['low'].shift(1).values
+    prev_close_w = df_1w['close'].shift(1).values
     
-    # Volume confirmation: current volume > 1.8x 20-period average volume
+    # Calculate weekly pivot levels
+    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3.0
+    r1_w = prev_close_w + (prev_high_w - prev_low_w) * 1.1 / 12.0
+    s1_w = prev_close_w - (prev_high_w - prev_low_w) * 1.1 / 12.0
+    r2_w = prev_close_w + (prev_high_w - prev_low_w) * 1.1 / 6.0
+    s2_w = prev_close_w - (prev_high_w - prev_low_w) * 1.1 / 6.0
+    r3_w = prev_close_w + (prev_high_w - prev_low_w) * 1.1 / 4.0
+    s3_w = prev_close_w - (prev_high_w - prev_low_w) * 1.1 / 4.0
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_w_6h = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_6h = align_htf_to_ltf(prices, df_1w, s1_w)
+    r2_w_6h = align_htf_to_ltf(prices, df_1w, r2_w)
+    s2_w_6h = align_htf_to_ltf(prices, df_1w, s2_w)
+    r3_w_6h = align_htf_to_ltf(prices, df_1w, r3_w)
+    s3_w_6h = align_htf_to_ltf(prices, df_1w, s3_w)
+    
+    # Calculate daily EMA20 for trend filter
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average volume
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.8)
+    volume_confirm = volume > (volume_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data for indicators
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if EMA data not ready
-        if np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(ema20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip if Camarilla levels not ready
-        if np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]):
+        # Skip if weekly pivot levels not ready
+        if np.isnan(r1_w_6h[i]) or np.isnan(s1_w_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + volume confirmation + price above weekly EMA50
-            if close[i] > r1_1d[i] and volume_confirm[i] and close[i] > ema50_1w_aligned[i]:
+            # Enter long: price breaks above R2 + volume confirmation + price above daily EMA20
+            if close[i] > r2_w_6h[i] and volume_confirm[i] and close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + volume confirmation + price below weekly EMA50
-            elif close[i] < s1_1d[i] and volume_confirm[i] and close[i] < ema50_1w_aligned[i]:
+            # Enter short: price breaks below S2 + volume confirmation + price below daily EMA20
+            elif close[i] < s2_w_6h[i] and volume_confirm[i] and close[i] < ema20_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1
-            if close[i] < s1_1d[i]:
+            # Exit long: price breaks below S2
+            if close[i] < s2_w_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1
-            if close[i] > r1_1d[i]:
+            # Exit short: price breaks above R2
+            if close[i] > r2_w_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
