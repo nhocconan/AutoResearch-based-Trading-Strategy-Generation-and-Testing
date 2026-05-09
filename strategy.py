@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike.
-# Uses 12h EMA50 for trend direction, Donchian channels for breakout signals,
-# and volume surge for confirmation. Works in bull (breakouts above upper channel) and bear (breakdowns below lower channel).
-# Target: 20-50 trades/year to avoid fee drag.
-name = "4h_Donchian20_12hEMA50_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 1h session-based mean reversion at Bollinger Bands with 4h trend filter
+# Uses Bollinger Bands (20,2) for mean reversion entries, 4h EMA for trend direction,
+# and session filter (08-20 UTC) to reduce noise. Designed to work in both bull (buy dips in uptrend)
+# and bear (sell rallies in downtrend). Target: 20-50 trades/year to avoid fee drag.
+name = "1h_BollingerMeanReversion_4hEMA_Trend_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,47 +20,39 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 50-period EMA for 12h timeframe
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 50-period EMA for 4h trend
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Align 12h EMA50 to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Calculate Donchian channels (20-period) for 4h timeframe
-    highest_high = np.maximum.accumulate(high)
-    lowest_low = np.minimum.accumulate(low)
-    
-    # For true Donchian, we need to reset the accumulation every 20 periods
-    upper_channel = np.full_like(high, np.nan)
-    lower_channel = np.full_like(low, np.nan)
-    for i in range(len(high)):
-        if i < 20:
-            upper_channel[i] = np.nan
-            lower_channel[i] = np.nan
-        else:
-            upper_channel[i] = np.max(high[i-19:i+1])
-            lower_channel[i] = np.min(low[i-19:i+1])
-    
-    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
+    # Bollinger Bands (20,2) for 1h
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma_20 + (bb_std * std_20)
+    lower_band = sma_20 - (bb_std * std_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian channels
+    start_idx = bb_period  # Need 20 periods for Bollinger Bands
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(sma_20[i]) or 
+            np.isnan(std_20[i]) or not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,29 +61,29 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + 12h EMA50 uptrend + volume spike
-            if (price > upper_channel[i] and price > ema_50_12h_aligned[i] and vol_confirm[i]):
-                signals[i] = 0.25
+            # Enter long: price touches lower band + price above 4h EMA (uptrend)
+            if (price <= lower_band[i] and price > ema_50_4h_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below lower channel + 12h EMA50 downtrend + volume spike
-            elif (price < lower_channel[i] and price < ema_50_12h_aligned[i] and vol_confirm[i]):
-                signals[i] = -0.25
+            # Enter short: price touches upper band + price below 4h EMA (downtrend)
+            elif (price >= upper_band[i] and price < ema_50_4h_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below upper channel or 12h EMA50 turns down
-            if price < upper_channel[i] or price < ema_50_12h_aligned[i]:
+            # Exit long: price returns to middle band or trend changes
+            if price >= sma_20[i] or price < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns above lower channel or 12h EMA50 turns up
-            if price > lower_channel[i] or price > ema_50_12h_aligned[i]:
+            # Exit short: price returns to middle band or trend changes
+            if price <= sma_20[i] or price > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
