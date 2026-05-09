@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h timeframe with 12h RSI mean reversion and 1-day volume spike confirmation.
-# In overbought/oversold conditions (RSI > 70 or < 30 on 12h), price tends to revert.
-# Enters short when 12h RSI > 70 and 1-day volume > 1.5x 20-period average volume.
-# Enters long when 12h RSI < 30 and 1-day volume > 1.5x 20-period average volume.
-# Exits when RSI returns to neutral range (40-60) or volume condition fails.
-# Uses volume spike to confirm genuine exhaustion rather than weak pullbacks.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 4h Camarilla pivot breakout with 1d EMA trend filter and volume confirmation.
+# Uses Camarilla levels (R1/S1) from daily pivot for precise entry/exit.
+# Long when price breaks above R1 with 1d EMA(34) uptrend and volume > 1.5x average.
+# Short when price breaks below S1 with 1d EMA(34) downtrend and volume > 1.5x average.
+# Exits when price returns to daily pivot or trend reverses.
+# Target: 80-160 total trades over 4 years (20-40/year) with size 0.25.
+# Works in bull/bear via trend filter and volatility-based exits.
 
-name = "6h_RSI_MeanReversion_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_EMA34_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,45 +20,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12-hour RSI (14-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 14:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close']
-    delta = close_12h.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi_12h = 100 - (100 / (1 + rs))
-    rsi_12h_values = rsi_12h.values
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h_values)
-    
-    # Calculate 1-day volume average (20-period)
+    # Calculate 1-day EMA(34) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume']
-    vol_ma_20 = volume_1d.rolling(window=20, min_periods=20).mean()
-    vol_ma_20_values = vol_ma_20.values
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_values)
+    close_1d = df_1d['close']
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Current 1-day volume (aligned)
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d.values)
+    # Calculate daily pivot and Camarilla levels (R1, S1)
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    # Volume spike condition: current volume > 1.5x 20-period average
-    volume_spike = volume_1d_aligned > 1.5 * vol_ma_20_aligned
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.0833)  # R1 = C + ((H-L) * 1.0833)
+    s1 = pivot - (range_1d * 1.0833)  # S1 = C - ((H-L) * 1.0833)
     
-    # RSI conditions
-    rsi_overbought = rsi_12h_aligned > 70
-    rsi_oversold = rsi_12h_aligned < 30
-    rsi_exit = (rsi_12h_aligned >= 40) & (rsi_12h_aligned <= 60)
+    r1_values = r1.values
+    s1_values = s1.values
+    pivot_values = pivot.values
+    
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_values)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_values)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,35 +63,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_12h_aligned[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(rsi_exit[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pivot_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: oversold RSI + volume spike
-            if rsi_oversold[i] and volume_spike[i]:
+            # Enter long: price > R1, EMA uptrend, volume confirmation
+            if close[i] > r1_aligned[i] and ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: overbought RSI + volume spike
-            elif rsi_overbought[i] and volume_spike[i]:
+            # Enter short: price < S1, EMA downtrend, volume confirmation
+            elif close[i] < s1_aligned[i] and ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral OR volume spike ends
-            if rsi_exit[i] or (not volume_spike[i]):
+            # Exit long: price returns to pivot OR EMA trend turns down
+            if close[i] <= pivot_aligned[i] or ema_34_1d_aligned[i] < ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral OR volume spike ends
-            if rsi_exit[i] or (not volume_spike[i]):
+            # Exit short: price returns to pivot OR EMA trend turns up
+            if close[i] >= pivot_aligned[i] or ema_34_1d_aligned[i] > ema_34_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
