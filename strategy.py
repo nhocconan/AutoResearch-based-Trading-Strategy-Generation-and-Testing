@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Liquidity_Sweep_Reversal_12hTrend
-# Hypothesis: Price sweeps liquidity (equal highs/lows) then reverses in direction of 12h trend.
-# Liquidity sweeps occur when price briefly breaks recent swing points but lacks follow-through.
-# In trending markets (12h EMA50), these often precede strong continuation moves.
-# Uses volume spike to confirm institutional participation. Works in both bull/bear markets
-# by aligning with higher timeframe trend.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Slow
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation.
+# Uses a higher volume threshold (2.0x average) and only enters when price is near 1d VWAP to reduce trades.
+# Designed to generate ~20-30 trades/year on 4h to avoid fee drag while maintaining edge in bull/bear markets.
+# Long when 1d trend up (close > EMA34), price breaks above R3, volume > 2x average, and close > 1d VWAP.
+# Short when 1d trend down (close < EMA34), price breaks below S3, volume > 2x average, and close < 1d VWAP.
 
-name = "6h_Liquidity_Sweep_Reversal_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Slow"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,42 +24,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and swing points
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema50_12h[i] = (close_12h[i] * 2 + ema50_12h[i-1] * 48) / 50
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align 12h EMA50 to 6h timeframe
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate swing points (pivot highs/lows) on 12h
-    # Swing high: high > previous 2 highs and next 2 highs
-    # Swing low: low < previous 2 lows and next 2 lows
-    swing_high_12h = np.full_like(high_12h, np.nan)
-    swing_low_12h = np.full_like(low_12h, np.nan)
+    # Calculate Camarilla levels for each 1d bar: R3, S3
+    camarilla_r3_1d = np.full_like(close_1d, np.nan)
+    camarilla_s3_1d = np.full_like(close_1d, np.nan)
     
-    for i in range(2, len(df_12h) - 2):
-        if (high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i-2] and
-            high_12h[i] > high_12h[i+1] and high_12h[i] > high_12h[i+2]):
-            swing_high_12h[i] = high_12h[i]
-        if (low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i-2] and
-            low_12h[i] < low_12h[i+1] and low_12h[i] < low_12h[i+2]):
-            swing_low_12h[i] = low_12h[i]
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            camarilla_r3_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
+            camarilla_s3_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
     
-    # Align swing points to 6h timeframe
-    swing_high_12h_aligned = align_htf_to_ltf(prices, df_12h, swing_high_12h)
-    swing_low_12h_aligned = align_htf_to_ltf(prices, df_12h, swing_low_12h)
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    
+    # Calculate 1d VWAP for additional filter
+    vwap_1d = np.full_like(close_1d, np.nan)
+    cumulative_volume = np.full_like(close_1d, np.nan)
+    cumulative_price_volume = np.full_like(close_1d, np.nan)
+    
+    for i in range(len(df_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]) or np.isnan(volume_1d[i]):
+            if i > 0:
+                vwap_1d[i] = vwap_1d[i-1]
+                cumulative_volume[i] = cumulative_volume[i-1]
+                cumulative_price_volume[i] = cumulative_price_volume[i-1]
+            continue
+            
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+        price_volume = typical_price * volume_1d[i]
+        
+        if i == 0:
+            cumulative_volume[i] = volume_1d[i]
+            cumulative_price_volume[i] = price_volume
+        else:
+            cumulative_volume[i] = cumulative_volume[i-1] + volume_1d[i]
+            cumulative_price_volume[i] = cumulative_price_volume[i-1] + price_volume
+            
+        if cumulative_volume[i] != 0:
+            vwap_1d[i] = cumulative_price_volume[i] / cumulative_volume[i]
+        else:
+            vwap_1d[i] = vwap_1d[i-1] if i > 0 else typical_price
+    
+    # Align 1d VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -76,49 +102,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need 12h EMA50 and volume MA
+    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(swing_high_12h_aligned[i]) or 
-            np.isnan(swing_low_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
+            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(volume_ratio[i]) or
+            np.isnan(vwap_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 12h trend
-        trend_up = close[i] > ema50_12h_aligned[i]
+        # Determine 1d trend and price relative to VWAP
+        trend_up = close[i] > ema34_1d_aligned[i]
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
         
         if position == 0:
-            # Liquidity sweep conditions:
-            # Bullish sweep: price makes new 12h swing high but closes below it (trapped longs)
-            # Bearish sweep: price makes new 12h swing low but closes above it (trapped shorts)
-            is_swing_high = not np.isnan(swing_high_12h_aligned[i])
-            is_swing_low = not np.isnan(swing_low_12h_aligned[i])
-            
-            bullish_sweep = is_swing_high and high[i] >= swing_high_12h_aligned[i] and close[i] < swing_high_12h_aligned[i]
-            bearish_sweep = is_swing_low and low[i] <= swing_low_12h_aligned[i] and close[i] > swing_low_12h_aligned[i]
-            
-            # Enter in direction of 12h trend after liquidity sweep
-            if bullish_sweep and trend_up and volume_ratio[i] > 1.8:
+            # Enter long: 1d trend up + price breaks above R3 + volume confirmation + price above VWAP
+            if trend_up and close[i] > camarilla_r3_1d_aligned[i] and volume_ratio[i] > 2.0 and price_above_vwap:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_sweep and not trend_up and volume_ratio[i] > 1.8:
+            # Enter short: 1d trend down + price breaks below S3 + volume confirmation + price below VWAP
+            elif not trend_up and close[i] < camarilla_s3_1d_aligned[i] and volume_ratio[i] > 2.0 and price_below_vwap:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend turns down or opposite sweep occurs
-            if not trend_up:
+            # Exit long: 1d trend turns down or price breaks below S3 or price falls below VWAP
+            if not trend_up or close[i] < camarilla_s3_1d_aligned[i] or not price_above_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend turns up or opposite sweep occurs
-            if trend_up:
+            # Exit short: 1d trend turns up or price breaks above R3 or price rises above VWAP
+            if trend_up or close[i] > camarilla_r3_1d_aligned[i] or not price_below_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
