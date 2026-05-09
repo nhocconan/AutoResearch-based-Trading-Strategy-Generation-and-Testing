@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_RSI_MeanReversion_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA for trend
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 1w EMA for trend (40-period)
+    ema40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
     
-    # Calculate 1d high, low, close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI(14) on 12h price
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Calculate daily range
-    daily_range = high_1d - low_1d
-    
-    # Camarilla levels: R1 = close + 1.1 * range / 12, S1 = close - 1.1 * range / 12
-    r1_level = close_1d + (1.1 * daily_range / 12)
-    s1_level = close_1d - (1.1 * daily_range / 12)
-    
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
-    
-    # Volume filter: current 4h volume > 1.3 * 20-period average
+    # Volume filter: current 12h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # EMA34 and volume MA
+    start_idx = max(40, 14, 20)  # EMA40, RSI, volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(ema40_1w_aligned[i]) or
+            np.isnan(rsi_values[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_val = ema34_1d_aligned[i]
-        r1 = r1_aligned[i]
-        s1 = s1_aligned[i]
+        ema40_val = ema40_1w_aligned[i]
+        rsi_val = rsi_values[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: close above R1 + above EMA34 trend + volume filter
-            if close[i] > r1 and close[i] > ema34_val and vol_filter:
+            # Enter long: RSI oversold (<30) + above weekly trend + volume filter
+            if rsi_val < 30 and close[i] > ema40_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: close below S1 + below EMA34 trend + volume filter
-            elif close[i] < s1 and close[i] < ema34_val and vol_filter:
+            # Enter short: RSI overbought (>70) + below weekly trend + volume filter
+            elif rsi_val > 70 and close[i] < ema40_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below EMA34 trend
-            if close[i] < ema34_val:
+            # Exit long: RSI returns to neutral (>50) or trend breaks
+            if rsi_val > 50 or close[i] < ema40_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above EMA34 trend
-            if close[i] > ema34_val:
+            # Exit short: RSI returns to neutral (<50) or trend breaks
+            if rsi_val < 50 or close[i] > ema40_val:
                 signals[i] = 0.0
                 position = 0
             else:
