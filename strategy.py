@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,17 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate 12h EMA50 for trend
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # Get daily data for Camarilla pivot levels (R3, S3)
-    # Using previous day's OHLC to avoid look-ahead
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day's OHLC
     prev_close = df_1d['close'].shift(1)
     prev_high = df_1d['high'].shift(1)
     prev_low = df_1d['low'].shift(1)
@@ -47,10 +51,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # EMA34 and volume MA
+    start_idx = max(50, 20)  # EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_aligned[i]) or
+        if (np.isnan(ema50_12h_aligned[i]) or
             np.isnan(camarilla_r3_aligned[i]) or
             np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(volume_filter[i])):
@@ -59,32 +63,32 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        ema34_val = ema34_1d_aligned[i]
+        ema50_val = ema50_12h_aligned[i]
         r3 = camarilla_r3_aligned[i]
         s3 = camarilla_s3_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: close above R3 + above daily EMA34 trend + volume filter
-            if close[i] > r3 and close[i] > ema34_val and vol_filter:
+            # Enter long: close above R3 + above 12h EMA50 trend + volume filter
+            if close[i] > r3 and close[i] > ema50_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: close below S3 + below daily EMA34 trend + volume filter
-            elif close[i] < s3 and close[i] < ema34_val and vol_filter:
+            # Enter short: close below S3 + below 12h EMA50 trend + volume filter
+            elif close[i] < s3 and close[i] < ema50_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below daily EMA34 trend
-            if close[i] < ema34_val:
+            # Exit long: close below 12h EMA50 trend
+            if close[i] < ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above daily EMA34 trend
-            if close[i] > ema34_val:
+            # Exit short: close above 12h EMA50 trend
+            if close[i] > ema50_val:
                 signals[i] = 0.0
                 position = 0
             else:
