@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 4h timeframe with daily pivot structure (from 1d) and weekly trend filter.
-# Uses daily Camarilla levels (R3/S3) for breakout entries and 1w EMA34 for trend filter.
-# Daily pivot provides structural support/resistance that works in both bull and bear markets.
-# Weekly trend filter reduces whipsaw in ranging markets. Volume spike confirms momentum.
-# Target: 100-200 total trades over 4 years (25-50/year) with size 0.25.
+# Hypothesis: 1d timeframe with daily Bollinger Bands squeeze and RSI mean reversion.
+# Uses Bollinger Band width percentile to detect low volatility (squeeze) conditions,
+# then enters mean reversion trades when RSI reaches extreme levels (<30 or >70).
+# The squeeze acts as a volatility filter to avoid whipsaw in high volatility periods,
+# while RSI extremes provide entry signals. Works in both bull and bear markets
+# by capturing mean reversion within ranges and avoiding strong trends.
+# Target: 50-100 total trades over 4 years (12-25/year) with size 0.25.
 
-name = "4h_Camarilla_R3_S3_1wEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_BollingerSqueeze_RSI_MeanReversion"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,50 +21,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + bb_std * std
+    lower = sma - bb_std * std
+    bb_width = upper - lower
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
+    # Bollinger Band width percentile (50-period lookback) to identify squeeze
+    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).rank(pct=True).values
+    squeeze = bb_width_percentile < 0.2  # Bottom 20% = low volatility squeeze
     
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r3
-    breakout_down = close < s3
+    # RSI (14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get weekly data for EMA34 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # RSI extremes for mean reversion
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
     
-    # Calculate 1w EMA34 trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    trend_up = close > ema_34_1w_aligned
-    trend_down = close < ema_34_1w_aligned
-    
-    # Volume filter: current volume > 2.0x 20-period average volume
+    # Volume filter: current volume > 1.5x 20-period average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * avg_volume)
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+        if (np.isnan(squeeze[i]) or np.isnan(rsi_oversold[i]) or np.isnan(rsi_overbought[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,26 +71,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 1w uptrend + volume spike
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: Bollinger squeeze + RSI oversold + volume confirmation
+            if squeeze[i] and rsi_oversold[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 1w downtrend + volume spike
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: Bollinger squeeze + RSI overbought + volume confirmation
+            elif squeeze[i] and rsi_overbought[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: RSI returns to neutral (50) or squeeze breaks
+            if rsi[i] >= 50 or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: RSI returns to neutral (50) or squeeze breaks
+            if rsi[i] <= 50 or not squeeze[i]:
                 signals[i] = 0.0
                 position = 0
             else:
