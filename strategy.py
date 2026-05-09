@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1wPivot_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_RSI4_Div_Liquidity"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,81 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (EMA200)
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 50:
+    # Daily RSI(4) for mean reversion signals
+    close_d = get_htf_data(prices, '1d')
+    if len(close_d) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA200 for trend filter
-    close_d = pd.Series(df_d['close'].values)
-    ema200_d = close_d.ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_d_aligned = align_htf_to_ltf(prices, df_d, ema200_d)
+    close_series = pd.Series(close_d['close'].values)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    avg_loss = loss.ewm(alpha=1/4, adjust=False, min_periods=4).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi4 = 100 - (100 / (1 + rs))
+    rsi4_values = rsi4.fillna(50).values
+    rsi4_aligned = align_htf_to_ltf(prices, close_d, rsi4_values)
     
-    # Get weekly data for pivot levels
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 50:
-        return np.zeros(n)
+    # Liquidity zones: intraday high/low of current 6h bar vs previous bar
+    high_prev = np.roll(high, 1)
+    low_prev = np.roll(low, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
     
-    # Calculate weekly pivot levels from previous week OHLC
-    H = df_w['high'].values
-    L = df_w['low'].values
-    C = df_w['close'].values
-    
-    # Pivot point: P = (H + L + C) / 3
-    P = (H + L + C) / 3
-    
-    # Weekly R1 and S1 levels (standard pivot levels)
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    R1 = 2 * P - L
-    S1 = 2 * P - H
-    
-    # Align weekly levels to 12h timeframe (use previous week's levels)
-    R1_aligned = align_htf_to_ltf(prices, df_w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_w, S1)
-    ema200_d_aligned = align_htf_to_ltf(prices, df_d, ema200_d)
-    
-    # Volume confirmation: current volume > 1.5x 24-period average (adjusted for 12h)
+    # Volume filter: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
-    vol_ma24 = vol_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # warmup for EMA200
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema200_d_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(vol_ma24[i])):
+        if np.isnan(rsi4_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma24[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and above daily EMA200 trend
-            if close[i] > R1_aligned[i] and vol_ok and close[i] > ema200_d_aligned[i]:
+            # Long: RSI < 30 (oversold) + price breaks above prior 6h high + volume
+            if rsi4_aligned[i] < 30 and close[i] > high_prev[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and below daily EMA200 trend
-            elif close[i] < S1_aligned[i] and vol_ok and close[i] < ema200_d_aligned[i]:
+            # Short: RSI > 70 (overbought) + price breaks below prior 6h low + volume
+            elif rsi4_aligned[i] > 70 and close[i] < low_prev[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses back below S1 (trend reversal)
-            if close[i] < S1_aligned[i]:
+            # Exit long: RSI > 50 (mean reversion) or stop below prior low
+            if rsi4_aligned[i] > 50 or close[i] < low_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses back above R1
-            if close[i] > R1_aligned[i]:
+            # Exit short: RSI < 50 or stop above prior high
+            if rsi4_aligned[i] < 50 or close[i] > high_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
