@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_RSI2_Cci_Trend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    12h RSI(2) + CCI(14) with 1d EMA(34) trend filter.
-    - Long: RSI(2) < 15 AND CCI(14) < -100 AND close > 1d EMA(34)
-    - Short: RSI(2) > 85 AND CCI(14) > 100 AND close < 1d EMA(34)
-    - Exit: RSI(2) crosses 50 or price crosses opposite side of 1d EMA(34)
-    - Uses extreme RSI(2) for mean reversion in trending markets
-    - Target: 12-25 trades/year on 12h timeframe
+    4h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
+    Long: Close breaks above R1 and above 1d EMA(34) and volume > 1.5x 20-period avg
+    Short: Close breaks below S1 and below 1d EMA(34) and volume > 1.5x 20-period avg
+    Exit: Opposite signal or price crosses EMA(34)
+    Position size: 0.25
     """
     n = len(prices)
     if n < 50:
@@ -23,70 +22,78 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate RSI(2)
-    close_s = pd.Series(close)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    avg_loss = loss.ewm(alpha=1/2, adjust=False, min_periods=2).mean()
-    rs = avg_gain / avg_loss
-    rsi2 = 100 - (100 / (1 + rs))
-    rsi2 = rsi2.values
+    # Calculate 4h Camarilla levels (based on previous day's OHLC)
+    # For each 4h bar, use previous day's OHLC to calculate today's Camarilla levels
+    # We'll calculate daily OHLC first, then align to 4h
     
-    # Calculate CCI(14)
-    typical_price = (high + low + close) / 3
-    tp_s = pd.Series(typical_price)
-    sma_tp = tp_s.rolling(window=14, min_periods=14).mean()
-    mad = tp_s.rolling(window=14, min_periods=14).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
-    cci = (typical_price - sma_tp.values) / (0.015 * mad.values)
-    cci = np.nan_to_num(cci, nan=0.0)
+    # Get daily OHLC from 1d data
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    # R1 = Close + (High - Low) * 1.1 / 12
+    # S1 = Close - (High - Low) * 1.1 / 12
+    rang = daily_high - daily_low
+    r1_daily = daily_close + rang * 1.1 / 12
+    s1_daily = daily_close - rang * 1.1 / 12
+    
+    # Align daily Camarilla levels to 4h timeframe (wait for day to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_daily)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_daily)
     
     # Calculate 1d EMA(34) for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
+    close_1d = pd.Series(daily_close)
     ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # ensure sufficient warmup for indicators
+    start_idx = 40  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Extreme oversold + CCI sell signal + above trend
-            if rsi2[i] < 15 and cci[i] < -100 and close[i] > ema34_1d_aligned[i]:
+            # Long: Close breaks above R1, above 1d EMA trend, and volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Extreme overbought + CCI buy signal + below trend
-            elif rsi2[i] > 85 and cci[i] > 100 and close[i] < ema34_1d_aligned[i]:
+            # Short: Close breaks below S1, below 1d EMA trend, and volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI crosses 50 or price breaks below trend
-            if rsi2[i] > 50 or close[i] < ema34_1d_aligned[i]:
+            # Exit long: Price crosses below EMA(34) or breaks below S1
+            if close[i] < ema34_1d_aligned[i] or close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses 50 or price breaks above trend
-            if rsi2[i] < 50 or close[i] > ema34_1d_aligned[i]:
+            # Exit short: Price crosses above EMA(34) or breaks above R1
+            if close[i] > ema34_1d_aligned[i] or close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
