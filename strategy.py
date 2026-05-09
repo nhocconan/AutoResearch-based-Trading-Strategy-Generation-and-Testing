@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,67 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get daily data for Camarilla pivot calculation
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 1:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily Camarilla pivot levels (standard)
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
+    close_d = df_d['close'].values
     
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Pivot point: P = (H + L + C)/3
+    pivot_d = (high_d + low_d + close_d) / 3.0
+    # Calculate range
+    range_d = high_d - low_d
+    # Camarilla levels
+    r3_d = close_d + range_d * 1.1 / 2
+    s3_d = close_d - range_d * 1.1 / 2
+    
+    # Align daily Camarilla levels to 12h timeframe
+    r3_d_aligned = align_htf_to_ltf(prices, df_d, r3_d)
+    s3_d_aligned = align_htf_to_ltf(prices, df_d, s3_d)
+    
+    # Get weekly data for trend filter
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 5:
+        return np.zeros(n)
+    
+    # Calculate 5-period EMA on weekly close for trend
+    close_w = df_w['close'].values
+    ema_w = pd.Series(close_w).ewm(span=5, adjust=False, min_periods=5).mean().values
+    ema_w_aligned = align_htf_to_ltf(prices, df_w, ema_w)
+    
+    # Volume filter: current volume > 1.3 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
-    
-    # Donchian channel (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for Donchian
+    start_idx = max(20, 5)  # Need enough data for volume MA and EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(high_roll[i]) or
-            np.isnan(low_roll[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(r3_d_aligned[i]) or 
+            np.isnan(s3_d_aligned[i]) or
+            np.isnan(ema_w_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_34_val = ema_34_1d_aligned[i]
-        upper_channel = high_roll[i]
-        lower_channel = low_roll[i]
-        vol_spike = volume_spike[i]
+        r3_val = r3_d_aligned[i]
+        s3_val = s3_d_aligned[i]
+        ema_val = ema_w_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price breaks above upper channel + price above daily EMA34 + volume spike
-            if close[i] > upper_channel and close[i] > ema_34_val and vol_spike:
+            # Enter long: Price above R3 + price above weekly EMA + volume filter
+            if close[i] > r3_val and close[i] > ema_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below lower channel + price below daily EMA34 + volume spike
-            elif close[i] < lower_channel and close[i] < ema_34_val and vol_spike:
+            # Enter short: Price below S3 + price below weekly EMA + volume filter
+            elif close[i] < s3_val and close[i] < ema_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below lower channel
-            if close[i] < lower_channel:
+            # Exit long: Price falls below S3
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above upper channel
-            if close[i] > upper_channel:
+            # Exit short: Price rises above R3
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
