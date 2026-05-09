@@ -3,127 +3,137 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d trend filter and volume confirmation.
-# - Tenkan-sen (9-period) and Kijun-sen (26-period) cross generates signals
-# - Senkou Span A/B form cloud; price above/below cloud confirms trend
-# - 1d EMA50 filters for higher timeframe trend alignment
-# - Volume > 1.5x average confirms institutional participation
-# Designed for low trade frequency to minimize fee drag on 6h timeframe.
-name = "6h_Ichimoku_1dEMA50_Volume"
-timeframe = "6h"
+# Hypothesis: 4h Donchian breakout with 1d ADX trend filter and volume spike confirmation.
+# Donchian(20) provides clear breakout signals; ADX(14) on 1d filters for trending markets.
+# Volume spikes (>2x average) confirm institutional interest. Designed for low trade frequency.
+# Works in bull markets (breakouts catch trends) and bear markets (ADX filters out false breakouts).
+name = "4h_Donchian20_1dADX14_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA50 trend filter
+    # Get 1d data for ADX14 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on 1d close
+    # Calculate 14-period ADX on 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Ichimoku components (6h timeframe)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period_tenkan = 9
-    max_high_9 = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    min_low_9 = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (max_high_9 + min_low_9) / 2
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period_kijun = 26
-    max_high_26 = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    min_low_26 = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (max_high_26 + min_low_26) / 2
+    # Directional Movement
+    up_move = high_1d[1:] - high_1d[:-1]
+    down_move = low_1d[:-1] - low_1d[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    plus_dm = np.concatenate([[np.nan], plus_dm])
+    minus_dm = np.concatenate([[np.nan], minus_dm])
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    max_high_52 = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    min_low_52 = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((max_high_52 + min_low_52) / 2)
+    # Smoothed values
+    def smoothed_avg(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value: simple average
+        result[period-1] = np.nanmean(arr[1:period])
+        # Subsequent values: Wilder smoothing
+        for i in range(period, len(arr)):
+            if not np.isnan(result[i-1]):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Chikou Span (Lagging Span): Close shifted 26 periods back
-    # Not used for signals to avoid look-ahead
+    atr = smoothed_avg(tr, 14)
+    plus_di = 100 * smoothed_avg(plus_dm, 14) / atr
+    minus_di = 100 * smoothed_avg(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smoothed_avg(dx, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align 1d EMA to 6s timeframe
-    # Senkou spans need to be aligned properly - they are plotted 26 periods ahead
-    # For signal generation at time t, we need Senkou values that were known 26 periods ago
-    # So we shift Senkou spans BACK by 26 to get their actual plotting position
-    senkou_a_shifted = np.roll(senkou_a, 26)
-    senkou_b_shifted = np.roll(senkou_b, 26)
-    # Fill the rolled values with NaN for the first 26 periods
-    senkou_a_shifted[:26] = np.nan
-    senkou_b_shifted[:26] = np.nan
+    # Calculate Donchian channels (20-period)
+    def rolling_max(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i >= window - 1:
+                result[i] = np.max(arr[i-window+1:i+1])
+        return result
+    
+    def rolling_min(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i >= window - 1:
+                result[i] = np.min(arr[i-window+1:i+1])
+        return result
+    
+    donchian_high = rolling_max(high, 20)
+    donchian_low = rolling_min(low, 20)
+    
+    # Calculate 20-period volume average for spike detection
+    def rolling_mean(arr, window):
+        result = np.full_like(arr, np.nan, dtype=float)
+        for i in range(len(arr)):
+            if i >= window - 1:
+                result[i] = np.mean(arr[i-window+1:i+1])
+        return result
+    
+    vol_ma = rolling_mean(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52, 26)  # Need 52 for Senkou B and 26 for alignment
+    start_idx = max(20, 1)  # Need 20 for Donchian
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a_shifted[i]) or np.isnan(senkou_b_shifted[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        # Skip if required data unavailable (NaN from indicators)
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Current Ichimoku values
-        tenkan_i = tenkan[i]
-        kijun_i = kijun[i]
-        senkou_a_i = senkou_a_shifted[i]
-        senkou_b_i = senkou_b_shifted[i]
-        close_i = close[i]
-        ema_1d = ema_50_1d_aligned[i]
+        adx_val = adx_1d_aligned[i]
+        upper = donchian_high[i]
+        lower = donchian_low[i]
         vol = volume[i]
-        
-        # Cloud top and bottom
-        cloud_top = max(senkou_a_i, senkou_b_i)
-        cloud_bottom = min(senkou_a_i, senkou_b_i)
-        
-        # Calculate 20-period volume average for spike detection
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-        else:
-            vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
+        vol_average = vol_ma[i]
         
         if position == 0:
-            # Enter long: Price above cloud AND Tenkan > Kijun AND price > 1d EMA50 AND volume > 1.5x average
-            if (close_i > cloud_top and tenkan_i > kijun_i and 
-                close_i > ema_1d and vol > 1.5 * vol_ma):
+            # Enter long: Break above upper Donchian AND ADX > 25 (trending) AND volume > 2x average
+            if close[i] > upper and adx_val > 25 and vol > 2.0 * vol_average:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below cloud AND Tenkan < Kijun AND price < 1d EMA50 AND volume > 1.5x average
-            elif (close_i < cloud_bottom and tenkan_i < kijun_i and 
-                  close_i < ema_1d and vol > 1.5 * vol_ma):
+            # Enter short: Break below lower Donchian AND ADX > 25 (trending) AND volume > 2x average
+            elif close[i] < lower and adx_val > 25 and vol > 2.0 * vol_average:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price below cloud OR Tenkan < Kijun OR trend reverses (price < 1d EMA50)
-            if (close_i < cloud_bottom or tenkan_i < kijun_i or close_i < ema_1d):
+            # Exit long: Close below lower Donchian OR ADX < 20 (trend weakening)
+            if close[i] < lower or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price above cloud OR Tenkan > Kijun OR trend reverses (price > 1d EMA50)
-            if (close_i > cloud_top or tenkan_i > kijun_i or close_i > ema_1d):
+            # Exit short: Close above upper Donchian OR ADX < 20 (trend weakening)
+            if close[i] > upper or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
