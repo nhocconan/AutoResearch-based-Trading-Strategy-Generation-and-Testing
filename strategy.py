@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_1wTrend"
-timeframe = "12h"
+name = "4h_FactorRotation_TrendMomentum"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,45 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend filter
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    # Calculate 12h EMA(50) for trend direction
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Get 1d data for momentum factor
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 14-period RSI on 1d close
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla levels from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla formula: Range = High - Low
-    range_1d = high_1d - low_1d
-    # Resistance levels
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    r4_1d = close_1d + (range_1d * 1.1 / 2)
-    # Support levels
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
-    s4_1d = close_1d - (range_1d * 1.1 / 2)
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA34 for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = gain_ma / (loss_ma + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
@@ -65,51 +51,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need enough data for volume MA and EMA
+    start_idx = max(50, 20)  # Need enough data for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(ema_34_1w_aligned[i]) or
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_1d_aligned[i]
-        r4_val = r4_1d_aligned[i]
-        s3_val = s3_1d_aligned[i]
-        s4_val = s4_1d_aligned[i]
-        ema_1d_val = ema_34_1d_aligned[i]
-        ema_1w_val = ema_34_1w_aligned[i]
+        ema_trend = ema_50_12h_aligned[i]
+        rsi_val = rsi_1d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price above R3 + 1d trend up + 1w trend up + volume spike
-            if close[i] > r3_val and close[i] > ema_1d_val and close[i] > ema_1w_val and vol_filter:
+            # Enter long: Price above 12h EMA50 + RSI > 55 + volume filter
+            if close[i] > ema_trend and rsi_val > 55 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below S3 + 1d trend down + 1w trend down + volume spike
-            elif close[i] < s3_val and close[i] < ema_1d_val and close[i] < ema_1w_val and vol_filter:
+            # Enter short: Price below 12h EMA50 + RSI < 45 + volume filter
+            elif close[i] < ema_trend and rsi_val < 45 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below S3 or trend changes
-            if close[i] < s3_val or close[i] < ema_1d_val or close[i] < ema_1w_val:
+            # Exit long: Price falls below EMA or RSI < 40
+            if close[i] < ema_trend or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above R3 or trend changes
-            if close[i] > r3_val or close[i] > ema_1d_val or close[i] > ema_1w_val:
+            # Exit short: Price rises above EMA or RSI > 60
+            if close[i] > ema_trend or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
