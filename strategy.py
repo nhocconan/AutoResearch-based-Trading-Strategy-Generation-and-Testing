@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
+#\usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with 1w ADX trend filter and volume spike.
-# Uses weekly ADX for trend strength, daily Donchian channels for breakout signals,
-# and volume surge for confirmation. Designed to work in both bull (breakouts above upper channel)
-# and bear (breakdowns below lower channel). Target: 15-30 trades/year to avoid fee drag.
-name = "1d_Donchian20_1wADX25_VolumeSpike"
-timeframe = "1d"
+# Hypothesis: 6h price crossing 12h EMA50 with 1d RSI(14) mean reversion filter.
+# Uses 12h EMA for trend direction, 1d RSI to avoid overbought/oversold extremes,
+# and price crossovers for entries. Designed to capture trend continuations
+# while avoiding counter-trend trades in ranging markets. Target: 15-30 trades/year.
+name = "6h_EMA50_12h_1dRSI_MeanReversion"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,113 +17,79 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for ADX trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for weekly timeframe
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 50-period EMA on 12h close
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # True Range
-    tr1 = np.abs(high_1w - low_1w)
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    # Get 1d data for RSI filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     
-    # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-    up_move = np.diff(high_1w, prepend=high_1w[0])
-    down_move = np.diff(low_1w, prepend=low_1w[0]) * -1
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 14-period RSI on 1d close
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    plus_di = 100 * np.where(atr > 0, 
-                             np.convolve(plus_dm, np.ones(period)/period, mode='full')[:len(plus_dm)] / atr, 0)
-    minus_di = 100 * np.where(atr > 0,
-                              np.convolve(minus_dm, np.ones(period)/period, mode='full')[:len(minus_dm)] / atr, 0)
-    
-    # Calculate DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.zeros_like(dx)
-    for i in range(len(dx)):
-        if i < period:
-            adx[i] = np.nan
-        elif i == period:
-            adx[i] = np.mean(dx[1:period+1])
-        else:
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-    
-    # Calculate Donchian channels (20-period) for daily timeframe
-    upper_channel = np.full_like(high, np.nan)
-    lower_channel = np.full_like(low, np.nan)
-    for i in range(len(high)):
-        if i < 20:
-            upper_channel[i] = np.nan
-            lower_channel[i] = np.nan
-        else:
-            upper_channel[i] = np.max(high[i-19:i+1])
-            lower_channel[i] = np.min(low[i-19:i+1])
-    
-    # Align 1w ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian channels
+    start_idx = 50  # Need 50 periods for EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx_aligned[i]) or np.isnan(upper_channel[i]) or 
-            np.isnan(lower_channel[i]) or np.isnan(vol_ema20[i])):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        ema = ema_50_12h_aligned[i]
+        rsi_val = rsi_aligned[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + 1w ADX > 25 + volume spike
-            if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter long: price crosses above EMA50 AND RSI < 70 (not overbought)
+            if price > ema and rsi_val < 70:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + 1w ADX > 25 + volume spike
-            elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter short: price crosses below EMA50 AND RSI > 30 (not oversold)
+            elif price < ema and rsi_val > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below upper channel or ADX drops below 20
-            if price < upper_channel[i] or adx_aligned[i] < 20:
+            # Exit long: price crosses below EMA50 OR RSI > 70 (overbought)
+            if price < ema or rsi_val > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above lower channel or ADX drops below 20
-            if price > lower_channel[i] or adx_aligned[i] < 20:
+            # Exit short: price crosses above EMA50 OR RSI < 30 (oversold)
+            if price > ema or rsi_val < 30:
                 signals[i] = 0.0
                 position = 0
             else:
