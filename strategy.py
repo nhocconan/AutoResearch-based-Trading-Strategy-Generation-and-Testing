@@ -1,13 +1,6 @@
-# 6H_Turtle_Rules_1dTrend_VolumeFilter
-# Based on Turtle Trading System: 20-day breakout with trend filter
-# Uses 1-day EMA for trend filter and volume confirmation to avoid false breakouts
-# Works in both bull and bear markets by following trend and requiring volume confirmation
-# Timeframe: 6h as required
-# Target: 20-50 trades per year to minimize fee drag
-
 #!/usr/bin/env python3
-name = "6H_Turtle_Rules_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "4H_Donchian20_12hTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,18 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12-period EMA for trend filter
+    ema12_12h = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Align 1-day EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align 12h EMA12 to 4h timeframe
+    ema12_12h_aligned = align_htf_to_ltf(prices, df_12h, ema12_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,19 +38,19 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if EMA data not ready
-        if np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(ema12_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate 20-period high and low for breakout levels
+        # Calculate 20-period high and low for Donchian channel
         period_high = np.max(high[i-20:i])
         period_low = np.min(low[i-20:i])
         
         # Determine trend
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        uptrend = close[i] > ema12_12h_aligned[i]
+        downtrend = close[i] < ema12_12h_aligned[i]
         
         # Volume confirmation: current volume > 1.5x 20-period average volume
         avg_volume = np.mean(volume[i-20:i])
@@ -74,7 +67,7 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below 10-period low (Turtle exit rule)
+            # Exit long: price breaks below 10-period low
             exit_low = np.min(low[i-10:i])
             if close[i] < exit_low:
                 signals[i] = 0.0
