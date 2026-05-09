@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Bollinger Bands Mean Reversion + 1w Trend Filter + Volume Spike
-# In bear markets (2025+), price tends to revert to mean after extreme deviations.
-# Bollinger Bands (20,2) identify overbought/oversold conditions.
-# 1w EMA50 trend filter ensures we trade counter-trend only in ranging markets.
-# Volume spike confirms exhaustion of the move.
-# Target: 10-25 trades/year (40-100 over 4 years) to minimize fee drag.
-name = "1d_BollingerMeanRev_1wTrendFilter_VolumeSpike"
-timeframe = "1d"
+# Hypothesis: 4h Donchian Breakout + 12h Trend Filter + Volume Spike
+# Donchian breakouts capture momentum in both bull and bear markets.
+# 12h EMA50 filter ensures trading with higher timeframe momentum.
+# Volume spike confirms institutional participation, reducing false breakouts.
+# Target: 20-50 trades/year (80-200 over 4 years) to avoid fee drag.
+# Works in bull markets (breakouts up) and bear markets (breakouts down).
+name = "4h_DonchianBreakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,23 +23,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Bollinger Bands (20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma20 + 2 * std20
-    lower_bb = sma20 - 2 * std20
+    # Donchian Channel (20-period)
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 1w EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 12h EMA50 to 4h
+    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,8 +48,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(ema50_1w_1d[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema50_12h_4h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,32 +58,27 @@ def generate_signals(prices):
         # Volume condition: current volume > 2.0 x 20-period average
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
-        # Trend condition: only trade counter-trend when 1w trend is weak
-        # In strong trends (price far from EMA50), avoid mean reversion
-        trend_strength = abs(close[i] - ema50_1w_1d[i]) / ema50_1w_1d[i]
-        weak_trend = trend_strength < 0.05  # Less than 5% deviation from 1w EMA50
-        
         if position == 0:
-            # Long: price below lower BB + weak trend + volume spike (exhausted selling)
-            if close[i] < lower_bb[i] and weak_trend and vol_spike:
+            # Long: price breaks above Donchian high + above 12h EMA50 + volume spike
+            if close[i] > high_max[i] and close[i] > ema50_12h_4h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price above upper BB + weak trend + volume spike (exhausted buying)
-            elif close[i] > upper_bb[i] and weak_trend and vol_spike:
+            # Short: price breaks below Donchian low + below 12h EMA50 + volume spike
+            elif close[i] < low_min[i] and close[i] < ema50_12h_4h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above middle band OR trend strengthens
-            if close[i] > sma20[i] or trend_strength >= 0.05:
+            # Exit long: price breaks below Donchian low OR below 12h EMA50
+            if close[i] < low_min[i] or close[i] < ema50_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below middle band OR trend strengthens
-            if close[i] < sma20[i] or trend_strength >= 0.05:
+            # Exit short: price breaks above Donchian high OR above 12h EMA50
+            if close[i] > high_max[i] or close[i] > ema50_12h_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
