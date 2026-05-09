@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 1h_PV_Camarilla_T4_S4_Breakout_4hTrend_1dVolume
-# Strategy: Trade PV_Camarilla pivot breakouts with 4h trend filter and 1d volume confirmation
-# Long when price breaks above PV_Camarilla T4 level with 4h uptrend and above-average volume
-# Short when price breaks below PV_Camarilla S4 level with 4h downtrend and above-average volume
-# Exit when price crosses back through the PV_Camarilla PP (pivot point) level
-# Uses volume surge to confirm breakouts and 4h trend to avoid counter-trend trades
-# Designed for 1h timeframe with selective entries to meet trade frequency targets
+# 6h_Ichimoku_Cloud_Trend_Signal
+# Strategy: Trade Ichimoku cloud breakout with trend filter from 1d timeframe
+# Long when price breaks above Kumo (cloud) and Tenkan > Kijun
+# Short when price breaks below Kumo (cloud) and Tenkan < Kijun
+# Exit when price re-enters Kumo
+# Uses Ichimoku from 6h chart and trend filter from 1d to avoid counter-trend trades
+# Designed for 6h timeframe with selective entries to minimize trade frequency
+# Ichimoku components calculated with proper periods: Tenkan=9, Kijun=26, SenkouA/B=26, Chikou=26
 
-name = "1h_PV_Camarilla_T4_S4_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Trend_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,108 +21,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
     
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 1d volume average (20-period)
+    # Calculate 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_avg_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
-    
-    # Calculate session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Calculate PV_Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Previous day's values (shifted by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Calculate Ichimoku components on 6h data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    max_high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_tenkan + min_low_tenkan) / 2
     
-    # Calculate pivot point (PP)
-    pp = (prev_high + prev_low + prev_close) / 3.0
-    # Calculate Camarilla levels
-    range_val = prev_high - prev_low
-    t4 = pp + range_val * 1.1 / 2.0  # T4 level
-    s4 = pp - range_val * 1.1 / 2.0  # S4 level
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    max_high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_kijun + min_low_kijun) / 2
     
-    # Align PV_Camarilla levels to 1h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    t4_aligned = align_htf_to_ltf(prices, df_1d, t4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    max_high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (max_high_senkou_b + min_low_senkou_b) / 2
+    
+    # Shift Senkou spans forward by 26 periods
+    senkou_a_shifted = np.roll(senkou_a, period_kijun)
+    senkou_b_shifted = np.roll(senkou_b, period_kijun)
+    # Fill first 26 values with NaN
+    senkou_a_shifted[:period_kijun] = np.nan
+    senkou_b_shifted[:period_kijun] = np.nan
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = period_kijun + period_senkou_b  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(vol_avg_20_1d_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or 
-            np.isnan(t4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or
-            np.isnan(prices['volume'].iloc[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(senkou_a_shifted[i]) or np.isnan(senkou_b_shifted[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Check session filter
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        current_volume = prices['volume'].iloc[i]
+        # Determine cloud boundaries (Senkou A and B shifted)
+        upper_cloud = max(senkou_a_shifted[i], senkou_b_shifted[i])
+        lower_cloud = min(senkou_a_shifted[i], senkou_b_shifted[i])
         
         if position == 0:
-            # Enter long: price breaks above T4 with 4h uptrend and volume surge
-            if (prices['high'].iloc[i] > t4_aligned[i] and 
-                ema_50_4h_aligned[i] > ema_50_4h_aligned[max(0, i-1)] and  # 4h EMA rising
-                current_volume > vol_avg_20_1d_aligned[i] * 1.5):  # Volume 1.5x average
-                signals[i] = 0.20
+            # Enter long: price above cloud and bullish TK cross (Tenkan > Kijun) with uptrend filter
+            if close[i] > upper_cloud and tenkan[i] > kijun[i] and close[i] > ema_50_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S4 with 4h downtrend and volume surge
-            elif (prices['low'].iloc[i] < s4_aligned[i] and 
-                  ema_50_4h_aligned[i] < ema_50_4h_aligned[max(0, i-1)] and  # 4h EMA falling
-                  current_volume > vol_avg_20_1d_aligned[i] * 1.5):  # Volume 1.5x average
-                signals[i] = -0.20
+            # Enter short: price below cloud and bearish TK cross (Tenkan < Kijun) with downtrend filter
+            elif close[i] < lower_cloud and tenkan[i] < kijun[i] and close[i] < ema_50_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses back through PP level
-            if prices['low'].iloc[i] < pp_aligned[i]:
+            # Exit long: price re-enters cloud (below upper cloud)
+            if close[i] < upper_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses back through PP level
-            if prices['high'].iloc[i] > pp_aligned[i]:
+            # Exit short: price re-enters cloud (above lower cloud)
+            if close[i] > lower_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
