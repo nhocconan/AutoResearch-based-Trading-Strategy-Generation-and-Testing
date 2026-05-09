@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_ChopFilter_Trix"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 35:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,101 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter and chop calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla levels, trend filter, and volume spike
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate TRIX on 1w close
-    close_1w = df_1w['close'].values
-    # TRIX: triple EMA of log returns
-    log_ret = np.diff(np.log(np.concatenate([[close_1w[0]], close_1w])))
-    ema1 = pd.Series(log_ret).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * np.diff(ema3) / ema3[:-1]  # percentage change
-    trix = np.concatenate([[0], trix])  # align length
-    trix = np.concatenate([[0], trix])  # second diff for triple
-    trix_1w = np.concatenate([[0, 0], trix[2:]])  # final alignment
-    trix_1w_aligned = align_htf_to_ltf(prices, df_1w, trix_1w)
+    # Calculate EMA34 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_1w).ewm(span=9, adjust=False, min_periods=9).mean().values
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1w, trix_signal)
+    # Calculate previous 1d Camarilla levels
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Calculate 1w Choppiness Index
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_arr = df_1w['close'].values
+    # Avoid division by zero in case high == low
+    range_prev = high_prev - low_prev
+    range_prev = np.where(range_prev == 0, 1e-10, range_prev)
     
-    # True Range
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w_arr[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w_arr[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[0], tr])  # align to same length
+    # Camarilla levels for previous day
+    R3 = close_prev + 1.1 * range_prev * 1.125 / 4  # close + 1.1*range*1.125/4
+    S3 = close_prev - 1.1 * range_prev * 1.125 / 4  # close - 1.1*range*1.125/4
+    R4 = close_prev + 1.1 * range_prev * 1.5       # close + 1.1*range*1.5/2
+    S4 = close_prev - 1.1 * range_prev * 1.5       # close - 1.1*range*1.5/2
     
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr = np.concatenate([np.zeros(13), atr[13:]])  # align
+    # Align Camarilla levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Sum of true ranges over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    tr_sum = np.concatenate([np.zeros(13), tr_sum[13:]])
-    
-    # Max/min close over 14 periods
-    max_close = pd.Series(close_1w_arr).rolling(window=14, min_periods=14).max().values
-    min_close = pd.Series(close_1w_arr).rolling(window=14, min_periods=14).min().values
-    max_close = np.concatenate([np.zeros(13), max_close[13:]])
-    min_close = np.concatenate([np.zeros(13), min_close[13:]])
-    
-    # Chop = 100 * log10(tr_sum / (max_close - min_close)) / log10(14)
-    range_14 = max_close - min_close
-    # Avoid division by zero
-    range_14 = np.where(range_14 == 0, 1e-10, range_14)
-    chop = 100 * np.log10(tr_sum / range_14) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Volume spike filter: current volume > 2.0 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for all indicators
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(trix_1w_aligned[i]) or 
-            np.isnan(trix_signal_aligned[i]) or
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
+            np.isnan(R4_aligned[i]) or
+            np.isnan(S4_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trix_val = trix_1w_aligned[i]
-        trix_signal_val = trix_signal_aligned[i]
-        chop_val = chop_aligned[i]
+        ema34 = ema34_1d_aligned[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
+        r4 = R4_aligned[i]
+        s4 = S4_aligned[i]
+        vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: TRIX crosses above signal line AND chop < 61.8 (trending market)
-            if trix_val > trix_signal_val and chop_val < 61.8:
+            # Enter long: price breaks above R3 with volume spike, in uptrend (price > EMA34)
+            if close[i] > r3 and vol_spike and close[i] > ema34:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX crosses below signal line AND chop < 61.8 (trending market)
-            elif trix_val < trix_signal_val and chop_val < 61.8:
+            # Enter short: price breaks below S3 with volume spike, in downtrend (price < EMA34)
+            elif close[i] < s3 and vol_spike and close[i] < ema34:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below signal line OR chop > 61.8 (ranging market)
-            if trix_val < trix_signal_val or chop_val > 61.8:
+            # Exit long: price breaks below S3 (failure) or trend reverses
+            if close[i] < s3 or close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above signal line OR chop > 61.8 (ranging market)
-            if trix_val > trix_signal_val or chop_val > 61.8:
+            # Exit short: price breaks above R3 (failure) or trend reverses
+            if close[i] > r3 or close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
