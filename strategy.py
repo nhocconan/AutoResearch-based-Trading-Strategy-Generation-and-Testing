@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla, trend, and volume
+    # Get 1d data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -26,23 +26,26 @@ def generate_signals(prices):
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels (R3, S3) from previous 1d bar
+    # Calculate 1d high, low, close for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    prev_close = np.roll(close_1d, 1)
-    prev_close[0] = np.nan  # First bar has no previous close
     
-    # Camarilla: R3 = Close + 1.1*(High-Low)/2, S3 = Close - 1.1*(High-Low)/2
-    r3 = prev_close + 1.1 * (high_1d - low_1d) / 2
-    s3 = prev_close - 1.1 * (high_1d - low_1d) / 2
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate daily range
+    daily_range = high_1d - low_1d
     
-    # Volume filter: current 12h volume > 1.5 * 20-period average
+    # Camarilla levels: R1 = close + 1.1 * range / 12, S1 = close - 1.1 * range / 12
+    r1_level = close_1d + (1.1 * daily_range / 12)
+    s1_level = close_1d - (1.1 * daily_range / 12)
+    
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
+    
+    # Volume filter: current 4h volume > 1.3 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0
@@ -51,8 +54,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,17 +63,17 @@ def generate_signals(prices):
             continue
         
         ema34_val = ema34_1d_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: close above R3 + above EMA34 trend + volume filter
-            if close[i] > r3_val and close[i] > ema34_val and vol_filter:
+            # Enter long: close above R1 + above EMA34 trend + volume filter
+            if close[i] > r1 and close[i] > ema34_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: close below S3 + below EMA34 trend + volume filter
-            elif close[i] < s3_val and close[i] < ema34_val and vol_filter:
+            # Enter short: close below S1 + below EMA34 trend + volume filter
+            elif close[i] < s1 and close[i] < ema34_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
