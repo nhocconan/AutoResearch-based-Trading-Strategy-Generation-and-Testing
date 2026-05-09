@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_AnchoredVWAP_Breakout_Trend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,28 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for anchor VWAP and trend filter
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate anchored VWAP from start of each daily candle
-    # VWAP = cumulative(close * volume) / cumulative(volume)
+    # Calculate Camarilla levels from previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    cum_vol_price = np.cumsum(close_1d * volume_1d)
-    cum_vol = np.cumsum(volume_1d)
-    vwap_1d = np.divide(cum_vol_price, cum_vol, out=np.full_like(cum_vol_price, np.nan), where=cum_vol!=0)
+    # Previous day's Camarilla levels (shifted by 1 to avoid look-ahead)
+    R3 = high_1d + (high_1d - low_1d) * 1.1 / 6
+    S3 = low_1d - (high_1d - low_1d) * 1.1 / 6
+    R4 = high_1d + (high_1d - low_1d) * 1.1 / 2
+    S4 = low_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align VWAP to 6h timeframe
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Shift by 1 to use only previous day's data
+    R3 = np.roll(R3, 1)
+    S3 = np.roll(S3, 1)
+    R4 = np.roll(R4, 1)
+    S4 = np.roll(S4, 1)
+    R3[0] = S3[0] = R4[0] = S4[0] = np.nan
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
+    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
     
     # Daily EMA34 for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike detection (6h timeframe)
+    # Volume spike detection (4h timeframe)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -49,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(R4_4h[i]) or 
+            np.isnan(S4_4h[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,26 +71,26 @@ def generate_signals(prices):
         vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Require strong volume spike
         
         if position == 0:
-            # Long: Price breaks above anchored VWAP with daily uptrend and volume spike
-            if close[i] > vwap_1d_aligned[i] and close[i] > ema_1d_aligned[i] and vol_ok:
+            # Long: Price breaks above R3 with daily uptrend and volume spike
+            if close[i] > R3_4h[i] and close[i] > ema_1d_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below anchored VWAP with daily downtrend and volume spike
-            elif close[i] < vwap_1d_aligned[i] and close[i] < ema_1d_aligned[i] and vol_ok:
+            # Short: Price breaks below S3 with daily downtrend and volume spike
+            elif close[i] < S3_4h[i] and close[i] < ema_1d_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below anchored VWAP or trend turns down
-            if close[i] < vwap_1d_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit long: Price falls below S3 or trend turns down
+            if close[i] < S3_4h[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above anchored VWAP or trend turns up
-            if close[i] > vwap_1d_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit short: Price rises above R3 or trend turns up
+            if close[i] > R3_4h[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
