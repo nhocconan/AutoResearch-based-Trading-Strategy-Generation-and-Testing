@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h MACD histogram with 12h trend filter and volume confirmation
-# Long when: MACD histogram > 0 (bullish momentum), 12h EMA50 uptrend (close > EMA50), volume > 1.5x 20-period average
-# Short when: MACD histogram < 0 (bearish momentum), 12h EMA50 downtrend (close < EMA50), volume > 1.5x 20-period average
-# Exit when: MACD histogram crosses zero OR 12h trend reverses
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA filter and volume confirmation
+# Long when: price breaks above Donchian(20) upper band, price > 1d EMA(50), volume > 1.5x 20-period average
+# Short when: price breaks below Donchian(20) lower band, price < 1d EMA(50), volume > 1.5x 20-period average
+# Exit when: price crosses back below/above Donchian(20) middle band or EMA(50) flips direction
 # Position size: 0.25 (25% of capital) to limit drawdown. Target: 25-50 trades/year.
-# Designed to work in both bull (MACD + trend + volume) and bear (MACD + trend + volume) markets.
+# Designed to work in both bull (breakouts with trend) and bear (breakouts against trend) markets.
 
-name = "6h_MACD_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dEMA_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,22 +24,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate MACD
-    close_s = pd.Series(close)
-    ema12 = close_s.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema26 = close_s.ewm(span=26, adjust=False, min_periods=26).mean()
-    macd = ema12 - ema26
-    signal_line = macd.ewm(span=9, adjust=False, min_periods=9).mean()
-    macd_hist = macd - signal_line
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
+    mid_20 = (high_20 + low_20) / 2
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA50 on 12h close
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 1d EMA(50)
+    ema_50 = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume spike: current volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -52,42 +49,38 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(macd_hist.iloc[i]) if hasattr(macd_hist, 'iloc') else np.isnan(macd_hist[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get MACD histogram value
-        macd_hist_val = macd_hist.iloc[i] if hasattr(macd_hist, 'iloc') else macd_hist[i]
-        
         if position == 0:
-            # Enter long: MACD histogram > 0, 12h close > EMA50 (uptrend), volume spike
-            if (macd_hist_val > 0 and 
-                close[i] > ema50_12h_aligned[i] and 
+            # Enter long: price breaks above upper band, price > EMA(50), volume spike
+            if (close[i] > high_20[i] and 
+                close[i] > ema_50_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: MACD histogram < 0, 12h close < EMA50 (downtrend), volume spike
-            elif (macd_hist_val < 0 and 
-                  close[i] < ema50_12h_aligned[i] and 
+            # Enter short: price breaks below lower band, price < EMA(50), volume spike
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema_50_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: MACD histogram crosses below zero OR 12h trend turns down (close < EMA50)
-            if (macd_hist_val <= 0) or (close[i] < ema50_12h_aligned[i]):
+            # Exit long: price crosses below middle band or EMA(50) turns down
+            if (close[i] < mid_20[i]) or (close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: MACD histogram crosses above zero OR 12h trend turns up (close > EMA50)
-            if (macd_hist_val >= 0) or (close[i] > ema50_12h_aligned[i]):
+            # Exit short: price crosses above middle band or EMA(50) turns up
+            if (close[i] > mid_20[i]) or (close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
