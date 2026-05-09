@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 4h timeframe with daily pivot structure (from 1d) and weekly trend filter.
-# Uses daily Camarilla levels (R3/S3) for breakout entries and 1w EMA34 for trend filter.
-# Daily pivot provides structural support/resistance that works in both bull and bear markets.
+# Hypothesis: 12h timeframe with daily ATR breakout and weekly trend filter.
+# Uses daily ATR-based breakout from previous day's range for entries and 1w EMA50 for trend filter.
+# ATR breakout captures volatility expansion in both bull and bear markets.
 # Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_Camarilla_R3_S3_1wEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_ATRBreakout_WeeklyTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,57 +24,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R3, S3) from previous day
-    prev_close = np.roll(close, 1)
+    # Calculate daily ATR(14) from previous day's data
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
+    tr1 = prev_high - prev_low
+    tr2 = np.abs(prev_high - prev_close)
+    tr3 = np.abs(prev_low - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r3
-    breakout_down = close < s3
+    # Breakout levels: previous day close ± 0.5 * ATR(14)
+    upper_break = prev_close + 0.5 * atr_14
+    lower_break = prev_close - 0.5 * atr_14
     
-    # Get weekly data for EMA34 trend filter
+    breakout_up = close > upper_break
+    breakout_down = close < lower_break
+    
+    # Get weekly data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 trend filter
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    trend_up = close > ema_34_1w_aligned
-    trend_down = close < ema_34_1w_aligned
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
-    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
+    # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * avg_volume)
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
             np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(volume_filter[i]) or np.isnan(atr_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R3 + 1w uptrend + volume spike
+            # Long: breakout above upper level + 1w uptrend + volume filter
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + 1w downtrend + volume spike
+            # Short: breakout below lower level + 1w downtrend + volume filter
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
