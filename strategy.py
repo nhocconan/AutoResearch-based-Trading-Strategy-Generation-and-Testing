@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate EMA34 on 1d close for trend filter
