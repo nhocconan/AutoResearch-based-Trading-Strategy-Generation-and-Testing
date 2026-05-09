@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Adaptive_Turtle_Signal"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,86 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volatility
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d ATR for volatility regime filter (same as Turtle)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift())
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift())
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    atr_1d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate 1d EMA for trend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1d EMA for trend filter
-    ema_1d = pd.Series(df_1d['close']).ewm(span=55, adjust=False, min_periods=55).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate Camarilla levels: R3, S3 from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 4h Donchian channels (20-period) - the core signal
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_high = high_series.rolling(window=20, min_periods=20).max().values
-    donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Previous day's range
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # Set first value to avoid NaN
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Camarilla levels
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume filter: current 12h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 20, 55)  # Donchian, volume MA, EMA
+    start_idx = max(34, 20)  # EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(R3_aligned[i]) or
+            np.isnan(S3_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        dh = donch_high[i]
-        dl = donch_low[i]
-        ema_trend = ema_1d_aligned[i]
-        atr_val = atr_1d_aligned[i]
-        vol_ok = volume_filter[i]
-        
-        # Skip if ATR is too low (avoid choppy markets)
-        if atr_val < 0.001 * close[i]:  # Avoid division by zero and noise
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Adaptive position size based on volatility (inverse volatility scaling)
-        # Base size 0.25, scaled by inverse ATR (lower vol = larger position)
-        vol_factor = np.clip(0.01 * close[i] / atr_val, 0.5, 2.0)  # Normalize around 1% ATR
-        base_size = 0.25
-        position_size = base_size * vol_factor
-        position_size = np.clip(position_size, 0.15, 0.35)  # Keep within reasonable bounds
+        ema34_val = ema34_1d_aligned[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: price breaks above Donchian high + above EMA trend + volume
-            if close[i] > dh and close[i] > ema_trend and vol_ok:
-                signals[i] = position_size
+            # Enter long: close above R3 + above EMA34 trend + volume filter
+            if close[i] > r3 and close[i] > ema34_val and vol_filter:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low + below EMA trend + volume
-            elif close[i] < dl and close[i] < ema_trend and vol_ok:
-                signals[i] = -position_size
+            # Enter short: close below S3 + below EMA34 trend + volume filter
+            elif close[i] < s3 and close[i] < ema34_val and vol_filter:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Donchian low OR trend reversal
-            if close[i] < dl or close[i] < ema_trend:
+            # Exit long: close below EMA34 trend
+            if close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Donchian high OR trend reversal
-            if close[i] > dh or close[i] > ema_trend:
+            # Exit short: close above EMA34 trend
+            if close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.25
     
     return signals
