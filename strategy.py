@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI_Overbought_Oversold_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Russell2000_Strength_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filter
+    # Get daily data for Russell 2000 proxy (BTC volatility index)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1h data for RSI calculation (more responsive than 4h for RSI)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 20:
+    # Calculate daily returns and volatility (proxy for Russell 2000 strength)
+    daily_ret = np.diff(df_1d['close'].values) / df_1d['close'].values[:-1]
+    daily_ret = np.concatenate([[np.nan], daily_ret])  # align with df_1d index
+    vol_10d = pd.Series(daily_ret).rolling(window=10, min_periods=10).std().values
+    
+    # Russell 2000 strength: low volatility = risk-on environment
+    russell_strength = vol_10d < np.percentile(vol_10d[~np.isnan(vol_10d)], 30)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA20 for trend
+    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: current 1d volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_1d['volume'].values)
+    # Get 6h data for entry signals (Donchian breakout)
+    # Calculate 20-period Donchian channels on 6h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
+    volume_confirm = volume > (vol_ma * 1.5)
     
-    # RSI(14) calculation on 1h data
-    delta = pd.Series(df_1h['close']).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Align all to 4h
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
-    rsi_4h = align_htf_to_ltf(prices, df_1h, rsi_values)
+    # Align all indicators to 6h timeframe
+    russell_strength_6h = align_htf_to_ltf(prices, df_1d, russell_strength)
+    ema20_1w_6h = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(20, 30)  # Need enough data for Donchian and weekly EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter_4h[i]) or
-            np.isnan(rsi_4h[i])):
+        if (np.isnan(russell_strength_6h[i]) or np.isnan(ema20_1w_6h[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_1d_4h[i]
-        vol_filter = volume_filter_4h[i]
-        rsi_val = rsi_4h[i]
+        russell_ok = russell_strength_6h[i]
+        weekly_trend = ema20_1w_6h[i]
+        upper_channel = donchian_high[i]
+        lower_channel = donchian_low[i]
+        vol_ok = volume_confirm[i]
         
         if position == 0:
-            # Enter long: RSI oversold (<30) with volume and above trend
-            if rsi_val < 30 and close[i] > trend and vol_filter:
+            # Enter long: Donchian breakout above upper channel + Russell strength + above weekly trend
+            if close[i] > upper_channel and russell_ok and close[i] > weekly_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI overbought (>70) with volume and below trend
-            elif rsi_val > 70 and close[i] < trend and vol_filter:
+            # Enter short: Donchian breakdown below lower channel + Russell strength + below weekly trend
+            elif close[i] < lower_channel and russell_ok and close[i] < weekly_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought (>70) or trend reversal
-            if rsi_val > 70 or close[i] < trend:
+            # Exit long: close below Donchian lower channel (breakdown)
+            if close[i] < lower_channel:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold (<30) or trend reversal
-            if rsi_val < 30 or close[i] > trend:
+            # Exit short: close above Donchian upper channel (breakout)
+            if close[i] > upper_channel:
                 signals[i] = 0.0
                 position = 0
             else:
