@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_4H_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn
-# Hypothesis: Camarilla R3/S3 breakout with daily EMA34 trend filter and volume spike confirmation.
+# 4h_4H_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: Camarilla R2/S2 breakout with daily EMA34 trend filter and volume spike confirmation.
+# R2/S2 levels are tighter than R3/S3, providing higher-probability breakouts with fewer false signals.
 # Works in bull/bear: EMA34 trend filter avoids counter-trend trades, volume confirms breakout strength.
-# Camarilla levels provide institutional-grade support/resistance that adapts to volatility.
 # Focus on high-probability breakouts to minimize trades and avoid fee drag.
 
-name = "4h_4H_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+name = "4h_4H_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike_Dyn"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,14 +37,14 @@ def generate_signals(prices):
     pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
     pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
     
-    # Calculate Camarilla levels (R3, S3 are the key breakout levels)
+    # Calculate Camarilla levels (R2, S2 are the key breakout levels)
     rang = ph - pl
-    r3 = pc + 1.1 * rang * 1.1666  # R3 = Close + 1.1 * (High-Low) * 1.1666
-    s3 = pc - 1.1 * rang * 1.1666  # S3 = Close - 1.1 * (High-Low) * 1.1666
+    r2 = pc + 1.1 * rang * 1.0833  # R2 = Close + 1.1 * (High-Low) * 1.0833
+    s2 = pc - 1.1 * rang * 1.0833  # S2 = Close - 1.1 * (High-Low) * 1.0833
     
     # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
     # Calculate 1d EMA34 for trend filter
     ema_34_1d = np.full_like(close_1d, np.nan)
@@ -73,7 +73,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -81,30 +81,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 AND uptrend (price > EMA34) AND volume spike
-            if (close[i] > r3_aligned[i] and 
+            # Enter long: price breaks above R2 AND uptrend (price > EMA34) AND volume spike
+            if (close[i] > r2_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 AND downtrend (price < EMA34) AND volume spike
-            elif (close[i] < s3_aligned[i] and 
+            # Enter short: price breaks below S2 AND downtrend (price < EMA34) AND volume spike
+            elif (close[i] < s2_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 OR trend reversal (price < EMA34)
-            if close[i] < s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: price breaks below S2 OR trend reversal (price < EMA34)
+            if close[i] < s2_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3 OR trend reversal (price > EMA34)
-            if close[i] > r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: price breaks above R2 OR trend reversal (price > EMA34)
+            if close[i] > r2_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
