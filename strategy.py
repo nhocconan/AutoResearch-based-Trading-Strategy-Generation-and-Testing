@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_Pullback_1dTrend_v3"
-timeframe = "12h"
+name = "6h_ElderRay_RayPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,92 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for Elder Ray and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate daily EMA13 for trend filter
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Calculate daily ATR(14) for volume filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
-    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), np.abs(high_1d[1:] - close_1d[:-1]))
-    tr = np.concatenate([[np.nan], np.maximum(tr1, tr2)])
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = df_1d['high'].values - ema_13_1d
+    bear_power = df_1d['low'].values - ema_13_1d
     
-    # Calculate daily volume MA(20) for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
-    
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    prev_close = np.roll(df_1d['close'], 1)
-    prev_high = np.roll(df_1d['high'], 1)
-    prev_low = np.roll(df_1d['low'], 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    
-    # Camarilla levels: H3, L3 (more reliable than H4/L4 for pullbacks)
-    H3 = (prev_high + prev_low) * 1.1 / 2 - (prev_high - prev_low) * 1.1 / 4
-    L3 = (prev_high + prev_low) * 1.1 / 2 + (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 35  # Need 34 for EMA + 1 for roll
+    start_idx = 40  # Need enough data for EMA and alignment
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i])):
+        if (np.isnan(ema_13_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_34_1d_aligned[i]
-        h3 = H3_aligned[i]
-        l3 = L3_aligned[i]
-        atr_14 = atr_14_1d_aligned[i]
-        vol_ma_20 = vol_ma_20_1d_aligned[i]
-        vol_current = volume[i * 2] if i * 2 < len(volume) else volume[-1]  # Approximate 12h vol from 5m data
-        
-        # Volume filter: current volume > 1.5x 20-day average (only for 12h bar)
-        vol_filter = vol_current > 1.5 * vol_ma_20
+        ema_1d = ema_13_1d_aligned[i]
+        bull = bull_power_aligned[i]
+        bear = bear_power_aligned[i]
         
         if position == 0:
-            # Enter long: Pullback to L3 in uptrend (price > EMA34) with volume confirmation
-            if close[i] <= l3 and close[i] > ema_1d and vol_filter:
+            # Enter long: Bull Power > 0 and Bear Power < 0 in uptrend (price > EMA13)
+            if bull > 0 and bear < 0 and close[i] > ema_1d:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Pullback to H3 in downtrend (price < EMA34) with volume confirmation
-            elif close[i] >= h3 and close[i] < ema_1d and vol_filter:
+            # Enter short: Bull Power < 0 and Bear Power > 0 in downtrend (price < EMA13)
+            elif bull < 0 and bear > 0 and close[i] < ema_1d:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below EMA34 (trend change) or reaches H3 (target)
-            if close[i] < ema_1d or close[i] >= h3:
+            # Exit long: Bear Power becomes positive (bulls losing control) or trend breaks
+            if bear > 0 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above EMA34 (trend change) or reaches L3 (target)
-            if close[i] > ema_1d or close[i] <= l3:
+            # Exit short: Bull Power becomes positive (bears losing control) or trend breaks
+            if bull > 0 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
