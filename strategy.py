@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1_S1_TrendFilter_VolumeSpike"
+name = "1d_1w_Camarilla_R1_S1_TrendFilter_VolumeSpike_v2"
 timeframe = "1d"
 leverage = 1.0
 
