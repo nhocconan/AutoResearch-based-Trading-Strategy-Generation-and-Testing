@@ -1,16 +1,10 @@
-# 6h_Camarilla_R4S4_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts at R4/S4 levels (extreme sentiment) with 1d trend filter and volume confirmation.
-# R4/S4 captures stronger momentum than R3/S3, reducing false breakouts. Works in bull (breakout continuation)
-# and bear (mean reversion fails, trend filters losses). Target: 20-50 trades/year.
-# Timeframe: 6h, HTF: 1d for trend and Camarilla calculation.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R4S4_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,67 +22,67 @@ def generate_signals(prices):
     if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R4, S4)
+    # Previous day's close for Camarilla calculation (R3, S3)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla levels (R4, S4)
-    r4 = prev_close + 1.1 * (prev_high - prev_low) * 1  # R4 = C + 1.1*(H-L)*1
-    s4 = prev_close - 1.1 * (prev_high - prev_low) * 1  # S4 = C - 1.1*(H-L)*1
+    # Calculate Camarilla levels (R3, S3)
+    r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.25  # R3 = C + 1.1*(H-L)*1.25
+    s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.25  # S3 = C - 1.1*(H-L)*1.25
     
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 6h volume > 1.5 * 20-period average
+    # Volume filter: current 4h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Align all to 6h (primary timeframe)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align all to 4h (primary timeframe)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(ema50_1d_6h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r4_val = r4_6h[i]
-        s4_val = s4_6h[i]
-        trend = ema50_1d_6h[i]
+        r3_val = r3_4h[i]
+        s3_val = s3_4h[i]
+        trend = ema34_1d_4h[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R4 with volume and above trend
-            if close[i] > r4_val and close[i] > trend and vol_filter:
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S4 with volume and below trend
-            elif close[i] < s4_val and close[i] < trend and vol_filter:
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S4 (mean reversion to center)
-            if close[i] < s4_val:
+            # Exit long: close below S3 (mean reversion to center)
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R4 (mean reversion to center)
-            if close[i] > r4_val:
+            # Exit short: close above R3 (mean reversion to center)
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
