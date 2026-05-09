@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h Donchian breakout with volume confirmation and daily trend filter.
-# Uses 4h for signal direction (trend and breakout levels) and 1h only for entry timing to reduce trade frequency.
-# Daily EMA50 filter ensures alignment with higher timeframe trend.
-# Designed to work in both bull and bear markets by following daily trend and avoiding counter-trend trades.
-# Target: 15-37 trades per year (60-150 over 4 years) to minimize fee drag.
-name = "1h_Donchian20_4hTrend_DailyEMA50_Volume"
-timeframe = "1h"
+# Hypothesis: 6h Williams Fractal breakout with weekly trend filter and volume confirmation.
+# Uses Williams Fractals on 1d to identify potential reversal points, then waits for breakout
+# in direction of weekly trend. Volume confirms breakout strength. Designed to work in
+# both bull and bear markets by following weekly trend direction.
+# Williams Fractals require 2-bar confirmation after the pattern forms.
+name = "6h_WilliamsFractal_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,54 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for Donchian channels and trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # 4h Donchian channels (20-period)
-    high_20_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_20_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    
-    # 4h trend filter: EMA50
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Daily data for trend filter
+    # Daily data for Williams Fractals
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 4h indicators to 1h timeframe
-    high_20_4h_1h = align_htf_to_ltf(prices, df_4h, high_20_4h)
-    low_20_4h_1h = align_htf_to_ltf(prices, df_4h, low_20_4h)
-    ema_50_4h_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    ema_50_1d_1h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Williams Fractals on daily: need 2-bar confirmation after pattern
+    # Bearish fractal: high[i] is highest of [i-2, i-1, i, i+1, i+2]
+    # Bullish fractal: low[i] is lowest of [i-2, i-1, i, i+1, i+2]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume spike filter: volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema20)
+    bearish_fractal = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal = np.zeros(len(low_1d), dtype=bool)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] >= high_1d[i-2] and high_1d[i] >= high_1d[i-1] and
+            high_1d[i] >= high_1d[i+1] and high_1d[i] >= high_1d[i+2]):
+            bearish_fractal[i] = True
+        if (low_1d[i] <= low_1d[i-2] and low_1d[i] <= low_1d[i-1] and
+            low_1d[i] <= low_1d[i+1] and low_1d[i] <= low_1d[i+2]):
+            bullish_fractal[i] = True
+    
+    # Apply 2-bar confirmation delay for fractals (need 2 more daily bars after pattern)
+    bearish_fractal_confirmed = np.zeros(len(high_1d), dtype=bool)
+    bullish_fractal_confirmed = np.zeros(len(low_1d), dtype=bool)
+    
+    for i in range(len(bearish_fractal)):
+        if bearish_fractal[i] and i + 2 < len(bearish_fractal):
+            bearish_fractal_confirmed[i + 2] = True
+        if bullish_fractal[i] and i + 2 < len(bullish_fractal):
+            bullish_fractal_confirmed[i + 2] = True
+    
+    # Align fractals to 6h timeframe with proper delay
+    bearish_6h = align_htf_to_ltf(prices, df_1d, bearish_fractal_confirmed.astype(float))
+    bullish_6h = align_htf_to_ltf(prices, df_1d, bullish_fractal_confirmed.astype(float))
+    
+    # Volume spike filter: volume > 2x 50-period EMA
+    vol_ema50 = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
+    vol_spike = volume > (2.0 * vol_ema50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable or outside session
-        if (np.isnan(high_20_4h_1h[i]) or np.isnan(low_20_4h_1h[i]) or
-            np.isnan(ema_50_4h_1h[i]) or np.isnan(ema_50_1d_1h[i]) or
-            np.isnan(vol_ema20[i]) or not session_mask[i]):
+        # Skip if required data unavailable
+        if (np.isnan(ema_50_6h[i]) or np.isnan(bearish_6h[i]) or 
+            np.isnan(bullish_6h[i]) or np.isnan(vol_ema50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,31 +88,29 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above 4h Donchian upper band with volume spike and above both EMAs
-            if (price > high_20_4h_1h[i] and vol_spike[i] and 
-                price > ema_50_4h_1h[i] and price > ema_50_1d_1h[i]):
-                signals[i] = 0.20
+            # Long: bullish fractal breakout with volume and above weekly EMA50
+            if bullish_6h[i] > 0.5 and vol_spike[i] and price > ema_50_6h[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian lower band with volume spike and below both EMAs
-            elif (price < low_20_4h_1h[i] and vol_spike[i] and 
-                  price < ema_50_4h_1h[i] and price < ema_50_1d_1h[i]):
-                signals[i] = -0.20
+            # Short: bearish fractal breakdown with volume and below weekly EMA50
+            elif bearish_6h[i] > 0.5 and vol_spike[i] and price < ema_50_6h[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 4h Donchian lower band
-            if price < low_20_4h_1h[i]:
+            # Exit long: price closes below weekly EMA50 or opposite fractal appears
+            if price < ema_50_6h[i] or bearish_6h[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 4h Donchian upper band
-            if price > high_20_4h_1h[i]:
+            # Exit short: price closes above weekly EMA50 or opposite fractal appears
+            if price > ema_50_6h[i] or bullish_6h[i] > 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
