@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1D_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Weekly Camarilla R3/S3 breakout with daily trend and volume confirmation on daily timeframe.
-# Uses weekly pivot levels for structure, daily EMA34 for trend filter, and volume spike for confirmation.
-# Designed to work in both bull and bear markets by following weekly structure and avoiding counter-trend trades.
-# Target: 10-30 trades per year (~40-120 over 4 years) to minimize fee drag.
+# 6H_Daily_Keltner_Breakout_Trend_TrendFilter
+# Hypothesis: 6h Keltner breakout with 1d trend filter (EMA50) and volume confirmation.
+# Keltner channels (ATR-based) adapt to volatility, reducing false breakouts in low-volatility periods.
+# Trend filter ensures we only trade in the direction of the 1d trend, improving win rate in both bull and bear markets.
+# Volume confirmation adds conviction to breakouts. Target: 15-35 trades/year.
 
-name = "1D_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6H_Daily_Keltner_Breakout_Trend_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,67 +23,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for EMA50 trend filter and ATR for Keltner channels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot point and Camarilla levels (R3, S3)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    r3_1w = pivot_1w + range_1w * 1.1
-    s3_1w = pivot_1w - range_1w * 1.1
+    # EMA50 for 1d trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily EMA34 for trend filter
-    ema34_d = pd.Series(close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # ATR(10) for Keltner channels (using 1d data)
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.maximum(np.abs(low_1d[1:] - close_1d[:-1]), tr1)
+    tr = np.concatenate([[np.nan], tr2])  # First TR is NaN
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Volume confirmation: current volume > 2.0x 20-day average
+    # Keltner channels on 1d: EMA20 ± 2*ATR(10)
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    upper_keltner = ema20_1d + 2 * atr10
+    lower_keltner = ema20_1d - 2 * atr10
+    
+    # Align 1d indicators to 6t
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 2.0)
-    
-    # Align weekly levels to daily timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    volume_confirm = volume > (volume_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for EMA34
-    start_idx = 34
+    # Start after we have enough data
+    start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if weekly data not ready
-        if np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]):
+        # Skip if data not ready
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
+            np.isnan(lower_keltner_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly R3 + above daily EMA34 + volume confirmation
-            if close[i] > r3_1w_aligned[i] and close[i] > ema34_d[i] and volume_confirm[i]:
+            # Enter long: price breaks above upper Keltner + above 1d EMA50 + volume confirmation
+            if (close[i] > upper_keltner_aligned[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S3 + below daily EMA34 + volume confirmation
-            elif close[i] < s3_1w_aligned[i] and close[i] < ema34_d[i] and volume_confirm[i]:
+            # Enter short: price breaks below lower Keltner + below 1d EMA50 + volume confirmation
+            elif (close[i] < lower_keltner_aligned[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily EMA34 (trend change)
-            if close[i] < ema34_d[i]:
+            # Exit long: price below lower Keltner (reversal signal)
+            if close[i] < lower_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above daily EMA34 (trend change)
-            if close[i] > ema34_d[i]:
+            # Exit short: price above upper Keltner (reversal signal)
+            if close[i] > upper_keltner_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
