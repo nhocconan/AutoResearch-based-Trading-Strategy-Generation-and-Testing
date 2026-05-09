@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,36 +27,65 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
+    # Calculate Choppiness Index on 1d to filter choppy markets
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_vals = df_1d['close'].values
     
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d_vals[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d_vals[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
+    
+    # ATR14
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ADX14 calculation
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_di14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / tr14
+    minus_di14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / tr14
+    dx = 100 * np.abs(plus_di14 - minus_di14) / (plus_di14 + minus_di14)
+    adx14 = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Align ADX to 4h timeframe
+    adx14_aligned = align_htf_to_ltf(prices, df_1d, adx14)
+    
+    # Calculate Camarilla levels from previous 1d bar
     # Camarilla R3, S3 levels: (H-L)*1.1/6
     camarilla_range = (high_1d - low_1d) * 1.1 / 6
     r3_level = close_1d_vals + camarilla_range * 4
     s3_level = close_1d_vals - camarilla_range * 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume spike filter: current volume > 1.5 * 30-period average
+    # Volume spike filter: current volume > 1.8 * 30-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
+    start_idx = max(34, 30, 14)  # Need enough data for EMA34, volume MA, ADX
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
         if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or
-            np.isnan(volume_spike[i])):
+            np.isnan(volume_spike[i]) or
+            np.isnan(adx14_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,6 +95,14 @@ def generate_signals(prices):
         r3 = r3_aligned[i]
         s3 = s3_aligned[i]
         vol_spike = volume_spike[i]
+        adx = adx14_aligned[i]
+        
+        # Only trade in trending markets (ADX > 25)
+        if adx <= 25:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
             # Enter long: Close breaks above R3 + 1d uptrend + volume spike
