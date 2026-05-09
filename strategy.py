@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_Trend_Volume_v2"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_Trend_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 1d data for Camarilla levels, trend, and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Previous day's close for Camarilla calculation
@@ -39,11 +39,11 @@ def generate_signals(prices):
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 12h
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align all to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -51,17 +51,17 @@ def generate_signals(prices):
     start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_filter_12h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
-        trend = ema34_1d_12h[i]
-        vol_filter = volume_filter_12h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema34_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
             # Enter long: break above R1 with volume and above trend
