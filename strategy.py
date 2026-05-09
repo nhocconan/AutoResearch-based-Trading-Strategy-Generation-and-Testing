@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h strategy using 4h trend and 1d structure for entries.
-# Uses 4h EMA50 for trend filter and 1d Camarilla S3/R3 for breakout levels.
-# Designed for low trade frequency (15-35/year) to avoid fee drag in 1h timeframe.
-# Works in both bull/bear markets by requiring alignment with 4h trend and 1d structure.
-name = "1h_Camarilla_S3R3_4hEMA50_1dTrend"
-timeframe = "1h"
+# Hypothesis: 6h strategy using 1w Pivot Points for trend direction and 1d ATR breakout for entry.
+# Uses weekly pivot levels to determine trend (above/below weekly pivot) and enters on
+# 1d ATR breakouts in the direction of the weekly trend. Includes volume confirmation
+# to filter breakouts. Designed for low trade frequency (15-25/year) to avoid fee drag.
+# Works in bull markets by buying breakouts above weekly pivot and in bear markets
+# by selling breakdowns below weekly pivot.
+name = "6h_WeeklyPivot_ATRBreakout_1dVolume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,56 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1w data for weekly pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla S3/R3 levels
+    # Get 1d data for ATR calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 trend filter
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points: P = (H + L + C)/3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     
-    # Calculate 1d Camarilla pivot levels (S3 and R3)
+    # Align weekly pivot to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    
+    # Calculate 14-period ATR on 1d timeframe
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # True Range calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # First period
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla levels
-    # S3 = C - (H - L) * 1.1/2
-    # R3 = C + (H - L) * 1.1/2
-    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0
-    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0
+    # ATR using Wilder's smoothing (equivalent to RMA)
+    atr_1d = np.zeros_like(tr)
+    atr_1d[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
     
-    # Align 1d Camarilla levels to 1h timeframe
-    s3_1h = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r3_1h = align_htf_to_ltf(prices, df_1d, r3_1d)
+    # Align ATR to 6h timeframe
+    atr_6h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Volume filter: spike above 2.0x 24-period average (1 day of 1h bars)
+    # Calculate 1d open for breakout levels
+    open_1d = df_1d['open'].values
+    open_6h = align_htf_to_ltf(prices, df_1d, open_1d)
+    
+    # Volume filter: 1.5x 24-period average (1 day of 6h bars)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24)  # Wait for EMA50 and volume MA
+    start_idx = max(24, 14)  # Wait for volume MA and ATR
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_1h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(s3_1h[i]) or np.isnan(r3_1h[i])):
+        if (np.isnan(pivot_6h[i]) or np.isnan(atr_6h[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(open_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        
+        # Breakout levels: today's open ± 1.5x ATR
+        upper_break = open_6h[i] + 1.5 * atr_6h[i]
+        lower_break = open_6h[i] - 1.5 * atr_6h[i]
         
         # Pre-compute hour for session filter (UTC 0-24)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
@@ -78,35 +98,35 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long: price above 1d R3, 4h uptrend (price > EMA50), volume breakout
-            if (close[i] > r3_1h[i] and 
-                close[i] > ema_50_1h[i] and 
+            # Long: price above weekly pivot AND breaks above upper level with volume
+            if (close[i] > pivot_6h[i] and 
+                close[i] > upper_break and 
                 vol_ok and 
                 in_session):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: price below 1d S3, 4h downtrend (price < EMA50), volume breakdown
-            elif (close[i] < s3_1h[i] and 
-                  close[i] < ema_50_1h[i] and 
+            # Short: price below weekly pivot AND breaks below lower level with volume
+            elif (close[i] < pivot_6h[i] and 
+                  close[i] < lower_break and 
                   vol_ok and 
                   in_session):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below 1d S3 or trend reversal
-            if close[i] < s3_1h[i] or close[i] < ema_50_1h[i]:
+            # Exit long: price breaks below weekly pivot or reverses below open
+            if close[i] < pivot_6h[i] or close[i] < open_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 1d R3 or trend reversal
-            if close[i] > r3_1h[i] or close[i] > ema_50_1h[i]:
+            # Exit short: price breaks above weekly pivot or reverses above open
+            if close[i] > pivot_6h[i] or close[i] > open_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
