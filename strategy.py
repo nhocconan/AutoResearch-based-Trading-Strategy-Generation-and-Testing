@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_TrendFollowing_Momentum
-# Hypothesis: Combines 1d trend filter (close above/below 200 EMA) with 4h momentum (RSI divergence) and 1h entry timing.
-# Uses 1d EMA200 for trend direction, 4h RSI for momentum confirmation, and 1h price action for entry.
-# Designed to work in both trending and ranging markets by filtering trades with higher timeframe trend.
-# Target: 15-30 trades/year per symbol with disciplined risk management.
+# 6h_WeeklyTrend_DailyPullback_Entry
+# Hypothesis: Trend-following strategy that uses weekly trend direction (EMA34) and enters on daily pullbacks to EMA21.
+# Works in both bull and bear markets by only taking trades in the direction of the weekly trend.
+# Uses 6h timeframe for entry timing with volume confirmation to reduce false signals.
+# Target: 20-35 trades/year per symbol with disciplined risk management.
 
-name = "1h_4h_1d_TrendFollowing_Momentum"
-timeframe = "1h"
+name = "6h_WeeklyTrend_DailyPullback_Entry"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,84 +23,97 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for multi-timeframe analysis
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 20 or len(df_1d) < 50:
+    # Get weekly data for trend direction (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly EMA34
+    ema_34_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[0:34])
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = (close_1w[i] * 2 + ema_34_1w[i-1] * 33) / 35
+    
+    # Get daily data for pullback entry (EMA21) and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 22:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
-    ema_200_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 200:
-        ema_200_1d[199] = np.mean(close_1d[0:200])
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = (close_1d[i] * 2 + ema_200_1d[i-1] * 198) / 200
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h RSI(14) for momentum
-    close_4h = df_4h['close'].values
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily EMA21
+    ema_21_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 21:
+        ema_21_1d[20] = np.mean(close_1d[0:21])
+        for i in range(21, len(close_1d)):
+            ema_21_1d[i] = (close_1d[i] * 2 + ema_21_1d[i-1] * 20) / 22
     
-    avg_gain = np.full_like(close_4h, np.nan)
-    avg_loss = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 14:
-        avg_gain[13] = np.mean(gain[0:14])
-        avg_loss[13] = np.mean(loss[0:14])
-        for i in range(14, len(close_4h)):
-            avg_gain[i] = (gain[i] + avg_gain[i-1] * 13) / 14
-            avg_loss[i] = (loss[i] + avg_loss[i-1] * 13) / 14
+    # Calculate daily average volume (20-period)
+    avg_volume_20d = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 20:
+        avg_volume_20d[19] = np.mean(volume_1d[0:20])
+        for i in range(20, len(volume_1d)):
+            avg_volume_20d[i] = (volume_1d[i] * 19 + avg_volume_20d[i-1]) / 20
     
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi_4h = 100 - (100 / (1 + rs))
+    # Align weekly trend to 6h timeframe
+    weekly_trend_up = ema_34_1w > np.roll(ema_34_1w, 1)  # Rising EMA
+    weekly_trend_up[0] = False  # First value has no previous
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
     
-    # Align higher timeframe indicators to 1h timeframe
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Align daily EMA21 to 6h timeframe
+    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Align daily average volume to 6h timeframe
+    avg_volume_20d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_20d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 14, 1)
+    start_idx = max(35, 22, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(rsi_4h_aligned[i]) or not session_filter[i]:
+        # Skip if data not ready
+        if np.isnan(weekly_trend_up_aligned[i]) or np.isnan(ema_21_1d_aligned[i]) or \
+           np.isnan(avg_volume_20d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume condition: current 6h volume > 1.5x daily average volume (scaled)
+        # Scale daily volume to 6h approximation: daily volume / 4 (since 4x6h in a day)
+        volume_condition = volume[i] > (avg_volume_20d_aligned[i] / 4.0) * 1.5
+        
         if position == 0:
-            # Enter long: Above 1d EMA200 AND 4h RSI > 50 (bullish momentum)
-            if close[i] > ema_200_1d_aligned[i] and rsi_4h_aligned[i] > 50:
-                signals[i] = 0.20
+            # Enter long: Weekly trend UP AND price pulls back to/touches daily EMA21 AND volume confirmation
+            if weekly_trend_up_aligned[i] and close[i] <= ema_21_1d_aligned[i] * 1.001 and volume_condition:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: Below 1d EMA200 AND 4h RSI < 50 (bearish momentum)
-            elif close[i] < ema_200_1d_aligned[i] and rsi_4h_aligned[i] < 50:
-                signals[i] = -0.20
+            # Enter short: Weekly trend DOWN AND price pulls back to/touches daily EMA21 AND volume confirmation
+            elif not weekly_trend_up_aligned[i] and close[i] >= ema_21_1d_aligned[i] * 0.999 and volume_condition:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Below 1d EMA200 OR 4h RSI < 40 (loss of momentum)
-            if close[i] < ema_200_1d_aligned[i] or rsi_4h_aligned[i] < 40:
+            # Exit long: Weekly trend turns down OR price breaks above daily EMA21 by 0.5%
+            if not weekly_trend_up_aligned[i] or close[i] > ema_21_1d_aligned[i] * 1.005:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Above 1d EMA200 OR 4h RSI > 60 (loss of momentum)
-            if close[i] > ema_200_1d_aligned[i] or rsi_4h_aligned[i] > 60:
+            # Exit short: Weekly trend turns up OR price breaks below daily EMA21 by 0.5%
+            if weekly_trend_up_aligned[i] or close[i] < ema_21_1d_aligned[i] * 0.995:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
