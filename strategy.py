@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    4h Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
-    Long: Close breaks above R1 and above 1d EMA(34) and volume > 1.5x 20-period avg
-    Short: Close breaks below S1 and below 1d EMA(34) and volume > 1.5x 20-period avg
-    Exit: Opposite signal or price crosses EMA(34)
-    Position size: 0.25
+    12h Camarilla R1/S1 breakout with 1w trend filter and volume confirmation.
+    Long: Close breaks above R1 AND close > 1w EMA(34) AND volume > 1.5x 12h avg volume
+    Short: Close breaks below S1 AND close < 1w EMA(34) AND volume > 1.5x 12h avg volume
+    Exit: Opposite signal or price reverts to Camarilla pivot
+    Uses 1d data for Camarilla levels (HLC from previous day)
+    Target: 15-35 trades/year on 12h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -24,41 +25,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Camarilla calculation (previous day's HLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 4h Camarilla levels (based on previous day's OHLC)
-    # For each 4h bar, use previous day's OHLC to calculate today's Camarilla levels
-    # We'll calculate daily OHLC first, then align to 4h
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
     
-    # Get daily OHLC from 1d data
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate 1w EMA(34) for trend filter
+    close_1w = pd.Series(df_1w['close'].values)
+    ema34_1w = close_1w.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Calculate Camarilla levels for each day
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    rang = daily_high - daily_low
-    r1_daily = daily_close + rang * 1.1 / 12
-    s1_daily = daily_close - rang * 1.1 / 12
-    
-    # Align daily Camarilla levels to 4h timeframe (wait for day to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_daily)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_daily)
-    
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = pd.Series(daily_close)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma20 * 1.5)
+    # Calculate average volume for volume confirmation (20-period SMA)
+    volume_s = pd.Series(volume)
+    vol_ma20 = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,34 +50,62 @@ def generate_signals(prices):
     start_idx = 40  # ensure sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if EMA data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        # Skip if trend or volume data not ready
+        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Get previous day's HLC for Camarilla calculation
+        prev_idx_1d = i // 16  # Approximate: 16x 12h bars per day
+        if prev_idx_1d < 1 or prev_idx_1d >= len(df_1d):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Previous day's high, low, close
+        prev_high = df_1d['high'].iloc[prev_idx_1d - 1]
+        prev_low = df_1d['low'].iloc[prev_idx_1d - 1]
+        prev_close = df_1d['close'].iloc[prev_idx_1d - 1]
+        
+        # Calculate Camarilla levels
+        range_val = prev_high - prev_low
+        if range_val <= 0:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Camarilla R1 and S1 levels
+        r1 = prev_close + (range_val * 1.1 / 12)
+        s1 = prev_close - (range_val * 1.1 / 12)
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume[i] > (1.5 * vol_ma20[i])
+        
         if position == 0:
-            # Long: Close breaks above R1, above 1d EMA trend, and volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_confirm[i]:
+            # Long: Break above R1 with trend and volume confirmation
+            if close[i] > r1 and close[i] > ema34_1w_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1, below 1d EMA trend, and volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_confirm[i]:
+            # Short: Break below S1 with trend and volume confirmation
+            elif close[i] < s1 and close[i] < ema34_1w_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below EMA(34) or breaks below S1
-            if close[i] < ema34_1d_aligned[i] or close[i] < s1_aligned[i]:
+            # Exit long: Price breaks below S1 or trend fails
+            if close[i] < s1 or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above EMA(34) or breaks above R1
-            if close[i] > ema34_1d_aligned[i] or close[i] > r1_aligned[i]:
+            # Exit short: Price breaks above R1 or trend fails
+            if close[i] > r1 or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
