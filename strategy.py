@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_ChandelierExit_12hTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,84 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily high, low, close for Camarilla
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h EMA20 for trend filter
+    close_12h = df_12h['close'].values
+    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
     
-    # Calculate Camarilla R3 and S3 levels
-    camarilla_R3 = np.zeros(len(df_1d))
-    camarilla_S3 = np.zeros(len(df_1d))
+    # Calculate ATR for Chandelier exit
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[0], tr])
+    atr = np.zeros(n)
+    for i in range(n):
+        if i < 21:
+            atr[i] = np.nan
+        else:
+            atr[i] = np.mean(tr[i-20:i+1])
     
-    for i in range(len(df_1d)):
-        if i >= 0:  # Need at least one day
-            H = high_1d[i]
-            L = low_1d[i]
-            C = close_1d[i]
-            camarilla_R3[i] = C + (H - L) * 1.1 / 6
-            camarilla_S3[i] = C - (H - L) * 1.1 / 6
+    # Calculate Chandelier Exit levels
+    chandelier_long = np.zeros(n)
+    chandelier_short = np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Initialize with first values
+    highest_high = high[0]
+    lowest_low = low[0]
     
-    # Calculate volume spike (20-period average)
+    for i in range(n):
+        highest_high = max(highest_high, high[i])
+        lowest_low = min(lowest_low, low[i])
+        if not np.isnan(atr[i]):
+            chandelier_long[i] = highest_high - 3.0 * atr[i]
+            chandelier_short[i] = lowest_low + 3.0 * atr[i]
+        else:
+            chandelier_long[i] = np.nan
+            chandelier_short[i] = np.nan
+    
+    # Volume confirmation (20-period average)
     vol_avg_20 = np.full(n, np.nan)
     for i in range(n):
         if i >= 19:
             vol_avg_20[i] = np.mean(volume[i-19:i+1])
     
-    # Align Camarilla levels and trend to 12h
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(ema20_12h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirmed = volume[i] > 1.5 * vol_avg_20[i]
-        
+        vol_confirmed = volume[i] > 1.2 * vol_avg_20[i]
         price = close[i]
-        r3 = camarilla_R3_aligned[i]
-        s3 = camarilla_S3_aligned[i]
-        ema34_today = ema34_1d_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume and above daily EMA34
-            if price > r3 and vol_confirmed and price > ema34_today:
+            # Enter long: price above Chandelier long exit + trend up + volume
+            if price > chandelier_long[i] and ema20_12h_aligned[i] > price and vol_confirmed:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume and below daily EMA34
-            elif price < s3 and vol_confirmed and price < ema34_today:
+            # Enter short: price below Chandelier short exit + trend down + volume
+            elif price < chandelier_short[i] and ema20_12h_aligned[i] < price and vol_confirmed:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 or trend changes
-            if price < s3 or price < ema34_today:
+            # Exit long: price below Chandelier long exit
+            if price < chandelier_long[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3 or trend changes
-            if price > r3 or price > ema34_today:
+            # Exit short: price above Chandelier short exit
+            if price > chandelier_short[i]:
                 signals[i] = 0.0
                 position = 0
             else:
