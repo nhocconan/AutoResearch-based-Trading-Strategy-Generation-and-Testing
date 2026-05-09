@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 24:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,59 +22,71 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate previous day's Camarilla levels (R3, S3)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla R3 and S3
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate 1-day EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Calculate daily Camarilla pivot levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = np.roll(close_1d, 1)
+    close_1d_prev[0] = close_1d[0]  # first day uses its own close
+    
+    # Camarilla levels: R1, S1
+    R1 = close_1d_prev + (high_1d - low_1d) * 1.1 / 12
+    S1 = close_1d_prev - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(24, n):  # Start after 24 hours of data
+    # Start after we have enough data for trend filter
+    start_idx = 34
+    
+    for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x 24-period average volume
-        avg_volume = np.mean(volume[i-24:i])
-        volume_confirm = volume[i] > avg_volume * 2.0
+        # Determine trend
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
+        
+        # Volume confirmation: current volume > 1.8x 20-period average volume
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+            volume_confirm = volume[i] > avg_volume * 1.8
+        else:
+            volume_confirm = False
         
         if position == 0:
-            # Enter long: price breaks above R3 + uptrend + volume confirmation
-            if close[i] > R3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
+            # Enter long: price crosses above S1 + uptrend + volume confirmation
+            if close[i] > S1_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + downtrend + volume confirmation
-            elif close[i] < S3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
+            # Enter short: price crosses below R1 + downtrend + volume confirmation
+            elif close[i] < R1_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3
-            if close[i] < S3_aligned[i]:
+            # Exit long: price crosses below R1 or trend reversal
+            if close[i] < R1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3
-            if close[i] > R3_aligned[i]:
+            # Exit short: price crosses above S1 or trend reversal
+            if close[i] > S1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
