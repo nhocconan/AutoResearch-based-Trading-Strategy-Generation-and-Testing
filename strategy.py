@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike_v1"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 20-day Donchian channels on daily data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
-    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    # Calculate weekly EMA20 for trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Align pivot levels to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1d EMA34 for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Volume spike detection (4h timeframe)
+    # Volume confirmation: current volume > 1.5x 20-day average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60  # Ensure sufficient lookback for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Require strong volume spike
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike filter
         
         if position == 0:
-            # Long: Price breaks above R1 with 1d uptrend and volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_ok:
+            # Long: Price breaks above 20-day high with weekly uptrend and volume confirmation
+            if close[i] > upper_channel[i] and close[i] > ema_1w_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with 1d downtrend and volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_ok:
+            # Short: Price breaks below 20-day low with weekly downtrend and volume confirmation
+            elif close[i] < lower_channel[i] and close[i] < ema_1w_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below S1 or trend turns down
-            if close[i] < s1_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit long: Price falls below 20-day low or weekly trend turns down
+            if close[i] < lower_channel[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above R1 or trend turns up
-            if close[i] > r1_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit short: Price rises above 20-day high or weekly trend turns up
+            if close[i] > upper_channel[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
