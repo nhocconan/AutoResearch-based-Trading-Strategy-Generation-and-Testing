@@ -1,13 +1,6 @@
-# 1D_WeeklyPivot_Crossover_Trend_Filter
-# Uses weekly pivot levels (PP, R1, S1) from 1w timeframe for entry/exit signals
-# Trend filter: price vs 50-period EMA on 1d timeframe
-# Volume confirmation: current volume > 1.5x 20-period average
-# Designed to work in both bull and bear markets by following weekly pivot structure with trend filter
-# Target: 20-50 trades per year to minimize fee drag
-
 #!/usr/bin/env python3
-name = "1D_WeeklyPivot_Crossover_Trend_Filter"
-timeframe = "1d"
+name = "12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 24:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pp - low_1w
-    s1 = 2 * pp - high_1w
-    
-    # Align weekly pivot levels to daily timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    # Calculate previous day's Camarilla levels (R3, S3)
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate 1-day EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Camarilla R3 and S3
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align 1-day EMA50 to daily timeframe (no alignment needed as same timeframe)
-    ema50_1d_aligned = ema50_1d
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for EMA
-    start_idx = 50
-    
-    for i in range(start_idx, n):
+    for i in range(24, n):  # Start after 24 hours of data
         # Skip if data not ready
-        if np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average volume
-        if i >= 20:
-            avg_volume = np.mean(volume[i-20:i])
-            volume_confirm = volume[i] > avg_volume * 1.5
-        else:
-            volume_confirm = False
+        # Volume confirmation: current volume > 2.0x 24-period average volume
+        avg_volume = np.mean(volume[i-24:i])
+        volume_confirm = volume[i] > avg_volume * 2.0
         
         if position == 0:
-            # Enter long: price crosses above R1 + uptrend + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_confirm:
+            # Enter long: price breaks above R3 + uptrend + volume confirmation
+            if close[i] > R3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below S1 + downtrend + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_confirm:
+            # Enter short: price breaks below S3 + downtrend + volume confirmation
+            elif close[i] < S3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below PP
-            if close[i] < pp_aligned[i]:
+            # Exit long: price breaks below S3
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above PP
-            if close[i] > pp_aligned[i]:
+            # Exit short: price breaks above R3
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
