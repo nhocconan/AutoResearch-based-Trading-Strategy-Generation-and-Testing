@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h price action relative to daily VWAP with volume confirmation and 1-day trend filter
-# Long when price > daily VWAP, price > 1-day EMA200, and volume > 2x 20-period average
-# Short when price < daily VWAP, price < 1-day EMA200, and volume > 2x 20-period average
-# Exit when price crosses VWAP or EMA200 trend contradicts position
-# Position size: 0.25 to limit drawdown and reduce trade frequency
-# Designed to work in trending markets via EMA200 filter and in ranging markets via VWAP mean reversion
+# Hypothesis: 4h Donchian breakout with volume confirmation and 1d EMA50 trend filter
+# Long when price breaks above Donchian(20) high, volume > 1.5x 20-period average, and price > 1d EMA50
+# Short when price breaks below Donchian(20) low, volume > 1.5x 20-period average, and price < 1d EMA50
+# Exit when price crosses back below Donchian(20) mean OR 1d EMA50 direction contradicts position
+# Position size: 0.28 (28% of capital) to balance return and drawdown
+# Designed to work in trending markets via EMA filter and reduce false breakouts with volume confirmation
+# Target: 20-40 trades/year per symbol to minimize fee drag
 
-name = "12h_VWAP_EMA200_Volume_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Volume_EMA50_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,35 +25,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12-period VWAP approximation for 12h timeframe (using typical price)
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
+    # Donchian channel (20-period) for breakout signals
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = high_roll.values
+    donchian_low = low_roll.values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Get 1d data for EMA200 trend filter
+    # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 1:
         return np.zeros(n)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 1-day EMA200
-    ema200 = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    
-    # Align 1-day EMA200 to 12h timeframe (waits for daily close)
-    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200)
-    
-    # Volume confirmation: current volume > 2x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ma.values)
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Need enough data for EMA200
+    start_idx = 60  # Need enough data for Donchian(20) and EMA50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(ema200_aligned[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema50_1d_aligned[i]) or 
             np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,33 +59,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price above VWAP AND above EMA200 (bullish alignment) + volume spike
-            if (close[i] > vwap[i] and 
-                close[i] > ema200_aligned[i] and 
-                vol_spike[i]):
-                signals[i] = 0.25
+            # Enter long: break above Donchian high + volume spike + price above 1d EMA50
+            if (close[i] > donchian_high[i] and 
+                vol_spike[i] and 
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.28
                 position = 1
-            # Enter short: price below VWAP AND below EMA200 (bearish alignment) + volume spike
-            elif (close[i] < vwap[i] and 
-                  close[i] < ema200_aligned[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.25
+            # Enter short: break below Donchian low + volume spike + price below 1d EMA50
+            elif (close[i] < donchian_low[i] and 
+                  vol_spike[i] and 
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.28
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below VWAP OR EMA200 turns bearish
-            if (close[i] < vwap[i]) or (close[i] < ema200_aligned[i]):
+            # Exit long: price crosses below Donchian mid OR price below 1d EMA50
+            if (close[i] < donchian_mid[i]) or (close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.28
         
         elif position == -1:
-            # Exit short: price crosses above VWAP OR EMA200 turns bullish
-            if (close[i] > vwap[i]) or (close[i] > ema200_aligned[i]):
+            # Exit short: price crosses above Donchian mid OR price above 1d EMA50
+            if (close[i] > donchian_mid[i]) or (close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.28
     
     return signals
