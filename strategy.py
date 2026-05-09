@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyDonchian20_Breakout_WeeklyTrend_Filter
-# Hypothesis: On daily timeframe, breakout of weekly Donchian(20) channels with weekly trend filter.
-# Long when weekly trend up (price > weekly SMA50) and price breaks above weekly Donchian upper.
-# Short when weekly trend down (price < weekly SMA50) and price breaks below weekly Donchian lower.
-# Uses weekly trend to avoid counter-trend trades and reduce whipsaw in ranging markets.
-# Weekly timeframe reduces trade frequency to avoid fee drag; daily execution allows timely entry.
+# 6h_RSI_Volume_Trend_Filter
+# Hypothesis: RSI mean reversion on 6h with 1d trend filter and volume confirmation.
+# Long when 1d trend up, RSI < 30 (oversold), and volume > 1.5x average.
+# Short when 1d trend down, RSI > 70 (overbought), and volume > 1.5x average.
+# Combines mean reversion in ranging markets with trend filter to avoid counter-trend traps.
+# Volume confirms conviction. Designed for 50-150 trades over 4 years.
 
-name = "1d_WeeklyDonchian20_Breakout_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "6h_RSI_Volume_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,76 +22,95 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Donchian channels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
-    high_weekly = df_weekly['high'].values
-    low_weekly = df_weekly['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly SMA50 for trend filter
-    sma50_weekly = np.full_like(close_weekly, np.nan)
-    if len(close_weekly) >= 50:
-        sma50_weekly[49] = np.mean(close_weekly[0:50])
-        for i in range(50, len(close_weekly)):
-            sma50_weekly[i] = (sma50_weekly[i-1] * 49 + close_weekly[i]) / 50
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = (close_1d[i] * 2 + ema50_1d[i-1] * 48) / 50
     
-    # Calculate weekly Donchian(20) channels
-    donchian_high = np.full_like(high_weekly, np.nan)
-    donchian_low = np.full_like(low_weekly, np.nan)
+    # Calculate RSI(14) on 6h
+    rsi_period = 14
+    rsi = np.full_like(close, np.nan)
+    if len(close) >= rsi_period + 1:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full_like(close, np.nan)
+        avg_loss = np.full_like(close, np.nan)
+        
+        avg_gain[rsi_period] = np.mean(gain[0:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[0:rsi_period])
+        
+        for i in range(rsi_period + 1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i-1]) / rsi_period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
+        rsi[rsi_period:] = 100 - (100 / (1 + rs[rsi_period:]))
     
-    for i in range(len(close_weekly)):
-        if i >= 19:
-            donchian_high[i] = np.max(high_weekly[i-19:i+1])
-            donchian_low[i] = np.min(low_weekly[i-19:i+1])
+    # Volume filter: current volume vs 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    # Align weekly indicators to daily timeframe
-    sma50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, sma50_weekly)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    
+    # Align 1d indicators to 6h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need weekly SMA50
+    start_idx = max(rsi_period + 1, 50, 20)  # Need RSI, EMA, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sma50_weekly_aligned[i]) or 
-            np.isnan(donchian_high_aligned[i]) or 
-            np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        trend_up = close[i] > sma50_weekly_aligned[i]
+        # Determine 1d trend
+        trend_up = close[i] > ema50_1d_aligned[i]
         
         if position == 0:
-            # Enter long: weekly trend up + price breaks above weekly Donchian high
-            if trend_up and close[i] > donchian_high_aligned[i]:
+            # Enter long: 1d trend up + RSI < 30 + volume confirmation
+            if trend_up and rsi[i] < 30 and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly trend down + price breaks below weekly Donchian low
-            elif not trend_up and close[i] < donchian_low_aligned[i]:
+            # Enter short: 1d trend down + RSI > 70 + volume confirmation
+            elif not trend_up and rsi[i] > 70 and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly trend turns down or price breaks below weekly Donchian low
-            if not trend_up or close[i] < donchian_low_aligned[i]:
+            # Exit long: RSI > 50 (mean reversion complete) or trend turns down
+            if rsi[i] > 50 or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly trend turns up or price breaks above weekly Donchian high
-            if trend_up or close[i] > donchian_high_aligned[i]:
+            # Exit short: RSI < 50 (mean reversion complete) or trend turns up
+            if rsi[i] < 50 or trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
