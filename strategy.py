@@ -3,91 +3,96 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_Filter_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    6h Camarilla R3/S3 breakout with 1d EMA trend filter and volume spike.
-    Trades only when price breaks R3/S3 with volume > 2.5x average and price >/< 1d EMA(34).
-    Exit when price crosses back through the pivot point (PP).
-    Designed for 60-120 total trades over 4 years to avoid fee drag.
+    4h KAMA direction + RSI + Choppiness regime filter.
+    Long when KAMA trending up, RSI > 50, and choppy market (CHOP > 61.8).
+    Short when KAMA trending down, RSI < 50, and choppy market (CHOP > 61.8).
+    Exit when KAMA direction changes or RSI crosses 50.
+    Designed for ~80-120 total trades over 4 years to avoid fee drag.
     """
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # KAMA calculation
+    close_series = pd.Series(close)
+    direction = abs(close - close.shift(10))
+    volatility = abs(close - close.shift(1)).rolling(10).sum()
+    er = direction / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (0.6665 - 0.0645) + 0.0645) ** 2
+    kama = close_series.copy()
+    for i in range(1, len(close)):
+        kama.iloc[i] = kama.iloc[i-1] + sc.iloc[i] * (close.iloc[i] - kama.iloc[i-1])
+    kama_values = kama.values
     
-    # Calculate 1d EMA(34) for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # RSI calculation
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(14, min_periods=14).mean()
+    avg_loss = loss.rolling(14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values
     
-    # Calculate Camarilla levels from previous day's range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
-    
-    pp_1d = (high_1d + low_1d + close_1d_arr) / 3
-    r3_1d = close_1d_arr + (high_1d - low_1d) * 1.1 / 4
-    s3_1d = close_1d_arr - (high_1d - low_1d) * 1.1 / 4
-    
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume confirmation: current volume > 2.5x 24-period average (4-day average for 6h)
-    vol_series = pd.Series(volume)
-    vol_ma24 = vol_series.rolling(window=24, min_periods=24).mean().values
+    # Choppiness Index calculation
+    atr = pd.Series(np.maximum.reduce([
+        high - low,
+        np.abs(high - close_series.shift()),
+        np.abs(low - close_series.shift())
+    ]))
+    atr_sum = atr.rolling(14, min_periods=14).sum()
+    highest_high = pd.Series(high).rolling(14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    chop_values = chop.fillna(50).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA and volume MA
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(vol_ma24[i])):
+        if (np.isnan(kama_values[i]) or np.isnan(rsi_values[i]) or 
+            np.isnan(chop_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.5 * vol_ma24[i]
+        kama_up = kama_values[i] > kama_values[i-1]
+        kama_down = kama_values[i] < kama_values[i-1]
+        rsi_above_50 = rsi_values[i] > 50
+        rsi_below_50 = rsi_values[i] < 50
+        choppy = chop_values[i] > 61.8
         
         if position == 0:
-            # Long: Close breaks above R3 with volume spike and above 1d EMA trend
-            if close[i] > r3_aligned[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
+            if kama_up and rsi_above_50 and choppy:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with volume spike and below 1d EMA trend
-            elif close[i] < s3_aligned[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
+            elif kama_down and rsi_below_50 and choppy:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses back through pivot point
-            if close[i] < pp_aligned[i]:
+            if not (kama_up and rsi_above_50 and choppy):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses back through pivot point
-            if close[i] > pp_aligned[i]:
+            if not (kama_down and rsi_below_50 and choppy):
                 signals[i] = 0.0
                 position = 0
             else:
