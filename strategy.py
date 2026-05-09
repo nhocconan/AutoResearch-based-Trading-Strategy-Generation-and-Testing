@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with weekly RSI mean reversion and daily volume confirmation.
-# Uses weekly RSI(14) for overbought/oversold signals and daily volume spike for confirmation.
-# Weekly RSI avoids short-term noise while capturing medium-term reversals.
-# Daily volume filter ensures institutional participation.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Hypothesis: 1d timeframe with weekly ATR-based volatility filter and daily KAMA trend.
+# Uses weekly ATR to filter low volatility regimes (avoids chop) and daily KAMA for trend direction.
+# Weekly volatility filter reduces whipsaw in sideways markets, KAMA adapts to trend changes.
+# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
 
-name = "12h_WeeklyRSI14_DailyVolume_MeanReversion"
-timeframe = "12h"
+name = "1d_KAMA_Trend_WeeklyATR_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,43 +18,61 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get weekly data for RSI(14) calculation
+    # Calculate daily KAMA trend
+    # Efficiency ratio: price change over 10 periods / sum of absolute changes
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |close[t] - close[t-1]| over window
+    # Handle the first 10 values
+    change = np.concatenate([np.full(10, np.nan), change])
+    volatility = np.concatenate([np.full(10, np.nan), volatility])
+    
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Get weekly ATR for volatility filter (avoid low volatility/chop)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate weekly RSI(14)
-    close_1w = pd.Series(df_1w['close'].values)
-    delta = close_1w.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_values = rsi_1w.values
+    # Calculate 1w ATR(14)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align weekly RSI to 12h timeframe (wait for weekly bar to close)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # first value has no TR
     
-    # Get daily data for volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    atr_14 = np.full_like(tr, np.nan)
+    for i in range(14, len(tr)):
+        if i == 14:
+            atr_14[i] = np.nanmean(tr[1:15])  # first ATR
+        else:
+            atr_14[i] = (atr_14[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily average volume (20-period)
-    vol_1d = pd.Series(df_1d['volume'].values)
-    avg_vol_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    atr_14_aligned = align_htf_to_ltf(prices, df_1w, atr_14)
     
-    # Volume spike: current volume > 2.0x daily average volume
-    volume_spike = volume > (2.0 * avg_vol_1d_aligned)
+    # Volatility filter: only trade when weekly ATR > 20-period average ATR
+    avg_atr = np.full_like(atr_14_aligned, np.nan)
+    for i in range(20, len(atr_14_aligned)):
+        if not np.isnan(atr_14_aligned[i-20:i]).all():
+            avg_atr[i] = np.nanmean(atr_14_aligned[i-20:i])
     
-    # RSI levels for mean reversion
-    rsi_overbought = 70
-    rsi_oversold = 30
+    volatility_filter = atr_14_aligned > avg_atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,34 +81,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(volatility_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI oversold + volume spike
-            if rsi_1w_aligned[i] < rsi_oversold and volume_spike[i]:
+            # Long: price above KAMA + volatility filter
+            if close[i] > kama[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + volume spike
-            elif rsi_1w_aligned[i] > rsi_overbought and volume_spike[i]:
+            # Short: price below KAMA + volatility filter
+            elif close[i] < kama[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral (50) or overbought
-            if rsi_1w_aligned[i] >= 50:
+            # Exit long: price crosses below KAMA or volatility dies
+            if close[i] <= kama[i] or not volatility_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral (50) or oversold
-            if rsi_1w_aligned[i] <= 50:
+            # Exit short: price crosses above KAMA or volatility dies
+            if close[i] >= kama[i] or not volatility_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
