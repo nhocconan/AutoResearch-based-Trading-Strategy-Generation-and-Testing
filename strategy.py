@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12H_1W_Camarilla_Pivot_Trend_Volume
-# Hypothesis: On 12h timeframe, enter long when price breaks above weekly Camarilla R4 level with 1d uptrend and volume confirmation.
-# Short when price breaks below weekly Camarilla S4 level with 1d downtrend and volume confirmation.
-# Uses weekly Camarilla levels for stronger support/resistance and 1d trend filter to avoid counter-trend trades.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# 4H_1D_Poisson_Rainbow_Volume
+# Hypothesis: Combines Poisson-based trend strength (count of closes above/below EMA) with
+# rainbow EMA convergence/divergence and volume spikes to capture sustained moves.
+# Works in bull/bear by requiring both trend alignment and volatility expansion.
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 
-name = "12H_1W_Camarilla_Pivot_Trend_Volume"
-timeframe = "12h"
+name = "4H_1D_Poisson_Rainbow_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,77 +23,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Camarilla levels: R4, S4 (strongest levels)
-    typical_price = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    camarilla_r4 = close_1w + (range_1w * 1.1 / 2)  # R4 = close + (range * 1.1/2)
-    camarilla_s4 = close_1w - (range_1w * 1.1 / 2)  # S4 = close - (range * 1.1/2)
-    
-    # Get daily data for trend filter
+    # Get 1d data for trend and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # 1d trend: EMA(34) on close
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_1d > ema_34
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    # Poisson trend strength: count of closes above/below EMA(21) in last 10 days
+    ema_21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    above_ema = (close_1d > ema_21_1d).astype(int)
+    below_ema = (close_1d < ema_21_1d).astype(int)
+    # Sum over last 10 days: strong trend if >=7 days in same direction
+    poisson_long = pd.Series(above_ema).rolling(window=10, min_periods=10).sum().values >= 7
+    poisson_short = pd.Series(below_ema).rolling(window=10, min_periods=10).sum().values >= 7
     
-    # Align weekly indicators to 12h
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+    # Rainbow EMA convergence: EMA(8,13,21) - look for compression/expansion
+    ema_8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_21 = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Rainbow spread: (EMA8 - EMA21) / EMA21 - measures convergence
+    rainbow_spread = (ema_8 - ema_21) / ema_21
+    # Converging when spread decreasing, expanding when increasing
+    rainbow_converging = np.diff(rainbow_spread, prepend=0) < 0
+    rainbow_expanding = np.diff(rainbow_spread, prepend=0) > 0
     
-    # Align daily indicators to 12h
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    # Volume spike: current > 2.0x 24-period average (1 day of 4h bars)
+    volume_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > (volume_avg * 2.0)
+    
+    # Align 1d indicators to 4h
+    poisson_long_aligned = align_htf_to_ltf(prices, df_1d, poisson_long)
+    poisson_short_aligned = align_htf_to_ltf(prices, df_1d, poisson_short)
+    rainbow_converging_aligned = align_htf_to_ltf(prices, df_1d, rainbow_converging)
+    rainbow_expanding_aligned = align_htf_to_ltf(prices, df_1d, rainbow_expanding)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)  # though volume is LTF, align for consistency
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or np.isnan(trend_up_aligned[i]):
+        if (np.isnan(poisson_long_aligned[i]) or np.isnan(poisson_short_aligned[i]) or
+            np.isnan(rainbow_converging_aligned[i]) or np.isnan(rainbow_expanding_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly Camarilla R4 + 1d uptrend + volume confirmation
-            if close[i] > camarilla_r4_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: strong uptrend (Poisson) + expanding rainbow + volume spike
+            if poisson_long_aligned[i] and rainbow_expanding_aligned[i] and volume_spike_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly Camarilla S4 + 1d downtrend + volume confirmation
-            elif close[i] < camarilla_s4_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: strong downtrend (Poisson) + expanding rainbow + volume spike
+            elif poisson_short_aligned[i] and rainbow_expanding_aligned[i] and volume_spike_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below weekly Camarilla S4 (reversal) or trend changes
-            if close[i] < camarilla_s4_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: trend weakening (Poisson fails) OR rainbow converging (loss of momentum)
+            if not poisson_long_aligned[i] or rainbow_converging_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above weekly Camarilla R4 (reversal) or trend changes
-            if close[i] > camarilla_r4_aligned[i] or trend_up_aligned[i]:
+            # Exit short: trend weakening (Poisson fails) OR rainbow converging
+            if not poisson_short_aligned[i] or rainbow_converging_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
