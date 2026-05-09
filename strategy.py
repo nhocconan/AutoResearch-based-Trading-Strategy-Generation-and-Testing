@@ -3,79 +3,113 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "1h_4d_Hybrid_Signal_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Get 12h data for EMA50 and volume average
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend and volatility filters
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # 12h volume average for volume spike filter
-    vol_series = pd.Series(df_12h['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = df_12h['volume'].values > (vol_ma * 2.0)  # Volume > 2x 20-period average
+    # Get 1d data for session and volatility regime
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Align 12h indicators to 4h
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    volume_spike_4h = align_htf_to_ltf(prices, df_12h, volume_spike)
+    # 4h EMA50 for trend filter
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Donchian(20) channels on 4h
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # 4h ATR(14) for volatility filter
+    tr_4h = np.maximum(df_4h['high'].values - df_4h['low'].values,
+                       np.maximum(np.abs(df_4h['high'].values - np.roll(df_4h['close'].values, 1)),
+                                  np.absolute(np.roll(df_4h['close'].values, 1) - df_4h['low'].values)))
+    tr_4h[0] = df_4h['high'].values[0] - df_4h['low'].values[0]
+    atr14_4h = pd.Series(tr_4h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr14_4h)
+    
+    # 1d ATR(10) for volatility regime filter (high vol = trend following, low vol = mean reversion)
+    tr_1d = np.maximum(df_1d['high'].values - df_1d['low'].values,
+                       np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
+                                  np.absolute(np.roll(df_1d['close'].values, 1) - df_1d['low'].values)))
+    tr_1d[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
+    atr10_1d = pd.Series(tr_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
+    
+    # Session filter: 08-20 UTC (precomputed for efficiency)
+    hours = pd.DatetimeIndex(open_time).hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
+    # Price position relative to 4h EMA50
+    price_vs_ema = close - ema50_4h_aligned
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    # Start after we have enough data for all indicators
-    start_idx = max(50, 20)
+    start_idx = max(50, 14, 10)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_4h[i]) or np.isnan(volume_spike_4h[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(atr14_4h_aligned[i]) or
+            np.isnan(atr10_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Skip outside session
+        if not session_mask[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        atr_ratio = atr10_1d_aligned[i] / (atr14_4h_aligned[i] + 1e-10)
+        price_above_ema = price_vs_ema[i] > 0
+        
         if position == 0:
-            # Enter long: price breaks above upper Donchian with volume spike and above 12h EMA50
-            if close[i] > upper[i] and volume_spike_4h[i] and close[i] > ema50_12h_4h[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below lower Donchian with volume spike and below 12h EMA50
-            elif close[i] < lower[i] and volume_spike_4h[i] and close[i] < ema50_12h_4h[i]:
-                signals[i] = -0.25
-                position = -1
+            # Trend following in high volatility regimes (ATR ratio > 1.2)
+            if atr_ratio > 1.2:
+                if price_above_ema and close[i] > close[i-1]:
+                    signals[i] = 0.20
+                    position = 1
+                elif not price_above_ema and close[i] < close[i-1]:
+                    signals[i] = -0.20
+                    position = -1
+            # Mean reversion in low volatility regimes (ATR ratio <= 1.2)
+            else:
+                if not price_above_ema and close[i] < close[i-1]:
+                    signals[i] = 0.20
+                    position = 1
+                elif price_above_ema and close[i] > close[i-1]:
+                    signals[i] = -0.20
+                    position = -1
         
         elif position == 1:
-            # Exit long: price retouches lower Donchian (mean reversion)
-            if close[i] < lower[i]:
+            # Exit long: price crosses below EMA or volatility regime shifts
+            if not price_above_ema or atr_ratio > 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price retouches upper Donchian (mean reversion)
-            if close[i] > upper[i]:
+            # Exit short: price crosses above EMA or volatility regime shifts
+            if price_above_ema or atr_ratio > 1.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
