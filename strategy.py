@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R3_S3_1dEMA34_Trend_Volume_Rev5"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_1dEMA34_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
