@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Bollinger Band squeeze breakout with 4h trend filter and volume spike.
-# Uses Bollinger Bands (20,2) squeeze detection (<20th percentile width) followed by breakout.
-# Long when price breaks above upper band with 4h uptrend and volume spike.
-# Short when price breaks below lower band with 4h downtrend and volume spike.
-# Designed to work in both bull (follow 4h uptrend) and bear (follow 4h downtrend) markets.
-# Target: 15-37 trades/year to avoid fee drag.
-name = "1h_Bollinger_Squeeze_Breakout_4hTrend_Volume"
-timeframe = "1h"
+# Hypothesis: 6h Williams Fractal breakout with weekly trend filter and volume spike.
+# Uses Williams fractals from 1d to identify swing points, with 1w EMA trend filter.
+# Long when price breaks above bearish fractal resistance with 1w uptrend and volume spike.
+# Short when price breaks below bullish fractal support with 1w downtrend and volume spike.
+# Designed to work in both bull (follow 1w uptrend) and bear (follow 1w downtrend) markets.
+# Target: 12-37 trades/year to avoid fee drag.
+name = "6h_Williams_Fractal_Breakout_1wEMA_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,76 +23,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2) on 1h
-    bb_period = 20
-    bb_mult = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
-    upper = sma + bb_mult * std
-    lower = sma - bb_mult * std
-    bb_width = upper - lower
-    
-    # Bollinger Band squeeze: width < 20th percentile of last 50 periods
-    bb_width_series = pd.Series(bb_width)
-    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=50).quantile(0.20)
-    squeeze = bb_width < bb_width_percentile.values
-    
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for Williams fractals
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate Williams fractals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    n1d = len(high_1d)
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    bearish_fractal = np.full(n1d, np.nan)  # resistance (swing high)
+    bullish_fractal = np.full(n1d, np.nan)  # support (swing low)
+    
+    for i in range(2, n1d - 2):
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            bearish_fractal[i] = high_1d[i]
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            bullish_fractal[i] = low_1d[i]
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Align indicators to 6h timeframe
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1d, bullish_fractal, additional_delay_bars=2
+    )
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Volume confirmation: volume > 2.0x 20-period EMA (high threshold for fewer trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
+    vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient data for indicators
+    start_idx = 1  # Need at least 1 day of data for fractals
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ema20[i]) or 
-            np.isnan(sma.iloc[i]) or np.isnan(std.iloc[i]) or np.isnan(bb_width_percentile.iloc[i])):
+        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        upper_val = upper.iloc[i]
-        lower_val = lower.iloc[i]
-        squeeze_val = squeeze.iloc[i]
         
         if position == 0:
-            # Enter long: BB squeeze breakout above upper band + 4h uptrend + volume spike
-            if squeeze_val and price > upper_val and price > ema_50_4h_aligned[i] and vol_confirm[i]:
-                signals[i] = 0.20
+            # Enter long: price breaks above bearish fractal + 1w uptrend + volume spike
+            if (price > bearish_fractal_aligned[i] and 
+                price > ema_34_1w_aligned[i] and vol_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: BB squeeze breakout below lower band + 4h downtrend + volume spike
-            elif squeeze_val and price < lower_val and price < ema_50_4h_aligned[i] and vol_confirm[i]:
-                signals[i] = -0.20
+            # Enter short: price breaks below bullish fractal + 1w downtrend + volume spike
+            elif (price < bullish_fractal_aligned[i] and 
+                  price < ema_34_1w_aligned[i] and vol_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below middle Bollinger Band or trend reverses
-            if price < sma.iloc[i] or price < ema_50_4h_aligned[i]:
+            # Exit long: price returns below bullish fractal or trend reverses
+            if price < bullish_fractal_aligned[i] or price < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above middle Bollinger Band or trend reverses
-            if price > sma.iloc[i] or price > ema_50_4h_aligned[i]:
+            # Exit short: price returns above bearish fractal or trend reverses
+            if price > bearish_fractal_aligned[i] or price > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
