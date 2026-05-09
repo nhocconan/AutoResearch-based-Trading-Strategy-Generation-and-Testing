@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1-day timeframe with 1-week RSI trend filter and weekly Donchian breakout confirmation.
-# Enters long when daily RSI < 40 (oversold) and price > weekly Donchian upper (breakout).
-# Enters short when daily RSI > 60 (overbought) and price < weekly Donchian lower (breakdown).
-# Uses 1-week RSI (14) as trend filter: only allow longs when weekly RSI > 50, shorts when weekly RSI < 50.
-# Exits when RSI reverts to neutral (40-60) or breakout fails.
-# Target: 20-60 total trades over 4 years (5-15/year) with size 0.25.
+# Hypothesis: 4h timeframe with 1-day Williams Alligator and 4-hour momentum confirmation.
+# In trending markets, Alligator lines (jaws, teeth, lips) align in order; in ranging markets, they intertwine.
+# Enters long when price > Alligator teeth and 4h ROC > 0, short when price < Alligator teeth and 4h ROC < 0.
+# Uses 1-day ADX > 25 as trend filter to avoid false signals in low volatility.
+# Exits when price crosses Alligator teeth or ADX drops below 20.
+# Target: 80-150 total trades over 4 years (20-37/year) with size 0.25.
 
-name = "1D_RSI_Oversold_WeeklyDonchian_Breakout"
-timeframe = "1d"
+name = "4h_Alligator_ROC_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,49 +19,73 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate 1-week RSI (14) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Calculate 1-day Williams Alligator (13,8,5 SMAs with future shift)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    close_1w = df_1w['close']
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    close_1d = df_1d['close']
+    # Jaws: 13-period SMA, shifted 8 bars forward
+    jaws = close_1d.rolling(window=13, min_periods=13).mean().shift(8)
+    # Teeth: 8-period SMA, shifted 5 bars forward
+    teeth = close_1d.rolling(window=8, min_periods=8).mean().shift(5)
+    # Lips: 5-period SMA, shifted 3 bars forward
+    lips = close_1d.rolling(window=5, min_periods=5).mean().shift(3)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w_values = rsi_1w.values
-    rsi_1w_50 = 50.0  # threshold for trend filter
+    jaws_values = jaws.values
+    teeth_values = teeth.values
+    lips_values = lips.values
+    jaws_aligned = align_htf_to_ltf(prices, df_1d, jaws_values)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_values)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_values)
     
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    # Calculate 1-day ADX (14-period) for trend strength
+    high_1d = df_1d['high']
+    low_1d = df_1d['low']
+    close_1d = df_1d['close']
     
-    # Calculate daily RSI (14) for entry signals
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = abs(high_1d - close_1d.shift(1))
+    tr3 = abs(low_1d - close_1d.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Directional Movement
+    up = high_1d - high_1d.shift(1)
+    down = low_1d.shift(1) - low_1d
+    plus_dm = np.where((up > down) & (up > 0), up, 0)
+    minus_dm = np.where((down > up) & (down > 0), down, 0)
     
-    # Calculate weekly Donchian channel (20-period) for breakout confirmation
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    donchian_upper = high_1w.rolling(window=20, min_periods=20).max()
-    donchian_lower = low_1w.rolling(window=20, min_periods=20).min()
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
     
-    donchian_upper_values = donchian_upper.values
-    donchian_lower_values = donchian_lower.values
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_values)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_values)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window=14, min_periods=14).mean()
+    
+    adx_values = adx.values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # Calculate 4-hour Rate of Change (10-period) for momentum
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close']
+    roc = close_4h.pct_change(periods=10) * 100
+    roc_values = roc.values
+    roc_aligned = align_htf_to_ltf(prices, df_4h, roc_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,35 +94,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_1w_aligned[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i])):
+        if (np.isnan(teeth_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(roc_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: daily RSI < 40 (oversold) + weekly RSI > 50 (uptrend) + price > weekly Donchian upper
-            if rsi[i] < 40 and rsi_1w_aligned[i] > rsi_1w_50 and close[i] > donchian_upper_aligned[i]:
+            # Enter long: price > Alligator teeth, ADX > 25 (trending), ROC > 0 (bullish momentum)
+            if close[i] > teeth_aligned[i] and adx_aligned[i] > 25 and roc_aligned[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: daily RSI > 60 (overbought) + weekly RSI < 50 (downtrend) + price < weekly Donchian lower
-            elif rsi[i] > 60 and rsi_1w_aligned[i] < rsi_1w_50 and close[i] < donchian_lower_aligned[i]:
+            # Enter short: price < Alligator teeth, ADX > 25 (trending), ROC < 0 (bearish momentum)
+            elif close[i] < teeth_aligned[i] and adx_aligned[i] > 25 and roc_aligned[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: daily RSI > 50 (revert to neutral) OR price < weekly Donchian lower (breakdown)
-            if rsi[i] > 50 or close[i] < donchian_lower_aligned[i]:
+            # Exit long: price crosses below Alligator teeth OR ADX drops below 20 (trend weakening)
+            if close[i] < teeth_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: daily RSI < 50 (revert to neutral) OR price > weekly Donchian upper (breakout)
-            if rsi[i] < 50 or close[i] > donchian_upper_aligned[i]:
+            # Exit short: price crosses above Alligator teeth OR ADX drops below 20 (trend weakening)
+            if close[i] > teeth_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
