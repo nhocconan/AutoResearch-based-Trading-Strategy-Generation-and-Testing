@@ -1,20 +1,15 @@
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Breakouts at R1/S1 levels (minor sentiment extremes) with 12h trend filter and volume confirmation.
-# R1/S1 provides tighter stops and more frequent entries than R3/S3. 12h trend ensures alignment with medium-term bias.
-# Volume filters low-liquidity breakouts. Designed for 20-50 trades/year in both bull and bear markets.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+name = "4h_Choppiness_Filter_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,77 +17,100 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R1, S1)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1d EMA34 trend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
+    # Get 12h data for choppiness regime
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Trend filter: 12h EMA34
-    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate choppiness index on 12h
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Volume filter: current 4h volume > 1.3 * 30-period average
+    # True range
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    
+    # Sum of true range over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    
+    # Chop calculation: 100 * log10(tr_sum / (hh - ll)) / log10(14)
+    chop = 100 * np.log10(tr_sum / (hh - ll)) / np.log10(14)
+    
+    # Chop > 61.8 = ranging market (mean revert)
+    # Chop < 38.2 = trending market (trend follow)
+    chop_12h = chop
+    
+    # Align all to 4h
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    chop_12h_4h = align_htf_to_ltf(prices, df_12h, chop_12h)
+    
+    # Donchian channel (20-period) on 4h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
-    
-    # Align all to 4h (primary timeframe)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_12h_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema34_12h_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema34_1d_4h[i]) or np.isnan(chop_12h_4h[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
-        trend = ema34_12h_4h[i]
+        ema34 = ema34_1d_4h[i]
+        chop_val = chop_12h_4h[i]
+        upper_ch = upper[i]
+        lower_ch = lower[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: break above upper band in trending market (chop < 38.2) with volume
+            if close[i] > upper_ch and chop_val < 38.2 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: break below lower band in trending market (chop < 38.2) with volume
+            elif close[i] < lower_ch and chop_val < 38.2 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: close below lower band OR chop > 61.8 (range) with mean reversion
+            if close[i] < lower_ch or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: close above upper band OR chop > 61.8 (range) with mean reversion
+            if close[i] > upper_ch or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
