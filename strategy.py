@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_KAMA_RSI_Combo_1dTrend
-# Hypothesis: Use KAMA trend filter from daily chart to identify regime, then enter long/short based on RSI extremes (below 30/above 70) with volume confirmation on 6h.
-# KAMA adapts to market noise, reducing whipsaws in choppy markets. RSI extremes provide mean reversion entries in ranging markets and momentum exhaustion signals in trends.
-# Works in bull markets by buying dips in uptrends, in bear markets by selling rallies in downtrends. Volume filter ensures only high-conviction moves trigger entries.
-# Target: 20-40 trades/year on 6h timeframe.
+# 12h_PriceChannelBreakout_VolumeTrend
+# Hypothesis: Breakout above/below 12h Donchian(20) channels with volume >1.5x 20-period average and trend filter from 1d EMA34.
+# Uses 12h timeframe for lower trade frequency, with 1d trend filter to reduce whipsaws in bear markets.
+# Designed for 15-30 trades/year on 12h timeframe with strict entry conditions to minimize fee drag.
 
-name = "6h_KAMA_RSI_Combo_1dTrend"
-timeframe = "6h"
+name = "12h_PriceChannelBreakout_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,77 +14,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 40:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend filter and RSI
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average ) on daily close
-    # Parameters: ER length = 10, Fast SC = 2/(2+1), Slow SC = 2/(30+1)
-    er_len = 10
-    fast_sc = 2 / (2 + 1)      # 0.6667
-    slow_sc = 2 / (30 + 1)     # 0.0645
+    # Calculate 1d EMA(34) with proper initialization
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    er = np.zeros_like(close_1d)
-    if len(close_1d) >= er_len:
-        for i in range(er_len, len(close_1d)):
-            net_change = np.abs(close_1d[i] - close_1d[i-er_len])
-            total_change = np.sum(np.abs(np.diff(close_1d[i-er_len:i+1])))
-            if total_change > 0:
-                er[i] = net_change / total_change
-            else:
-                er[i] = 0
+    # Align 1d EMA to 12h timeframe
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Smoothing Constant (SC)
-    sc = np.zeros_like(close_1d)
-    sc = er * (fast_sc - slow_sc) + slow_sc
+    # Calculate 12h Donchian channels (20-period high/low)
+    donchian_high = np.full_like(high, np.nan)
+    donchian_low = np.full_like(low, np.nan)
     
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    if len(close_1d) > 0:
-        kama[0] = close_1d[0]
-        for i in range(1, len(close_1d)):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    if len(high) >= 20:
+        # Initialize first value
+        donchian_high[19] = np.max(high[0:20])
+        donchian_low[19] = np.min(low[0:20])
+        # Rolling calculation
+        for i in range(20, len(high)):
+            donchian_high[i] = max(donchian_high[i-1], high[i])
+            donchian_low[i] = min(donchian_low[i-1], low[i])
     
-    # Align KAMA to 6h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate RSI(14) on 6h close
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    
-    if len(close) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[0:rsi_period])
-        avg_loss[rsi_period-1] = np.mean(loss[0:rsi_period])
-        for i in range(rsi_period, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.zeros_like(close)
-    rsi = np.full_like(close, np.nan)
-    valid = (~np.isnan(avg_gain)) & (~np.isnan(avg_loss)) & (avg_loss != 0)
-    rs[valid] = avg_gain[valid] / avg_loss[valid]
-    rsi[valid] = 100 - (100 / (1 + rs[valid]))
-    
-    # Volume filter: 6h volume / 20-period average volume
+    # Volume filter: 12h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -99,37 +66,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20, 14)  # Ensure all indicators are ready
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high[i]) or \
+           np.isnan(donchian_low[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price above KAMA (uptrend) AND RSI oversold (<30) AND volume confirmation
-            if close[i] > kama_aligned[i] and rsi[i] < 30 and volume_ratio[i] > 1.5:
+            # Enter long: Price breaks above Donchian high AND volume confirmation AND bullish trend (price > EMA)
+            if close[i] > donchian_high[i] and volume_ratio[i] > 1.5 and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below KAMA (downtrend) AND RSI overbought (>70) AND volume confirmation
-            elif close[i] < kama_aligned[i] and rsi[i] > 70 and volume_ratio[i] > 1.5:
+            # Enter short: Price breaks below Donchian low AND volume confirmation AND bearish trend (price < EMA)
+            elif close[i] < donchian_low[i] and volume_ratio[i] > 1.5 and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought (>70) or price crosses below KAMA (trend change)
-            if rsi[i] > 70 or close[i] < kama_aligned[i]:
+            # Exit long: Price breaks below Donchian low (reversal signal) or trend turns bearish
+            if close[i] < donchian_low[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold (<30) or price crosses above KAMA (trend change)
-            if rsi[i] < 30 or close[i] > kama_aligned[i]:
+            # Exit short: Price breaks above Donchian high (reversal signal) or trend turns bullish
+            if close[i] > donchian_high[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
