@@ -1,17 +1,14 @@
-# 6h Weekly Pivot + Volume Spike + Trend Confirmation
-# Hypothesis: Combines weekly pivot points (1w) for institutional support/resistance with volume confirmation and daily trend filter.
-# Weekly pivot levels (R1/S1) act as key price levels where reversals or breakouts occur.
-# Volume spikes confirm institutional participation. Daily ADX > 25 ensures trades align with stronger trends.
-# Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1).
-# Target: 15-35 trades/year to minimize fee drag on 6h timeframe.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_VolumeTrend"
-timeframe = "6h"
+# Hypothesis: 4h Camarilla Pivot (R1/S1) breakout with 1d VWAP trend filter and volume spike.
+# Uses daily VWAP for trend direction, Camarilla levels for precise breakout entries,
+# and volume surge for confirmation. Designed to work in both bull (breakouts above R1)
+# and bear (breakdowns below S1). Target: 20-40 trades/year to avoid fee drag.
+name = "4h_Camarilla_R1_S1_Breakout_1dVWAP_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,94 +21,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (using previous week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Pivot point and support/resistance levels
-    pivot = (high_1w[:-1] + low_1w[:-1] + close_1w[:-1]) / 3
-    r1 = 2 * pivot - low_1w[:-1]
-    s1 = 2 * pivot - high_1w[:-1]
-    r2 = pivot + (high_1w[:-1] - low_1w[:-1])
-    s2 = pivot - (high_1w[:-1] - low_1w[:-1])
-    
-    # Align weekly pivot levels to 6h timeframe (previous week's levels)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Get daily data for ADX trend filter
+    # Get 1d data for VWAP trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 14-period ADX for daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate VWAP for daily timeframe
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    pv = typical_price_1d * df_1d['volume'].values
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(df_1d['volume'].values)
+    vwap = np.divide(cum_pv, cum_vol, out=np.zeros_like(cum_pv), where=cum_vol!=0)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
+    # Calculate Camarilla levels for 4h timeframe (based on previous day's OHLC)
+    # We need daily OHLC to calculate Camarilla levels for intraday periods
+    # Since we're on 4h timeframe, we'll use the previous day's OHLC for all 4h bars of current day
+    # Extract daily OHLC from 1d data
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Plus/Minus Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = np.diff(low_1d, prepend=low_1d[0]) * -1
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate Camarilla levels for each day
+    camarilla_r1 = np.zeros_like(daily_close)
+    camarilla_s1 = np.zeros_like(daily_close)
+    camarilla_r2 = np.zeros_like(daily_close)
+    camarilla_s2 = np.zeros_like(daily_close)
     
-    # Wilder's smoothing
-    period = 14
-    alpha = 1.0 / period
-    atr = np.zeros_like(tr)
-    atr[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
+    for i in range(len(daily_close)):
+        # Camarilla formulas
+        range_val = daily_high[i] - daily_low[i]
+        camarilla_r1[i] = daily_close[i] + range_val * 1.1 / 12
+        camarilla_s1[i] = daily_close[i] - range_val * 1.1 / 12
+        camarilla_r2[i] = daily_close[i] + range_val * 1.1 / 6
+        camarilla_s2[i] = daily_close[i] - range_val * 1.1 / 6
     
-    plus_di = 100 * np.where(atr > 0, 
-                             np.convolve(plus_dm, np.ones(period)/period, mode='full')[:len(plus_dm)] / atr, 0)
-    minus_di = 100 * np.where(atr > 0,
-                              np.convolve(minus_dm, np.ones(period)/period, mode='full')[:len(minus_dm)] / atr, 0)
+    # Align daily Camarilla levels to 4h timeframe
+    # Each 4h bar gets the Camarilla levels from the same day
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
     
-    # Calculate DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = np.zeros_like(dx)
-    for i in range(len(dx)):
-        if i < period:
-            adx[i] = np.nan
-        elif i == period:
-            adx[i] = np.mean(dx[1:period+1])
-        else:
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    # VWAP trend: price above/below VWAP indicates trend
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
-    # Align daily ADX to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Volume confirmation: volume > 2.0x 20-period EMA
+    # Volume confirmation: volume > 1.8x 20-period EMA (moderate threshold)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
+    vol_confirm = volume > (1.8 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after enough data for indicators
-    start_idx = max(20, 14)  # EMA20 and ADX14
+    start_idx = 0  # Can start from first bar as Camarilla levels are available
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(vwap_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -120,26 +87,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above R1 + ADX > 25 + volume spike
-            if (price > r1_aligned[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter long: price breaks above R1 + price > VWAP (uptrend) + volume spike
+            if (price > r1_aligned[i] and price > vwap_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + ADX > 25 + volume spike
-            elif (price < s1_aligned[i] and adx_aligned[i] > 25 and vol_confirm[i]):
+            # Enter short: price breaks below S1 + price < VWAP (downtrend) + volume spike
+            elif (price < s1_aligned[i] and price < vwap_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below pivot or ADX drops below 20
-            if price < pivot_aligned[i] or adx_aligned[i] < 20:
+            # Exit long: price returns below R1 or VWAP turns down
+            if price < r1_aligned[i] or price < vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above pivot or ADX drops below 20
-            if price > pivot_aligned[i] or adx_aligned[i] < 20:
+            # Exit short: price returns above S1 or VWAP turns up
+            if price > s1_aligned[i] or price > vwap_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
