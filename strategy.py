@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Vortex_Trend_12hEMA50"
-timeframe = "4h"
+name = "1h_Camarilla_Pullback_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,73 +17,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
+        return np.zeros(n)
     
-    # Calculate Vortex Indicator (VI) on 4h
-    period = 14
-    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.nan
-    vm_minus[0] = np.nan
+    # 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    # Daily Camarilla levels (using previous day's OHLC)
+    prev_close_1d = np.roll(df_1d['close'], 1)
+    prev_high_1d = np.roll(df_1d['high'], 1)
+    prev_low_1d = np.roll(df_1d['low'], 1)
+    prev_close_1d[0] = np.nan
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
     
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
+    # Camarilla levels: H3, L3 (tighter levels for more precise entries)
+    H3 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 4
+    L3 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 4
+    
+    # Align 4h EMA and daily Camarilla levels to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, period)  # Need 50 for EMA50 and 14 for VI
+    start_idx = 20  # Need enough for EMA and Camarilla
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i])):
+        # Skip if required data unavailable
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_12h = ema_50_12h_aligned[i]
-        vi_p = vi_plus[i]
-        vi_m = vi_minus[i]
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        if position == 0:
-            # Enter long: VI+ > VI- and price above 12h EMA50 (uptrend)
-            if vi_p > vi_m and close[i] > ema_12h:
-                signals[i] = 0.25
+        ema_4h = ema_4h_aligned[i]
+        h3 = H3_aligned[i]
+        l3 = L3_aligned[i]
+        
+        if position == 0 and in_session:
+            # Enter long: Pullback to L3 in uptrend (price > 4h EMA20)
+            if close[i] <= l3 and close[i] > ema_4h:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: VI- > VI+ and price below 12h EMA50 (downtrend)
-            elif vi_m > vi_p and close[i] < ema_12h:
-                signals[i] = -0.25
+            # Enter short: Pullback to H3 in downtrend (price < 4h EMA20)
+            elif close[i] >= h3 and close[i] < ema_4h:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: VI- > VI+ (trend change) or price below 12h EMA50
-            if vi_m > vi_p or close[i] < ema_12h:
+            # Exit long: Price crosses below 4h EMA20 (trend change)
+            if close[i] < ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: VI+ > VI- (trend change) or price above 12h EMA50
-            if vi_p > vi_m or close[i] > ema_12h:
+            # Exit short: Price crosses above 4h EMA20 (trend change)
+            if close[i] > ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
