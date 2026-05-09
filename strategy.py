@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1d_KAMA_Trend_RSI_Overbought_Oversold"
-timeframe = "12h"
+name = "1h_4h_1d_Camarilla_R1_S1_Breakout_Trend_Volume_Session"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,76 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 4h data for trend and volume filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # KAMA trend calculation
-    close_series = pd.Series(df_1d['close'])
-    change = abs(close_series.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = [close_series.iloc[0]]
-    for i in range(1, len(close_series)):
-        kama.append(kama[-1] + sc.iloc[i] * (close_series.iloc[i] - kama[-1]))
-    kama = np.array(kama)
+    # Get 1d data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # RSI calculation
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50)
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align KAMA and RSI to 12h
-    kama_12h = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_12h = align_htf_to_ltf(prices, df_1d, rsi.values)
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    
+    # Trend filter: 4h EMA34
+    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Volume filter: current 4h volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_4h['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_4h = df_4h['volume'].values > (vol_ma * 1.5)
+    
+    # Align all to 1h
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_4h_1h = align_htf_to_ltf(prices, df_4h, ema34_4h)
+    volume_filter_4h_1h = align_htf_to_ltf(prices, df_4h, volume_filter_4h)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Need enough data for KAMA and RSI
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_12h[i]) or np.isnan(rsi_12h[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
+            np.isnan(ema34_4h_1h[i]) or np.isnan(volume_filter_4h_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama_12h[i]
-        rsi_val = rsi_12h[i]
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        r1_val = r1_1h[i]
+        s1_val = s1_1h[i]
+        trend = ema34_4h_1h[i]
+        vol_filter = volume_filter_4h_1h[i]
         
         if position == 0:
-            # Enter long: price above KAMA and RSI oversold (<30)
-            if close[i] > kama_val and rsi_val < 30:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price below KAMA and RSI overbought (>70)
-            elif close[i] < kama_val and rsi_val > 70:
-                signals[i] = -0.25
-                position = -1
+            if in_session:
+                # Enter long: break above R1 with volume and above trend
+                if close[i] > r1_val and close[i] > trend and vol_filter:
+                    signals[i] = 0.20
+                    position = 1
+                # Enter short: break below S1 with volume and below trend
+                elif close[i] < s1_val and close[i] < trend and vol_filter:
+                    signals[i] = -0.20
+                    position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought (>70) or price below KAMA
-            if rsi_val > 70 or close[i] < kama_val:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: RSI oversold (<30) or price above KAMA
-            if rsi_val < 30 or close[i] > kama_val:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
