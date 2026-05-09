@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h breakout at daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
-# Uses price channel breakouts (proven structure) with volume confirmation and trend alignment.
-# Designed for low trade frequency (<30/year) to minimize fee drag in BTC/ETH.
+# 4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS
+# Hypothesis: Tight breakout at Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+# EMA34 is more responsive than EMA50, better capturing trend changes in volatile crypto markets.
+# Volume spike (>2x 20-period average) confirms breakout strength.
+# Designed for low trade frequency (<50/year) to minimize fee drag in BTC/ETH.
 # Works in both bull and bear markets by following the daily trend direction.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +43,7 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
