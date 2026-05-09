@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend
-# Hypothesis: Buy when price breaks above Camarilla R1 level and sell when price breaks below S1 level on 4h timeframe, 
-# filtered by 1d EMA34 trend direction (bullish when price > EMA34, bearish when price < EMA34). 
-# Uses volume confirmation (volume > 1.5x average) to filter low-conviction moves. 
-# Designed for 20-50 trades per year on 4h timeframe. Works in bull markets via breakouts in uptrend 
-# and in bear markets via breakdowns in downtrend.
+# 4h_ADX_Donchian_Breakout_1dTrend
+# Hypothesis: Breakout from Donchian(20) channels on 4h timeframe, filtered by ADX(14) > 25 for trending regime
+# and 1d EMA50 trend direction. Long when price breaks above upper band in bullish trend (price > EMA50),
+# short when price breaks below lower band in bearish trend (price < EMA50). Uses volume confirmation
+# (volume > 1.5x average) to avoid false breakouts. Designed for 20-50 trades per year on 4h timeframe.
+# Works in bull markets via breakouts in uptrends and bear markets via breakdowns in downtrends.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend"
+name = "4h_ADX_Donchian_Breakout_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,44 +26,69 @@ def generate_signals(prices):
     
     # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(34)
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
+    # Calculate 1d EMA(50)
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
     # Align 1d EMA to 4h timeframe
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels using previous day's OHLC
-    # Camarilla levels are calculated from previous day's range
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
-    # We need to shift by 1 to use previous day's data
+    # Calculate ADX(14) on 4h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
+        
+        # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed TR, +DM, -DM using Wilder's smoothing (same as EMA with alpha=1/period)
+        def wilder_smooth(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                result[period-1] = np.mean(data[0:period])
+                for i in range(period, len(data)):
+                    result[i] = (result[i-1] * (period-1) + data[i]) / period
+            return result
+        
+        atr = wilder_smooth(tr, period)
+        plus_di = 100 * wilder_smooth(plus_dm, period) / atr
+        minus_di = 100 * wilder_smooth(minus_dm, period) / atr
+        
+        # DX and ADX
+        dx = np.zeros_like(close)
+        dx_mask = (plus_di + minus_di) != 0
+        dx[dx_mask] = 100 * np.abs(plus_di[dx_mask] - minus_di[dx_mask]) / (plus_di[dx_mask] + minus_di[dx_mask])
+        
+        adx = wilder_smooth(dx, period)
+        return adx
     
-    # Calculate daily range from 1d data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = np.roll(close_1d, 1)  # Previous day's close
-    close_1d_prev[0] = np.nan  # First day has no previous
+    adx = calculate_adx(high, low, close, 14)
     
-    # Calculate Camarilla levels for each day
-    camarilla_R1 = np.full_like(close_1d, np.nan)
-    camarilla_S1 = np.full_like(close_1d, np.nan)
+    # Calculate Donchian channels (20-period)
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(low, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    valid = ~np.isnan(close_1d_prev)
-    camarilla_R1[valid] = close_1d_prev[valid] + (high_1d[valid] - low_1d[valid]) * 1.1 / 12
-    camarilla_S1[valid] = close_1d_prev[valid] - (high_1d[valid] - low_1d[valid]) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    upper_band, lower_band = donchian_channels(high, low, 20)
     
     # Volume filter: 4h volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -79,38 +104,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)  # Ensure volume MA is ready
+    start_idx = max(20, 14, 1)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or \
-           np.isnan(camarilla_S1_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or \
+           np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or \
+           np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price breaks above R1 AND volume confirmation AND bullish trend (price > EMA)
-            if close[i] > camarilla_R1_aligned[i] and volume_ratio[i] > 1.5 and close[i] > ema_34_1d_aligned[i]:
+            # Enter long: Price breaks above upper band AND ADX > 25 (trending) AND volume confirmation AND bullish trend (price > EMA)
+            if close[i] > upper_band[i] and adx[i] > 25 and volume_ratio[i] > 1.5 and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S1 AND volume confirmation AND bearish trend (price < EMA)
-            elif close[i] < camarilla_S1_aligned[i] and volume_ratio[i] > 1.5 and close[i] < ema_34_1d_aligned[i]:
+            # Enter short: Price breaks below lower band AND ADX > 25 (trending) AND volume confirmation AND bearish trend (price < EMA)
+            elif close[i] < lower_band[i] and adx[i] > 25 and volume_ratio[i] > 1.5 and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below S1 (reversal signal) or trend turns bearish
-            if close[i] < camarilla_S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Price breaks below lower band (reversal) or trend turns bearish or ADX weakens
+            if close[i] < lower_band[i] or close[i] < ema_50_1d_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above R1 (reversal signal) or trend turns bullish
-            if close[i] > camarilla_R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Price breaks above upper band (reversal) or trend turns bullish or ADX weakens
+            if close[i] > upper_band[i] or close[i] > ema_50_1d_aligned[i] or adx[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
