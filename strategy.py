@@ -1,16 +1,14 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-6h 1w/1d CCI Divergence with Weekly Trend Filter
-Long when: Price makes lower low, CCI makes higher low (bullish divergence) above -100, weekly CCI > 0
-Short when: Price makes higher high, CCI makes lower high (bearish divergence) below 100, weekly CCI < 0
-Exit: CCI crosses zero in opposite direction
-Uses weekly CCI for trend filter and daily CCI for divergence signals to avoid false breakouts in ranging markets.
-Designed for 6h timeframe with ~50-150 trades over 4 years (12-37/year).
-"""
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume spike
+# Long when price breaks above 12h Donchian upper band with 1d EMA50 uptrend and volume > 1.5x average
+# Short when price breaks below 12h Donchian lower band with 1d EMA50 downtrend and volume > 1.5x average
+# Exit when price returns to 12h Donchian middle band or reverses to opposite band
+# Uses Donchian channels for breakout structure, EMA for trend, volume for conviction
+# Designed to capture medium-term trends with low frequency to minimize fee drag
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "6h_CCI_Divergence_WeeklyTrend"
-timeframe = "6h"
+name = "12h_Donchian20_1dEMA50_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,101 +17,73 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
+    # Calculate 12h Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Calculate weekly CCI (20-period)
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    ma_1w = typical_price_1w.rolling(window=20, min_periods=20).mean()
-    mad_1w = typical_price_1w.rolling(window=20, min_periods=20).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci_1w = (typical_price_1w - ma_1w) / (0.015 * mad_1w)
-    cci_1w = cci_1w.fillna(0).values
-    cci_1w_aligned = align_htf_to_ltf(prices, df_1w, cci_1w)
-    
-    # Get daily data for signal generation
+    # Calculate 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate daily CCI (14-period)
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    ma_1d = typical_price_1d.rolling(window=14, min_periods=14).mean()
-    mad_1d = typical_price_1d.rolling(window=14, min_periods=14).apply(
-        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-    )
-    cci_1d = (typical_price_1d - ma_1d) / (0.015 * mad_1d)
-    cci_1d = cci_1d.fillna(0).values
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align price arrays for divergence detection
-    high_aligned = align_htf_to_ltf(prices, df_1d, high)
-    low_aligned = align_htf_to_ltf(prices, df_1d, low)
-    close_aligned = align_htf_to_ltf(prices, df_1d, close)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for CCI calculation
+    start_idx = 50  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(cci_1w_aligned[i]) or np.isnan(cci_1d_aligned[i]) or
-            np.isnan(high_aligned[i]) or np.isnan(low_aligned[i]) or np.isnan(close_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get values for divergence detection (look back 2-5 periods)
-        lookback = 3
-        if i - lookback < 0:
-            continue
-            
-        # Current and past values
-        cci_now = cci_1d_aligned[i]
-        cci_past = cci_1d_aligned[i - lookback]
-        price_high_now = high_aligned[i]
-        price_high_past = high_aligned[i - lookback]
-        price_low_now = low_aligned[i]
-        price_low_past = low_aligned[i - lookback]
-        
         if position == 0:
-            # Bullish divergence: price makes lower low, CCI makes higher low
-            bull_div = (price_low_now < price_low_past) and (cci_now > cci_past)
-            # Bearish divergence: price makes higher high, CCI makes lower high
-            bear_div = (price_high_now > price_high_past) and (cci_now < cci_past)
-            
-            # Enter long: bullish divergence above -100, weekly CCI positive
-            if bull_div and (cci_now > -100) and (cci_1w_aligned[i] > 0):
+            # Enter long: price breaks above Donchian upper band, EMA50 uptrend, volume spike
+            if (close[i] > donchian_high[i] and 
+                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA rising
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish divergence below 100, weekly CCI negative
-            elif bear_div and (cci_now < 100) and (cci_1w_aligned[i] < 0):
+            # Enter short: price breaks below Donchian lower band, EMA50 downtrend, volume spike
+            elif (close[i] < donchian_low[i] and 
+                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA falling
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: CCI crosses below zero
-            if cci_now < 0 and cci_past >= 0:
+            # Exit long: price returns to middle band or reverses to lower band
+            if (close[i] <= donchian_mid[i]) or (close[i] < donchian_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: CCI crosses above zero
-            if cci_now > 0 and cci_past <= 0:
+            # Exit short: price returns to middle band or reverses to upper band
+            if (close[i] >= donchian_mid[i]) or (close[i] > donchian_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
