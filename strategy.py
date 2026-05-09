@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Camarilla_R3S3_Breakout_TrendFilter_Volume"
-timeframe = "4h"
+name = "12H_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,24 +22,23 @@ def generate_signals(prices):
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
+    # Calculate Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and ranges
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels (R3, S3) - key breakout levels
+    # Camarilla levels (R3, S3)
     r3_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 4h
+    # Align to 12h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Daily EMA50 for trend filter (more reliable than 34)
+    # Daily EMA50 for trend filter
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
@@ -51,7 +50,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
