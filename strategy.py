@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Keltner_Reversal_DailyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    4h Camarilla R3/S3 breakout with 1d EMA(34) trend filter and volume confirmation.
-    - Long: Close breaks above Camarilla R3 with volume > 1.5x avg and price > 1d EMA(34)
-    - Short: Close breaks below Camarilla S3 with volume > 1.5x avg and price < 1d EMA(34)
-    - Exit: Price crosses back through the pivot point (PP)
-    - Uses Camarilla from previous day's range (excluding current day)
-    - Target: 25-40 trades/year on 4h timeframe
+    12h Keltner reversal with daily trend filter and volume spike.
+    - Long: Close below lower Keltner band (20, 1.5) + daily close > daily EMA50 + volume > 2x avg
+    - Short: Close above upper Keltner band (20, 1.5) + daily close < daily EMA50 + volume > 2x avg
+    - Exit: Close crosses back through 20-period EMA
+    - Uses daily trend to filter reversals in ranging markets
     """
     n = len(prices)
     if n < 50:
@@ -25,34 +24,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend filter
+    # Calculate daily EMA(50) for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate previous day's Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Calculate 12h Keltner channels (20, 1.5)
+    close_series = pd.Series(close)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     
-    # PP = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 4
-    # S3 = C - (H - L) * 1.1 / 4
-    pp_1d = (high_1d + low_1d + close_1d_vals) / 3
-    r3_1d = close_1d_vals + (high_1d - low_1d) * 1.1 / 4
-    s3_1d = close_1d_vals - (high_1d - low_1d) * 1.1 / 4
+    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_series = pd.Series(np.maximum(high - low, np.maximum(abs(high - close_series.shift(1)), abs(low - close_series.shift(1)))))
+    atr = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align to 4h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    upper_keltner = ema20 + 1.5 * atr
+    lower_keltner = ema20 - 1.5 * atr
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2x 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -63,37 +57,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema20[i]) or 
+            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
         
         if position == 0:
-            # Long: Close breaks above R3 with volume confirmation and above 1d EMA trend
-            if close[i] > r3_aligned[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
+            # Long: Close below lower Keltner + daily uptrend + volume spike
+            if close[i] < lower_keltner[i] and close[i] > ema50_1d_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S3 with volume confirmation and below 1d EMA trend
-            elif close[i] < s3_aligned[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
+            # Short: Close above upper Keltner + daily downtrend + volume spike
+            elif close[i] > upper_keltner[i] and close[i] < ema50_1d_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses back through pivot point
-            if close[i] < pp_aligned[i]:
+            # Exit long: Close crosses back through 20-period EMA
+            if close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses back through pivot point
-            if close[i] > pp_aligned[i]:
+            # Exit short: Close crosses back through 20-period EMA
+            if close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
