@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian20_WeeklyPivotTrend_VolumeFilter"
-timeframe = "6h"
+name = "12h_1d_ChoppinessIndex_MeanReversion_V2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,84 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian breakout and volume filter
+    # Get 1d data for choppiness and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 25:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 1w data for weekly pivot trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate 1d Choppiness Index (14-period)
+    atr_series = []
+    for i in range(len(df_1d)):
+        if i == 0:
+            tr = df_1d['high'].iloc[i] - df_1d['low'].iloc[i]
+        else:
+            tr = max(
+                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+                abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+            )
+        atr_series.append(tr)
     
-    # Calculate 1d Donchian channels (20-period)
-    high_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    atr_series = np.array(atr_series)
+    atr_sum = pd.Series(atr_series).rolling(window=14, min_periods=14).sum().values
     
-    # Calculate 1w weekly pivot points (classic floor trader pivots)
-    prev_weekly_high = df_1w['high'].shift(1).values
-    prev_weekly_low = df_1w['low'].shift(1).values
-    prev_weekly_close = df_1w['close'].shift(1).values
+    highest_high = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
     
-    pivot_point = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
-    r1 = 2 * pivot_point - prev_weekly_low
-    s1 = 2 * pivot_point - prev_weekly_high
+    # Avoid division by zero
+    range_sum = highest_high - lowest_low
+    chop = np.zeros_like(atr_sum)
+    mask = range_sum != 0
+    chop[mask] = 100 * np.log10(atr_sum[mask] / range_sum[mask]) / np.log10(14)
     
-    # Volume filter: current 1d volume > 1.3 * 20-day average
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Volume filter: current 1d volume > 1.3 * 30-day average
     vol_series = pd.Series(df_1d['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
     volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.3)
     
-    # Align all to 6h timeframe
-    high_20_6h = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_6h = align_htf_to_ltf(prices, df_1d, low_20)
-    pivot_point_6h = align_htf_to_ltf(prices, df_1w, pivot_point)
-    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
-    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
-    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align all to 12h
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 20)  # Need enough data for Donchian and volume MA
+    start_idx = max(50, 30)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20_6h[i]) or np.isnan(low_20_6h[i]) or
-            np.isnan(pivot_point_6h[i]) or np.isnan(r1_6h[i]) or
-            np.isnan(s1_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if (np.isnan(chop_12h[i]) or np.isnan(ema50_1d_12h[i]) or 
+            np.isnan(volume_filter_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper_channel = high_20_6h[i]
-        lower_channel = low_20_6h[i]
-        pivot = pivot_point_6h[i]
-        r1_val = r1_6h[i]
-        s1_val = s1_6h[i]
-        vol_filter = volume_filter_6h[i]
+        chop_val = chop_12h[i]
+        trend = ema50_1d_12h[i]
+        vol_filter = volume_filter_12h[i]
         
         if position == 0:
-            # Enter long: break above upper Donchian with volume and above weekly pivot
-            if close[i] > upper_channel and close[i] > pivot and vol_filter:
+            # Enter long in ranging market (high chop) when price below EMA50
+            if chop_val > 61.8 and close[i] < trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower Donchian with volume and below weekly pivot
-            elif close[i] < lower_channel and close[i] < pivot and vol_filter:
+            # Enter short in ranging market (high chop) when price above EMA50
+            elif chop_val > 61.8 and close[i] > trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below weekly pivot (mean reversion to pivot)
-            if close[i] < pivot:
+            # Exit long: chop drops (trending) or price crosses above EMA50
+            if chop_val < 38.2 or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above weekly pivot (mean reversion to pivot)
-            if close[i] > pivot:
+            # Exit short: chop drops (trending) or price crosses below EMA50
+            if chop_val < 38.2 or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
