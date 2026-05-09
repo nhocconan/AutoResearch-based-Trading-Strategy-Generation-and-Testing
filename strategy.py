@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1w ADX trend filter and volume confirmation.
-# Uses weekly ADX for strong trend filtering (reduces false signals), Donchian channels for breakout entries,
-# and volume surge for confirmation. Designed to capture strong trends while avoiding chop.
-# Weekly timeframe reduces noise, ADX > 25 ensures trend strength. Target: 20-40 trades/year.
-name = "4h_Donchian20_1wADX25_VolumeConfirm"
-timeframe = "4h"
+# Hypothesis: 1d Donchian breakout with 1w ADX trend filter and volume spike.
+# Uses weekly ADX for trend strength, daily Donchian channels for breakout signals,
+# and volume surge for confirmation. Designed to work in both bull (breakouts above upper channel)
+# and bear (breakdowns below lower channel). Target: 15-30 trades/year to avoid fee drag.
+name = "1d_Donchian20_1wADX25_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -69,7 +69,7 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Donchian channels (20-period) for 4h timeframe
+    # Calculate Donchian channels (20-period) for daily timeframe
     upper_channel = np.full_like(high, np.nan)
     lower_channel = np.full_like(low, np.nan)
     for i in range(len(high)):
@@ -80,12 +80,12 @@ def generate_signals(prices):
             upper_channel[i] = np.max(high[i-19:i+1])
             lower_channel[i] = np.min(low[i-19:i+1])
     
-    # Align 1w ADX to 4h timeframe
+    # Align 1w ADX to 1d timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Volume confirmation: volume > 1.8x 20-period EMA (balanced threshold)
+    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.8 * vol_ema20)
+    vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,11 +104,11 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: price breaks above upper channel + 1w ADX > 25 + volume confirmation
+            # Enter long: price breaks above upper channel + 1w ADX > 25 + volume spike
             if (price > upper_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower channel + 1w ADX > 25 + volume confirmation
+            # Enter short: price breaks below lower channel + 1w ADX > 25 + volume spike
             elif (price < lower_channel[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
