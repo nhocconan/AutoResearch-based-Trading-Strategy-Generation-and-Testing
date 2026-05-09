@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Long when price breaks above Donchian upper band, price > 1d EMA50, and volume > 1.5x volume MA(20).
-# Short when price breaks below Donchian lower band, price < 1d EMA50, and volume > 1.5x volume MA(20).
-# Exit when price crosses back below Donchian middle band (for longs) or above (for shorts).
-# Uses volatility-adjusted position sizing (0.25) to manage drawdowns.
-# Target: 20-50 trades per year per symbol (80-200 over 4 years).
+# Hypothesis: 12h timeframe with 1-day RSI(14) momentum and 1-week Bollinger Bands(20,2) regime.
+# Enters long when RSI > 55 and price touches lower Bollinger Band in low volatility regime.
+# Enters short when RSI < 45 and price touches upper Bollinger Band in low volatility regime.
+# Uses 1-day ATR(14) normalized by 50-period mean to detect low-volatility regime (mean-reversion favorable).
+# Weekly Bollinger Bands provide dynamic support/resistance that adapts to market conditions.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_Donchian20_EMA50_Volume_Trend"
-timeframe = "4h"
+name = "12h_RSI_BBands_VolRegime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,22 +24,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2.0
-    
-    # 1d EMA50 for trend filter
+    # Calculate 1-day RSI(14) for momentum
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # RSI(14)
+    delta = np.diff(df_1d['close'], prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14 = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: volume > 1.5x volume MA(20)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (1.5 * vol_ma)
+    # Calculate 1-day ATR(14) for volatility regime
+    prev_close = np.roll(df_1d['close'], 1)
+    prev_close[0] = np.nan
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - prev_close)
+    tr3 = np.abs(df_1d['low'] - prev_close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # 50-period mean of ATR for normalization
+    atr_mean_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    
+    # Volatility regime: low volatility when ATR < 0.8 * mean ATR
+    vol_regime_low = atr_14 < (0.8 * atr_mean_50)
+    
+    # Calculate 1-week Bollinger Bands(20,2) on 12h data (1 week = 14 bars)
+    typical_price = (high + low + close) / 3.0
+    bb_middle = pd.Series(typical_price).rolling(window=14, min_periods=14).mean().values
+    bb_std = pd.Series(typical_price).rolling(window=14, min_periods=14).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    
+    # Price touching Bollinger Bands (with small tolerance)
+    price_touching_lower = low <= bb_lower * 1.001
+    price_touching_upper = high >= bb_upper * 0.999
+    
+    # Align HTF indicators to 12h timeframe
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    vol_regime_low_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -48,38 +75,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_confirmed[i])):
+        if (np.isnan(rsi_14_aligned[i]) or np.isnan(vol_regime_low_aligned[i]) or
+            np.isnan(price_touching_lower[i]) or np.isnan(price_touching_upper[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: breakout above Donchian high, above EMA50, volume confirmed
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_confirmed[i]):
+            # Enter long: low volatility regime + RSI > 55 + price touching lower BB
+            if vol_regime_low_aligned[i] and rsi_14_aligned[i] > 55 and price_touching_lower[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: breakdown below Donchian low, below EMA50, volume confirmed
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_confirmed[i]):
+            # Enter short: low volatility regime + RSI < 45 + price touching upper BB
+            elif vol_regime_low_aligned[i] and rsi_14_aligned[i] < 45 and price_touching_upper[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian middle band
-            if close[i] < donchian_mid[i]:
+            # Exit long: volatility regime shifts to high OR RSI < 50 OR price touches upper BB
+            if (not vol_regime_low_aligned[i]) or (rsi_14_aligned[i] < 50) or price_touching_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian middle band
-            if close[i] > donchian_mid[i]:
+            # Exit short: volatility regime shifts to high OR RSI > 50 OR price touches lower BB
+            if (not vol_regime_low_aligned[i]) or (rsi_14_aligned[i] > 50) or price_touching_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
