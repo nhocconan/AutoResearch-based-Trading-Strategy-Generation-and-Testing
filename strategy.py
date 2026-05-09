@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     r4 = close_1d + camarilla_range * 1.666
     s4 = close_1d - camarilla_range * 1.666
     
-    # Align Camarilla R4 and S4 to 12h timeframe
+    # Align Camarilla R4 and S4 to 4h timeframe
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
