@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    12h Camarilla pivot R1/S1 breakout with 1d trend filter and volume confirmation.
+    4h Camarilla pivot R1/S1 breakout with 1d trend filter and volume confirmation.
     - Long: Close breaks above R1 with volume > 1.5x average and price > 1d EMA(34)
     - Short: Close breaks below S1 with volume > 1.5x average and price < 1d EMA(34)
     - Exit: Opposite breakout or price crosses back through pivot point (PP)
     - Uses Camarilla levels from previous 1d session
-    - Target: 12-30 trades/year on 12h timeframe
+    - Target: 20-50 trades/year on 4h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -46,7 +46,7 @@ def generate_signals(prices):
     r1 = pp + (range_1d * 1.1 / 12)
     s1 = pp - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -81,7 +81,7 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: Close breaks below PP or opposite signal
+            # Exit long: Close crosses below pivot point
             if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
@@ -89,7 +89,7 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close breaks above PP or opposite signal
+            # Exit short: Close crosses above pivot point
             if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
