@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_Trend_Signal_With_Volume_Filter"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,81 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # KAMA parameters
-    fast = 2
-    slow = 30
+    # Previous day's close for Camarilla calculation (R3, S3)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate ER (Efficiency Ratio)
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of absolute changes
+    # Calculate Camarilla levels (R3, S3)
+    r3 = prev_close + 1.1 * (prev_high - prev_low) * 3 / 4
+    s3 = prev_close - 1.1 * (prev_high - prev_low) * 3 / 4
     
-    # Handle edge cases for ER calculation
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Smoothing constants
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i-1] * (close[i] - kama[i-1])
-    
-    # Weekly EMA20 for trend filter
-    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 2.0 * 20-period average (more restrictive)
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
-    # Align weekly EMA to daily
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align all to 6h timeframe
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Need enough data for KAMA and volume MA
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
+            np.isnan(ema50_1d_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama[i]
-        trend = ema20_1w_aligned[i]
-        vol_filter = volume_filter[i]
+        r3_val = r3_6h[i]
+        s3_val = s3_6h[i]
+        trend = ema50_1d_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: price above KAMA and above weekly trend with volume
-            if close[i] > kama_val and close[i] > trend and vol_filter:
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA and below weekly trend with volume
-            elif close[i] < kama_val and close[i] < trend and vol_filter:
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama_val:
+            # Exit long: close below S3 (mean reversion to center)
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama_val:
+            # Exit short: close above R3 (mean reversion to center)
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
