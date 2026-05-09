@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 6h_StellarCore_Trend_Momentum_Fusion
-# Hypothesis: In both bull and bear markets, price tends to respect the 1d EMA(50) as dynamic support/resistance.
-# Combines 60-period momentum (ROC) with 1d EMA trend filter to capture high-probability continuations.
-# Uses volume surge (>1.5x 20-period average) to confirm institutional participation.
-# Designed for low-frequency, high-conviction trades (~20-40/year) to minimize fee drag.
-# Works in bull markets by buying pullbacks to EMA in uptrends, and in bear markets by selling bounces to EMA in downtrends.
+# 4h_Three_White_Soldiers_Black_Crows_1dTrend
+# Strategy: Trade three consecutive bullish/bearish candles with 1d trend filter
+# Long when three consecutive bullish candles close above 1d EMA(50)
+# Short when three consecutive bearish candles close below 1d EMA(50)
+# Exit when opposite pattern forms or trend weakens
+# Uses price action patterns with trend filter to capture momentum in both bull and bear markets
+# Designed for 4h timeframe with selective entries to minimize trade frequency
 
-name = "6h_StellarCore_Trend_Momentum_Fusion"
-timeframe = "6h"
+name = "4h_Three_White_Soldiers_Black_Crows_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,73 +17,76 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    volume = prices['volume'].values
+    open_price = prices['open'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # --- 1d EMA(50) for trend filter ---
+    # Calculate 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # --- 60-period ROC (momentum) ---
-    lookback = 60
-    roc = np.zeros(n)
-    for i in range(lookback, n):
-        if close[i - lookback] != 0:
-            roc[i] = (close[i] - close[i - lookback]) / close[i - lookback] * 100
+    # Identify bullish and bearish candles
+    bullish = close > open_price  # Close > Open
+    bearish = close < open_price  # Close < Open
     
-    # --- Volume surge filter: >1.5x 20-period average ---
-    vol_ma_20 = np.zeros(n)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_surge = np.zeros(n, dtype=bool)
-    for i in range(20, n):
-        if vol_ma_20[i] > 0:
-            volume_surge[i] = volume[i] > 1.5 * vol_ma_20[i]
+    # Count consecutive bullish/bearish candles
+    consec_bullish = np.zeros(n, dtype=int)
+    consec_bearish = np.zeros(n, dtype=int)
     
-    # --- Signal generation ---
+    for i in range(1, n):
+        if bullish[i]:
+            consec_bullish[i] = consec_bullish[i-1] + 1
+            consec_bearish[i] = 0
+        elif bearish[i]:
+            consec_bearish[i] = consec_bearish[i-1] + 1
+            consec_bullish[i] = 0
+        else:
+            consec_bullish[i] = 0
+            consec_bearish[i] = 0
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 20)  # Ensure ROC and volume MA are ready
+    start_idx = 50  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(roc[i]) or 
-            i < 20):  # volume_surge needs i>=20
+        # Skip if data not ready
+        if np.isnan(ema_50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish momentum + price above 1d EMA50 + volume surge
-            if roc[i] > 2.0 and close[i] > ema_50_1d_aligned[i] and volume_surge[i]:
+            # Enter long: Three consecutive bullish candles and above 1d EMA50 (uptrend filter)
+            if consec_bullish[i] >= 3 and close[i] > ema_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish momentum + price below 1d EMA50 + volume surge
-            elif roc[i] < -2.0 and close[i] < ema_50_1d_aligned[i] and volume_surge[i]:
+            # Enter short: Three consecutive bearish candles and below 1d EMA50 (downtrend filter)
+            elif consec_bearish[i] >= 3 and close[i] < ema_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: momentum fades or price crosses below EMA
-            if roc[i] < 0.5 or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: Three consecutive bearish candles or price below 1d EMA50
+            if consec_bearish[i] >= 3 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: momentum fades or price crosses above EMA
-            if roc[i] > -0.5 or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: Three consecutive bullish candles or price above 1d EMA50
+            if consec_bullish[i] >= 3 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
