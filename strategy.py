@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_Trend_RSI_MeanRev_2"
-timeframe = "1d"
+name = "6h_Alligator_ElderRay_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,46 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Elder Ray and Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate weekly KAMA for trend filter (ER=10, fast=2, slow=30)
-    close_1w = pd.Series(df_1w['close'].values)
-    # Efficiency Ratio
-    change = abs(close_1w.diff(10))
-    volatility = close_1w.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama_1w = np.zeros_like(close_1w)
-    kama_1w[0] = close_1w.iloc[0]
-    for i in range(1, len(close_1w)):
-        if not np.isnan(sc.iloc[i]):
-            kama_1w[i] = kama_1w[i-1] + sc.iloc[i] * (close_1w.iloc[i] - kama_1w[i-1])
-        else:
-            kama_1w[i] = kama_1w[i-1]
-    kama_1w = kama_1w[~np.isnan(kama_1w)] if np.any(np.isnan(kama_1w)) else kama_1w
-    # Ensure same length
-    if len(kama_1w) != len(close_1w):
-        kama_1w = pd.Series(kama_1w).reindex_like(close_1w, method='ffill').bfill().values
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate 1d EMA13 for Alligator Jaw
+    close_1d = pd.Series(df_1d['close'].values)
+    ema13 = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
     
-    # Daily RSI for mean reversion (14-period)
+    # Calculate 1d EMA8 for Alligator Teeth
+    ema8 = close_1d.ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema8_aligned = align_htf_to_ltf(prices, df_1d, ema8)
+    
+    # Calculate 1d EMA5 for Alligator Lips
+    ema5 = close_1d.ewm(span=5, adjust=False, min_periods=5).mean().values
+    ema5_aligned = align_htf_to_ltf(prices, df_1d, ema5)
+    
+    # Calculate 13-period EMA for Elder Ray Bull/Bear Power
+    ema13_1d = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = (df_1d['high'].values - ema13_1d)  # High - EMA13
+    bear_power = (df_1d['low'].values - ema13_1d)   # Low - EMA13
+    
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # 6-period RSI for entry timing
+    rsi_period = 6
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    
-    # Daily volume spike detection
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    rsi = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,35 +61,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(ema13_aligned[i]) or np.isnan(ema8_aligned[i]) or np.isnan(ema5_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        # Alligator conditions: aligned for trend
+        jaw = ema13_aligned[i]
+        teeth = ema8_aligned[i]
+        lips = ema5_aligned[i]
+        
+        # Elder Ray: positive bull power = buying pressure, negative bear power = selling pressure
+        bull = bull_power_aligned[i]
+        bear = bear_power_aligned[i]
         
         if position == 0:
-            # Long: KAMA uptrend + RSI oversold + volume
-            if close[i] > kama_1w_aligned[i] and rsi[i] < 30 and vol_ok:
+            # Long: Alligator aligned up (lips > teeth > jaw) + bull power positive + RSI not overbought
+            if lips > teeth > jaw and bull > 0 and rsi[i] < 70:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA downtrend + RSI overbought + volume
-            elif close[i] < kama_1w_aligned[i] and rsi[i] > 70 and vol_ok:
+            # Short: Alligator aligned down (lips < teeth < jaw) + bear power negative + RSI not oversold
+            elif lips < teeth < jaw and bear < 0 and rsi[i] > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought or trend reversal
-            if rsi[i] > 70 or close[i] < kama_1w_aligned[i]:
+            # Exit long: Alligator turns down OR bear power turns negative
+            if lips < teeth or bear < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold or trend reversal
-            if rsi[i] < 30 or close[i] > kama_1w_aligned[i]:
+            # Exit short: Alligator turns up OR bull power turns positive
+            if lips > teeth or bull > 0:
                 signals[i] = 0.0
                 position = 0
             else:
