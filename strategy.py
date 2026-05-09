@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h volume-weighted RSI with 4h trend filter and daily volume regime.
-# Uses RSI(14) on volume-weighted close (VWC) to reduce noise and identify momentum.
-# Long when VWC RSI < 30 (oversold) + 4h EMA(50) up + daily volume > 20-day average.
-# Short when VWC RSI > 70 (overbought) + 4h EMA(50) down + daily volume > 20-day average.
-# Designed to capture mean reversion in ranging markets while filtering with higher timeframe trend.
-# Volume-weighted RSI is less prone to whipsaw than standard RISI.
-name = "1h_VolumeWeightedRSI_4hEMA50_DailyVol"
-timeframe = "1h"
+# Hypothesis: 12h Donchian channel breakout with 1d volume spike and 1d EMA trend filter.
+# Uses 12h Donchian (20) for breakout signals, confirmed by 1d volume > 2x EMA20 and price > 1d EMA50 for longs,
+# or price < 1d EMA50 for shorts. Designed to capture medium-term trends with low trade frequency.
+# Works in bull markets via breakouts and in bear via breakdowns with trend filter.
+name = "12h_Donchian20_1dVolumeSpike_1dEMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,37 +21,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume-weighted close: (high + low + close + volume) / 4
-    vwc = (high + low + close + volume) / 4
-    
-    # RSI(14) on VWC
-    delta = np.diff(vwc, prepend=vwc[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h EMA(50) trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Daily volume regime: volume > 1.5x 20-day average
+    # 1d data for volume and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    vol_20d = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_20d)
-    vol_regime = volume > (1.5 * vol_20d_aligned)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # 12h Donchian channel (20-period)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # 1d volume EMA20 for spike detection
+    vol_ema20 = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema20_aligned = align_htf_to_ltf(prices, df_1d, vol_ema20)
+    
+    # 1d EMA50 trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,43 +48,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_20d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ema20_aligned[i]) or np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if not session_filter[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        price = close[i]
         
         if position == 0:
-            # Long: VWC RSI < 30 (oversold) + 4h EMA up + volume regime
-            if (rsi[i] < 30 and close[i] > ema_4h_aligned[i] and vol_regime[i]):
-                signals[i] = 0.20
+            # Long: price > 12h Donchian high + volume spike + price > 1d EMA50
+            if (price > donchian_high[i] and 
+                volume[i] > (2.0 * vol_ema20_aligned[i]) and 
+                price > ema_50_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: VWC RSI > 70 (overbought) + 4h EMA down + volume regime
-            elif (rsi[i] > 70 and close[i] < ema_4h_aligned[i] and vol_regime[i]):
-                signals[i] = -0.20
+            # Short: price < 12h Donchian low + volume spike + price < 1d EMA50
+            elif (price < donchian_low[i] and 
+                  volume[i] > (2.0 * vol_ema20_aligned[i]) and 
+                  price < ema_50_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: VWC RSI > 50 or price below 4h EMA
-            if rsi[i] > 50 or close[i] < ema_4h_aligned[i]:
+            # Exit long: price < 12h Donchian low or price < 1d EMA50
+            if price < donchian_low[i] or price < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: VWC RSI < 50 or price above 4h EMA
-            if rsi[i] < 50 or close[i] > ema_4h_aligned[i]:
+            # Exit short: price > 12h Donchian high or price > 1d EMA50
+            if price > donchian_high[i] or price > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
