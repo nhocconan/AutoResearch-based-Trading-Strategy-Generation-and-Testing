@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,75 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Donchian calculation
+    # Get 1d data for trend and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for long-term trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-day high/low)
-    high_series = pd.Series(df_1d['high'].values)
-    low_series = pd.Series(df_1d['low'].values)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Trend filter: 12h EMA50
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Volume filter: current 12h volume > 1.5 * 20-day average
-    vol_series = pd.Series(df_12h['volume'].values)
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Long-term trend filter: 1w EMA200 (only for trend bias)
+    ema200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_12h = df_12h['volume'].values > (vol_ma * 1.5)
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 4h
-    donchian_high_4h = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_4h = align_htf_to_ltf(prices, df_1d, donchian_low)
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    volume_filter_4h = align_htf_to_ltf(prices, df_12h, volume_filter_12h)
+    # Align all to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1w_12h = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(donchian_high_4h[i]) or np.isnan(donchian_low_4h[i]) or
-            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_filter_4h[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(ema50_1d_12h[i]) or np.isnan(ema200_1w_12h[i]) or np.isnan(volume_filter_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = donchian_high_4h[i]
-        lower = donchian_low_4h[i]
-        trend = ema50_12h_4h[i]
-        vol_filter = volume_filter_4h[i]
+        r1_val = r1_12h[i]
+        s1_val = s1_12h[i]
+        trend = ema50_1d_12h[i]
+        long_trend = ema200_1w_12h[i]
+        vol_filter = volume_filter_12h[i]
         
         if position == 0:
-            # Enter long: break above upper Donchian with volume and above trend
-            if close[i] > upper and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume, above trend, and bullish long-term trend
+            if close[i] > r1_val and close[i] > trend and close[i] > long_trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower Donchian with volume and below trend
-            elif close[i] < lower and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume, below trend, and bearish long-term trend
+            elif close[i] < s1_val and close[i] < trend and close[i] < long_trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below lower Donchian (mean reversion)
-            if close[i] < lower:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above upper Donchian (mean reversion)
-            if close[i] > upper:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
