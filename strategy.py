@@ -3,11 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R3/S3 breakout with volume confirmation and 1d trend filter.
-# Works in bull/bear by using 1d EMA34 trend direction - only trade breakouts in trend direction.
-# Volume filter reduces false breakouts. Target: 20-40 trades/year per symbol.
-
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_Volume"
+name = "4h_Donchian20_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,72 +17,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1d data for trend and volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA50 for trend
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
-    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
-    
-    # 1d volume average for volume filter
+    # 1d volume average
     vol_1d = df_1d['volume'].values
     vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align all to 4h
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    # Align to 4h
+    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    
+    # Calculate Donchian channels (20-period) on 4h data
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(lookback - 1, n):
+        upper[i] = np.max(high[i - lookback + 1:i + 1])
+        lower[i] = np.min(low[i - lookback + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 35
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_4h[i]) or np.isnan(camarilla_high_4h[i]) or 
-            np.isnan(camarilla_low_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
+        if (np.isnan(ema50_1d_4h[i]) or np.isnan(vol_avg_1d_4h[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema34_1d_4h[i]
-        resistance = camarilla_high_4h[i]
-        support = camarilla_low_4h[i]
+        trend = ema50_1d_4h[i]
         vol_avg = vol_avg_1d_4h[i]
         vol_ok = volume[i] > vol_avg * 1.5
         
         if position == 0:
-            # Long: break above R3 with volume and ABOVE 1d EMA34 (uptrend)
-            if close[i] > resistance and vol_ok and close[i] > trend:
+            # Long: break above upper Donchian with volume and above 1d EMA50
+            if close[i] > upper[i] and vol_ok and close[i] > trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with volume and BELOW 1d EMA34 (downtrend)
-            elif close[i] < support and vol_ok and close[i] < trend:
+            # Short: break below lower Donchian with volume and below 1d EMA50
+            elif close[i] < lower[i] and vol_ok and close[i] < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 or trend reversal (below EMA34)
-            if close[i] < support or close[i] < trend:
+            # Exit long: close below lower Donchian or trend reversal
+            if close[i] < lower[i] or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 or trend reversal (above EMA34)
-            if close[i] > resistance or close[i] > trend:
+            # Exit short: close above upper Donchian or trend reversal
+            if close[i] > upper[i] or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
