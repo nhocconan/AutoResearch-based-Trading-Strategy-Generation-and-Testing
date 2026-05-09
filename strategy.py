@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_12h_ADX14_Trend_30Volume"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,79 +17,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for ADX and volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 1d data for Camarilla levels, trend, and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # ADX calculation (14-period)
-    tr1 = df_12h['high'] - df_12h['low']
-    tr2 = abs(df_12h['high'] - df_12h['close'].shift(1))
-    tr3 = abs(df_12h['low'] - df_12h['close'].shift(1))
-    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    plus_dm = df_12h['high'].diff()
-    minus_dm = df_12h['low'].diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    minus_dm = abs(minus_dm)
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    atr = tr.rolling(window=14, min_periods=14).mean()
-    plus_di = 100 * (plus_dm.rolling(window=14, min_periods=14).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window=14, min_periods=14).mean() / atr)
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(window=14, min_periods=14).mean()
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 12h volume > 30 * 30-period average (extreme spike)
-    vol_series = pd.Series(df_12h['volume'].values)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_filter_12h = df_12h['volume'].values > (vol_ma * 30)
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 6h
-    adx_6h = align_htf_to_ltf(prices, df_12h, adx.values)
-    plus_di_6h = align_htf_to_ltf(prices, df_12h, plus_di.values)
-    minus_di_6h = align_htf_to_ltf(prices, df_12h, minus_di.values)
-    volume_filter_6h = align_htf_to_ltf(prices, df_12h, volume_filter_12h)
+    # Align all to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 42  # Need enough data for ADX calculation (14*3)
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(adx_6h[i]) or np.isnan(plus_di_6h[i]) or 
-            np.isnan(minus_di_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_6h[i]
-        plus_di_val = plus_di_6h[i]
-        minus_di_val = minus_di_6h[i]
-        vol_filter = volume_filter_6h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema34_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
-            # Enter long: ADX > 25 (strong trend), +DI > -DI, volume spike
-            if adx_val > 25 and plus_di_val > minus_di_val and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25, -DI > +DI, volume spike
-            elif adx_val > 25 and minus_di_val > plus_di_val and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend weakens (ADX < 20) or DI crossover
-            if adx_val < 20 or minus_di_val > plus_di_val:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend weakens or DI crossover
-            if adx_val < 20 or plus_di_val > minus_di_val:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
