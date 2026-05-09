@@ -1,12 +1,11 @@
-#/usr/bin/env python3
-# Hypothesis: 4h timeframe with monthly pivot structure and weekly trend filter.
-# Uses monthly Camarilla levels (R1/S1) for breakout entries and weekly EMA34 for trend filter.
-# Monthly pivot provides robust structural support/resistance that works in both bull and bear markets.
-# Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
-# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
+#!/usr/bin/env python3
+# Hypothesis: 1d timeframe with weekly trend filter and daily volume confirmation.
+# Uses weekly EMA34 for trend direction and daily volume spike for entry timing.
+# Weekly trend filter ensures trades align with higher timeframe momentum, reducing whipsaw.
+# Daily volume confirmation adds conviction to breakouts. Target: 30-100 total trades over 4 years.
 
-name = "4h_Camarilla_R1_S1_1wEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyEMA34_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,77 +17,56 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate monthly Camarilla levels (R1, S1) from previous month
-    prev_close = np.roll(close, 112)  # 112 bars = 28 days * 4 bars per day (approx 1 month)
-    prev_high = np.roll(high, 112)
-    prev_low = np.roll(low, 112)
-    prev_close[:112] = np.nan  # First values invalid
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 4
-    s1 = prev_close - 1.1 * camarilla_range / 4
-    
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r1
-    breakout_down = close < s1
     
     # Get weekly data for EMA34 trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1w EMA34 trend filter
+    # Calculate weekly EMA34
     ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    trend_up = close > ema_34_1w_aligned
-    trend_down = close < ema_34_1w_aligned
-    
-    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
+    # Daily volume filter: volume > 2.0x 20-day average
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 112  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R1 + 1w uptrend + volume spike
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: price above weekly EMA34 + volume spike
+            if close[i] > ema_34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + 1w downtrend + volume spike
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: price below weekly EMA34 + volume spike
+            elif close[i] < ema_34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous month's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price crosses below weekly EMA34
+            if close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous month's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price crosses above weekly EMA34
+            if close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
