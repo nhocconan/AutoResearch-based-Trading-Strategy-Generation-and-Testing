@@ -1,14 +1,16 @@
+#%%
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA50 trend filter.
-# Uses 4h timeframe to balance trade frequency and capture meaningful moves.
-# Donchian breakouts capture momentum, volume confirms strength, EMA50 ensures trend alignment.
-# Designed to work in both bull and bear markets by following daily trend.
-name = "4h_Donchian20_1dEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Uses daily timeframe to reduce trade frequency and avoid overtrading.
+# Donchian breakouts capture strong momentum moves with volume confirmation.
+# Weekly EMA200 filter ensures alignment with higher timeframe trend.
+# Designed to work in both bull and bear markets by following weekly trend.
+name = "1d_Donchian20_1wEMA200_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,18 +23,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Daily Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA200 trend filter
+    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # Volume spike filter: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -41,12 +43,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 200  # Ensure EMA200 is available
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(ema_200_1d[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,29 +57,31 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above 20-period high with volume and above daily EMA50
-            if (price > high_max[i] and vol_spike[i] and price > ema_50_4h[i]):
+            # Long: price breaks above Donchian upper band with volume spike and above weekly EMA200
+            if (price > high_20[i] and vol_spike[i] and price > ema_200_1d[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low with volume and below daily EMA50
-            elif (price < low_min[i] and vol_spike[i] and price < ema_50_4h[i]):
+            # Short: price breaks below Donchian lower band with volume spike and below weekly EMA200
+            elif (price < low_20[i] and vol_spike[i] and price < ema_200_1d[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 20-period low (mean reversion)
-            if price < low_min[i]:
+            # Exit long: price falls back below Donchian lower band (mean reversion to support)
+            if price < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 20-period high (mean reversion)
-            if price > high_max[i]:
+            # Exit short: price rises back above Donchian upper band (mean reversion to resistance)
+            if price > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#%%
