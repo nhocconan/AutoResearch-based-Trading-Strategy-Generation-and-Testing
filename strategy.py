@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_PivotPoint_Reversal_1dTrend_Volume
-# Hypothesis: Reversals at daily pivot points (PP, R1, S1) with 1d EMA trend filter and volume confirmation.
-# Works in bull/bear: Trend filter ensures trades align with higher timeframe direction.
-# Pivot points provide institutional reference levels for mean reversion in ranging markets.
-# Uses 1d EMA50 for trend and volume ratio (current/20-bar average) for confirmation.
+# 4h_PhaseShift_Momentum_Reversal
+# Hypothesis: Uses Hilbert Transform phase shift to detect momentum exhaustion and reversal points.
+# Works in bull/bear markets by identifying overextended moves and mean reversion opportunities.
+# Combines phase shift with volume confirmation and volatility filter for high-probability reversals.
+# Targets 20-40 trades/year to minimize fee drag while capturing significant moves.
 
-name = "6h_PivotPoint_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_PhaseShift_Momentum_Reversal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,89 +23,153 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Hilbert Transform - Phase Calculation (using Ehlers method)
+    # Uses 3-bar median filter to reduce noise
+    def hilbert_transform(price_series, length=30):
+        if len(price_series) < length:
+            return np.full_like(price_series, np.nan)
+        
+        # Median filter for smoothing
+        smoothed = np.full_like(price_series, np.nan)
+        half_len = length // 2
+        for i in range(len(price_series)):
+            start_idx = max(0, i - half_len)
+            end_idx = min(len(price_series), i + half_len + 1)
+            window = price_series[start_idx:end_idx]
+            smoothed[i] = np.median(window)
+        
+        # In-phase and quadrature components
+        in_phase = np.full_like(price_series, np.nan)
+        quadrature = np.full_like(price_series, np.nan)
+        
+        # Calculate using delayed signals
+        delay = length // 4
+        for i in range(delay, len(smoothed)):
+            in_phase[i] = smoothed[i - delay]
+            quadrature[i] = smoothed[i]
+        
+        # Calculate phase
+        phase = np.full_like(price_series, np.nan)
+        valid = (~np.isnan(in_phase)) & (~np.isnan(quadrature)) & (np.abs(in_phase) > 1e-10)
+        phase[valid] = np.arctan(quadrature[valid] / in_phase[valid])
+        
+        # Unwrap phase to avoid jumps
+        phase = np.unwrap(phase)
+        
+        # Calculate rate of phase change (angular velocity)
+        angular_velocity = np.full_like(price_series, np.nan)
+        for i in range(1, len(phase)):
+            if not np.isnan(phase[i]) and not np.isnan(phase[i-1]):
+                angular_velocity[i] = phase[i] - phase[i-1]
+        
+        return angular_velocity
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate phase shift indicator
+    phase_shift = hilbert_transform(close, 30)
     
-    # Previous day's values for pivot calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
+    # Volume confirmation - volume ratio
+    def calculate_volume_ratio(vol_series, length=20):
+        if len(vol_series) < length:
+            return np.full_like(vol_series, np.nan)
+        
+        vol_ma = np.full_like(vol_series, np.nan)
+        # Initialize with simple average
+        if len(vol_series) >= length:
+            vol_ma[length-1] = np.mean(vol_series[0:length])
+            # Exponential smoothing
+            for i in range(length, len(vol_series)):
+                vol_ma[i] = (vol_ma[i-1] * (length-1) + vol_series[i]) / length
+        
+        vol_ratio = np.full_like(vol_series, np.nan)
+        valid = (~np.isnan(vol_ma)) & (vol_ma > 0)
+        vol_ratio[valid] = vol_series[valid] / vol_ma[valid]
+        return vol_ratio
     
-    # Pivot point and support/resistance levels
-    pp = (ph + pl + pc) / 3
-    r1 = 2 * pp - pl
-    s1 = 2 * pp - ph
+    volume_ratio = calculate_volume_ratio(volume, 20)
     
-    # Align pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Volatility filter - ATR ratio
+    def calculate_atr(high_series, low_series, close_series, length=14):
+        if len(high_series) < length:
+            return np.full_like(high_series, np.nan)
+        
+        tr = np.full_like(high_series, np.nan)
+        for i in range(len(high_series)):
+            if i == 0:
+                tr[i] = high_series[i] - low_series[i]
+            else:
+                tr[i] = max(
+                    high_series[i] - low_series[i],
+                    abs(high_series[i] - close_series[i-1]),
+                    abs(low_series[i] - close_series[i-1])
+                )
+        
+        atr = np.full_like(high_series, np.nan)
+        if len(tr) >= length:
+            atr[length-1] = np.mean(tr[0:length])
+            for i in range(length, len(tr)):
+                atr[i] = (atr[i-1] * (length-1) + tr[i]) / length
+        
+        return atr
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (ema_50_1d[i-1] * 49 + close_1d[i]) / 50
+    atr = calculate_atr(high, low, close, 14)
+    atr_ratio = np.full_like(atr, np.nan)
+    atr_ma = np.full_like(atr, np.nan)
     
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate ATR moving average for ratio
+    if len(atr) >= 20:
+        atr_ma[19] = np.mean(atr[0:20])
+        for i in range(20, len(atr)):
+            atr_ma[i] = (atr_ma[i-1] * 19 + atr[i]) / 20
     
-    # Volume spike filter: current volume / 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    valid_atr = (~np.isnan(atr)) & (~np.isnan(atr_ma)) & (atr_ma > 0)
+    atr_ratio[valid_atr] = atr[valid_atr] / atr_ma[valid_atr]
     
-    volume_ratio = np.full_like(volume, np.nan)
-    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid] = volume[valid] / vol_ma[valid]
+    # Align indicators to 4h timeframe
+    # Phase shift is already calculated on close prices, so no HTF needed
+    # But we'll align volume ratio and ATR ratio for consistency
+    
+    # For volume ratio, we need to calculate it on HTF and align back
+    # However, since volume ratio uses the same timeframe, we can use directly
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(30, 20)  # Ensure indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(phase_shift[i]) or np.isnan(volume_ratio[i]) or 
+            np.isnan(atr_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price touches S1 AND uptrend (price > EMA50) AND volume spike
-            if (low[i] <= s1_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 1.5):
+            # Enter long: negative phase shift (momentum exhaustion) + volume confirmation + volatility expansion
+            if (phase_shift[i] < -0.1 and  # Negative angular velocity indicates slowing momentum
+                volume_ratio[i] > 1.3 and   # Volume confirmation
+                atr_ratio[i] > 0.8):        # Volatility filter (not too low)
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price touches R1 AND downtrend (price < EMA50) AND volume spike
-            elif (high[i] >= r1_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 1.5):
+            # Enter short: positive phase shift (momentum exhaustion) + volume confirmation + volatility expansion
+            elif (phase_shift[i] > 0.1 and   # Positive angular velocity indicates slowing momentum
+                  volume_ratio[i] > 1.3 and  # Volume confirmation
+                  atr_ratio[i] > 0.8):       # Volatility filter
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches PP or trend reversal (price < EMA50)
-            if high[i] >= pp_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: phase shift turns positive (momentum returning) OR volatility contraction
+            if phase_shift[i] > 0.05 or atr_ratio[i] < 0.6:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches PP or trend reversal (price > EMA50)
-            if low[i] <= pp_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: phase shift turns negative (momentum returning) OR volatility contraction
+            if phase_shift[i] < -0.05 or atr_ratio[i] < 0.6:
                 signals[i] = 0.0
                 position = 0
             else:
