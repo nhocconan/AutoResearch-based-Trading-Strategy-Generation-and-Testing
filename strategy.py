@@ -1,14 +1,14 @@
-# 1h_AggressiveTrend_Scalper_v1
-# Hypothesis: 1-hour aggressive trend scalper using 4h EMA crossover with volume confirmation and RSI momentum filter.
-# Designed for trending markets - captures strong momentum moves while avoiding chop.
-# Uses 4h for trend direction (EMA21/EMA55 crossover) and 1h for precise entry timing.
-# Volume spike (>1.5x 20-period average) confirms momentum strength.
-# RSI(14) > 55 for longs, < 45 for shorts to ensure momentum alignment.
-# Target: 15-35 trades/year (60-140 over 4 years) to minimize fee drag.
-# Works in both bull/bear markets by following the 4h trend direction.
+#!/usr/bin/env python3
+"""
+4h_Donchian20_Breakout_1dEMA200_Trend_VolumeSpike
+Hypothesis: Donchian channel breakout with daily EMA200 trend filter and volume confirmation.
+Daily EMA200 provides robust long-term trend filter that adapts to bull/bear markets.
+Volume spike (>2x 24-period average) confirms breakout strength.
+Designed for low trade frequency (19-50/year) to minimize fee drag.
+"""
 
-name = "1h_AggressiveTrend_Scalper_v1"
-timeframe = "1h"
+name = "4h_Donchian20_Breakout_1dEMA200_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,101 +25,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 55:
+    # Get daily data for trend filter and Donchian calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h EMAs for trend direction
-    ema_21_4h = np.full_like(close_4h, np.nan)
-    ema_55_4h = np.full_like(close_4h, np.nan)
+    # Previous day's values for Donchian calculation
+    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
+    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
     
-    if len(close_4h) >= 21:
-        ema_21_4h[20] = np.mean(close_4h[0:21])
-        for i in range(21, len(close_4h)):
-            ema_21_4h[i] = (close_4h[i] * 2 + ema_21_4h[i-1] * 19) / 21
+    # Calculate daily Donchian channels (20-period)
+    upper = np.full_like(close_1d, np.nan)
+    lower = np.full_like(close_1d, np.nan)
     
-    if len(close_4h) >= 55:
-        ema_55_4h[54] = np.mean(close_4h[0:55])
-        for i in range(55, len(close_4h)):
-            ema_55_4h[i] = (close_4h[i] * 2 + ema_55_4h[i-1] * 53) / 55
+    if len(ph) >= 20:
+        for i in range(19, len(ph)):
+            upper[i] = np.max(ph[i-19:i+1])
+            lower[i] = np.min(pl[i-19:i+1])
     
-    # Align 4h EMAs to 1h timeframe
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    ema_55_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_55_4h)
+    # Align daily Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
     
-    # 1h RSI for momentum filter
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily EMA200 for trend filter
+    ema_200_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 200:
+        ema_200_1d[199] = np.mean(close_1d[0:200])
+        for i in range(200, len(close_1d)):
+            ema_200_1d[i] = (ema_200_1d[i-1] * 199 + close_1d[i]) / 200
     
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    if len(close) >= 14:
-        avg_gain[13] = np.mean(gain[0:14])
-        avg_loss[13] = np.mean(loss[0:14])
-        for i in range(14, len(close)):
-            avg_gain[i] = (gain[i] * 13 + avg_gain[i-1]) / 14
-            avg_loss[i] = (loss[i] * 13 + avg_loss[i-1]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(close, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1h volume spike filter
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (volume[i] * 19 + vol_ma[i-1]) / 20
+    if len(volume) >= 24:
+        vol_ma[23] = np.mean(volume[0:24])
+        for i in range(24, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
     
-    volume_ratio = np.divide(volume, vol_ma, out=np.full_like(volume, np.nan), where=vol_ma!=0)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(55, 20, 14)  # Ensure all indicators are ready
+    start_idx = max(24, 200)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_21_4h_aligned[i]) or np.isnan(ema_55_4h_aligned[i]) or 
-            np.isnan(rsi[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
+        bars_since_entry += 1
+        
         if position == 0:
-            # Enter long: 4h EMA21 > EMA55 (uptrend) AND RSI > 55 AND volume spike
-            if (ema_21_4h_aligned[i] > ema_55_4h_aligned[i] and 
-                rsi[i] > 55 and 
-                volume_ratio[i] > 1.5):
+            # Enter long: price breaks above upper Donchian AND uptrend (price > EMA200) AND volume spike
+            if (close[i] > upper_aligned[i] and 
+                close[i] > ema_200_1d_aligned[i] and 
+                volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 4h EMA21 < EMA55 (downtrend) AND RSI < 45 AND volume spike
-            elif (ema_21_4h_aligned[i] < ema_55_4h_aligned[i] and 
-                  rsi[i] < 45 and 
-                  volume_ratio[i] > 1.5):
+                bars_since_entry = 0
+            # Enter short: price breaks below lower Donchian AND downtrend (price < EMA200) AND volume spike
+            elif (close[i] < lower_aligned[i] and 
+                  close[i] < ema_200_1d_aligned[i] and 
+                  volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: 4h EMA21 < EMA55 (trend change) OR RSI < 40 (momentum loss)
-            if (ema_21_4h_aligned[i] < ema_55_4h_aligned[i] or rsi[i] < 40):
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = 0.25
+            else:
+                # Exit long: price breaks below lower Donchian OR trend reversal (price < EMA200)
+                if close[i] < lower_aligned[i] or close[i] < ema_200_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 4h EMA21 > EMA55 (trend change) OR RSI > 60 (momentum loss)
-            if (ema_21_4h_aligned[i] > ema_55_4h_aligned[i] or rsi[i] > 60):
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = -0.25
+            else:
+                # Exit short: price breaks above upper Donchian OR trend reversal (price > EMA200)
+                if close[i] > upper_aligned[i] or close[i] > ema_200_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
