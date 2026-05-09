@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-name = "4h_Camarilla_R3_S3_1dEMA34_Trend_Volume_Rev3"
+name = "4h_Camarilla_R3_S3_1dEMA34_Trend_Volume_Rev4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -44,9 +44,9 @@ def generate_signals(prices):
     trend_up = close > ema_34_1d_aligned
     trend_down = close < ema_34_1d_aligned
     
-    # Volume filter: current volume > 3.0x 30-period average volume (tighter to reduce trades)
+    # Volume filter: current volume > 2.5x 30-period average volume (tighter to reduce trades)
     avg_volume = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (3.0 * avg_volume)
+    volume_filter = volume > (2.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
