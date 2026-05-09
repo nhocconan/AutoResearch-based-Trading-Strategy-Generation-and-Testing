@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_DailyBreakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for pivot points and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Previous 12h bar's OHLC (for Camarilla calculation)
-    prev_close_12h = df_12h['close'].shift(1).values
-    prev_high_12h = df_12h['high'].shift(1).values
-    prev_low_12h = df_12h['low'].shift(1).values
+    # Calculate weekly pivot points: P = (H + L + C)/3
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Calculate Camarilla levels (R1, S1)
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_range = prev_high_12h - prev_low_12h
-    camarilla_r1 = prev_close_12h + camarilla_range * 1.1 / 12
-    camarilla_s1 = prev_close_12h - camarilla_range * 1.1 / 12
+    # Weekly R1 and S1 (first resistance and support)
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align Camarilla levels to 4h
-    camarilla_r1_4h = align_htf_to_ltf(prices, df_12h, camarilla_r1)
-    camarilla_s1_4h = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    # Align weekly pivot levels to daily
+    pivot_daily = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r1_daily = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_daily = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly trend filter: EMA20 on weekly close
+    weekly_ema20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    weekly_ema20_daily = align_htf_to_ltf(prices, df_1w, weekly_ema20)
     
-    # Volume filter: above 1.5x 12-period average (12*4h = 2 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Daily volume filter: above 1.5x 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 12  # Wait for volume MA
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1_4h[i]) or np.isnan(camarilla_s1_4h[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_daily[i]) or np.isnan(r1_daily[i]) or 
+            np.isnan(s1_daily[i]) or np.isnan(weekly_ema20_daily[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,32 +66,32 @@ def generate_signals(prices):
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above Camarilla R1 with 12h uptrend
-            if (close[i] > camarilla_r1_4h[i] and 
-                close[i] > ema_50_4h[i] and  # 12h uptrend
+            # Long breakout: price breaks above weekly R1 with weekly uptrend
+            if (close[i] > r1_daily[i] and 
+                close[i] > weekly_ema20_daily[i] and  # weekly uptrend
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below Camarilla S1 with 12h downtrend
-            elif (close[i] < camarilla_s1_4h[i] and 
-                  close[i] < ema_50_4h[i] and  # 12h downtrend
+            # Short breakdown: price breaks below weekly S1 with weekly downtrend
+            elif (close[i] < s1_daily[i] and 
+                  close[i] < weekly_ema20_daily[i] and  # weekly downtrend
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Camarilla S1 (mean reversion)
-            if close[i] < camarilla_s1_4h[i]:
+            # Exit long: price falls back below weekly pivot
+            if close[i] < pivot_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Camarilla R1 (mean reversion)
-            if close[i] > camarilla_r1_4h[i]:
+            # Exit short: price rises back above weekly pivot
+            if close[i] > pivot_daily[i]:
                 signals[i] = 0.0
                 position = 0
             else:
