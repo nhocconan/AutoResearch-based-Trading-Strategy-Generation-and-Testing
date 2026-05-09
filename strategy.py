@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12H_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Use weekly trend filter (1w EMA50) with 12h Camarilla R1/S1 breakouts.
-# Weekly trend provides robust trend filtering for 12h timeframe, reducing whipsaws in sideways markets.
-# Volume confirmation ensures breakouts have conviction. Designed to work in both bull and bear markets
-# by aligning with higher timeframe trend. Target: 50-150 total trades over 4 years (12-37/year).
+# 1D_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Use weekly trend filter (EMA50) with daily Camarilla R1/S1 breakouts and volume confirmation.
+# Weekly EMA provides robust trend filtering for multi-year trends, reducing whipsaw in sideways markets.
+# Daily breakouts capture momentum with lower frequency than intraday timeframes, minimizing fee drag.
+# Volume confirmation ensures breakouts have institutional participation.
+# Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 
-name = "12H_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1D_1W_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +47,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 12h
+    # Align to daily
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
