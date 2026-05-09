@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1D_R2_S2_Breakout_1wTrend_Volume
-# Hypothesis: Breakout above/below weekly pivot levels (R2/S2) with volume >1.8x 30-day average and trend filter from 1w EMA50.
-# Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA50 weekly), buy breakout above R2; in downtrend (price < EMA50 weekly), sell breakdown below S2.
-# Volume filter ensures only high-conviction moves trigger entries. Designed for 7-25 trades/year on 1d timeframe.
+# 6h_ElderRay_BullBearPower_1dTrend
+# Hypothesis: Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) with 1d EMA50 trend filter.
+# In uptrend (price > 1d EMA50), enter long when Bull Power > 0 and rising; enter short when Bear Power < 0 and falling.
+# In downtrend (price < 1d EMA50), enter short when Bear Power < 0 and falling; enter long when Bull Power > 0 and rising.
+# Uses 13-period EMA for Elder Ray calculation. Designed for 15-30 trades/year on 6h timeframe.
 
-name = "1D_R2_S2_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,81 +21,68 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter and pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    # Calculate 1d EMA(50) with proper initialization
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Calculate 1w EMA(50) with proper initialization
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 48) / 50
+    # Align 1d EMA to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, S2 = P-(H-L), R2 = P+(H-L)
-    pivot = (high_1w + low_1w + close_1w) / 3
-    weekly_range = high_1w - low_1w
-    weekly_R2 = pivot + weekly_range  # R2 = P + (H-L)
-    weekly_S2 = pivot - weekly_range  # S2 = P - (H-L)
+    # Calculate EMA(13) for Elder Ray
+    ema_13 = np.full_like(close, np.nan)
+    if len(close) >= 13:
+        ema_13[12] = np.mean(close[0:13])
+        for i in range(13, len(close)):
+            ema_13[i] = (close[i] * 2 + ema_13[i-1] * 11) / 13
     
-    # Align 1w data to 1d timeframe
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    weekly_R2_aligned = align_htf_to_ltf(prices, df_1w, weekly_R2)
-    weekly_S2_aligned = align_htf_to_ltf(prices, df_1w, weekly_S2)
-    
-    # Volume filter: 1d volume / 30-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 30:
-        vol_ma[29] = np.mean(volume[0:30])
-        for i in range(30, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 29 + volume[i]) / 30
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Calculate Bull Power and Bear Power
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 1)
+    start_idx = max(30, 13)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(weekly_R2_aligned[i]) or \
-           np.isnan(weekly_S2_aligned[i]) or np.isnan(volume_ratio[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Price breaks above weekly R2 AND volume confirmation AND bullish trend (price > EMA50 weekly)
-            if close[i] > weekly_R2_aligned[i] and volume_ratio[i] > 1.8 and close[i] > ema_50_1w_aligned[i]:
+            # Enter long: Bull Power > 0 and rising (bull_power[i] > bull_power[i-1]) AND uptrend (price > 1d EMA50)
+            if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below weekly S2 AND volume confirmation AND bearish trend (price < EMA50 weekly)
-            elif close[i] < weekly_S2_aligned[i] and volume_ratio[i] > 1.8 and close[i] < ema_50_1w_aligned[i]:
+            # Enter short: Bear Power < 0 and falling (bear_power[i] < bear_power[i-1]) AND downtrend (price < 1d EMA50)
+            elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price breaks below weekly S2 (reversal signal) or trend turns bearish
-            if close[i] < weekly_S2_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: Bull Power <= 0 or falling OR trend turns bearish
+            if bull_power[i] <= 0 or bull_power[i] < bull_power[i-1] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price breaks above weekly R2 (reversal signal) or trend turns bullish
-            if close[i] > weekly_R2_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: Bear Power >= 0 or rising OR trend turns bullish
+            if bear_power[i] >= 0 or bear_power[i] > bear_power[i-1] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
