@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
-# Hypothesis: Camarilla R3/S3 breakouts with 12h EMA50 trend filter and volume spike filter.
-# Works in bull/bear: Trend filter avoids counter-trend trades, volume spike confirms institutional interest.
-# R3/S3 levels provide institutional-grade support/resistance for breakouts.
-# Uses 12h EMA50 for trend and volume ratio (current/20-bar average) for confirmation.
+# 1h_4h1d_Trend_Filtered_Momentum_v2
+# Hypothesis: Use 4h trend (EMA50) and 1d volatility (ATR) as filters for 1h momentum entries.
+# Only trade during active sessions (08-20 UTC) to avoid low-liquidity noise.
+# Long: price > 4h EMA50 AND 1h close > 1h open AND ATR ratio > 0.8
+# Short: price < 4h EMA50 AND 1h close < 1h open AND ATR ratio > 0.8
+# Position size fixed at 0.20 to manage drawdown. Target 15-35 trades/year.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1h_4h1d_Trend_Filtered_Momentum_v2"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -21,97 +22,93 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_ = prices['open'].values
     
-    # Calculate Camarilla levels from previous day
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Get 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema_50_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 50:
+        ema_50_4h[49] = np.mean(close_4h[0:50])
+        for i in range(50, len(close_4h)):
+            ema_50_4h[i] = (ema_50_4h[i-1] * 49 + close_4h[i]) / 50
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
+    # Get 1d ATR(14) for volatility filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr = np.maximum(high_1d - low_1d, np.maximum(abs(high_1d - np.roll(close_1d, 1)), abs(low_1d - np.roll(close_1d, 1))))
+    tr[0] = high_1d[0] - low_1d[0]  # first TR
+    atr_14_1d = np.full_like(tr, np.nan)
+    if len(tr) >= 14:
+        atr_14_1d[13] = np.mean(tr[0:14])
+        for i in range(14, len(tr)):
+            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr[i]) / 14
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
-    
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
-    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
-    
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume spike filter: current volume / 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid] = volume[valid] / vol_ma[valid]
+    # 1h ATR(14) for volatility ratio
+    tr_1h = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    tr_1h[0] = high[0] - low[0]
+    atr_14_1h = np.full_like(tr_1h, np.nan)
+    if len(tr_1h) >= 14:
+        atr_14_1h[13] = np.mean(tr_1h[0:14])
+        for i in range(14, len(tr_1h)):
+            atr_14_1h[i] = (atr_14_1h[i-1] * 13 + tr_1h[i]) / 14
+    atr_ratio = np.full_like(close, np.nan)
+    valid = (~np.isnan(atr_14_1h)) & (~np.isnan(atr_14_1d_aligned)) & (atr_14_1d_aligned != 0)
+    atr_ratio[valid] = atr_14_1h[valid] / atr_14_1d_aligned[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(50, 14)  # Ensure EMA and ATR are ready
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(atr_ratio[i]) or
+            not (8 <= hours[i] <= 20)):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_ratio[i] > 1.5):
-                signals[i] = 0.25
+            # Enter long: uptrend + bullish candle + sufficient volatility
+            if (close[i] > ema_50_4h_aligned[i] and 
+                close[i] > open_[i] and 
+                atr_ratio[i] > 0.8):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_ratio[i] > 1.5):
-                signals[i] = -0.25
+            # Enter short: downtrend + bearish candle + sufficient volatility
+            elif (close[i] < ema_50_4h_aligned[i] and 
+                  close[i] < open_[i] and 
+                  atr_ratio[i] > 0.8):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 OR trend reversal (price < EMA50)
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: trend reversal or bearish candle
+            if close[i] < ema_50_4h_aligned[i] or close[i] < open_[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price breaks above R3 OR trend reversal (price > EMA50)
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: trend reversal or bullish candle
+            if close[i] > ema_50_4h_aligned[i] or close[i] > open_[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
