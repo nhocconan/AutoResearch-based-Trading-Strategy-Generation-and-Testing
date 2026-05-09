@@ -1,11 +1,6 @@
-# 12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2
-# Hypothesis: Breakout above daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume confirmation. Targets 25-35 trades/year on 12h timeframe for BTC/ETH/SOL. Works in bull/bear by following trend via EMA filter.
-# Timeframe: 12h for lower trade frequency to reduce fee drag. Uses 1d HTF for structure.
-# Risk: Position size 0.25 limits drawdown. Exit on trend reversal.
-
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolatilityFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,74 +17,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get 4h data for trend and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate 4h close for trend
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    
+    # 4h EMA20 for trend filter
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # Get 1d data for volatility filter (ATR)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Calculate 1-day ATR(14)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0]  # first bar
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels (R1, S1) - breakout levels
-    r1_1d = pivot_1d + (range_1d * 1.1 / 4)
-    s1_1d = pivot_1d - (range_1d * 1.1 / 4)
+    # Calculate 1-day ATR ratio (current vs 20-period average)
+    atr_ratio = atr14_1d / pd.Series(atr14_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Align to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate 4h Camarilla levels (R1, S1)
+    close_4h_prev = np.roll(close_4h, 1)
+    close_4h_prev[0] = close_4h[0]  # avoid NaN on first
+    high_4h_prev = np.roll(high_4h, 1)
+    high_4h_prev[0] = high_4h[0]
+    low_4h_prev = np.roll(low_4h, 1)
+    low_4h_prev[0] = low_4h[0]
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    pivot_4h = (high_4h_prev + low_4h_prev + close_4h_prev) / 3
+    range_4h = high_4h_prev - low_4h_prev
     
-    # Volume confirmation: current volume > 2.0x 20-period average (higher threshold to reduce trades)
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 2.0)
+    r1_4h = pivot_4h + (range_4h * 1.1 / 4)
+    s1_4h = pivot_4h - (range_4h * 1.1 / 4)
+    
+    r1_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 100
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_aligned[i]):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(atr_ratio_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + above daily EMA34 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+            # Enter long: price breaks above R1 + above 4h EMA20 + ATR ratio > 0.8 (avoid low volatility)
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema20_4h_aligned[i] and 
+                atr_ratio_aligned[i] > 0.8):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S1 + below daily EMA34 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+            # Enter short: price breaks below S1 + below 4h EMA20 + ATR ratio > 0.8
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema20_4h_aligned[i] and 
+                  atr_ratio_aligned[i] > 0.8):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily EMA34 (trend change)
-            if close[i] < ema34_aligned[i]:
+            # Exit long: price below 4h EMA20 (trend change)
+            if close[i] < ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price above daily EMA34 (trend change)
-            if close[i] > ema34_aligned[i]:
+            # Exit short: price above 4h EMA20 (trend change)
+            if close[i] > ema20_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
