@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_TrueRangeBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and ATR
+    # Get 1d data for Camarilla pivots (based on previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels (based on previous day)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = tr3[0] = 0  # first value
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Calculate 1d EMA(50) for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Camarilla levels
+    R1 = pivot + (range_hl * 1.1 / 4)
+    S1 = pivot - (range_hl * 1.1 / 4)
     
-    # Align 1d indicators to 6h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align to 12h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Calculate 6-period range for breakout (6h window)
-    range_6h = pd.Series(high - low).rolling(window=6, min_periods=6).max().values
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current 6h volume > 1.5 * 20-period average
+    # Volume filter: current 12h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
@@ -52,42 +50,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(30, 50)  # Need enough data for ATR and EMA
+    start_idx = max(20, 34)  # Need enough data for volume MA and EMA34
     
     for i in range(start_idx, n):
-        if (np.isnan(atr_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(range_6h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        atr = atr_1d_aligned[i]
-        trend = ema50_1d_aligned[i]
-        rng = range_6h[i]
+        r1 = R1_aligned[i]
+        s1 = S1_aligned[i]
+        trend = ema34_1d_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above 6h high + ATR filter + above trend
-            if close[i] > high[i-1] and rng > (atr * 0.5) and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1 and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below 6h low + ATR filter + below trend
-            elif close[i] < low[i-1] and rng > (atr * 0.5) and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1 and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below 6h low or trend reversal
-            if close[i] < low[i-1] or close[i] < trend:
+            # Exit long: close below S1 (reversion to mean)
+            if close[i] < s1:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above 6h high or trend reversal
-            if close[i] > high[i-1] or close[i] > trend:
+            # Exit short: close above R1 (reversion to mean)
+            if close[i] > r1:
                 signals[i] = 0.0
                 position = 0
             else:
