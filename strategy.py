@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyPivot_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily pivot levels (from previous day's OHLC)
+    # Previous day's OHLC for daily pivot levels (1d)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
     prev_close = np.roll(close, 1)
@@ -35,12 +35,12 @@ def generate_signals(prices):
     r4 = prev_high + 3 * (pivot - prev_low)
     s4 = prev_low - 3 * (prev_high - pivot)
     
-    # Weekly trend: EMA34 on 1w
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Daily trend: EMA34 on 1d
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume filter: volume > 1.5x 20-period SMA
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,7 +54,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if required data unavailable
         if np.isnan(pivot[i]) or np.isnan(r4[i]) or np.isnan(s4[i]) or \
-           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,35 +63,35 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R4 with weekly uptrend and volume
+            # Long: breakout above R4 with daily uptrend and volume
             if (price > r4[i] and 
-                price > ema34_1w_aligned[i] and 
+                price > ema34_1d_aligned[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S4 with weekly downtrend and volume
+            # Short: breakdown below S4 with daily downtrend and volume
             elif (price < s4[i] and 
-                  price < ema34_1w_aligned[i] and 
+                  price < ema34_1d_aligned[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price returns to pivot or weekly trend fails
+            # Exit long: price returns to pivot or daily trend fails
             if (price < pivot[i] or 
-                price < ema34_1w_aligned[i]):
+                price < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot or weekly trend fails
+            # Exit short: price returns to pivot or daily trend fails
             if (price > pivot[i] or 
-                price > ema34_1w_aligned[i]):
+                price > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
