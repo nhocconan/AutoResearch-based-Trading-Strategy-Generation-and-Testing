@@ -1,21 +1,19 @@
-# 1d_GoldenCross_VolumeConfirm_1wTrend
-# Hypothesis: Daily golden cross (SMA50 > SMA200) with volume confirmation and weekly trend filter.
-# Golden cross indicates long-term bullish momentum; volume > 1.5x average confirms institutional participation.
-# Weekly EMA50 trend filter ensures alignment with higher timeframe momentum.
-# Designed for low trade frequency (<25/year) to minimize fee drag in ranging/bear markets.
-# Works in bull markets via trend continuation and in bear markets via mean-reversion pulls to support.
-
-name = "1d_GoldenCross_VolumeConfirm_1wTrend"
-timeframe = "1d"
-leverage = 1.0
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 1h Keltner breakout with 4h EMA25 trend filter and volume confirmation.
+# In 4h uptrend (price > EMA25), break above upper Keltner band (EMA + 2*ATR) signals momentum.
+# In 4h downtrend (price < EMA25), break below lower Keltner band (EMA - 2*ATR) signals momentum.
+# Volume > 1.5x average confirms institutional participation. Designed for 15-30 trades/year.
+name = "1h_Keltner_Breakout_4hEMA25_Volume"
+timeframe = "1h"
+leverage = 1.0
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,66 +21,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data for EMA25 and ATR
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 25:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on weekly close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 25-period EMA on 4h close
+    close_4h = df_4h['close'].values
+    ema_25_4h = pd.Series(close_4h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema_25_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_25_4h)
     
-    # Calculate daily SMA50 and SMA200 for golden cross
-    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
+    # Calculate ATR(14) on 4h
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr1[0] = tr2[0] = tr3[0] = np.nan
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_4h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_14_4h)
     
-    # Calculate 20-day volume average for confirmation
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 1h EMA for Keltner channels (EMA20)
+    close_1h = close
+    ema_20_1h = pd.Series(close_1h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate ATR(10) for 1h Keltner width
+    tr1h = high - low
+    tr2h = np.abs(high - np.roll(close, 1))
+    tr3h = np.abs(low - np.roll(close, 1))
+    tr1h[0] = tr2h[0] = tr3h[0] = np.nan
+    trh = np.maximum(tr1h, np.maximum(tr2h, tr3h))
+    atr_10_1h = pd.Series(trh).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Keltner bands: EMA20 ± 2 * ATR10
+    keltner_upper = ema_20_1h + 2.0 * atr_10_1h
+    keltner_lower = ema_20_1h - 2.0 * atr_10_1h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # Need 200 for SMA200 and 20 for volume MA
+    start_idx = max(25, 20, 14, 10, 1)  # Need data for all indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(sma_50[i]) or np.isnan(sma_200[i]) or np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(ema_25_4h_aligned[i]) or np.isnan(atr_14_4h_aligned[i]) or \
+           np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        sma50 = sma_50[i]
-        sma200 = sma_200[i]
-        vol_ma = vol_ma_20[i]
+        ema_4h = ema_25_4h_aligned[i]
+        atr_4h = atr_14_4h_aligned[i]
+        keltner_up = keltner_upper[i]
+        keltner_low = keltner_lower[i]
         vol = volume[i]
-        weekly_ema = ema_50_1w_aligned[i]
+        
+        # Calculate 20-period volume average for confirmation
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+        else:
+            vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
         if position == 0:
-            # Enter long: Golden cross (SMA50 > SMA200) AND volume > 1.5x average AND price above weekly EMA (uptrend)
-            if sma50 > sma200 and vol > 1.5 * vol_ma and close[i] > weekly_ema:
-                signals[i] = 0.25
+            # Enter long: 4h uptrend AND price > upper Keltner AND volume > 1.5x average
+            if close[i] > ema_4h and close[i] > keltner_up and vol > 1.5 * vol_ma:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Death cross (SMA50 < SMA200) AND volume > 1.5x average AND price below weekly EMA (downtrend)
-            elif sma50 < sma200 and vol > 1.5 * vol_ma and close[i] < weekly_ema:
-                signals[i] = -0.25
+            # Enter short: 4h downtrend AND price < lower Keltner AND volume > 1.5x average
+            elif close[i] < ema_4h and close[i] < keltner_low and vol > 1.5 * vol_ma:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Death cross OR price below weekly EMA (trend reversal)
-            if sma50 < sma200 or close[i] < weekly_ema:
+            # Exit long: Price < lower Keltner OR 4h trend turns down
+            if close[i] < keltner_low or close[i] < ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Golden cross OR price above weekly EMA (trend reversal)
-            if sma50 > sma200 or close[i] > weekly_ema:
+            # Exit short: Price > upper Keltner OR 4h trend turns up
+            if close[i] > keltner_up or close[i] > ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
