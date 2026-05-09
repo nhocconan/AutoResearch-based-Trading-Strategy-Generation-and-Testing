@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakout on 4h with 1d EMA trend filter and volume confirmation.
-# Long when 1d trend up and price breaks above R3 with volume > 1.5x average.
-# Short when 1d trend down and price breaks below S3 with volume > 1.5x average.
-# Combines pivot-based structure with trend and volume filters to reduce whipsaw and improve edge.
-# Designed to work in both bull and bear markets by following the 1d trend direction.
+"""
+6h_Liquidity_Imbalance_Momentum
+Hypothesis: On 6h timeframe, price reacts to intraday liquidity imbalances (order book pressure) that persist due to delayed institutional execution.
+Buy when price breaks above prior 6h high with expanding volume and bullish imbalance; sell when breaks below prior low with bearish imbalance.
+Uses 1d trend filter to avoid counter-trend trades. Works in bull (momentum continuation) and bear (mean reversion of overextended moves) regimes.
+Designed for low trade frequency (~20-40/year) to minimize fee drag.
+"""
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Liquidity_Imbalance_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,89 +25,82 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
+    # Calculate 1d EMA20 for trend filter
+    ema20_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        ema20_1d[19] = np.mean(close_1d[0:20])
+        for i in range(20, len(close_1d)):
+            ema20_1d[i] = (close_1d[i] * 2 + ema20_1d[i-1] * 18) / 20
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    camarilla_r3 = np.full_like(high_1d, np.nan)
-    camarilla_s3 = np.full_like(low_1d, np.nan)
+    # Align 1d EMA to 6h
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's data
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        
-        camarilla_r3[i] = pc + (ph - pl) * 1.1 / 4
-        camarilla_s3[i] = pc - (ph - pl) * 1.1 / 4
-    
-    # Align 1d indicators to 4h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume filter: current volume vs 20-period average
+    # Calculate 6-period volume average for imbalance detection
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    if len(volume) >= 6:
+        vol_ma[5] = np.mean(volume[0:6])
+        for i in range(6, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 5 + volume[i]) / 6
     
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Volume spike detector (current > 1.5x average)
+    volume_spike = np.zeros(n, dtype=bool)
+    valid_vol = ~np.isnan(vol_ma) & (vol_ma > 0)
+    volume_spike[valid_vol] = volume[valid_vol] > (vol_ma[valid_vol] * 1.5)
+    
+    # Track 6-period high/low for breakout levels
+    highest_6h = np.full_like(high, np.nan)
+    lowest_6h = np.full_like(low, np.nan)
+    
+    if len(high) >= 6:
+        for i in range(6, len(high)):
+            highest_6h[i] = np.max(high[i-6:i])
+            lowest_6h[i] = np.min(low[i-6:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 1, 20)  # Need 1d EMA, Camarilla, and volume MA
+    start_idx = max(20, 6)  # Need 1d EMA and 6-period lookback
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(highest_6h[i]) or 
+            np.isnan(lowest_6h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine 1d trend
-        trend_up = close[i] > ema34_1d_aligned[i]
+        trend_up = close[i] > ema20_1d_aligned[i]
         
         if position == 0:
-            # Enter long: 1d trend up + price breaks above R3 + volume confirmation
-            if trend_up and close[i] > camarilla_r3_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long: bullish trend + break above 6h high + volume spike
+            if trend_up and high[i] > highest_6h[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + price breaks below S3 + volume confirmation
-            elif not trend_up and close[i] < camarilla_s3_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter short: bearish trend + break below 6h low + volume spike
+            elif not trend_up and low[i] < lowest_6h[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 1d trend turns down or price breaks below S3
-            if not trend_up or close[i] < camarilla_s3_aligned[i]:
+            # Exit long: trend turns bearish OR price breaks below 6h low
+            if not trend_up or low[i] < lowest_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 1d trend turns up or price breaks above R3
-            if trend_up or close[i] > camarilla_r3_aligned[i]:
+            # Exit short: trend turns bullish OR price breaks above 6h high
+            if trend_up or high[i] > highest_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
