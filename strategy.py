@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 2025-06-22 | 1d_WickReversal_MomentumFilter
-# Hypothesis: Daily wicks indicate rejection of price extremes. Long when lower wick > 2x upper wick in downtrend,
-# short when upper wick > 2x lower wick in uptrend. Weekly trend filter avoids counter-trend trades.
-# Volume confirmation ensures conviction. Designed for low trade frequency (10-25/year) to minimize fee drag.
-# Works in bull/bear via trend filter and mean-reversion logic at extremes.
+# 2025-06-22 | 4h_PivotReversal_Energy_1dTrend
+# Hypothesis: Daily pivot point reversals with 1d EMA100 trend filter and volume confirmation.
+# Uses standard pivot point calculation (PP, R1, S1) from previous day's OHLC.
+# Long when price crosses above S1 in uptrend (price > EMA100), short when crosses below R1 in downtrend (price < EMA100).
+# Volume confirmation (>1.5x 20-period average) filters weak breakouts.
+# Designed for low trade frequency (15-30/year) with clear trend alignment to work in both bull and bear markets.
 
-name = "1d_WickReversal_MomentumFilter"
-timeframe = "1d"
+name = "4h_PivotReversal_Energy_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,97 +19,95 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA21 for trend filter
-    ema_21_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 21:
-        ema_21_1w[20] = np.mean(close_1w[0:21])
-        for i in range(21, len(close_1w)):
-            ema_21_1w[i] = (ema_21_1w[i-1] * 20 + close_1w[i]) / 21
+    # Previous day's values for pivot calculation
+    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
+    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
+    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
     
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate daily pivot points (standard formula)
+    pp = (ph + pl + pc) / 3.0           # Pivot Point
+    r1 = 2 * pp - pl                    # Resistance 1
+    s1 = 2 * pp - ph                    # Support 1
     
-    # Daily calculations
-    body = np.abs(close - open_) if 'open' in prices.columns else np.abs(close - np.roll(close, 1))
-    upper_wick = high - np.maximum(close, open_) if 'open' in prices.columns else high - np.maximum(close, np.roll(close, 1))
-    lower_wick = np.minimum(close, open_) - low if 'open' in prices.columns else np.roll(close, 1) - low
+    # Align daily pivot levels to 4h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Handle first bar
-    if 'open' in prices.columns:
-        open_ = prices['open'].values
-        body = np.abs(close - open_)
-        upper_wick = high - np.maximum(close, open_)
-        lower_wick = np.minimum(close, open_) - low
-    else:
-        open_ = np.roll(close, 1)
-        open_[0] = close[0]
-        body = np.abs(close - open_)
-        upper_wick = high - np.maximum(close, open_)
-        lower_wick = np.minimum(close, open_) - low
+    # Calculate daily EMA100 for trend filter
+    ema_100_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 100:
+        ema_100_1d[99] = np.mean(close_1d[0:100])
+        for i in range(100, len(close_1d)):
+            ema_100_1d[i] = (ema_100_1d[i-1] * 99 + close_1d[i]) / 100
     
-    # Wick ratio: lower/upper or upper/lower
-    lower_to_upper = np.divide(lower_wick, upper_wick, out=np.full_like(lower_wick, np.nan), where=upper_wick!=0)
-    upper_to_lower = np.divide(upper_wick, lower_wick, out=np.full_like(upper_wick, np.nan), where=lower_wick!=0)
+    ema_100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
-    # Volume spike: current vs 20-day average
-    vol_ma20 = np.full_like(volume, np.nan)
+    # Volume confirmation: current volume / 20-period average volume
+    vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
-        vol_ma20[19] = np.mean(volume[0:20])
+        vol_ma[19] = np.mean(volume[0:20])
         for i in range(20, len(volume)):
-            vol_ma20[i] = (vol_ma20[i-1] * 19 + volume[i]) / 20
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    volume_ratio = np.divide(volume, vol_ma20, out=np.full_like(volume, np.nan), where=vol_ma20!=0)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 21)  # Volume MA and weekly EMA ready
+    start_idx = max(20, 100)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lower_to_upper[i]) or np.isnan(upper_to_lower[i]) or 
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_100_1d_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: strong lower wick rejection in weekly downtrend + volume
-            if (lower_to_upper[i] > 2.0 and 
-                close[i] < ema_21_1w_aligned[i] and 
+            # Enter long: price crosses above S1 AND uptrend (price > EMA100) AND volume confirmation
+            if (close[i] > s1_aligned[i] and 
+                close[i] > ema_100_1d_aligned[i] and 
                 volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: strong upper wick rejection in weekly uptrend + volume
-            elif (upper_to_lower[i] > 2.0 and 
-                  close[i] > ema_21_1w_aligned[i] and 
+            # Enter short: price crosses below R1 AND downtrend (price < EMA100) AND volume confirmation
+            elif (close[i] < r1_aligned[i] and 
+                  close[i] < ema_100_1d_aligned[i] and 
                   volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: wick exhaustion or trend change
-            if lower_to_upper[i] < 0.5 or close[i] > ema_21_1w_aligned[i]:
+            # Exit long: price crosses below pivot point OR trend reversal (price < EMA100)
+            if close[i] < pp_aligned[i] or close[i] < ema_100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: wick exhaustion or trend change
-            if upper_to_lower[i] < 0.5 or close[i] < ema_21_1w_aligned[i]:
+            # Exit short: price crosses above pivot point OR trend reversal (price > EMA100)
+            if close[i] > pp_aligned[i] or close[i] > ema_100_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
