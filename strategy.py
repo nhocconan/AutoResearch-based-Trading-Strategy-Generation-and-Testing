@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d timeframe with weekly Bollinger Band squeeze (low volatility) and 1-week Donchian channel breakout.
-# In low volatility regimes (BB width < 20th percentile), price tends to mean-revert to the Bollinger mid-band (20 SMA).
-# Enters long when price crosses above the 20 SMA in low-volatility regime, short when below.
-# Uses weekly Donchian breakout as confirmation: only take longs when price > weekly Donchian upper, shorts when < weekly Donchian lower.
-# Exits when volatility regime shifts to high volatility or price reverts to the 20 SMA.
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
+# Hypothesis: 12h timeframe with 1-day RSI (14) mean reversion in oversold/overbought zones, confirmed by 4h EMA (50) trend.
+# Enters long when 1d RSI < 30 (oversold) and price > 4h EMA50 (uptrend), exits when RSI > 50.
+# Enters short when 1d RSI > 70 (overbought) and price < 4h EMA50 (downtrend), exits when RSI < 50.
+# Uses 1d RSI for mean reversion signal and 4h EMA50 for trend filter to avoid counter-trend trades.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "1d_WeeklyBB_Squeeze_WeeklyDonchian_Confirmation"
-timeframe = "1d"
+name = "12h_RSI_MeanReversion_EMA50_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,46 +23,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Calculate 1-day RSI (14)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    close_1w = df_1w['close']
-    sma_20 = close_1w.rolling(window=20, min_periods=20).mean()
-    std_20 = close_1w.rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = upper_bb - lower_bb
+    close_1d = df_1d['close']
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_values = rsi_1d.values
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
     
-    # Bollinger Band squeeze: low volatility when BB width < 20th percentile
-    bb_width_percentile = bb_width.rolling(window=100, min_periods=100).quantile(0.2)
-    bb_squeeze = bb_width < bb_width_percentile
-    bb_squeeze_values = bb_squeeze.values
-    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1w, bb_squeeze_values)
+    # Calculate 4h EMA (50) for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Bollinger mid-band (20 SMA) for mean reversion target
-    bb_mid = sma_20.values
-    bb_mid_aligned = align_htf_to_ltf(prices, df_1w, bb_mid)
-    
-    # Price position relative to BB mid-band
-    price_above_mid = close > bb_mid_aligned
-    price_below_mid = close < bb_mid_aligned
-    
-    # Weekly Donchian channel (20-period) for breakout confirmation
-    high_1w = df_1w['high']
-    low_1w = df_1w['low']
-    donchian_upper = high_1w.rolling(window=20, min_periods=20).max()
-    donchian_lower = low_1w.rolling(window=20, min_periods=20).min()
-    
-    donchian_upper_values = donchian_upper.values
-    donchian_lower_values = donchian_lower.values
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_values)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_values)
-    
-    # Breakout conditions: price > weekly Donchian upper (long), price < weekly Donchian lower (short)
-    price_above_donchian_upper = close > donchian_upper_aligned
-    price_below_donchian_lower = close < donchian_lower_aligned
+    close_4h = df_4h['close']
+    ema_50_4h = close_4h.ewm(span=50, adjust=False).mean()
+    ema_50_4h_values = ema_50_4h.values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,37 +56,34 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_squeeze_aligned[i]) or
-            np.isnan(bb_mid_aligned[i]) or
-            np.isnan(price_above_mid[i]) or np.isnan(price_below_mid[i]) or
-            np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
-            np.isnan(price_above_donchian_upper[i]) or np.isnan(price_below_donchian_lower[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: low volatility (BB squeeze) + price above BB mid + price > weekly Donchian upper
-            if bb_squeeze_aligned[i] and price_above_mid[i] and price_above_donchian_upper[i]:
+            # Enter long: 1d RSI < 30 (oversold) and price > 4h EMA50 (uptrend)
+            if rsi_1d_aligned[i] < 30 and close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: low volatility (BB squeeze) + price below BB mid + price < weekly Donchian lower
-            elif bb_squeeze_aligned[i] and price_below_mid[i] and price_below_donchian_lower[i]:
+            # Enter short: 1d RSI > 70 (overbought) and price < 4h EMA50 (downtrend)
+            elif rsi_1d_aligned[i] > 70 and close[i] < ema_50_4h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: volatility regime shifts to high OR price crosses below BB mid
-            if (not bb_squeeze_aligned[i]) or (not price_above_mid[i]):
+            # Exit long: 1d RSI > 50 (mean reversion complete)
+            if rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: volatility regime shifts to high OR price crosses above BB mid
-            if (not bb_squeeze_aligned[i]) or (not price_below_mid[i]):
+            # Exit short: 1d RSI < 50 (mean reversion complete)
+            if rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
