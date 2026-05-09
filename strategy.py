@@ -1,6 +1,16 @@
+# 1D_Wilson_Wave_Oscillator_Trend_Filter
+# Combines Wilson Wave Oscillator with trend filter and volume confirmation
+# Wilson Wave Oscillator: %K = (Close - Lowest Low) / (Highest High - Lowest Low) * 100
+# Trend filter: 1w EMA200 on weekly chart for long-term direction
+# Volume confirmation: Daily volume > 1.5x 20-day average
+# Entry: WWO oversold (<20) in uptrend or overbought (>80) in downtrend + volume confirmation
+# Exit: Opposite WWO level or trend reversal
+# Designed for 1d timeframe to work in both bull and bear markets
+# Target: 15-25 trades/year to stay within fee limits
+
 #!/usr/bin/env python3
-name = "6h_Fisher_Transform_1dTrend_Volume"
-timeframe = "6h"
+name = "1D_Wilson_Wave_Oscillator_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,74 +27,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1D trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    close_1w = df_1w['close'].values
     
-    # Fisher Transform (9-period) on 6H prices
-    hl2 = (high + low) / 2
-    max_hl2 = pd.Series(hl2).rolling(window=9, min_periods=9).max().values
-    min_hl2 = pd.Series(hl2).rolling(window=9, min_periods=9).min().values
-    value = np.where(max_hl2 - min_hl2 != 0,
-                     2 * ((hl2 - min_hl2) / (max_hl2 - min_hl2) - 0.5),
-                     0)
-    value = np.clip(value, -0.999, 0.999)
-    fisher = np.zeros_like(hl2)
-    fisher[0] = 0
-    for i in range(1, len(hl2)):
-        fisher[i] = 0.5 * np.log((1 + value[i]) / (1 - value[i])) + 0.5 * fisher[i-1]
-    fisher = np.nan_to_num(fisher, nan=0.0)
+    # Calculate 1w EMA200 for trend filter
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume filter: current volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align 1w EMA200 to daily timeframe
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Calculate Wilson Wave Oscillator (14-period)
+    wwo_period = 14
+    highest_high = pd.Series(high).rolling(window=wwo_period, min_periods=wwo_period).max().values
+    lowest_low = pd.Series(low).rolling(window=wwo_period, min_periods=wwo_period).min().values
+    
+    # Avoid division by zero
+    range_ww = highest_high - lowest_low
+    wwo_raw = np.where(range_ww != 0, (close - lowest_low) / range_ww * 100, 50)
+    
+    # Get daily data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    
+    # Calculate 20-day volume average
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align volume MA to daily timeframe (same timeframe, so direct use)
+    vol_ma20_aligned = vol_ma20_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(9, 20, 100)
+    # Start after we have enough data for all indicators
+    start_idx = max(200, wwo_period, 20)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema100_1d_aligned[i]) or np.isnan(vol_ema20[i]):
+        if (np.isnan(ema200_1w_aligned[i]) or np.isnan(wwo_raw[i]) or 
+            np.isnan(vol_ma20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine market conditions
-        # Uptrend: price above 1D EMA100
-        uptrend = close[i] > ema100_1d_aligned[i]
-        # Downtrend: price below 1D EMA100
-        downtrend = close[i] < ema100_1d_aligned[i]
-        # Volume surge
-        volume_surge = volume[i] > vol_ema20[i] * 1.5
+        # Uptrend: price above 1w EMA200
+        uptrend = close[i] > ema200_1w_aligned[i]
+        # Downtrend: price below 1w EMA200
+        downtrend = close[i] < ema200_1w_aligned[i]
+        # Volume confirmation: current volume > 1.5x 20-day average
+        volume_confirm = volume[i] > vol_ma20_aligned[i] * 1.5
         
         if position == 0:
-            # Enter long: Fisher crosses above -1.5 + uptrend + volume surge
-            if fisher[i] > -1.5 and fisher[i-1] <= -1.5 and uptrend and volume_surge:
+            # Enter long: WWO oversold (<20) in uptrend + volume confirmation
+            if uptrend and wwo_raw[i] < 20 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Fisher crosses below +1.5 + downtrend + volume surge
-            elif fisher[i] < 1.5 and fisher[i-1] >= 1.5 and downtrend and volume_surge:
+            # Enter short: WWO overbought (>80) in downtrend + volume confirmation
+            elif downtrend and wwo_raw[i] > 80 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Fisher crosses below +1.5 OR trend turns down
-            if fisher[i] < 1.5 and fisher[i-1] >= 1.5 or not uptrend:
+            # Exit long: WWO overbought (>80) or trend turns down
+            if wwo_raw[i] > 80 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Fisher crosses above -1.5 OR trend turns up
-            if fisher[i] > -1.5 and fisher[i-1] <= -1.5 or not downtrend:
+            # Exit short: WWO oversold (<20) or trend turns up
+            if wwo_raw[i] < 20 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
