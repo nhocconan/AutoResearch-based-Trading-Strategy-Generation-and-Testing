@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
-# 2025-06-22 | 1h_SMMA_Trend_Filter_v1
-# Hypothesis: Use 4h Smoothed Moving Average (SMMA) for trend direction and 1h for precise entry timing.
-# SMMA (Smoothed Moving Average) is less reactive than EMA/SMA, reducing whipsaws in sideways markets.
-# Long when price > SMMA(50) and short when price < SMMA(50) on 4h timeframe.
-# Entry on 1h only when price crosses SMMA with volume confirmation (>1.5x 20-period average).
+# 2025-06-23 | 6h_Ichimoku_Cloud_Trend_v1
+# Hypothesis: Use Ichimoku Cloud from 1d timeframe for trend direction and 6h for entry timing.
+# In bull markets: price above cloud + Tenkan > Kijun = bullish trend.
+# In bear markets: price below cloud + Tenkan < Kijun = bearish trend.
+# The Ichimoku cloud provides dynamic support/resistance and adapts to volatility.
+# Cloud acts as a filter: only trade in direction of cloud color (green=bull, red=bear).
+# Entry on 6h when Tenkan crosses Kijun with confirmation from cloud and price action.
 # Designed for low trade frequency (15-35/year) to minimize fee drag in both bull and bear markets.
 
-name = "1h_SMMA_Trend_Filter_v1"
-timeframe = "1h"
+name = "6h_Ichimoku_Cloud_Trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,81 +17,112 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for SMMA trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for Ichimoku calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h SMMA(50) - Smoothed Moving Average
-    smma_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 50:
-        # First value is simple average
-        smma_4h[49] = np.mean(close_4h[0:50])
-        # Subsequent values: SMMA = (PREV_SMMA * (N-1) + CLOSE) / N
-        for i in range(50, len(close_4h)):
-            smma_4h[i] = (smma_4h[i-1] * 49 + close_4h[i]) / 50
+    # Calculate Ichimoku components on 1d
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period9_high = np.full_like(high_1d, np.nan)
+    period9_low = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 8:
+            start_idx = i - 8
+            period9_high[i] = np.max(high_1d[start_idx:i+1])
+            period9_low[i] = np.min(low_1d[start_idx:i+1])
+    tenkan = (period9_high + period9_low) / 2
     
-    # Align 4h SMMA to 1h timeframe
-    smma_4h_aligned = align_htf_to_ltf(prices, df_4h, smma_4h)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period26_high = np.full_like(high_1d, np.nan)
+    period26_low = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 25:
+            start_idx = i - 25
+            period26_high[i] = np.max(high_1d[start_idx:i+1])
+            period26_low[i] = np.min(low_1d[start_idx:i+1])
+    kijun = (period26_high + period26_low) / 2
     
-    # Volume filter: 1h volume / 20-period average volume
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    volume_ratio = np.full_like(volume, np.nan)
-    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid] = volume[valid] / vol_ma[valid]
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period52_high = np.full_like(high_1d, np.nan)
+    period52_low = np.full_like(low_1d, np.nan)
+    for i in range(len(high_1d)):
+        if i >= 51:
+            start_idx = i - 51
+            period52_high[i] = np.max(high_1d[start_idx:i+1])
+            period52_low[i] = np.min(low_1d[start_idx:i+1])
+    senkou_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure SMMA and volume MA are ready
+    start_idx = 51  # Need Senkou B (52-period) to be ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(smma_4h_aligned[i]) or np.isnan(volume_ratio[i]):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud color and position
+        # Green cloud: senkou_a > senkou_b (bullish)
+        # Red cloud: senkou_a < senkou_b (bearish)
+        cloud_green = senkou_a_6h[i] > senkou_b_6h[i]
+        cloud_red = senkou_a_6h[i] < senkou_b_6h[i]
+        
+        # Price position relative to cloud
+        price_above_cloud = close[i] > max(senkou_a_6h[i], senkou_b_6h[i])
+        price_below_cloud = close[i] < min(senkou_a_6h[i], senkou_b_6h[i])
+        
         if position == 0:
-            # Enter long: price crosses above SMMA AND volume confirmation
-            if close[i] > smma_4h_aligned[i] and volume_ratio[i] > 1.5:
-                signals[i] = 0.20
+            # Enter long: bullish alignment
+            # Price above green cloud AND Tenkan > Kijun
+            if cloud_green and price_above_cloud and tenkan_6h[i] > kijun_6h[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below SMMA AND volume confirmation
-            elif close[i] < smma_4h_aligned[i] and volume_ratio[i] > 1.5:
-                signals[i] = -0.20
+            # Enter short: bearish alignment
+            # Price below red cloud AND Tenkan < Kijun
+            elif cloud_red and price_below_cloud and tenkan_6h[i] < kijun_6h[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below SMMA
-            if close[i] < smma_4h_aligned[i]:
+            # Exit long: price breaks below cloud OR Tenkan crosses below Kijun
+            if price_below_cloud or tenkan_6h[i] < kijun_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above SMMA
-            if close[i] > smma_4h_aligned[i]:
+            # Exit short: price breaks above cloud OR Tenkan crosses above Kijun
+            if price_above_cloud or tenkan_6h[i] > kijun_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
