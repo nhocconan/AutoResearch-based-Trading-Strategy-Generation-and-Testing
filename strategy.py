@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_MarketStructure_Breakout_1dTrend_Volume
-# Hypothesis: 6h market structure (higher highs/lows) combined with 1d trend filter and volume confirmation.
-# Works in bull/bear: Trend filter ensures we trade with higher timeframe momentum, volume confirms breakout strength.
-# Market structure filters out false breakouts in ranging markets, focusing on institutional-grade moves.
+# 4h_Vortex_Trend_Strength_12hTrend_VolumeSpike
+# Hypothesis: Vortex indicator trend strength (VI+ > VI-) combined with 12h EMA50 trend filter and volume spike.
+# Works in bull/bear: Trend filter avoids counter-trend trades, volume confirms momentum.
+# Vortex captures trend initiation and continuation; filters reduce false signals and overtrading.
 
-name = "6h_MarketStructure_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Vortex_Trend_Strength_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,24 +17,56 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
+    close_12h = df_12h['close'].values
+    ema_50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[0:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
     
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Vortex Indicator (VI+ and VI-) - 14 periods
+    tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr])  # align with indices
+    
+    vm_plus = np.abs(high - low[:-1])
+    vm_minus = np.abs(low - high[:-1])
+    
+    # Sum over 14 periods
+    n_tr = len(tr)
+    vi_plus = np.full(n_tr, np.nan)
+    vi_minus = np.full(n_tr, np.nan)
+    
+    if n_tr >= 14:
+        # Initial sums
+        tr_sum = np.nansum(tr[1:15])  # skip first NaN
+        vm_plus_sum = np.nansum(vm_plus[1:15])
+        vm_minus_sum = np.nansum(vm_minus[1:15])
+        
+        if tr_sum > 0:
+            vi_plus[14] = vm_plus_sum / tr_sum
+            vi_minus[14] = vm_minus_sum / tr_sum
+        
+        # Rolling update
+        for i in range(15, n_tr):
+            tr_sum = tr_sum - tr[i-14] + tr[i]
+            vm_plus_sum = vm_plus_sum - vm_plus[i-14] + vm_plus[i]
+            vm_minus_sum = vm_minus_sum - vm_minus[i-14] + vm_minus[i]
+            
+            if tr_sum > 0:
+                vi_plus[i] = vm_plus_sum / tr_sum
+                vi_minus[i] = vm_minus_sum / tr_sum
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -47,52 +79,45 @@ def generate_signals(prices):
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
     volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
-    # Market structure: higher highs and higher lows for uptrend, lower lows and lower highs for downtrend
-    # We'll use a simple 5-period structure check
-    lookback = 5
-    hh_condition = np.zeros(n, dtype=bool)  # higher high
-    ll_condition = np.zeros(n, dtype=bool)  # lower low
-    
-    for i in range(lookback, n):
-        # Higher high: current high > highest high in lookback period
-        hh_condition[i] = high[i] == np.max(high[i-lookback:i+1])
-        # Lower low: current low < lowest low in lookback period
-        ll_condition[i] = low[i] == np.min(low[i-lookback:i+1])
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)  # Ensure volume MA is ready
+    start_idx = max(14, 20, 50)  # Ensure VI, volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: higher high + uptrend (close > EMA34) + volume spike
-            if hh_condition[i] and close[i] > ema_34_1d_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long: VI+ > VI- (bullish trend) AND uptrend (price > EMA50) AND volume spike
+            if (vi_plus[i] > vi_minus[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: lower low + downtrend (close < EMA34) + volume spike
-            elif ll_condition[i] and close[i] < ema_34_1d_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter short: VI- > VI+ (bearish trend) AND downtrend (price < EMA50) AND volume spike
+            elif (vi_minus[i] > vi_plus[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: lower low OR trend reversal (close < EMA34)
-            if ll_condition[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: VI- > VI+ (trend reversal) OR trend reversal (price < EMA50)
+            if vi_minus[i] > vi_plus[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: higher high OR trend reversal (close > EMA34)
-            if hh_condition[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: VI+ > VI- (trend reversal) OR trend reversal (price > EMA50)
+            if vi_plus[i] > vi_minus[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
