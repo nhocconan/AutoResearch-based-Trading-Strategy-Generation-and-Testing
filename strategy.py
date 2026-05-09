@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1h Camarilla Reversion with 4h Trend Filter
-Hypothesis: In ranging markets, price reverts to Camarilla pivot levels (H4/L4).
-Use 4h trend to filter direction: only long when 4h trend up at L4, short when 4h trend down at H4.
-1h provides precise entry timing. Target: 15-35 trades/year.
-Works in bull (trend-following reversals) and bear (mean reversion in ranges).
+6h Weekly Pivot + Volume Surge + Trend Filter
+Hypothesis: Weekly pivots act as strong support/resistance in ranging markets. 
+When price breaks above/below weekly pivot with volume surge and aligns with daily trend,
+it signals institutional participation. Weekly timeframe reduces noise, volume surge 
+confirms legitimacy, daily trend filter avoids counter-trend trades. Works in bull/bear
+as it trades breakouts in both directions with strict filters.
 """
 
-name = "1h_Camarilla_Reversion_4hTrend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_VolumeTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,90 +24,108 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA20 for trend filter
-    ema20_4h = np.full_like(close_4h, np.nan)
-    if len(close_4h) >= 20:
-        ema20_4h[19] = np.mean(close_4h[0:20])
-        for i in range(20, len(close_4h)):
-            ema20_4h[i] = (close_4h[i] * 2 + ema20_4h[i-1] * 18) / 20
+    # Calculate weekly pivot points (standard: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H)
+    pivot_1w = np.full_like(close_1w, np.nan)
+    r1_1w = np.full_like(close_1w, np.nan)
+    s1_1w = np.full_like(close_1w, np.nan)
     
-    # Align 4h EMA20 to 1h timeframe
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    for i in range(len(df_1w)):
+        if not (np.isnan(high_1w[i]) or np.isnan(low_1w[i]) or np.isnan(close_1w[i])):
+            pivot_1w[i] = (high_1w[i] + low_1w[i] + close_1w[i]) / 3.0
+            r1_1w[i] = 2 * pivot_1w[i] - low_1w[i]
+            s1_1w[i] = 2 * pivot_1w[i] - high_1w[i]
     
-    # Get 1d data for Camarilla calculation (H4/L4 levels)
+    # Align weekly pivot levels to 6h timeframe (wait for weekly bar close)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla H4 and L4 for each 1d bar
-    camarilla_h4_1d = np.full_like(close_1d, np.nan)
-    camarilla_l4_1d = np.full_like(close_1d, np.nan)
+    # Calculate 20-period EMA on daily for trend filter
+    ema20_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 20:
+        ema20_1d[19] = np.mean(close_1d[0:20])
+        for i in range(20, len(close_1d)):
+            ema20_1d[i] = (close_1d[i] * 2 + ema20_1d[i-1] * 18) / 20
     
-    for i in range(len(df_1d)):
-        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
-            range_ = high_1d[i] - low_1d[i]
-            camarilla_h4_1d[i] = close_1d[i] + 1.1 * range_ / 2  # H4
-            camarilla_l4_1d[i] = close_1d[i] - 1.1 * range_ / 2  # L4
+    # Align daily EMA20 to 6h timeframe
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Align Camarilla levels to 1h timeframe
-    camarilla_h4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4_1d)
-    camarilla_l4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4_1d)
+    # Volume filter: current volume vs 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after 4h EMA warmup
-    start_idx = 20
+    start_idx = max(20, 20)  # Need weekly pivot and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(camarilla_h4_1d_aligned[i]) or 
-            np.isnan(camarilla_l4_1d_aligned[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(ema20_1d_aligned[i]) or
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 4h trend
-        trend_up = close[i] > ema20_4h_aligned[i]
+        # Determine conditions
+        price_above_pivot = close[i] > pivot_1w_aligned[i]
+        price_below_pivot = close[i] < pivot_1w_aligned[i]
+        price_above_r1 = close[i] > r1_1w_aligned[i]
+        price_below_s1 = close[i] < s1_1w_aligned[i]
+        trend_up = close[i] > ema20_1d_aligned[i]
+        volume_surge = volume_ratio[i] > 2.0
         
         if position == 0:
-            # Enter long at L4 in uptrend (buy the dip in uptrend)
-            if trend_up and close[i] <= camarilla_l4_1d_aligned[i]:
-                signals[i] = 0.20
+            # Enter long: Price above weekly pivot + volume surge + uptrend
+            if price_above_pivot and volume_surge and trend_up:
+                signals[i] = 0.25
                 position = 1
-            # Enter short at H4 in downtrend (sell the rally in downtrend)
-            elif not trend_up and close[i] >= camarilla_h4_1d_aligned[i]:
-                signals[i] = -0.20
+            # Enter short: Price below weekly pivot + volume surge + downtrend
+            elif price_below_pivot and volume_surge and not trend_up:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend turns down OR price reaches H4 (take profit)
-            if not trend_up or close[i] >= camarilla_h4_1d_aligned[i]:
+            # Exit long: Price breaks below pivot OR trend reverses
+            if price_below_pivot or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend turns up OR price reaches L4 (take profit)
-            if trend_up or close[i] <= camarilla_l4_1d_aligned[i]:
+            # Exit short: Price breaks above pivot OR trend reverses
+            if price_above_pivot or trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
