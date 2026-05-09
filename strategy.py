@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Camarilla R3/S3 breakout with volume confirmation and 1d EMA20 trend filter.
+# Hypothesis: 4h Camarilla R3/S3 breakout with volume confirmation and 1d EMA50 trend filter.
 # Uses stronger breakout levels (R3/S3) for fewer, higher-quality trades.
-# 1d EMA20 filters for trend direction to avoid counter-trend entries.
+# 1d EMA50 filters for trend direction to avoid counter-trend entries.
 # Volume > 1.5x 20-period EMA ensures institutional participation.
 # Designed to work in both bull and bear markets by following higher timeframe trend.
-name = "12h_Camarilla_R3S3_Breakout_1dEMA20_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA50_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,9 +22,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA20 trend
+    # 1d data for EMA50 trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # Daily data for Camarilla levels
@@ -48,13 +48,13 @@ def generate_signals(prices):
     r3_shifted[0] = np.nan
     s3_shifted[0] = np.nan
     
-    # Align to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d_cam, r3_shifted)
-    s3_12h = align_htf_to_ltf(prices, df_1d_cam, s3_shifted)
+    # Align to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d_cam, r3_shifted)
+    s3_4h = align_htf_to_ltf(prices, df_1d_cam, s3_shifted)
     
-    # 1d EMA20 trend filter
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume spike filter: volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -63,12 +63,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,18 +77,18 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume spike and above 1d EMA20
-            if (price > r3_12h[i] and vol_spike[i] and price > ema_20_1d_aligned[i]):
+            # Long: price breaks above R3 with volume spike and above 1d EMA50
+            if (price > r3_4h[i] and vol_spike[i] and price > ema_50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume spike and below 1d EMA20
-            elif (price < s3_12h[i] and vol_spike[i] and price < ema_20_1d_aligned[i]):
+            # Short: price breaks below S3 with volume spike and below 1d EMA50
+            elif (price < s3_4h[i] and vol_spike[i] and price < ema_50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price falls back below S3 (mean reversion to support)
-            if price < s3_12h[i]:
+            if price < s3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -96,7 +96,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price rises back above R3 (mean reversion to resistance)
-            if price > r3_12h[i]:
+            if price > r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
