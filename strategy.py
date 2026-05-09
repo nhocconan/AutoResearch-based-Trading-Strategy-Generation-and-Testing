@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_Volume
+1d_Camarilla_R3_S3_Breakout_1wTrend_Volume_v2
 Hypothesis: Camarilla R3/S3 levels on 1d act as strong support/resistance. Breakouts
 above R3 or below S3 with volume spike and aligned 1w trend (EMA34) capture
 institutional moves. Works in bull/bear by following 1w trend direction.
-Designed for very low trade frequency (<10/year) with high win rate.
+Improved version with tighter exit logic and reduced trade frequency.
 """
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume_v2"
 timeframe = "1d"
 leverage = 1.0
 
@@ -84,16 +84,16 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price returns to previous day's close OR breaks below R3 (failed breakout)
+            if close[i] <= prev_close[i] or close[i] < r3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price returns to previous day's close OR breaks above S3 (failed breakdown)
+            if close[i] >= prev_close[i] or close[i] > s3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
