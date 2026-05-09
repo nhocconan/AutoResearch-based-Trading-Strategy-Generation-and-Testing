@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Williams Fractal breakout with 1d trend filter and volume confirmation
-# Long when bullish fractal breaks above with 1d EMA50 uptrend and volume > 1.5x average
-# Short when bearish fractal breaks below with 1d EMA50 downtrend and volume > 1.5x average
-# Exit when price crosses the 20-period EMA
-# Williams Fractals identify natural support/resistance; EMA50 filters trend; volume confirms conviction
-# Designed for medium-frequency, high-conviction trades on 6h timeframe
-# Target: 80-120 total trades over 4 years (20-30/year) with size 0.25
+# Hypothesis: 4h Camarilla pivot breakout with 1d EMA34 trend filter and volume spike
+# Long when price breaks above S1 with 1d EMA34 upward trend and volume > 2x average
+# Short when price breaks below R1 with 1d EMA34 downward trend and volume > 2x average
+# Exit when price crosses the 1-day EMA34
+# Combines institutional pivot levels with trend alignment and volume confirmation
+# Target: 100-180 total trades over 4 years (25-45/year) with size 0.25
 
-name = "6h_WilliamsFractal_Breakout_1dEMA50_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,60 +24,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Williams Fractals
-    # Bearish fractal: high[n-2] < high[n-1] > high[n] and high[n-3] < high[n-1] > high[n+1]
-    # Bullish fractal: low[n-2] > low[n-1] < low[n] and low[n-3] > low[n-1] < low[n+1]
-    n_high = len(high)
-    bearish_fractal = np.zeros(n_high, dtype=bool)
-    bullish_fractal = np.zeros(n_high, dtype=bool)
+    # Calculate Camarilla levels from previous 1-day OHLC
+    close_1d_prev = df_1d['close'].values
+    high_1d_prev = df_1d['high'].values
+    low_1d_prev = df_1d['low'].values
     
-    for i in range(2, n_high - 2):
-        # Bearish fractal (peak)
-        if (high[i-2] < high[i] and high[i-1] < high[i] and 
-            high[i+1] < high[i] and high[i+2] < high[i]):
-            bearish_fractal[i] = True
-        # Bullish fractal (valley)
-        if (low[i-2] > low[i] and low[i-1] > low[i] and 
-            low[i+1] > low[i] and low[i+2] > low[i]):
-            bullish_fractal[i] = True
+    # Camarilla multipliers
+    R1 = close_1d_prev + 0.183 * (high_1d_prev - low_1d_prev)
+    S1 = close_1d_prev - 0.183 * (high_1d_prev - low_1d_prev)
     
-    # Convert to price levels (0 where no fractal)
-    bearish_level = np.where(bearish_fractal, high, 0)
-    bullish_level = np.where(bullish_fractal, low, 0)
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # For alignment, we need arrays where non-fractal points carry last valid value
-    # But since fractals are rare, we'll use the raw levels and align them
-    # Williams fractals need 2-bar confirmation delay (already built into calculation above)
-    bearish_aligned = align_ltf_to_htf(prices, df_1d, bearish_level)
-    bullish_aligned = align_ltf_to_htf(prices, df_1d, bullish_level)
-    
-    # EMA50 alignment (no extra delay needed as it's based on closed daily candle)
-    ema_50_aligned = align_ltf_to_htf(prices, df_1d, ema_50)
-    
-    # EMA20 for exit
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    vol_confirm = volume > (2.0 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for all indicators
+    start_idx = 40  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(bearish_aligned[i]) or 
-            np.isnan(bullish_aligned[i]) or np.isnan(ema_20[i]) or 
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -86,28 +65,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price crosses above bullish fractal level with uptrend and volume
-            if (bullish_aligned[i] > 0 and close[i] > bullish_aligned[i] and 
-                close[i] > ema_50_aligned[i] and vol_confirm[i]):
+            # Enter long: price breaks above S1 with upward EMA trend and volume spike
+            if (close[i] > S1_aligned[i] and 
+                close[i] > ema_34_aligned[i] and  # Additional trend filter
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below bearish fractal level with downtrend and volume
-            elif (bearish_aligned[i] > 0 and close[i] < bearish_aligned[i] and 
-                  close[i] < ema_50_aligned[i] and vol_confirm[i]):
+            # Enter short: price breaks below R1 with downward EMA trend and volume spike
+            elif (close[i] < R1_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and  # Additional trend filter
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA20
-            if close[i] < ema_20[i]:
+            # Exit long: price crosses below EMA34
+            if close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA20
-            if close[i] > ema_20[i]:
+            # Exit short: price crosses above EMA34
+            if close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
