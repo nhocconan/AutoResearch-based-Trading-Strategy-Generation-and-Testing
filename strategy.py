@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_With_Volume"
+name = "4h_RSI_Divergence_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,71 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d KAMA(14, 2, 30)
+    # 1d EMA34 trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    change = abs(close_1d.diff(1))
-    volatility = change.rolling(window=14, min_periods=14).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros(len(close_1d))
-    kama[0] = close_1d.iloc[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # RSI(14) on 4h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Get 1d data for volume average
-    vol_1d = pd.Series(df_1d['volume'].values)
-    vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    
-    # Current volume for confirmation (20-period MA)
+    # Volume confirmation: 20-period MA
     vol_series = pd.Series(volume)
-    vol_ma20_current = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for indicators
+    start_idx = 50  # warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or 
-            np.isnan(vol_ma20_current[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20_current[i]
+        vol_ok = volume[i] > 1.3 * vol_ma20[i]
         
         if position == 0:
-            # Long: Price above KAMA with volume
-            if close[i] > kama_aligned[i] and vol_ok:
+            # Long: RSI < 30 (oversold) + price above 1d EMA34 + volume
+            if rsi[i] < 30 and close[i] > ema34_1d_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA with volume
-            elif close[i] < kama_aligned[i] and vol_ok:
+            # Short: RSI > 70 (overbought) + price below 1d EMA34 + volume
+            elif rsi[i] > 70 and close[i] < ema34_1d_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below KAMA
-            if close[i] < kama_aligned[i]:
+            # Exit long: RSI > 50 (momentum fade) or price below 1d EMA34
+            if rsi[i] > 50 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above KAMA
-            if close[i] > kama_aligned[i]:
+            # Exit short: RSI < 50 (momentum fade) or price above 1d EMA34
+            if rsi[i] < 50 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
