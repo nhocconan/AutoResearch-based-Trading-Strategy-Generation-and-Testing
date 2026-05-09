@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,77 +18,56 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla levels and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate weekly EMA200 for trend filter
+    weekly_close = df_weekly['close'].values
+    ema200_weekly = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
     
-    # Previous day's close for Camarilla calculation (R3, S3)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Calculate Camarilla levels (R3, S3)
-    r3 = prev_close + 1.1 * (prev_high - prev_low) * 3 / 4
-    s3 = prev_close - 1.1 * (prev_high - prev_low) * 3 / 4
-    
-    # Trend filter: weekly EMA50
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter: current daily volume > 1.5 * 20-period average
-    vol_series = pd.Series(df_1d['volume'].values)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
-    
-    # Align all to daily
-    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Calculate Donchian channels (20-period) on 6h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = 20  # Need enough data for Donchian calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_1d[i]) or np.isnan(s3_1d[i]) or
-            np.isnan(ema50_1w_1d[i]) or np.isnan(volume_filter_1d_aligned[i])):
+        if np.isnan(ema200_weekly_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_1d[i]
-        s3_val = s3_1d[i]
-        trend = ema50_1w_1d[i]
-        vol_filter = volume_filter_1d_aligned[i]
+        trend_filter = ema200_weekly_aligned[i]
         
         if position == 0:
-            # Enter long: break above R3 with volume and above trend
-            if close[i] > r3_val and close[i] > trend and vol_filter:
+            # Enter long: price breaks above upper Donchian in uptrend (price > weekly EMA200)
+            if close[i] > upper_channel[i] and close[i] > trend_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with volume and below trend
-            elif close[i] < s3_val and close[i] < trend and vol_filter:
+            # Enter short: price breaks below lower Donchian in downtrend (price < weekly EMA200)
+            elif close[i] < lower_channel[i] and close[i] < trend_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 (mean reversion to center)
-            if close[i] < s3_val:
+            # Exit long: price crosses below lower Donchian (trend reversal)
+            if close[i] < lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 (mean reversion to center)
-            if close[i] > r3_val:
+            # Exit short: price crosses above upper Donchian (trend reversal)
+            if close[i] > upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
