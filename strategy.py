@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_TRIX_WeeklyTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -12,74 +12,98 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX on 6h: 15-period EMA of price, then 15-period EMA of that, then 15-period EMA of that, then % change
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - previous value, then divided by previous EMA(EMA(EMA(close,15),15),15)
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix_raw = ema3.pct_change() * 100  # percentage change
-    trix = trix_raw.fillna(0).values
+    # Daily Camarilla levels (R3, S3) - calculated from previous day's range
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    # Using previous day's values (shifted by 1) to avoid look-ahead
+    daily_high = pd.Series(high).shift(1)
+    daily_low = pd.Series(low).shift(1)
+    daily_close = pd.Series(close).shift(1)
     
-    # Volume spike: current volume > 2.0 * 20-period SMA of volume
-    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_sma20)
+    R3 = daily_close + 1.1 * (daily_high - daily_low) / 2
+    S3 = daily_close - 1.1 * (daily_high - daily_low) / 2
     
-    # Weekly trend filter: EMA34 on 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Align daily levels to 12h timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Calculate Camarilla levels on daily data
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
+    
+    d_R3 = d_close + 1.1 * (d_high - d_low) / 2
+    d_S3 = d_close - 1.1 * (d_high - d_low) / 2
+    
+    # Shift to use previous day's levels (avoid look-ahead)
+    d_R3 = np.roll(d_R3, 1)
+    d_S3 = np.roll(d_S3, 1)
+    d_R3[0] = np.nan
+    d_S3[0] = np.nan
+    
+    R3_aligned = align_htf_to_ltf(prices, df_1d, d_R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, d_S3)
+    
+    # Daily trend filter: EMA34
+    d_ema34 = pd.Series(d_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    d_ema34_aligned = align_htf_to_ltf(prices, df_1d, d_ema34)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # warmup for TRIX and volume calculations
+    start_idx = 50  # warmup period
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(trix[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_sma20[i]):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(d_ema34_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = close[i]
+        
         if position == 0:
-            # Long: TRIX crosses above zero (bullish momentum) + weekly uptrend + volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and  # TRIX bullish crossover
-                close[i] > ema34_1w_aligned[i] and    # weekly uptrend
-                volume_spike[i]):                     # volume confirmation
+            # Long: price breaks above R3 + daily uptrend + volume confirmation
+            if (price > R3_aligned[i] and 
+                price > d_ema34_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: TRIX crosses below zero (bearish momentum) + weekly downtrend + volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and  # TRIX bearish crossover
-                  close[i] < ema34_1w_aligned[i] and    # weekly downtrend
-                  volume_spike[i]):                     # volume confirmation
+            # Short: price breaks below S3 + daily downtrend + volume confirmation
+            elif (price < S3_aligned[i] and 
+                  price < d_ema34_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: TRIX turns negative or weekly trend fails
-            if (trix[i] < 0 or                    # TRIX bearish
-                close[i] < ema34_1w_aligned[i]):  # weekly trend fail
+            # Exit long: price returns below EMA34 or volume drops
+            if (price < d_ema34_aligned[i] or 
+                not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX turns positive or weekly trend fails
-            if (trix[i] > 0 or                    # TRIX bullish
-                close[i] > ema34_1w_aligned[i]):  # weekly trend fail
+            # Exit short: price returns above EMA34 or volume drops
+            if (price > d_ema34_aligned[i] or 
+                not volume_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
