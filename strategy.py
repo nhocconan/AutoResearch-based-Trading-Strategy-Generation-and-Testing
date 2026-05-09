@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_KAMA_Direction_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,28 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for trend filter and KAMA calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend filter
+    # Calculate KAMA on 1d close for trend direction
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency Ratio (ER) for KAMA
+    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # 10-period volatility
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan, dtype=np.float64)
+    kama[29] = close_1d[29]  # Start at index 29 for 30-period lookback
+    for i in range(30, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla R3, S3 levels (used for breakout)
-    R3 = prev_close + 0.75 * (prev_high - prev_low)
-    S3 = prev_close - 0.75 * (prev_high - prev_low)
-    
-    # Align Camarilla levels to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align KAMA to 4h timeframe
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
     # Calculate 20-period volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,44 +48,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 34 for 1d EMA and 20 for volume average
+    start_idx = max(30, 20)  # Need 30 for KAMA, 20 for volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3 = R3_aligned[i]
-        s3 = S3_aligned[i]
-        ema_1d = ema_34_1d_aligned[i]
+        kama_val = kama_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Close > R3 AND price > 1d EMA34 (uptrend) AND volume > 2.5x average
-            if close[i] > r3 and close[i] > ema_1d and vol > 2.5 * vol_ma_val:
+            # Enter long: Close > KAMA AND volume > 2.0x average
+            if close[i] > kama_val and vol > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S3 AND price < 1d EMA34 (downtrend) AND volume > 2.5x average
-            elif close[i] < s3 and close[i] < ema_1d and vol > 2.5 * vol_ma_val:
+            # Enter short: Close < KAMA AND volume > 2.0x average
+            elif close[i] < kama_val and vol > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < S3 OR trend reverses (price < 1d EMA34)
-            if close[i] < s3 or close[i] < ema_1d:
+            # Exit long: Close < KAMA
+            if close[i] < kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > R3 OR trend reverses (price > 1d EMA34)
-            if close[i] > r3 or close[i] > ema_1d:
+            # Exit short: Close > KAMA
+            if close[i] > kama_val:
                 signals[i] = 0.0
                 position = 0
             else:
