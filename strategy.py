@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Keltner_Channel_Breakout_Trend_1w"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,88 +17,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for ATR calculation (longer period)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate weekly ATR(10)
-    high_low = df_1w['high'] - df_1w['low']
-    high_close = np.abs(df_1w['high'] - df_1w['close'].shift())
-    low_close = np.abs(df_1w['low'] - df_1w['close'].shift())
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    atr_1w = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    atr_1w_4h = align_htf_to_ltf(prices, df_1w, atr_1w)
-    
-    # Get daily data for Keltner channels and trend filter
+    # Get daily data for trend filter and Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily EMA(20) for middle line
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Previous 1d bar's OHLC (for Camarilla calculation)
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
     
-    # Keltner Channels: EMA(20) ± 2 * ATR(1w)
-    keltner_upper_1d = ema_20_1d + 2 * atr_1w
-    keltner_lower_1d = ema_20_1d - 2 * atr_1w
-    keltner_upper_4h = align_htf_to_ltf(prices, df_1d, keltner_upper_1d)
-    keltner_lower_4h = align_htf_to_ltf(prices, df_1d, keltner_lower_1d)
+    # Calculate Camarilla levels R1 and S1 (inner bounds)
+    camarilla_pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    camarilla_range_1d = prev_high_1d - prev_low_1d
+    camarilla_r1_1d = camarilla_pivot_1d + camarilla_range_1d * 1.1 / 12
+    camarilla_s1_1d = camarilla_pivot_1d - camarilla_range_1d * 1.1 / 12
     
-    # Weekly EMA(50) for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Align Camarilla levels to 4h
+    camarilla_pivot_4h = align_htf_to_ltf(prices, df_1d, camarilla_pivot_1d)
+    camarilla_r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Volume filter: above 1.8x 8-period average
-    vol_ma = pd.Series(volume).rolling(window=8, min_periods=8).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: above 1.5x 12-period average (12*4h = 2 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    
+    # Choppiness index (14-period) for regime filter
+    atr = np.abs(high - low)
+    tr1 = np.abs(high - np.roll(close, 1))
+    tr2 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(atr, np.maximum(tr1, tr2))
+    tr[0] = atr[0]
+    atr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_ma * 14 / (highest_high - lowest_low)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 8  # Wait for volume MA
+    start_idx = 14  # Wait for chop calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(keltner_upper_4h[i]) or np.isnan(keltner_lower_4h[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_4h[i]) or np.isnan(camarilla_s1_4h[i]) or 
+            np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.8 * vol_ma[i]  # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        chop_ok = chop[i] < 61.8  # Trending regime (chop < 61.8)
         
         # Session filter: 08-20 UTC (reduce noise trades)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above upper Keltner with weekly uptrend
-            if (close[i] > keltner_upper_4h[i] and 
-                close[i] > ema_50_4h[i] and  # weekly uptrend
+            # Long breakout: price breaks above camarilla R1 with daily uptrend
+            if (close[i] > camarilla_r1_4h[i] and 
+                close[i] > ema_34_4h[i] and  # daily uptrend
                 vol_ok and 
+                chop_ok and
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below lower Keltner with weekly downtrend
-            elif (close[i] < keltner_lower_4h[i] and 
-                  close[i] < ema_50_4h[i] and  # weekly downtrend
+            # Short breakdown: price breaks below camarilla S1 with daily downtrend
+            elif (close[i] < camarilla_s1_4h[i] and 
+                  close[i] < ema_34_4h[i] and  # daily downtrend
                   vol_ok and 
+                  chop_ok and
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below EMA(20) (mean reversion to middle)
-            if close[i] < ema_20_4h[i]:
+            # Exit long: price falls back below camarilla pivot (mean reversion)
+            if close[i] < camarilla_pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above EMA(20) (mean reversion to middle)
-            if close[i] > ema_20_4h[i]:
+            # Exit short: price rises back above camarilla pivot (mean reversion)
+            if close[i] > camarilla_pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
