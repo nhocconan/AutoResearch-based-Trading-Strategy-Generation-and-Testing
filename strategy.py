@@ -1,22 +1,19 @@
-#!/usr/bin/env python3
+# 1d_RSI_50_Crossover_1wMA100_Trend_Volume
+# Hypothesis: Daily RSI crossing above/below 50 with weekly MA100 trend filter and volume confirmation.
+# RSI(14) > 50 indicates bullish momentum, < 50 bearish. Weekly MA100 filters for long-term trend direction.
+# Volume > 1.5x 20-day EMA confirms participation. Works in both bull/bear by following weekly trend.
+# Target: 20-40 trades/year on daily timeframe.
+name = "1d_RSI_50_Crossover_1wMA100_Trend_Volume"
+timeframe = "1d"
+leverage = 1.0
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation.
-# Uses Donchian channel breakouts (20-period high/low) to capture breakout moves.
-# Trend filter from 1d EMA50 to align with higher timeframe trend.
-# Volume confirmation requires volume > 1.5x 20-period EMA to filter false breakouts.
-# Designed to work in both bull and bear markets by following 1d EMA trend.
-# Exit when price crosses back through the middle of the Donchian channel.
-# Parameters chosen to limit trades and avoid overtrading.
-name = "4h_DonchianBreakout_1dEMA50_Volume"
-timeframe = "4h"
-leverage = 1.0
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,34 +21,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 100:
         return np.zeros(n)
     
-    # Donchian channel (20-period high/low)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend first value as NaN to align with price array
+    rsi = np.concatenate([[np.nan], rsi])
     
-    # 1d EMA trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly MA100 trend filter
+    ma_100_1w = pd.Series(df_1w['close'].values).rolling(window=100, min_periods=100).mean().values
+    ma_100_1w_aligned = align_htf_to_ltf(prices, df_1w, ma_100_1w)
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Volume confirmation: volume > 1.5x 20-day EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 100  # Ensure enough data for RSI and weekly MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ma_100_1w_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,28 +61,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high + volume + 1d EMA up
-            if (price > donchian_high[i] and 
-                vol_confirm[i] and price > ema_1d_aligned[i]):
+            # Long: RSI > 50 (bullish momentum) + price above weekly MA100 + volume confirmation
+            if rsi[i] > 50 and price > ma_100_1w_aligned[i] and vol_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + volume + 1d EMA down
-            elif (price < donchian_low[i] and 
-                  vol_confirm[i] and price < ema_1d_aligned[i]):
+            # Short: RSI < 50 (bearish momentum) + price below weekly MA100 + volume confirmation
+            elif rsi[i] < 50 and price < ma_100_1w_aligned[i] and vol_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian mid
-            if price < donchian_mid[i]:
+            # Exit long: RSI crosses below 50 or price below weekly MA100
+            if rsi[i] < 50 or price < ma_100_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian mid
-            if price > donchian_mid[i]:
+            # Exit short: RSI crosses above 50 or price above weekly MA100
+            if rsi[i] > 50 or price > ma_100_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
