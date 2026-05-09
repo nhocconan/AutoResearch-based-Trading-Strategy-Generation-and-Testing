@@ -3,13 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams %R with 1d ADX25 trend filter and volume spike.
-# Williams %R identifies overbought/oversold conditions (above -20 or below -80).
-# Trend filter ensures we trade in direction of daily trend.
-# Volume spike confirms momentum.
-# Designed for 12h timeframe to target 12-37 trades/year.
-# Works in bull (buy oversold in uptrend) and bear (sell overbought in downtrend).
-name = "12h_WilliamsR14_1dADX25_VolumeSpike"
+# Hypothesis: 12-hour Bollinger Band breakout with 1-day ADX trend filter and volume surge.
+# Uses daily ADX for trend strength, Bollinger Bands for volatility-based breakout,
+# and volume surge for confirmation. Designed to work in both bull (breakouts above upper BB)
+# and bear (breakdowns below lower BB). Target: 20-40 trades/year to avoid fee drag.
+name = "12h_BB20_1dADX25_VolumeSurge"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,7 +23,7 @@ def generate_signals(prices):
     
     # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # Calculate 14-period ADX for daily timeframe
@@ -38,7 +36,7 @@ def generate_signals(prices):
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
     
     # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
     up_move = np.diff(high_1d, prepend=high_1d[0])
@@ -54,19 +52,13 @@ def generate_signals(prices):
     for i in range(1, len(tr)):
         atr[i] = (1 - alpha) * atr[i-1] + alpha * tr[i]
     
-    # Calculate +DI and -DI
-    plus_di = np.zeros_like(atr)
-    minus_di = np.zeros_like(atr)
-    for i in range(len(atr)):
-        if atr[i] > 0:
-            plus_di[i] = 100 * np.sum(plus_dm[max(0, i-period+1):i+1]) / (atr[i] * period)
-            minus_di[i] = 100 * np.sum(minus_dm[max(0, i-period+1):i+1]) / (atr[i] * period)
-        else:
-            plus_di[i] = 0
-            minus_di[i] = 0
+    plus_di = 100 * np.where(atr > 0,
+                             np.convolve(plus_dm, np.ones(period)/period, mode='full')[:len(plus_dm)] / atr, 0)
+    minus_di = 100 * np.where(atr > 0,
+                              np.convolve(minus_dm, np.ones(period)/period, mode='full')[:len(minus_dm)] / atr, 0)
     
     # Calculate DX and ADX
-    dx = np.where((plus_di + minus_di) > 0, 
+    dx = np.where((plus_di + minus_di) > 0,
                   100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
     adx = np.zeros_like(dx)
     for i in range(len(dx)):
@@ -77,59 +69,64 @@ def generate_signals(prices):
         else:
             adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
     
-    # Calculate Williams %R (14-period) for 12h timeframe
-    highest_high = np.maximum.accumulate(high)
-    lowest_low = np.minimum.accumulate(low)
-    williams_r = np.full_like(close, np.nan)
-    for i in range(len(close)):
-        if i < 14:
-            williams_r[i] = np.nan
+    # Calculate Bollinger Bands (20-period, 2 std dev) for 12h timeframe
+    sma = np.zeros_like(close)
+    std = np.zeros_like(close)
+    for i in range(n):
+        if i < 20:
+            sma[i] = np.nan
+            std[i] = np.nan
         else:
-            highest_high_14 = np.max(high[i-13:i+1])
-            lowest_low_14 = np.min(low[i-13:i+1])
-            if highest_high_14 != lowest_low_14:
-                williams_r[i] = -100 * (highest_high_14 - close[i]) / (highest_high_14 - lowest_low_14)
-            else:
-                williams_r[i] = -50  # Avoid division by zero
+            sma[i] = np.mean(close[i-19:i+1])
+            std[i] = np.std(close[i-19:i+1])
     
-    # Volume confirmation: volume > 2.0x 20-period EMA (strict threshold)
+    upper_band = sma + (2 * std)
+    lower_band = sma - (2 * std)
+    
+    # Align 1d ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Volume confirmation: volume > 2.5x 20-period EMA (strict threshold to reduce trades)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (2.0 * vol_ema20)
+    vol_confirm = volume > (2.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 14  # Need 14 periods for Williams %R
+    start_idx = 20  # Need 20 periods for Bollinger Bands
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(adx[i]) or np.isnan(williams_r[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(upper_band[i]) or 
+            np.isnan(lower_band[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        price = close[i]
+        
         if position == 0:
-            # Enter long: Williams %R < -80 (oversold) + 1d ADX > 25 + volume spike
-            if (williams_r[i] < -80 and adx[i] > 25 and vol_confirm[i]):
+            # Enter long: price breaks above upper band + 1d ADX > 25 + volume surge
+            if (price > upper_band[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R > -20 (overbought) + 1d ADX > 25 + volume spike
-            elif (williams_r[i] > -20 and adx[i] > 25 and vol_confirm[i]):
+            # Enter short: price breaks below lower band + 1d ADX > 25 + volume surge
+            elif (price < lower_band[i] and adx_aligned[i] > 25 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R > -50 (return to midpoint) or ADX drops below 20
-            if williams_r[i] > -50 or adx[i] < 20:
+            # Exit long: price returns below upper band or ADX drops below 20
+            if price < upper_band[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R < -50 (return to midpoint) or ADX drops below 20
-            if williams_r[i] < -50 or adx[i] < 20:
+            # Exit short: price returns above lower band or ADX drops below 20
+            if price > lower_band[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
