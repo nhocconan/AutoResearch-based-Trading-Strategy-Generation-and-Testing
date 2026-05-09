@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Camarilla R2/S2 breakout on 12h with daily EMA34 trend filter and volume spike confirmation.
+# 4h_4H_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: Camarilla R2/S2 breakout with daily EMA34 trend filter and volume spike confirmation.
+# R2/S2 levels are tighter than R3/S3, providing higher-probability breakouts with fewer false signals.
 # Works in bull/bear: EMA34 trend filter avoids counter-trend trades, volume confirms breakout strength.
-# Focus on high-probability breakouts to minimize trades and avoid fee drag. Target: 12-37 trades/year.
+# Focus on high-probability breakouts to minimize trades and avoid fee drag.
 
-name = "12h_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_4H_Camarilla_R2_S2_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,7 +42,7 @@ def generate_signals(prices):
     r2 = pc + 1.1 * rang * 1.0833  # R2 = Close + 1.1 * (High-Low) * 1.0833
     s2 = pc - 1.1 * rang * 1.0833  # S2 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
