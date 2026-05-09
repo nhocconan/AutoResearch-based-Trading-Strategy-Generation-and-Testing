@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation
-# Camarilla levels provide precise support/resistance, EMA50 on 12h filters trend direction,
-# and volume > 1.5x 20-period average confirms institutional participation.
-# Works in bull/bear markets by requiring trend alignment. Target: 75-200 trades over 4 years.
-name = "4h_Camarilla_R1_S1_12hEMA50_Trend_Volume"
-timeframe = "4h"
+# Hypothesis: 1d 20-day breakout with 1w EMA trend filter and volume confirmation
+# Daily breakout captures medium-term trends, 1w EMA filters for strong trend direction,
+# and volume confirmation ensures institutional participation. Works in bull/bear markets
+# by requiring trend alignment. Target: 30-100 trades over 4 years.
+name = "1d_20DayBreakout_1wEMA_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,62 +21,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1w data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Get 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 20-day Donchian channels (highest high/lowest low of last 20 days)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    highest_high_20d = high_series.rolling(window=20, min_periods=20).max().values
+    lowest_low_20d = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous 1d
-    # Using previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    
-    # Align Camarilla levels to 4h
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Volume filter: current volume > 1.5x 20-day average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and Camarilla calculations
+    start_idx = 50  # Need enough data for EMA and Donchian calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_4h[i]) or np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
-            np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_50_1d[i]) or np.isnan(highest_high_20d[i]) or 
+            np.isnan(lowest_low_20d[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Breakout conditions
-        long_breakout = close[i] > R1_4h[i-1]  # Break above R1
-        short_breakout = close[i] < S1_4h[i-1]  # Break below S1
+        long_breakout = close[i] > highest_high_20d[i-1]  # Break above 20-day high
+        short_breakout = close[i] < lowest_low_20d[i-1]  # Break below 20-day low
         
-        trend_up = close[i] > ema_50_4h[i]
-        trend_down = close[i] < ema_50_4h[i]
+        trend_up = close[i] > ema_50_1d[i]
+        trend_down = close[i] < ema_50_1d[i]
         
         if position == 0:
             # Long: bullish breakout + uptrend + volume confirmation
@@ -89,21 +72,19 @@ def generate_signals(prices):
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout below S1 or trend reversal
-            if close[i] < S1_4h[i] or not trend_up:
+            # Exit long: bearish breakout below 20-day low or trend reversal
+            if close[i] < lowest_low_20d[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout above R1 or trend reversal
-            if close[i] > R1_4h[i] or not trend_down:
+            # Exit short: bullish breakout above 20-day high or trend reversal
+            if close[i] > highest_high_20d[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-# %%
