@@ -1,99 +1,93 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_LarryWilliamsVolatilityBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    1d Camarilla R1/S1 breakout with 1w trend filter and volume confirmation.
-    - Long: Close breaks above R1 with volume > 2x avg and price > 1w EMA(20)
-    - Short: Close breaks below S1 with volume > 2x avg and price < 1w EMA(20)
-    - Exit: Close crosses back through Camarilla pivot (P) level
-    - Uses Camarilla from previous day (excluding current)
-    - Target: 10-25 trades/year on 1d timeframe
+    Larry Williams Volatility Breakout (LVB) with 1d trend filter and volume confirmation.
+    Long: Open > previous close + k * (previous high - previous low) with volume > 1.5x avg and price > 1d EMA(50)
+    Short: Open < previous close - k * (previous high - previous low) with volume > 1.5x avg and price < 1d EMA(50)
+    Exit: Close crosses the previous close (mean reversion)
+    k = 0.55 (optimized for 6h BTC/ETH)
+    Target: 15-35 trades/year on 6h timeframe
     """
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA(20) for trend filter
-    close_1w = pd.Series(df_1w['close'].values)
-    ema20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Calculate 1d EMA(50) for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate Camarilla levels from previous day (using HLC of previous day)
-    # Camarilla: P = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's HLC, so shift by 1
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    # Calculate previous bar's range for LVB
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_range = prev_high - prev_low
     
-    # Previous day's OHLC
-    prev_high = high_series.shift(1).values
-    prev_low = low_series.shift(1).values
-    prev_close = close_series.shift(1).values
+    # LVB levels: k = 0.55
+    k = 0.55
+    long_trigger = prev_close + k * prev_range
+    short_trigger = prev_close - k * prev_range
     
-    # Calculate Camarilla levels for today based on yesterday's price action
-    camarilla_p = (prev_high + prev_low + prev_close) / 3
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Volume confirmation: current volume > 2x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # need at least 20 days for vol MA + 1 for shift
+    start_idx = 60  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(camarilla_r1[i]) or 
-            np.isnan(camarilla_s1[i]) or np.isnan(camarilla_p[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(prev_close[i])):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(long_trigger[i]) or np.isnan(short_trigger[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma20[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Close breaks above R1 with volume confirmation and above 1w EMA trend
-            if close[i] > camarilla_r1[i] and vol_ok and close[i] > ema20_1w_aligned[i]:
+            # Long: Open breaks above LVB trigger with volume confirmation and above 1d EMA trend
+            if open_price[i] > long_trigger[i] and vol_ok and open_price[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1 with volume confirmation and below 1w EMA trend
-            elif close[i] < camarilla_s1[i] and vol_ok and close[i] < ema20_1w_aligned[i]:
+            # Short: Open breaks below LVB trigger with volume confirmation and below 1d EMA trend
+            elif open_price[i] < short_trigger[i] and vol_ok and open_price[i] < ema50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close crosses back below pivot P
-            if close[i] < camarilla_p[i]:
+            # Exit long: Close crosses below previous close (mean reversion)
+            if close[i] < prev_close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close crosses back above pivot P
-            if close[i] > camarilla_p[i]:
+            # Exit short: Close crosses above previous close (mean reversion)
+            if close[i] > prev_close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
