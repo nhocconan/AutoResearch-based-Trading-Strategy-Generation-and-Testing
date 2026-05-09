@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Bollinger Band squeeze breakout with 1d trend filter (EMA34) and volume confirmation
-# Long when Bollinger Band width < 20th percentile (squeeze), price breaks above upper band, EMA34 > EMA34 previous, volume > 1.5x avg
-# Short when Bollinger Band width < 20th percentile (squeeze), price breaks below lower band, EMA34 < EMA34 previous, volume > 1.5x avg
-# Exit when price crosses back inside Bollinger Bands or Bollinger Band width > 80th percentile (expansion)
-# Designed to capture volatility breakouts in both trending and ranging markets
-# Target: 100-200 total trades over 4 years (25-50/year) with size 0.25
+# Hypothesis: 12h price action relative to 1d VWAP with 1w ADX trend strength and 1d volume confirmation
+# Long when price > 1d VWAP, ADX > 25 (trending), and volume > 1.5x 20-period average
+# Short when price < 1d VWAP, ADX > 25, and volume > 1.5x 20-period average
+# Exit when ADX < 20 (trend weakening) or price crosses VWAP
+# Uses ADX for trend filter, VWAP for dynamic support/resistance, volume for conviction
+# Designed to capture strong trends while avoiding choppy markets
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "4h_BB_Squeeze_Breakout_EMA34_Volume"
-timeframe = "4h"
+name = "12h_1dVWAP_1wADX_1dVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,32 +25,48 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2) on 4h data
-    bb_length = 20
-    bb_mult = 2.0
-    basis = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
-    dev = bb_mult * pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
-    upper = basis + dev
-    lower = basis - dev
-    bb_width = upper - lower
-    
-    # Calculate Bollinger Band width percentiles for squeeze/expansion detection
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=50, min_periods=50).rank(pct=True).values * 100
-    
-    # Calculate 1d EMA34 for trend filter
+    # Calculate VWAP for 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # Need enough data for EMA34
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_prev = np.roll(ema_34_1d, 1)
-    ema_34_1d_prev[0] = ema_34_1d[0]  # Handle first value
-    ema_34_1d_rising = ema_34_1d > ema_34_1d_prev
-    ema_34_1d_falling = ema_34_1d < ema_34_1d_prev
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_34_1d_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_rising)
-    ema_34_1d_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_falling)
+    # Typical price for VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # VWAP calculation: cumulative(TP * Volume) / cumulative(Volume)
+    vwap_1d = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Calculate ADX for 1w timeframe (14-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need enough data for ADX calculation
+        return np.zeros(n)
+    
+    # True Range
+    tr1 = df_1w['high'] - df_1w['low']
+    tr2 = abs(df_1w['high'] - df_1w['close'].shift(1))
+    tr3 = abs(df_1w['low'] - df_1w['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    up_move = df_1w['high'] - df_1w['high'].shift(1)
+    down_move = df_1w['low'].shift(1) - df_1w['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    
+    # Directional Indicators
+    plus_di_1w = 100 * plus_dm_14 / tr_14
+    minus_di_1w = 100 * minus_dm_14 / tr_14
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w)
+    adx_1w = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -58,45 +75,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for calculations
+    start_idx = 50  # Need enough data for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_width_pct[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_1d_rising_aligned[i]) or 
-            np.isnan(ema_34_1d_falling_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(vwap_1d_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Bollinger squeeze (width < 20th percentile), price breaks above upper band, EMA rising, volume confirmation
-            if (bb_width_pct[i] < 20 and 
-                close[i] > upper[i] and 
-                ema_34_1d_rising_aligned[i] and 
+            # Enter long: price above VWAP, strong trend (ADX > 25), volume confirmation
+            if (close[i] > vwap_1d_aligned[i] and 
+                adx_1w_aligned[i] > 25 and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bollinger squeeze (width < 20th percentile), price breaks below lower band, EMA falling, volume confirmation
-            elif (bb_width_pct[i] < 20 and 
-                  close[i] < lower[i] and 
-                  ema_34_1d_falling_aligned[i] and 
+            # Enter short: price below VWAP, strong trend (ADX > 25), volume confirmation
+            elif (close[i] < vwap_1d_aligned[i] and 
+                  adx_1w_aligned[i] > 25 and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses back inside Bollinger Bands or Bollinger Band expansion (width > 80th percentile)
-            if (close[i] < basis[i]) or (bb_width_pct[i] > 80):
+            # Exit long: trend weakening (ADX < 20) or price crosses below VWAP
+            if (adx_1w_aligned[i] < 20) or (close[i] < vwap_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses back inside Bollinger Bands or Bollinger Band expansion (width > 80th percentile)
-            if (close[i] > basis[i]) or (bb_width_pct[i] > 80):
+            # Exit short: trend weakening (ADX < 20) or price crosses above VWAP
+            if (adx_1w_aligned[i] < 20) or (close[i] > vwap_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
