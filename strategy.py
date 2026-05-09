@@ -3,57 +3,65 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume_Filtered"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Previous day OHLC for Camarilla calculation (using 1d data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Previous hour OHLC for Camarilla (1h lookback)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Calculate Camarilla levels for 1h
+    range_ = prev_high - prev_low
+    close_prev = prev_close
+    r1 = close_prev + range_ * 1.1 / 12
+    s1 = close_prev - range_ * 1.1 / 12
+    
+    # 4h trend: EMA21 on 4h
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
+    ema21_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
     
-    prev_high_1d = df_1d['high'].values
-    prev_low_1d = df_1d['low'].values
-    prev_close_1d = df_1d['close'].values
-    prev_open_1d = df_1d['open'].values
+    # Volume filter: volume > 1.2x 24-period SMA
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_filter = volume > 1.2 * vol_ma24
     
-    # Calculate daily range and Camarilla levels
-    daily_range = prev_high_1d - prev_low_1d
-    r3 = prev_close_1d + daily_range * 1.1 / 4
-    s3 = prev_close_1d - daily_range * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Daily trend: EMA34 on 1d
-    ema34_1d = pd.Series(prev_close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: volume > 1.5x 20-period SMA
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > 1.5 * vol_ma20
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(r1[i]) or np.isnan(s1[i]) or \
+           np.isnan(ema21_4h_aligned[i]) or np.isnan(vol_ma24[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Apply session filter
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,38 +70,38 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R3 with daily uptrend and volume
-            if (price > r3_12h[i] and 
-                price > ema34_1d_aligned[i] and 
+            # Long: breakout above R1 with 4h uptrend and volume
+            if (price > r1[i] and 
+                price > ema21_4h_aligned[i] and 
                 vol_filter[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 continue
             
-            # Short: breakdown below S3 with daily downtrend and volume
-            elif (price < s3_12h[i] and 
-                  price < ema34_1d_aligned[i] and 
+            # Short: breakdown below S1 with 4h downtrend and volume
+            elif (price < s1[i] and 
+                  price < ema21_4h_aligned[i] and 
                   vol_filter[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price returns to daily EMA or loses volume
-            if (price < ema34_1d_aligned[i] or 
+            # Exit long: price returns to 4h EMA or loses volume
+            if (price < ema21_4h_aligned[i] or 
                 not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns to daily EMA or loses volume
-            if (price > ema34_1d_aligned[i] or 
+            # Exit short: price returns to 4h EMA or loses volume
+            if (price > ema21_4h_aligned[i] or 
                 not vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
