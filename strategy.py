@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_RSI_1dChop"
-timeframe = "4h"
+name = "1h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,99 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend and chop filter
+    # Get 1d data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend indicator
+    # 1d EMA50 for trend
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 1d Camarilla levels (R3, S3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = change[1:] / np.where(volatility[1:] == 0, 1, volatility[1:])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    range_1d = high_1d - low_1d
+    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
+    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
     
-    # RSI(14) on 1d
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / np.where(avg_loss == 0, 1, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d volume average for volume filter
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index on 1d (14-period)
-    atr_1d = np.zeros_like(close_1d)
-    tr1 = np.abs(np.diff(high_1d := df_1d['high'].values, prepend=high_1d[0]))
-    tr2 = np.abs(np.diff(low_1d := df_1d['low'].values, prepend=low_1d[0]))
-    tr3 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3[0] = tr2[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align all to 1h
+    ema50_1d_1h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    camarilla_high_1h = align_htf_to_ltf(prices, df_1d, camarilla_high)
+    camarilla_low_1h = align_htf_to_ltf(prices, df_1d, camarilla_low)
+    vol_avg_1d_1h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    sum_atr = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
-    
-    # Align to 4h
-    kama_4h = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_4h = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_4h = align_htf_to_ltf(prices, df_1d, chop)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_4h[i]) or np.isnan(rsi_4h[i]) or np.isnan(chop_4h[i])):
+        if (np.isnan(ema50_1d_1h[i]) or np.isnan(camarilla_high_1h[i]) or 
+            np.isnan(camarilla_low_1h[i]) or np.isnan(vol_avg_1d_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = kama_4h[i]
-        rsi_val = rsi_4h[i]
-        chop_val = chop_4h[i]
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Chop regime: > 61.8 = range, < 38.2 = trend
-        in_range = chop_val > 61.8
-        in_trend = chop_val < 38.2
+        trend = ema50_1d_1h[i]
+        resistance = camarilla_high_1h[i]
+        support = camarilla_low_1h[i]
+        vol_avg = vol_avg_1d_1h[i]
+        vol_ok = volume[i] > vol_avg * 2.0  # Higher volume threshold
         
-        if position == 0:
-            # Long: KAMA uptrend + RSI not overbought + in trending regime
-            if close[i] > trend and rsi_val < 70 and in_trend:
-                signals[i] = 0.25
+        if position == 0 and in_session:
+            # Long: break above R3 with volume and above 1d EMA50
+            if close[i] > resistance and vol_ok and close[i] > trend:
+                signals[i] = 0.20
                 position = 1
-            # Short: KAMA downtrend + RSI not oversold + in trending regime
-            elif close[i] < trend and rsi_val > 30 and in_trend:
-                signals[i] = -0.25
+            # Short: break below S3 with volume and below 1d EMA50
+            elif close[i] < support and vol_ok and close[i] < trend:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: trend reversal or RSI overbought
-            if close[i] < trend or rsi_val > 75:
+            # Exit long: close below S3 or trend reversal or outside session
+            if close[i] < support or close[i] < trend or not in_session:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: trend reversal or RSI oversold
-            if close[i] > trend or rsi_val < 25:
+            # Exit short: close above R3 or trend reversal or outside session
+            if close[i] > resistance or close[i] > trend or not in_session:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
