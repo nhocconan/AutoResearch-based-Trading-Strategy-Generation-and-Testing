@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_1w_Camarilla_R1_S1_Breakout_Trend_Volume_v3"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,78 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations
+    # Get 1d data for Elder Ray and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for volume filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (daily data)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Elder Ray calculations (13-period EMA)
+    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema13
+    bear_power = ema13 - df_1d['low'].values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Weekly trend filter: EMA50
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Weekly volume filter: current volume > 1.5 * 20-week average
-    vol_series = pd.Series(df_1w['volume'].values)
+    # Volume filter: current 12h volume > 1.3 * 20-period average
+    vol_series = pd.Series(df_12h['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1w = df_1w['volume'].values > (vol_ma * 1.5)
+    volume_filter_12h = df_12h['volume'].values > (vol_ma * 1.3)
     
-    # Align all to daily
-    r1_1d = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1d, s1)
-    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    volume_filter_1d = align_htf_to_ltf(prices, df_1w, volume_filter_1w)
+    # Align all to 6h
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
+    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_6h = align_htf_to_ltf(prices, df_12h, volume_filter_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(30, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or
-            np.isnan(ema50_1w_1d[i]) or np.isnan(volume_filter_1d[i])):
+        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or
+            np.isnan(ema34_1d_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_1d[i]
-        s1_val = s1_1d[i]
-        trend = ema50_1w_1d[i]
-        vol_filter = volume_filter_1d[i]
+        bull = bull_power_6h[i]
+        bear = bear_power_6h[i]
+        trend = ema34_1d_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above weekly trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: bull power > 0, price above trend, volume confirmation
+            if bull > 0 and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below weekly trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: bear power > 0, price below trend, volume confirmation
+            elif bear > 0 and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: bear power becomes positive (bearish pressure)
+            if bear > 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: bull power becomes positive (bullish pressure)
+            if bull > 0:
                 signals[i] = 0.0
                 position = 0
             else:
