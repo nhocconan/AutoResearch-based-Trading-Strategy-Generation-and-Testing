@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_4h1d_Camarilla_R1S1_VolumeSpike"
-timeframe = "1h"
+name = "4h_Keltner_Channel_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,47 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for Keltner Channel and trend filter
     df_1d = get_htf_data(prices, '1d')
+    
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla R1 and S1 from previous day's OHLC
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA(20) as center line
+    ema20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    # Calculate 1d ATR(10) for channel width
+    high_low = df_1d['high'] - df_1d['low']
+    high_close = np.abs(df_1d['high'] - np.roll(df_1d['close'], 1))
+    low_close = np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    tr[0] = high_low[0]  # First TR
+    atr10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    prev_daily_range = prev_high_1d - prev_low_1d
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1 = pivot + 1.1 * prev_daily_range * 1.0 / 12  # R1 = pivot + 1.1 * range * 1/12
-    s1 = pivot - 1.1 * prev_daily_range * 1.0 / 12  # S1 = pivot - 1.1 * range * 1/12
+    # Calculate Keltner Channel bands: ±1.5 * ATR
+    upper_keltner = ema20_1d + 1.5 * atr10_1d
+    lower_keltner = ema20_1d - 1.5 * atr10_1d
     
-    # Align Camarilla levels to 1h
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Keltner Channel levels to 4h
+    upper_keltner_4h = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_4h = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema20_1d_4h = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
-    
-    # Volume spike detection (20-period for 1h)
+    # Volume spike detection (20-period for 4h)
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,8 +53,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema50_1h[i]) or 
-            np.isnan(vol_avg[i]) or not in_session[i]):
+        if (np.isnan(upper_keltner_4h[i]) or np.isnan(lower_keltner_4h[i]) or 
+            np.isnan(ema20_1d_4h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,29 +64,29 @@ def generate_signals(prices):
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: Break above Camarilla R1 with uptrend and volume spike
-            if close[i] > r1_1h[i] and close[i] > ema50_1h[i] and vol_spike:
-                signals[i] = 0.20
+            # Long: Break above Upper Keltner with uptrend and volume spike
+            if close[i] > upper_keltner_4h[i] and close[i] > ema20_1d_4h[i] and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S1 with downtrend and volume spike
-            elif close[i] < s1_1h[i] and close[i] < ema50_1h[i] and vol_spike:
-                signals[i] = -0.20
+            # Short: Break below Lower Keltner with downtrend and volume spike
+            elif close[i] < lower_keltner_4h[i] and close[i] < ema20_1d_4h[i] and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below Camarilla S1 OR trend turns down
-            if close[i] < s1_1h[i] or close[i] < ema50_1h[i]:
+            # Exit long: Price falls back below EMA(20) OR trend turns down
+            if close[i] < ema20_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above Camarilla R1 OR trend turns up
-            if close[i] > r1_1h[i] or close[i] > ema50_1h[i]:
+            # Exit short: Price rises back above EMA(20) OR trend turns up
+            if close[i] > ema20_1d_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
