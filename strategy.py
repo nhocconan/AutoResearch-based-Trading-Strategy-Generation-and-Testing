@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Daily_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R1S1_Breakout_Trend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,22 +19,23 @@ def generate_signals(prices):
     
     # Get daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate daily pivot and range
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate pivot and ranges
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla R1 and S1 levels
+    # Camarilla levels (R1, S1) - breakout levels
     r1_1d = pivot_1d + (range_1d * 1.1 / 4)
     s1_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align to 12h timeframe
+    # Align to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -42,14 +43,15 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 1.5x 20-period average (12h)
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    # Start after we have enough data
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
