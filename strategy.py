@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-12H_Daily_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Use 12h timeframe with daily Camarilla R3/S3 breakout and EMA34 trend filter.
-Volume confirmation (2x 20-period average) filters false breakouts. Designed to work in both bull and bear markets by following the daily trend while capturing breakouts from key intraday levels. Targets 15-30 trades per year to minimize fee drag.
+4H_Daily_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_v3
+Hypothesis: Combine Camarilla R3/S3 breakouts with 1D EMA trend filter and volume confirmation.
+This strategy aims to capture strong intraday moves aligned with daily trend, using volume to filter false breakouts.
+Designed to work in both bull and bear markets by following the daily trend direction while using volatility-based entries.
+Target: 20-40 trades/year per symbol to minimize fee drag.
 """
 
-name = "12H_Daily_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,7 +43,7 @@ def generate_signals(prices):
     # EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align to 12h
+    # Align to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
