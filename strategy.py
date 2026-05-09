@@ -1,12 +1,11 @@
-# 6H_GapFill_1dTrend_Volume
-# Hypothesis: 6h gap fill strategy with 1d trend filter and volume confirmation.
-# Gaps often fill due to mean reversion, especially in choppy markets.
-# In strong trends, we trade pullbacks to the gap area in trend direction.
-# Works in both bull (buy dips) and bear (sell rallies) markets.
-# Target: 15-35 trades/year per symbol.
+# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Breakouts from weekly Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
+# The weekly timeframe provides a strong trend filter that works in both bull and bear markets.
+# Volume spike (>2x 24-period average) confirms breakout strength. Designed for low trade frequency (12-37/year)
+# to minimize fee drag. Uses 12h timeframe for execution with weekly trend filter.
 
-name = "6H_GapFill_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,44 +22,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and gap detection
+    # Get weekly data for trend filter and Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Previous week's values for Camarilla calculation
+    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
+    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
+    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
+    
+    # Calculate weekly Camarilla levels (R1, S1 are the key breakout levels)
+    rang = ph - pl
+    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
+    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
+    
+    # Align weekly Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Calculate daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA21 for trend filter
-    ema_21_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 21:
-        ema_21_1d[20] = np.mean(close_1d[0:21])
-        for i in range(21, len(close_1d)):
-            ema_21_1d[i] = (ema_21_1d[i-1] * 20 + close_1d[i]) / 21
+    # Previous day's close for EMA calculation
+    prev_close_1d = np.concatenate([[close_1d[0]], close_1d[:-1]])
     
-    ema_21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_21_1d)
+    # Calculate EMA50 on daily close
+    ema_50_1d = np.full_like(prev_close_1d, np.nan)
+    if len(prev_close_1d) >= 50:
+        ema_50_1d[49] = np.mean(prev_close_1d[0:50])
+        for i in range(50, len(prev_close_1d)):
+            ema_50_1d[i] = (ema_50_1d[i-1] * 49 + prev_close_1d[i]) / 50
     
-    # Daily ATR14 for gap threshold
-    tr_1d = np.maximum(high_1d[1:] - low_1d[1:], 
-                       np.maximum(np.abs(high_1d[1:] - close_1d[:-1]),
-                                  np.abs(low_1d[1:] - close_1d[:-1])))
-    tr_1d = np.concatenate([[high_1d[0] - low_1d[0]], tr_1d])
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    atr_14_1d = np.full_like(tr_1d, np.nan)
-    if len(tr_1d) >= 14:
-        atr_14_1d[13] = np.mean(tr_1d[0:14])
-        for i in range(14, len(tr_1d)):
-            atr_14_1d[i] = (atr_14_1d[i-1] * 13 + tr_1d[i]) / 14
-    
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # 6h volume ratio (current vs 6-period average = 1 day)
+    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 6:
-        vol_ma[5] = np.mean(volume[0:6])
-        for i in range(6, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 5 + volume[i]) / 6
+    if len(volume) >= 24:
+        vol_ma[23] = np.mean(volume[0:24])
+        for i in range(24, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
     
     volume_ratio = np.full_like(volume, np.nan)
     valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
@@ -70,13 +81,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(6, 21)  # Ensure volume MA and EMA are ready
+    start_idx = max(24, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_21_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,38 +96,28 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Detect gap: previous 6h bar's close vs current bar's open
-            prev_close = close[i-1]
-            curr_open = prices['open'].iloc[i]
-            gap_size = abs(curr_open - prev_close)
-            
-            # Only trade if gap is significant (> 0.5 * daily ATR)
-            if gap_size > 0.5 * atr_14_1d_aligned[i]:
-                # Gap down: potential long (price likely to fill gap upward)
-                if curr_open < prev_close:
-                    # In uptrend or ranging: buy the gap fill
-                    if close[i-1] >= ema_21_1d_aligned[i-1] or volume_ratio[i] > 1.5:
-                        signals[i] = 0.25
-                        position = 1
-                        bars_since_entry = 0
-                # Gap up: potential short (price likely to fill gap downward)
-                elif curr_open > prev_close:
-                    # In downtrend or ranging: sell the gap fill
-                    if close[i-1] <= ema_21_1d_aligned[i-1] or volume_ratio[i] > 1.5:
-                        signals[i] = -0.25
-                        position = -1
-                        bars_since_entry = 0
+            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_ratio[i] > 2.0):
+                signals[i] = 0.25
+                position = 1
+                bars_since_entry = 0
+            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_ratio[i] > 2.0):
+                signals[i] = -0.25
+                position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 2 bars
-            if bars_since_entry < 2:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = 0.25
             else:
-                # Exit conditions:
-                # 1. Gap filled (price returned to previous close)
-                # 2. Strong adverse move (stop)
-                prev_close = close[i-1]
-                if close[i] >= prev_close or close[i] < prev_close - 1.5 * atr_14_1d_aligned[i]:
+                # Exit long: price breaks below S1 OR trend reversal (price < EMA50)
+                if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -125,15 +125,12 @@ def generate_signals(prices):
                     signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 2 bars
-            if bars_since_entry < 2:
+            # Minimum holding period: 3 bars
+            if bars_since_entry < 3:
                 signals[i] = -0.25
             else:
-                # Exit conditions:
-                # 1. Gap filled (price returned to previous close)
-                # 2. Strong adverse move (stop)
-                prev_close = close[i-1]
-                if close[i] <= prev_close or close[i] > prev_close + 1.5 * atr_14_1d_aligned[i]:
+                # Exit short: price breaks above R1 OR trend reversal (price > EMA50)
+                if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
