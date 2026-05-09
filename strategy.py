@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_DailyCamarilla_R3S3_Breakout_Trend_Volume_v2"
-timeframe = "4h"
+name = "12H_DailyCamarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,17 +17,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for trend and levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate daily close for EMA
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate pivot and ranges
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Daily pivot and ranges for Camarilla levels
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
@@ -35,27 +39,13 @@ def generate_signals(prices):
     r3_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 4h
+    # Align to 12h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Volume confirmation: current volume > 2x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 2.0)
-    
-    # RSI(14) for additional momentum filter
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,33 +55,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]) or np.isnan(rsi_values[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation + RSI > 50
-            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i] and rsi_values[i] > 50:
+            # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation
+            if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation + RSI < 50
-            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i] and rsi_values[i] < 50:
+            # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation
+            elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily EMA34 (trend change) OR RSI < 30 (oversold)
-            if close[i] < ema34_aligned[i] or rsi_values[i] < 30:
+            # Exit long: price below daily EMA34 (trend change)
+            if close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above daily EMA34 (trend change) OR RSI > 70 (overbought)
-            if close[i] > ema34_aligned[i] or rsi_values[i] > 70:
+            # Exit short: price above daily EMA34 (trend change)
+            if close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
