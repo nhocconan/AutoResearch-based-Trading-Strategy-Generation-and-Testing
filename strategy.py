@@ -1,6 +1,6 @@
-# 4H_DailyCamarilla_R3S3_Breakout_Trend_Volume_v3
-name = "4H_DailyCamarilla_R3S3_Breakout_Trend_Volume_v3"
-timeframe = "4h"
+#!/usr/bin/env python3
+name = "6H_Daily_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
     r3_1d = pivot_1d + (range_1d * 1.1 / 2)
     s3_1d = pivot_1d - (range_1d * 1.1 / 2)
     
-    # Align to 4h
+    # Align to 6h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
@@ -43,11 +43,11 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: current volume > 2.5x 20-period average (more selective)
+    # Volume confirmation: current volume > 2x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 2.5)
+    volume_confirm = volume > (volume_avg * 2.0)
     
-    # RSI(14) for momentum filter
+    # RSI(14) for additional momentum filter
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
