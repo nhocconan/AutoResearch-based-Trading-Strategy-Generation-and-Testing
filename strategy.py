@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Filtered_v3"
-timeframe = "4h"
+name = "6h_ElderRay_Momentum_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,96 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for trend filter and Elder Ray calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
+    # Calculate EMA13 on 1d close for trend filter and Elder Ray
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Calculate Camarilla R3 and S3 from previous 1d bar
+    # Calculate Elder Ray components on 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + camarilla_range * 1.250
-    s3 = close_1d - camarilla_range * 1.250
+    # Bull Power = High - EMA13
+    bull_power = high_1d - ema13_1d
+    # Bear Power = Low - EMA13
+    bear_power = low_1d - ema13_1d
     
-    # Align Camarilla R3 and S3 to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Volume spike filter: current volume > 2.2 * 50-period average (slightly stricter)
+    # Volume spike filter: current volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=50, min_periods=50).mean().values
-    volume_spike = volume > (vol_ma * 2.2)
-    
-    # Choppiness regime filter: avoid choppy markets
-    # Calculate Choppiness Index on 4h data
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
-    lowest_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    # Avoid division by zero
-    atr_safe = np.where(atr == 0, 1e-10, atr)
-    chop = 100 * np.log10((highest_high - lowest_low) / (atr_safe * atr_period)) / np.log10(atr_period)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)  # Neutral when no range
-    
-    # Trending market: CHOP < 38.2, Choppy market: CHOP > 61.8
-    trending_market = chop < 38.2
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 50, atr_period)  # Need enough data for EMA34, volume MA and ATR
+    start_idx = max(13, 20)  # Need enough data for EMA13 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
-            np.isnan(trending_market[i])):
+        if (np.isnan(ema13_1d_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_34_1d_aligned[i]
+        ema13 = ema13_1d_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         vol_spike = volume_spike[i]
-        is_trending = trending_market[i]
         
         if position == 0:
-            # Enter long: Close > R3 and price above 1d EMA34 with volume spike in trending market
-            if close[i] > r3_aligned[i] and close[i] > ema_1d and vol_spike and is_trending:
+            # Enter long: Bull Power > 0 (bullish momentum), price above EMA13, volume spike
+            if bull_power_val > 0 and close[i] > ema13 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S3 and price below 1d EMA34 with volume spike in trending market
-            elif close[i] < s3_aligned[i] and close[i] < ema_1d and vol_spike and is_trending:
+            # Enter short: Bear Power < 0 (bearish momentum), price below EMA13, volume spike
+            elif bear_power_val < 0 and close[i] < ema13 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < S3 or trend breaks (price < 1d EMA34) or market becomes choppy
-            if close[i] < s3_aligned[i] or close[i] < ema_1d or not is_trending:
+            # Exit long: Bear Power >= 0 (bullish momentum fading) or price below EMA13
+            if bear_power_val >= 0 or close[i] < ema13:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > R3 or trend breaks (price > 1d EMA34) or market becomes choppy
-            if close[i] > r3_aligned[i] or close[i] > ema_1d or not is_trending:
+            # Exit short: Bull Power <= 0 (bearish momentum fading) or price above EMA13
+            if bull_power_val <= 0 or close[i] > ema13:
                 signals[i] = 0.0
                 position = 0
             else:
