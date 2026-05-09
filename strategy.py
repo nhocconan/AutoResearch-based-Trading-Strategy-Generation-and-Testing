@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_1w_1d_PivotBreakout_VolumeTrend_v2"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChoppyRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,85 +17,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for Pivot levels
+    # Get 1d data for TRIX and chop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter (needs 50 bars)
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # TRIX on 1d close (15-period EMA of EMA of EMA)
+    close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix_raw = np.diff(ema3, prepend=ema3[0]) / ema3 * 100
+    trix_1d = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Daily Pivot points (using previous day's OHLC)
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
-    prev_close_1d = df_1d['close'].shift(1).values
+    # Align TRIX to 4h
+    trix_4h = align_htf_to_ltf(prices, df_1d, trix_1d)
     
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1_1d = pivot_1d + (prev_high_1d - prev_low_1d)
-    s1_1d = pivot_1d - (prev_high_1d - prev_low_1d)
+    # Choppy index on 1d (14-period)
+    hl_range = df_1d['high'].values - df_1d['low'].values
+    atr_14 = pd.Series(hl_range).rolling(window=14, min_periods=14).mean().values
+    sum_atr = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
+    max_hh = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    min_ll = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    chop_denom = max_hh - min_ll
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)
+    chop_1d = 100 * np.log10(sum_atr / chop_denom) / np.log10(14)
     
-    # Align Pivot levels to 12h
-    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align chop to 4h
+    chop_4h = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Volume filter: above 1.5x 24-period average (24*12h = 12 days)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: above 2.0x 12-period average (2 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = 24  # Wait for volume MA
+    start_idx = 14  # Wait for chop calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_12h[i]) or np.isnan(pivot_12h[i]) or 
-            np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trix_4h[i]) or np.isnan(chop_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        vol_ok = volume[i] > 2.0 * vol_ma[i]
         
-        # Session filter: 00-23 UTC (full day for 12h timeframe)
+        # Session filter: 08-20 UTC
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        in_session = True  # 12h timeframe covers full day
+        in_session = 8 <= hour <= 20
+        
+        # Chop regime: >61.8 = choppy (mean revert), <38.2 = trending
+        is_choppy = chop_4h[i] > 61.8
+        is_trending = chop_4h[i] < 38.2
         
         if position == 0:
-            # Long breakout: price breaks above R1 with weekly uptrend
-            if (close[i] > r1_12h[i] and 
-                close[i] > ema_50_12h[i] and  # Weekly uptrend
-                vol_ok and 
-                in_session):
+            # Long: TRIX crosses above zero in choppy market (mean reversion bounce)
+            if (trix_4h[i] > 0 and trix_4h[i-1] <= 0 and 
+                is_choppy and vol_ok and in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with weekly downtrend
-            elif (close[i] < s1_12h[i] and 
-                  close[i] < ema_50_12h[i] and  # Weekly downtrend
-                  vol_ok and 
-                  in_session):
+            # Short: TRIX crosses below zero in choppy market (mean reversion fade)
+            elif (trix_4h[i] < 0 and trix_4h[i-1] >= 0 and 
+                  is_choppy and vol_ok and in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below pivot (mean reversion)
-            if close[i] < pivot_12h[i]:
+            # Exit long: TRIX crosses below zero or chop breaks down
+            if trix_4h[i] < 0 or not is_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above pivot (mean reversion)
-            if close[i] > pivot_12h[i]:
+            # Exit short: TRIX crosses above zero or chop breaks down
+            if trix_4h[i] > 0 or not is_choppy:
                 signals[i] = 0.0
                 position = 0
             else:
