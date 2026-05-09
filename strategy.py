@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_MultiTF_Trend_Momentum"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    1h strategy using 4h trend (EMA21) and 1h momentum (RSI(14)) with volume filter.
-    - Long: Price > 4h EMA21 AND RSI(14) < 30 AND volume > 1.5x avg volume (20)
-    - Short: Price < 4h EMA21 AND RSI(14) > 70 AND volume > 1.5x avg volume (20)
-    - Exit: Opposite condition met (price crosses 4h EMA21 or RSI reverts)
-    - Session filter: 08:00-20:00 UTC only
-    - Target: 15-30 trades/year on 1h timeframe (60-120 total over 4 years)
+    12h Camarilla R3/S3 breakout with 1d trend filter and volume confirmation.
+    - Long: Price breaks above Camarilla R3 with 1d EMA34 trend and volume spike
+    - Short: Price breaks below Camarilla S3 with 1d EMA34 trend and volume spike
+    - Exit: Price crosses back through Camarilla pivot (P)
+    - Volume spike: current volume > 2.0 x 24-period average
+    - Target: 12-37 trades/year on 12h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -25,107 +25,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA21 on 4h close
-    close_4h = df_4h['close'].values
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 21:
-        ema_4h[20] = np.mean(close_4h[:21])
-        for i in range(21, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2/22) + (ema_4h[i-1] * 20/22)
+    # Calculate 12h Camarilla levels from prior 12h candle
+    # Camarilla uses previous period's high, low, close
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align 4h EMA to 1h
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Pivot point
+    P = (prev_high + prev_low + prev_close) / 3
+    # Camarilla levels
+    range_val = prev_high - prev_low
+    R3 = P + range_val * 1.1 / 2
+    S3 = P - range_val * 1.1 / 2
     
-    # Calculate RSI(14) on 1h close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34[i] = close_1d[i] * (2 / (34 + 1)) + ema_34[i-1] * (1 - 2 / (34 + 1))
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
+    # Align EMA34 to 12h
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Wilder smoothing for RSI
-    period = 14
-    if n >= period:
-        avg_gain[period-1] = np.mean(gain[1:period+1])
-        avg_loss[period-1] = np.mean(loss[1:period+1])
-        
-        for i in range(period, n):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-    
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, 50.0)  # default neutral
-    
-    for i in range(period, n):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-    
-    # Volume average (20-period)
+    # Volume spike detection (24-period for 12h)
     vol_avg = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_avg[i] = np.mean(volume[i-20:i])
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    for i in range(24, n):
+        vol_avg[i] = np.mean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # ensure sufficient warmup
+    start_idx = max(50, 24)  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(P[i]) or np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
+        # Volume condition: current volume > 2.0 x 24-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
         
-        if not in_session:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume condition: current volume > 1.5x 20-period average
-        vol_condition = volume[i] > vol_avg[i] * 1.5
+        # Trend filter: price > EMA34 for long, price < EMA34 for short
+        uptrend = close[i] > ema_34_12h[i]
+        downtrend = close[i] < ema_34_12h[i]
         
         if position == 0:
-            # Long: Price > 4h EMA21 AND RSI < 30 (oversold) AND volume spike
-            if (close[i] > ema_4h_aligned[i] and rsi[i] < 30 and vol_condition):
-                signals[i] = 0.20
+            # Long: Break above R3 with uptrend and volume spike
+            if (close[i] > R3[i] and uptrend and vol_spike):
+                signals[i] = 0.25
                 position = 1
-            # Short: Price < 4h EMA21 AND RSI > 70 (overbought) AND volume spike
-            elif (close[i] < ema_4h_aligned[i] and rsi[i] > 70 and vol_condition):
-                signals[i] = -0.20
+            # Short: Break below S3 with downtrend and volume spike
+            elif (close[i] < S3[i] and downtrend and vol_spike):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price < 4h EMA21 OR RSI > 50 (momentum fade)
-            if close[i] < ema_4h_aligned[i] or rsi[i] > 50:
+            # Exit long: Price crosses below pivot P
+            if close[i] < P[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price > 4h EMA21 OR RSI < 50 (momentum fade)
-            if close[i] > ema_4h_aligned[i] or rsi[i] < 50:
+            # Exit short: Price crosses above pivot P
+            if close[i] > P[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
