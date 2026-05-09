@@ -1,13 +1,12 @@
-#!/usr/bin/env python3
-# Hypothesis: 1h Fibonacci pullback strategy with 4h EMA21 trend filter and volume spike
-# Long when price pulls back to 0.618 Fib level in uptrend (4h EMA21 rising) with volume > 1.5x average
-# Short when price pulls back to 0.382 Fib level in downtrend (4h EMA21 falling) with volume > 1.5x average
-# Exit when price reaches opposite Fib level or shows reversal signs
-# Uses 4h for trend direction, 1h for precise entry timing during pullbacks
-# Target: 80-120 total trades over 4 years (20-30/year) with size 0.20
+# 6h_WeeklyPivotBreakout_1dTrendVolume - Novel weekly pivot breakout strategy for 6h timeframe
+# Hypothesis: Breakouts from weekly pivot levels (R4/S4) with 1d trend filter and volume spike
+# captures institutional-level support/resistance breaks. Weekly pivots are more significant
+# than daily pivots and less prone to noise. Works in both bull/bear markets by filtering
+# with 1d trend and requiring volume confirmation to avoid false breakouts.
+# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
 
-name = "1h_Fibonacci_Pullback_4hEMA21_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivotBreakout_1dTrendVolume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,82 +23,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 4h EMA21 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Calculate weekly pivot levels (PP, R1-R4, S1-S4)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    ema21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Previous week's OHLC for weekly pivot calculation
+    prev_high = df_1w['high'].shift(1)
+    prev_low = df_1w['low'].shift(1)
+    prev_close = df_1w['close'].shift(1)
     
-    # Calculate 1h swing high/low for Fibonacci levels (20-period lookback)
-    def calculate_fib_levels(high_arr, low_arr, lookback=20):
-        fib_levels = np.full_like(high_arr, np.nan)
-        for i in range(lookback, len(high_arr)):
-            window_high = np.max(high_arr[i-lookback:i])
-            window_low = np.min(low_arr[i-lookback:i])
-            diff = window_high - window_low
-            if diff > 0:
-                fib_levels[i] = window_high - 0.618 * diff  # 0.618 retracement for longs
-                # Also calculate 0.382 for shorts
-        return fib_levels
+    # Calculate weekly pivot point
+    pp = (prev_high + prev_low + prev_close) / 3
+    # Calculate weekly pivot levels
+    r1 = pp + (prev_high - prev_low) * 1.0833
+    r2 = pp + (prev_high - prev_low) * 1.1666
+    r3 = pp + (prev_high - prev_low) * 1.2500
+    r4 = pp + (prev_high - prev_low) * 1.5000
+    s1 = pp - (prev_high - prev_low) * 1.0833
+    s2 = pp - (prev_high - prev_low) * 1.1666
+    s3 = pp - (prev_high - prev_low) * 1.2500
+    s4 = pp - (prev_high - prev_low) * 1.5000
     
-    # Calculate Fibonacci levels
-    fib_618 = calculate_fib_levels(high, low)
-    fib_382 = np.full_like(high, np.nan)
-    for i in range(20, len(high)):
-        window_high = np.max(high[i-20:i])
-        window_low = np.min(low[i-20:i])
-        diff = window_high - window_low
-        if diff > 0:
-            fib_382[i] = window_low + 0.382 * diff  # 0.382 retracement for shorts
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp.values)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4.values)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1.values)
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: current volume > 2.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    vol_confirm = volume > (2.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for calculations
+    start_idx = 50  # Need enough data for EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(fib_618[i]) or np.isnan(fib_382[i]) or
-            np.isnan(vol_confirm[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: pullback to 0.618 Fib in uptrend with volume spike
-            if (low[i] <= fib_618[i] and  # Price touches or goes below 0.618 level
-                ema21_4h_aligned[i] > ema21_4h_aligned[i-1] and  # 4h EMA21 rising
+            # Enter long: price breaks above weekly R4, 1d EMA uptrend, volume spike
+            if (close[i] > r4_aligned[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Enter short: pullback to 0.382 Fib in downtrend with volume spike
-            elif (high[i] >= fib_382[i] and  # Price touches or goes above 0.382 level
-                  ema21_4h_aligned[i] < ema21_4h_aligned[i-1] and  # 4h EMA21 falling
+            # Enter short: price breaks below weekly S4, 1d EMA downtrend, volume spike
+            elif (close[i] < s4_aligned[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches 0.382 Fib level or shows weakness
-            if (high[i] >= fib_382[i]) or (close[i] < close[i-1] and low[i] < fib_618[i]):
+            # Exit long: price retouches weekly pivot or reverses to S1
+            if (close[i] <= pp_aligned[i]) or (close[i] < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches 0.618 Fib level or shows strength
-            if (low[i] <= fib_618[i]) or (close[i] > close[i-1] and high[i] > fib_382[i]):
+            # Exit short: price retouches weekly pivot or reverses to R1
+            if (close[i] >= pp_aligned[i]) or (close[i] > r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
