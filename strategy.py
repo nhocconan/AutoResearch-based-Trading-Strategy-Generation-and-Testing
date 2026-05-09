@@ -1,19 +1,6 @@
 #!/usr/bin/env python3
-"""
-6h_ERP_Energy_Trend
-Elder Ray Power (Bull/Bear Power) with 12h trend filter and volume confirmation.
-- Bull Power = High - EMA13
-- Bear Power = Low - EMA13
-Long when Bull Power > 0 and rising, Bear Power < 0, and 12h trend up.
-Short when Bear Power < 0 and falling, Bull Power > 0, and 12h trend down.
-Volume filter ensures institutional participation.
-Designed for 6h timeframe to capture trends while avoiding whipsaws.
-Works in both bull and bear markets via trend filter.
-Target: 20-50 trades/year.
-"""
-
-name = "6h_ERP_Energy_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_RSI_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,37 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h EMA34 for trend filter
-    ema34_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[0:34])
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = (close_12h[i] * 2 + ema34_12h[i-1] * 32) / 34
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align 12h EMA34 to 6h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate EMA13 for Elder Ray Power on 6h data
-    ema13 = np.full_like(close, np.nan)
-    if len(close) >= 13:
-        ema13[12] = np.mean(close[0:13])
-        for i in range(13, len(close)):
-            ema13[i] = (close[i] * 2 + ema13[i-1] * 11) / 13
+    # Calculate Camarilla levels for each 1d bar: R3, S3
+    camarilla_r3_1d = np.full_like(close_1d, np.nan)
+    camarilla_s3_1d = np.full_like(close_1d, np.nan)
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            camarilla_r3_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
+            camarilla_s3_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    
+    # Calculate 14-period RSI on 4h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    
+    if len(close) >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.full_like(close, np.nan)
+    rsi = np.full_like(close, np.nan)
+    valid_avg_loss = avg_loss != 0
+    rs[valid_avg_loss] = avg_gain[valid_avg_loss] / avg_loss[valid_avg_loss]
+    rsi[valid_avg_loss] = 100 - (100 / (1 + rs[valid_avg_loss]))
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -76,12 +85,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 13, 20)  # Need 12h EMA34, EMA13, and volume MA
+    start_idx = max(34, 14, 20)  # Need 1d EMA34, RSI, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
+            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(rsi[i]) or
             np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -89,32 +98,32 @@ def generate_signals(prices):
             continue
         
         # Determine market conditions
-        trend_up = close[i] > ema34_12h_aligned[i]
-        bull_power_rising = bull_power[i] > bull_power[i-1]
-        bear_power_falling = bear_power[i] < bear_power[i-1]
-        volume_surge = volume_ratio[i] > 1.5
+        trend_up = close[i] > ema34_1d_aligned[i]
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
+        volume_surge = volume_ratio[i] > 1.8
         
         if position == 0:
-            # Enter long: Uptrend + Bull Power rising > 0 + Bear Power < 0 + volume surge
-            if trend_up and bull_power_rising and bull_power[i] > 0 and bear_power[i] < 0 and volume_surge:
+            # Enter long: Uptrend + RSI bullish + price breaks above R3 + volume surge
+            if trend_up and rsi_bullish and close[i] > camarilla_r3_1d_aligned[i] and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + Bear Power falling < 0 + Bull Power > 0 + volume surge
-            elif not trend_up and bear_power_falling and bear_power[i] < 0 and bull_power[i] > 0 and volume_surge:
+            # Enter short: Downtrend + RSI bearish + price breaks below S3 + volume surge
+            elif not trend_up and rsi_bearish and close[i] < camarilla_s3_1d_aligned[i] and volume_surge:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend turns down OR Bull Power turns negative OR Bear Power turns positive
-            if not trend_up or bull_power[i] <= 0 or bear_power[i] >= 0:
+            # Exit long: Trend turns down OR RSI turns bearish OR price breaks below S3
+            if not trend_up or not rsi_bullish or close[i] < camarilla_s3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend turns up OR Bear Power turns positive OR Bull Power turns negative
-            if trend_up or bear_power[i] >= 0 or bull_power[i] <= 0:
+            # Exit short: Trend turns up OR RSI turns bullish OR price breaks above R3
+            if trend_up or rsi_bullish or close[i] > camarilla_r3_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
