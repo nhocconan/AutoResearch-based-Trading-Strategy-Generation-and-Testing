@@ -1,13 +1,6 @@
-# 12h_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: Breakout of daily Camarilla R1/S1 levels with 12h EMA34 trend filter and volume confirmation.
-# Uses 12h timeframe to reduce trade frequency and capture sustained moves in both bull and bear markets.
-# Volume filters false breakouts. EMA34 trend filter ensures directional bias.
-# Target: 15-30 trades/year per symbol to minimize fee drag.
-# Works in bull via breakout momentum, in bear via short-side breakdowns.
-
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R1S1_Breakout_Trend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +35,7 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (range_1d * 1.1 / 4)
     s1_1d = pivot_1d - (range_1d * 1.1 / 4)
     
-    # Align to 12h
+    # Align to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
