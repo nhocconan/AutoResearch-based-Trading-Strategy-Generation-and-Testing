@@ -1,12 +1,12 @@
-# 6h_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: On 6h timeframe, enter long when price breaks above Camarilla R3 level from previous 12h candle with 12h uptrend and volume confirmation.
-# Short when price breaks below Camarilla S3 level with 12h downtrend and volume confirmation.
-# Uses 12h trend filter to avoid counter-trend trades and Camarilla levels from 12h for precise entries.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
-# Camarilla R3/S3 levels are stronger breakout levels than R1/S1, reducing false breakouts and improving win rate.
+#!/usr/bin/env python3
+# 4H_1D_RVOL_MeanReversion_WithTrend
+# Hypothesis: Mean reversion in 4h works when price deviates significantly from 1d VWAP, but only in the direction of 1d trend to avoid counter-trend trades.
+# Uses 1d VWAP as fair value, 4h RVO (Relative Volume) for confirmation, and 1d EMA50 for trend filter.
+# Designed for both bull and bear markets: in uptrend, buy dips to VWAP; in downtrend, sell rallies to VWAP.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years) to avoid fee drag.
 
-name = "6h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_1D_RVOL_MeanReversion_WithTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,36 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla levels and trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 1d data for VWAP and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for 12h: R3, S3 based on previous period
-    # Typical price = (high + low + close) / 3
-    typical_price = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
-    # Camarilla R3 = close + (range * 1.1/4)
-    # Camarilla S3 = close - (range * 1.1/4)
-    camarilla_r3 = close_12h + (range_12h * 1.1 / 4)
-    camarilla_s3 = close_12h - (range_12h * 1.1 / 4)
+    # Calculate 1d VWAP (volume-weighted average price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3
+    vwap_1d = (typical_price_1d * volume_1d).cumsum() / volume_1d.cumsum()
     
-    # 12h trend: EMA(34) on close
-    ema_34 = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_12h > ema_34
+    # 1d trend: EMA(50) on close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = close_1d > ema_50
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    # 4h Relative Volume: current volume / 20-period average volume
+    volume_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rvol = volume / np.where(volume_avg_20 > 0, volume_avg_20, 1)  # avoid div by zero
     
-    # Align 12h indicators to 6h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
+    # Align 1d indicators to 4h
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,33 +57,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(trend_up_aligned[i]):
+        if np.isnan(vwap_1d_aligned[i]) or np.isnan(trend_up_aligned[i]) or np.isnan(rvol[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Mean reversion triggers: price deviates >1.5% from 1d VWAP
+        dev_pct = (close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i] * 100
+        
         if position == 0:
-            # Enter long: price breaks above Camarilla R3 + 12h uptrend + volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
+            # Enter long: price below VWAP (oversold) + 1d uptrend + volume confirmation (RVO > 1.5)
+            if dev_pct < -1.5 and trend_up_aligned[i] and rvol[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Camarilla S3 + 12h downtrend + volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
+            # Enter short: price above VWAP (overbought) + 1d downtrend + volume confirmation (RVO > 1.5)
+            elif dev_pct > 1.5 and not trend_up_aligned[i] and rvol[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Camarilla S3 (reversal) or trend changes
-            if close[i] < camarilla_s3_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: price returns to VWAP or trend changes
+            if dev_pct > -0.5 or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Camarilla R3 (reversal) or trend changes
-            if close[i] > camarilla_r3_aligned[i] or trend_up_aligned[i]:
+            # Exit short: price returns to VWAP or trend changes
+            if dev_pct < 0.5 or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
