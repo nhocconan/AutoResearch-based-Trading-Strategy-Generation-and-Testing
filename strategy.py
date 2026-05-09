@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1H_4H_1D_Camarilla_R1S1_Breakout_Trend"
-timeframe = "1h"
+name = "6H_Weekly_Pivot_Donchian_Breakout_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot levels
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 1:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly pivot points (using standard formula)
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Get 1d data for Camarilla pivot levels (R1, S1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    pivot_w = (high_w + low_w + close_w) / 3
+    range_w = high_w - low_w
+    r1_w = pivot_w + (range_w * 1.1 / 12)
+    s1_w = pivot_w - (range_w * 1.1 / 12)
+    r2_w = pivot_w + (range_w * 1.1 / 6)
+    s2_w = pivot_w - (range_w * 1.1 / 6)
+    r3_w = pivot_w + (range_w * 1.1 / 4)
+    s3_w = pivot_w - (range_w * 1.1 / 4)
+    r4_w = pivot_w + (range_w * 1.1 / 2)
+    s4_w = pivot_w - (range_w * 1.1 / 2)
+    
+    # Get daily data for Donchian channel and trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    # Pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    r1 = pivot + (range_ * 1.1 / 12)
-    s1 = pivot - (range_ * 1.1 / 12)
+    # Donchian channel (20-day)
+    upper_dc = pd.Series(high_d).rolling(window=20, min_periods=20).max().values
+    lower_dc = pd.Series(low_d).rolling(window=20, min_periods=20).min().values
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Daily EMA50 for trend filter
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly pivot levels to 6h
+    r1_w_aligned = align_htf_to_ltf(prices, df_weekly, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_weekly, s1_w)
+    r2_w_aligned = align_htf_to_ltf(prices, df_weekly, r2_w)
+    s2_w_aligned = align_htf_to_ltf(prices, df_weekly, s2_w)
+    r3_w_aligned = align_htf_to_ltf(prices, df_weekly, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_weekly, s3_w)
+    r4_w_aligned = align_htf_to_ltf(prices, df_weekly, r4_w)
+    s4_w_aligned = align_htf_to_ltf(prices, df_weekly, s4_w)
+    
+    # Align daily indicators to 6h
+    upper_dc_aligned = align_htf_to_ltf(prices, df_daily, upper_dc)
+    lower_dc_aligned = align_htf_to_ltf(prices, df_daily, lower_dc)
+    ema50_d_aligned = align_htf_to_ltf(prices, df_daily, ema50_d)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
-    
-    # Session filter: 08-20 UTC (only trade during active hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,38 +80,45 @@ def generate_signals(prices):
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if data not ready or outside session
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or not session_filter[i]):
+        # Skip if data not ready
+        if (np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or 
+            np.isnan(upper_dc_aligned[i]) or np.isnan(lower_dc_aligned[i]) or 
+            np.isnan(ema50_d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + above 4h EMA50 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema50_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.20
+            # Enter long: price breaks above R3 weekly pivot AND above daily Donchian upper AND above daily EMA50 AND volume confirmation
+            if (close[i] > r3_w_aligned[i] and 
+                close[i] > upper_dc_aligned[i] and 
+                close[i] > ema50_d_aligned[i] and 
+                volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + below 4h EMA50 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema50_4h_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.20
+            # Enter short: price breaks below S3 weekly pivot AND below daily Donchian lower AND below daily EMA50 AND volume confirmation
+            elif (close[i] < s3_w_aligned[i] and 
+                  close[i] < lower_dc_aligned[i] and 
+                  close[i] < ema50_d_aligned[i] and 
+                  volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below 4h EMA50 (trend change)
-            if close[i] < ema50_4h_aligned[i]:
+            # Exit long: price below daily Donchian lower OR below daily EMA50
+            if close[i] < lower_dc_aligned[i] or close[i] < ema50_d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 4h EMA50 (trend change)
-            if close[i] > ema50_4h_aligned[i]:
+            # Exit short: price above daily Donchian upper OR above daily EMA50
+            if close[i] > upper_dc_aligned[i] or close[i] > ema50_d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
