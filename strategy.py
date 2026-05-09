@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot breakout with 1d trend and volume confirmation.
-# Uses 1d Camarilla levels (R3/S3 for reversal, R4/S4 for breakout) and 1d EMA trend filter.
-# In bull markets: buy R3/S3 bounce in uptrend, sell R4/S4 breakout in uptrend.
-# In bear markets: sell R3/S3 rejection in downtrend, buy R4/S4 breakdown in downtrend.
-# Target: 12-37 trades/year to avoid fee drag.
-name = "6h_Camarilla_R3S3_R4S4_1dTrend_Volume"
-timeframe = "6h"
+# Hypothesis: 12h momentum strategy using 1-day RSI divergence and price action at key levels.
+# In bull markets: buy on bullish RSI divergence near support; in bear markets: sell on bearish RSI divergence near resistance.
+# Uses 1-day RSI for momentum divergence detection and price position relative to 1-day VWAP for entry timing.
+# Designed to capture swing points with low frequency to avoid fee drag.
+name = "12h_RSIDivergence_VWAP_Pullback"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,87 +21,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA trend filter
+    # Get 1-day data for RSI and VWAP
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:  # Need at least 14 days for RSI
         return np.zeros(n)
     
-    # Calculate 1-day Camarilla levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (H-L)*1.1/2
-    # R3 = C + (H-L)*1.1/4
-    # S3 = C - (H-L)*1.1/4
-    # S4 = C - (H-L)*1.1/2
-    H = df_1d['high'].values
-    L = df_1d['low'].values
-    C = df_1d['close'].values
+    # Calculate 1-day RSI(14)
+    delta = df_1d['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    pivot = (H + L + C) / 3.0
-    rng = H - L
-    r4 = C + rng * 1.1 / 2.0
-    r3 = C + rng * 1.1 / 4.0
-    s3 = C - rng * 1.1 / 4.0
-    s4 = C - rng * 1.1 / 2.0
+    # Calculate 1-day VWAP
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    vwap = (vwap_numerator / vwap_denominator).values
     
-    # 1d EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 1-day indicators to 12h timeframe (use previous day's values)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
-    # Align Camarilla levels and EMA to 6h timeframe (use previous day's values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: volume > 1.5x 20-period EMA (moderate threshold)
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
+    # Calculate 12-period RSI on 12h for entry timing confirmation
+    delta_12h = pd.Series(close).diff()
+    gain_12h = delta_12h.clip(lower=0)
+    loss_12h = -delta_12h.clip(upper=0)
+    avg_gain_12h = gain_12h.ewm(alpha=1/12, adjust=False, min_periods=12).mean()
+    avg_loss_12h = loss_12h.ewm(alpha=1/12, adjust=False, min_periods=12).mean()
+    rs_12h = avg_gain_12h / avg_loss_12h
+    rsi_12h = 100 - (100 / (1 + rs_12h))
+    rsi_12h_values = rsi_12h.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need at least 1 day of data for pivots/EMA
+    start_idx = 1  # Need at least 1 day of data
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(rsi_aligned[i]) or np.isnan(vwap_aligned[i]) or 
+            np.isnan(rsi_12h_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
+        rsi_1d = rsi_aligned[i]
+        rsi_12h = rsi_12h_values[i]
+        vwap_1d = vwap_aligned[i]
+        
+        # Calculate RSI slope for divergence detection (3-period change)
+        if i >= 3:
+            rsi_slope_1d = rsi_1d - rsi_aligned[i-3]
+            price_slope = price - close[i-3]
+            
+            # Bullish divergence: price making lower low, RSI making higher low
+            bullish_div = (price_slope < 0) and (rsi_slope_1d > 0) and (rsi_1d < 40)
+            # Bearish divergence: price making higher high, RSI making lower high
+            bearish_div = (price_slope > 0) and (rsi_slope_1d < 0) and (rsi_1d > 60)
+        else:
+            bullish_div = False
+            bearish_div = False
         
         if position == 0:
-            # Enter long: R3/S3 bounce in uptrend OR R4/S4 breakout in uptrend + volume
-            if ((price >= r3_aligned[i] and price <= s3_aligned[i]) and 
-                price > ema_34_1d_aligned[i] and vol_confirm[i]):
-                # In the range between S3 and R3, go long in uptrend
+            # Enter long: bullish RSI divergence + price near VWAP support + 12h RSI not overbought
+            if bullish_div and price >= vwap_1d * 0.995 and rsi_12h < 70:
                 signals[i] = 0.25
                 position = 1
-            elif (price > r4_aligned[i] and price > ema_34_1d_aligned[i] and vol_confirm[i]):
-                # Breakout above R4 in uptrend
-                signals[i] = 0.25
-                position = 1
-            elif (price < s4_aligned[i] and price < ema_34_1d_aligned[i] and vol_confirm[i]):
-                # Breakdown below S4 in downtrend
+            # Enter short: bearish RSI divergence + price near VWAP resistance + 12h RSI not oversold
+            elif bearish_div and price <= vwap_1d * 1.005 and rsi_12h > 30:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns below R3 or trend reverses
-            if price < r3_aligned[i] or price < ema_34_1d_aligned[i]:
+            # Exit long: bearish divergence or price significantly above VWAP
+            if bearish_div or price > vwap_1d * 1.02:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns above S3 or trend reverses
-            if price > s3_aligned[i] or price > ema_34_1d_aligned[i]:
+            # Exit short: bullish divergence or price significantly below VWAP
+            if bullish_div or price < vwap_1d * 0.98:
                 signals[i] = 0.0
                 position = 0
             else:
