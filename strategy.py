@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,73 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
+    # Get 1d data for Ichimoku and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Ichimoku components (9, 26, 52)
+    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
+    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
+    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
     
-    # Calculate Camarilla levels (R1, S1)
-    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
+    tenkan = (high_9 + low_9) / 2
+    kijun = (high_26 + low_26) / 2
+    senkou_a = (tenkan + kijun) / 2
+    senkou_b = (high_52 + low_52) / 2
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # TK Cross signals
+    tk_cross_long = (tenkan > kijun) & (tenkan[:-1] <= kijun[:-1])  # bullish cross
+    tk_cross_short = (tenkan < kijun) & (tenkan[:-1] >= kijun[:-1])  # bearish cross
     
-    # Volume filter: current 1d volume > 1.3 * 20-day average
+    # Cloud: green when senkou_a > senkou_b, red when senkou_a < senkou_b
+    cloud_green = senkou_a > senkou_b
+    cloud_red = senkou_a < senkou_b
+    
+    # Trend filter: price above/below cloud
+    price_above_cloud = df_1d['close'].values > np.maximum(senkou_a, senkou_b)
+    price_below_cloud = df_1d['close'].values < np.minimum(senkou_a, senkou_b)
+    
+    # Volume filter: current volume > 1.5 * 20-day average
     vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.3)
+    volume_filter = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Align all to 12h
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
+    # Align all to 6h
+    tk_long_6h = align_htf_to_ltf(prices, df_1d, tk_cross_long)
+    tk_short_6h = align_htf_to_ltf(prices, df_1d, tk_cross_short)
+    cloud_green_6h = align_htf_to_ltf(prices, df_1d, cloud_green)
+    cloud_red_6h = align_htf_to_ltf(prices, df_1d, cloud_red)
+    price_above_cloud_6h = align_htf_to_ltf(prices, df_1d, price_above_cloud)
+    price_below_cloud_6h = align_htf_to_ltf(prices, df_1d, price_below_cloud)
+    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = 52  # Need enough data for Ichimoku
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_filter_12h[i])):
+        if (np.isnan(tk_long_6h[i]) or np.isnan(tk_short_6h[i]) or
+            np.isnan(cloud_green_6h[i]) or np.isnan(cloud_red_6h[i]) or
+            np.isnan(price_above_cloud_6h[i]) or np.isnan(price_below_cloud_6h[i]) or
+            np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
-        trend = ema34_1d_12h[i]
-        vol_filter = volume_filter_12h[i]
+        tk_long = tk_long_6h[i]
+        tk_short = tk_short_6h[i]
+        cloud_green = cloud_green_6h[i]
+        cloud_red = cloud_red_6h[i]
+        price_above = price_above_cloud_6h[i]
+        price_below = price_below_cloud_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1_val and close[i] > trend and vol_filter:
+            # Enter long: bullish TK cross + price above cloud + green cloud + volume
+            if tk_long and price_above and cloud_green and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1_val and close[i] < trend and vol_filter:
+            # Enter short: bearish TK cross + price below cloud + red cloud + volume
+            elif tk_short and price_below and cloud_red and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S1 (mean reversion to center)
-            if close[i] < s1_val:
+            # Exit long: bearish TK cross or price below cloud
+            if tk_short or price_below:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R1 (mean reversion to center)
-            if close[i] > r1_val:
+            # Exit short: bullish TK cross or price above cloud
+            if tk_long or price_above:
                 signals[i] = 0.0
                 position = 0
             else:
