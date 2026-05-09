@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_Pivot_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,73 +17,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend filter
+    # Get 1d data for TRIX and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d TRIX (15-period)
     close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema1 = close_1d.ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix = 100 * (ema3 / ema3.shift(1) - 1)
+    trix_values = trix.values
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
     
-    # Calculate 1d Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # 1d volume spike detection (20-period MA)
+    vol_1d = pd.Series(df_1d['volume'].values)
+    vol_ma20_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d_arr) / 3.0
-    # Calculate range
-    range_1d = high_1d - low_1d
-    # Camarilla levels: R1 = close + 1.1*range/12, S1 = close - 1.1*range/12
-    r1 = close_1d_arr + 1.1 * range_1d / 12.0
-    s1 = close_1d_arr - 1.1 * range_1d / 12.0
+    # 4h ADX for trend filter (14-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    close_series = pd.Series(close)
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    tr1 = high_series - low_series
+    tr2 = abs(high_series - close_series.shift(1))
+    tr3 = abs(low_series - close_series.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Volume spike detection on 12h (20-period MA)
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    up_move = high_series - high_series.shift(1)
+    down_move = low_series.shift(1) - low_series
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    tr_ma = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / tr_ma
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(trix_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or np.isnan(adx[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20_1d_aligned[i]
+        adx_ok = adx[i] > 20
         
         if position == 0:
-            # Long: Price breaks above R1 with uptrend and volume
-            if close[i] > r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_ok:
+            # Long: TRIX positive with volume and trend
+            if trix_aligned[i] > 0 and vol_ok and adx_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with downtrend and volume
-            elif close[i] < s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_ok:
+            # Short: TRIX negative with volume and trend
+            elif trix_aligned[i] < 0 and vol_ok and adx_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below S1
-            if close[i] < s1_aligned[i]:
+            # Exit long: TRIX turns negative
+            if trix_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above R1
-            if close[i] > r1_aligned[i]:
+            # Exit short: TRIX turns positive
+            if trix_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
