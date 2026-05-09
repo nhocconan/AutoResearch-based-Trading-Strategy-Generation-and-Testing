@@ -1,15 +1,13 @@
-#146644
-# 1d_Donchian20_Breakout_1wTrend_Volume
-# Hypothesis: 1d Donchian channel breakout with 1w trend filter and volume confirmation.
-# Uses weekly trend to capture long-term momentum, Donchian(20) breakouts for entry timing,
-# and volume confirmation to filter false breakouts. Designed to generate ~10-25 trades/year
-# on 1d timeframe to avoid fee drag while maintaining edge in both bull and bear markets.
-# Long when weekly trend up (weekly close > weekly EMA20), price breaks above Donchian(20) high,
-# and volume > 2x average. Short when weekly trend down (weekly close < weekly EMA20),
-# price breaks below Donchian(20) low, and volume > 2x average.
+#!/usr/bin/env python3
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Filtered
+# Hypothesis: 4h Camarilla R3/S3 breakout with 1d EMA34 trend filter, volume confirmation, and price filter near 1d VWAP.
+# Uses a higher volume threshold (2.5x average) and tighter price-VWAP proximity to reduce trades and avoid overtrading.
+# Designed to generate ~20-30 trades/year on 4h to avoid fee drag while maintaining edge in bull/bear markets.
+# Long when 1d trend up (close > EMA34), price breaks above R3, volume > 2.5x average, and close within 0.5% of 1d VWAP.
+# Short when 1d trend down (close < EMA34), price breaks below S3, volume > 2.5x average, and close within 0.5% of 1d VWAP.
 
-name = "1d_Donchian20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,36 +24,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly EMA20 for trend filter
-    ema20_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[0:20])
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = (close_1w[i] * 2 + ema20_1w[i-1] * 18) / 20
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align weekly EMA20 to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align 1d EMA34 to 4h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate Donchian channels (20-period) on daily data
-    donchian_high = np.full_like(high, np.nan)
-    donchian_low = np.full_like(low, np.nan)
+    # Calculate Camarilla levels for each 1d bar: R3, S3
+    camarilla_r3_1d = np.full_like(close_1d, np.nan)
+    camarilla_s3_1d = np.full_like(close_1d, np.nan)
     
-    for i in range(n):
-        if i < 19:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            camarilla_r3_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
+            camarilla_s3_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    
+    # Calculate 1d VWAP for additional filter
+    vwap_1d = np.full_like(close_1d, np.nan)
+    cumulative_volume = np.full_like(close_1d, np.nan)
+    cumulative_price_volume = np.full_like(close_1d, np.nan)
+    
+    for i in range(len(df_1d)):
+        if np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i]) or np.isnan(volume_1d[i]):
+            if i > 0:
+                vwap_1d[i] = vwap_1d[i-1]
+                cumulative_volume[i] = cumulative_volume[i-1]
+                cumulative_price_volume[i] = cumulative_price_volume[i-1]
+            continue
+            
+        typical_price = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+        price_volume = typical_price * volume_1d[i]
+        
+        if i == 0:
+            cumulative_volume[i] = volume_1d[i]
+            cumulative_price_volume[i] = price_volume
         else:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
+            cumulative_volume[i] = cumulative_volume[i-1] + volume_1d[i]
+            cumulative_price_volume[i] = cumulative_price_volume[i-1] + price_volume
+            
+        if cumulative_volume[i] != 0:
+            vwap_1d[i] = cumulative_price_volume[i] / cumulative_volume[i]
+        else:
+            vwap_1d[i] = vwap_1d[i-1] if i > 0 else typical_price
     
-    # Volume filter: current volume vs 20-day average
+    # Align 1d VWAP to 4h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -69,41 +102,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(19, 19)  # Need Donchian(20) and volume MA
+    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
+            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(volume_ratio[i]) or
+            np.isnan(vwap_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        trend_up = close[i] > ema20_1w_aligned[i]
+        # Determine 1d trend and price relative to VWAP (within 0.5%)
+        trend_up = close[i] > ema34_1d_aligned[i]
+        vwap_diff_pct = abs((close[i] - vwap_1d_aligned[i]) / vwap_1d_aligned[i]) * 100
+        near_vwap = vwap_diff_pct <= 0.5
         
         if position == 0:
-            # Enter long: weekly trend up + price breaks above Donchian high + volume confirmation
-            if trend_up and close[i] > donchian_high[i] and volume_ratio[i] > 2.0:
+            # Enter long: 1d trend up + price breaks above R3 + volume confirmation + near VWAP
+            if trend_up and close[i] > camarilla_r3_1d_aligned[i] and volume_ratio[i] > 2.5 and near_vwap:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly trend down + price breaks below Donchian low + volume confirmation
-            elif not trend_up and close[i] < donchian_low[i] and volume_ratio[i] > 2.0:
+            # Enter short: 1d trend down + price breaks below S3 + volume confirmation + near VWAP
+            elif not trend_up and close[i] < camarilla_s3_1d_aligned[i] and volume_ratio[i] > 2.5 and near_vwap:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly trend turns down or price breaks below Donchian low
-            if not trend_up or close[i] < donchian_low[i]:
+            # Exit long: 1d trend turns down or price breaks below S3 or price moves away from VWAP
+            if not trend_up or close[i] < camarilla_s3_1d_aligned[i] or not near_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly trend turns up or price breaks above Donchian high
-            if trend_up or close[i] > donchian_high[i]:
+            # Exit short: 1d trend turns up or price breaks above R3 or price moves away from VWAP
+            if trend_up or close[i] > camarilla_r3_1d_aligned[i] or not near_vwap:
                 signals[i] = 0.0
                 position = 0
             else:
