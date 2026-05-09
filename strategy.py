@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Combining strong breakout signals (Camarilla R3/S3) with 1D trend filter and volume surge reduces false signals while capturing momentum. Works in bull (breakouts continue) and bear (reversals at S3/R3) by requiring volume confirmation and trend alignment. Target: 25-40 trades/year.
-"""
+# 12h_Camarilla_Breakout_1dTrend_Volume_Slow
+# Hypothesis: Using 12h timeframe reduces trade frequency to avoid fee drag.
+# Combines 1d Camarilla R3/S3 breakouts with 1d EMA trend filter and volume surge.
+# Designed for fewer trades (target 12-37/year) with strong confirmation to work in both bull and bear markets.
+# Uses discrete position sizing (0.25) to minimize churn and manage drawdown.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_Breakout_1dTrend_Volume_Slow"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for Camarilla levels, trend filter, and volume average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -30,6 +30,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate 1d EMA34 for trend filter
     ema34_1d = np.full_like(close_1d, np.nan)
@@ -38,8 +39,16 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align 1d EMA34 to 4h timeframe
+    # Calculate 1d EMA34 for volume average (same period)
+    vol_ema34_1d = np.full_like(volume_1d, np.nan)
+    if len(volume_1d) >= 34:
+        vol_ema34_1d[33] = np.mean(volume_1d[0:34])
+        for i in range(34, len(volume_1d)):
+            vol_ema34_1d[i] = (volume_1d[i] * 2 + vol_ema34_1d[i-1] * 32) / 34
+    
+    # Align 1d indicators to 12h timeframe
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema34_1d)
     
     # Calculate Camarilla levels for each 1d bar: R3, S3
     camarilla_r3_1d = np.full_like(close_1d, np.nan)
@@ -50,30 +59,19 @@ def generate_signals(prices):
             camarilla_r3_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
             camarilla_s3_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
     camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    
-    # Volume filter: current volume vs 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
+    start_idx = 34  # Need EMA34 and volume average
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or 
-            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ema34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,7 +79,7 @@ def generate_signals(prices):
         
         # Determine market conditions
         trend_up = close[i] > ema34_1d_aligned[i]
-        volume_surge = volume_ratio[i] > 1.8
+        volume_surge = volume[i] > vol_ema34_1d_aligned[i] * 2.0  # Require 2x average volume
         
         if position == 0:
             # Enter long: Uptrend + price breaks above R3 + volume surge
@@ -110,3 +108,5 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
