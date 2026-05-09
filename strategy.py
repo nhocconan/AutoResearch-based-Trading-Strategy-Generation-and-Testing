@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyTrend_Breakout_Volume
-# Hypothesis: Uses weekly trend direction via 50-period EMA on 1w timeframe to filter entries,
-# combined with daily price breaking above/below the previous day's high/low with volume confirmation.
-# Trend filter reduces whipsaw in choppy markets, volume confirms breakout strength.
-# Designed to work in both bull and bear markets by following the higher timeframe trend.
-# Target: 15-25 trades/year per symbol with disciplined risk management.
+# 4h_12h_Supertrend_HMA_Combined
+# Hypothesis: Combines 4h Supertrend (trend direction) with 12h HMA (momentum) to filter entries.
+# Takes long when both indicate uptrend, short when both indicate downtrend.
+# Uses volume confirmation to avoid false breakouts and ATR-based stop loss for risk management.
+# Designed for 4h timeframe with 12h as higher timeframe filter to reduce whipsaw.
+# Target: 20-40 trades/year per symbol with disciplined risk management for both bull and bear markets.
 
-name = "1d_WeeklyTrend_Breakout_Volume"
-timeframe = "1d"
+name = "4h_12h_Supertrend_HMA_Combined"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,31 +24,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (50-period EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Calculate ATR for Supertrend
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full_like(tr, np.nan)
+    if len(tr) >= 10:
+        atr[9] = np.mean(tr[0:10])  # SMA seed for ATR
+        for i in range(10, len(tr)):
+            atr[i] = (atr[i-1] * 9 + tr[i]) / 10
+    
+    # Supertrend calculation (4h)
+    period = 10
+    multiplier = 3.0
+    hl2 = (high + low) / 2
+    upperband = hl2 + (multiplier * atr)
+    lowerband = hl2 - (multiplier * atr)
+    
+    supertrend = np.full_like(close, np.nan)
+    uptrend = np.full_like(close, True)
+    
+    for i in range(1, len(close)):
+        if np.isnan(upperband[i-1]) or np.isnan(lowerband[i-1]) or np.isnan(atr[i]):
+            supertrend[i] = np.nan
+            uptrend[i] = uptrend[i-1] if i > 0 else True
+            continue
+            
+        if close[i] > upperband[i-1]:
+            uptrend[i] = True
+        elif close[i] < lowerband[i-1]:
+            uptrend[i] = False
+        else:
+            uptrend[i] = uptrend[i-1]
+            if uptrend[i] and lowerband[i] < lowerband[i-1]:
+                lowerband[i] = lowerband[i-1]
+            if not uptrend[i] and upperband[i] > upperband[i-1]:
+                upperband[i] = upperband[i-1]
+        
+        supertrend[i] = lowerband[i] if uptrend[i] else upperband[i]
+    
+    # Get 12h data for HMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 16:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly 50-period EMA
-    ema_50 = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        ema_50[49] = np.mean(close_1w[0:50])  # SMA seed
-        alpha = 2.0 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema_50[i] = alpha * close_1w[i] + (1 - alpha) * ema_50[i-1]
+    # Calculate Hull Moving Average (16-period)
+    def calculate_hma(arr, period):
+        n = len(arr)
+        hma = np.full(n, np.nan)
+        if n < period:
+            return hma
+        
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        
+        # WMA function
+        def wma(values, window):
+            wma_vals = np.full(len(values), np.nan)
+            if len(values) < window:
+                return wma_vals
+            weights = np.arange(1, window + 1)
+            for i in range(window-1, len(values)):
+                wma_vals[i] = np.dot(values[i-window+1:i+1], weights) / weights.sum()
+            return wma_vals
+        
+        wma_half = wma(arr, half_period)
+        wma_full = wma(arr, period)
+        
+        # Calculate 2*WMA(half) - WMA(full)
+        raw_hma = 2 * wma_half - wma_full
+        
+        # Final WMA of raw_hma with sqrt_period
+        hma = wma(raw_hma, sqrt_period)
+        return hma
     
-    # Align weekly EMA to daily timeframe
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    hma_12h = calculate_hma(close_12h, 16)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Previous day's high and low for breakout levels
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = np.nan  # First day has no previous
-    prev_low[0] = np.nan
-    
-    # Volume filter: current volume vs 20-day average
+    # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 20:
         vol_ma[19] = np.mean(volume[0:20])
@@ -62,41 +121,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 1)  # Need volume MA and previous day data
+    start_idx = max(20, 1)  # Need volume MA and enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema_50_aligned[i]) or np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or np.isnan(volume_ratio[i]):
+        if (np.isnan(supertrend[i]) or np.isnan(hma_12h_aligned[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        uptrend = close[i] > ema_50_aligned[i]
-        downtrend = close[i] < ema_50_aligned[i]
+        # Determine trend direction from both timeframes
+        supertrend_up = close[i] > supertrend[i]
+        hma_up = close[i] > hma_12h_aligned[i]
         
         if position == 0:
-            # Enter long: uptrend + break above previous day's high + volume confirmation
-            if uptrend and close[i] > prev_high[i] and volume_ratio[i] > 1.5:
+            # Enter long: both timeframes uptrend + volume confirmation
+            if supertrend_up and hma_up and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: downtrend + break below previous day's low + volume confirmation
-            elif downtrend and close[i] < prev_low[i] and volume_ratio[i] > 1.5:
+            # Enter short: both timeframes downtrend + volume confirmation
+            elif not supertrend_up and not hma_up and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reversal or break below previous day's low
-            if not uptrend or close[i] < prev_low[i]:
+            # Exit long: either timeframe turns downtrend or ATR-based stop
+            if not supertrend_up or not hma_up or close[i] < supertrend[i] - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend reversal or break above previous day's high
-            if not downtrend or close[i] > prev_high[i]:
+            # Exit short: either timeframe turns uptrend or ATR-based stop
+            if supertrend_up or hma_up or close[i] > supertrend[i] + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
