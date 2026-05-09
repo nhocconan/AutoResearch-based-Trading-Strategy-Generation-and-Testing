@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_RSI_Chop_v1"
-timeframe = "1d"
+name = "6h_WeeklyPivot_Breakout_Trend_Volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,122 +17,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    fast_sc = 0.666  # EMA constant for fast EMA (2)
-    slow_sc = 0.0645 # EMA constant for slow EMA (30)
+    # Get weekly data for pivot points and trend
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio (ER) and Smoothing Constant (SC)
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    vol = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # 10-period volatility
-    # Fix dimensions: change has length n-10, vol has length n-1
-    # We'll compute ER for index i using change[i:i+10] and vol[i:i+10]
-    er = np.full(n, np.nan)
-    for i in range(10, n):
-        if vol[i-10:i] > 0:  # vol[i-10:i] corresponds to periods i-10 to i-1
-            er[i] = change[i-10:i].sum() / vol[i-10:i].sum()
-        else:
-            er[i] = 0
+    # Previous week's high, low, close for pivot calculation
+    prev_high = df_w['high'].shift(1).values
+    prev_low = df_w['low'].shift(1).values
+    prev_close = df_w['close'].shift(1).values
     
-    # Calculate SC: [ER * (fast_sc - slow_sc) + slow_sc]^2
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate weekly pivot points
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
     
-    # Calculate KAMA
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # Start after first 10 periods
-    for i in range(10, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Align weekly pivot levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_w, s3)
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Trend filter: weekly EMA50
+    ema50_w = pd.Series(df_w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    
-    # First average
-    avg_gain[13] = gain[1:14].mean()
-    avg_loss[13] = loss[1:14].mean()
-    
-    # Wilder smoothing
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Chopiness Index (14-period) - range detection
-    atr = np.full(n, np.nan)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # Align with original index
-    
-    # ATR calculation
-    atr[13] = tr[1:14].mean()
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Chop calculation: 100 * log10(sum(ATR,14) / (HHH - LLL)) / log10(14)
-    sum_atr14 = np.full(n, np.nan)
-    hh_l = np.full(n, np.nan)
-    ll_h = np.full(n, np.nan)
-    
-    for i in range(13, n):
-        sum_atr14[i] = tr[i-13:i+1].sum()  # 14-period sum of TR
-        hh_l[i] = high[i-13:i+1].max() - low[i-13:i+1].min()
-    
-    chop = np.full(n, np.nan)
-    for i in range(13, n):
-        if hh_l[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr14[i] / hh_l[i]) / np.log10(14)
-        else:
-            chop[i] = 50  # Neutral when no range
-    
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current 6h volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 14)  # Need enough data for indicators
+    start_idx = max(20, 50)  # Need enough data for volume MA and EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(ema50_w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        pp = pivot_aligned[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        r2 = r2_aligned[i]
+        s2 = s2_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        trend = ema50_w_aligned[i]
+        vol_filter = volume_filter[i]
+        
         if position == 0:
-            # Enter long: price above KAMA, RSI > 50, low chop (trending)
-            if close[i] > kama[i] and rsi[i] > 50 and chop[i] < 38.2 and volume_filter[i]:
+            # Enter long: break above R2 with volume and above weekly trend
+            if close[i] > r2 and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA, RSI < 50, low chop (trending)
-            elif close[i] < kama[i] and rsi[i] < 50 and chop[i] < 38.2 and volume_filter[i]:
+            # Enter short: break below S2 with volume and below weekly trend
+            elif close[i] < s2 and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below KAMA OR RSI < 40 OR high chop (ranging)
-            if close[i] < kama[i] or rsi[i] < 40 or chop[i] > 61.8:
+            # Exit long: close below weekly pivot (mean reversion to pivot)
+            if close[i] < pp:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above KAMA OR RSI > 60 OR high chop (ranging)
-            if close[i] > kama[i] or rsi[i] > 60 or chop[i] > 61.8:
+            # Exit short: close above weekly pivot (mean reversion to pivot)
+            if close[i] > pp:
                 signals[i] = 0.0
                 position = 0
             else:
