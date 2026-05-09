@@ -3,13 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+# Hypothesis: 4h Camarilla R1/S1 breakout with 1d trend filter and volume spike
+# Uses 4h as primary timeframe for optimal trade frequency (target: 25-50 trades/year)
+# Combines price structure (Camarilla levels), trend filter (1d EMA), and volume confirmation
+# Designed to work in both bull and bear markets by requiring alignment with daily trend
+# Volume spike filter reduces false breakouts and improves signal quality
 name = "4h_Camarilla_R1_S1_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,12 +22,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for calculations (called ONCE before loop)
+    # Get 1d data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close for trend filter
+    # 34-period EMA on 1d close for trend filter
     close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
@@ -42,7 +47,7 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate 20-period volume average for spike detection
+    # Calculate 20-period volume average for spike detection (using 4h volume)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
