@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 6h_Weekly_Trend_Daily_Momentum
-# Hypothesis: Combines weekly trend direction (from weekly close > weekly SMA50) with daily momentum (RSI > 55) on 6-hour timeframe.
-# Weekly trend filter ensures we trade with the higher timeframe trend, while daily RSI provides entry timing.
-# Works in both bull and bear markets by following the weekly trend direction. Target: 15-25 trades/year per symbol.
+# 12h_Combined_Strategy_v1
+# Hypothesis: Combines weekly trend (above/below SMA50), daily RSI mean reversion, and 12h momentum for high-probability entries.
+# Weekly trend provides directional bias, daily RSI identifies overbought/oversold conditions within the trend, and 12h momentum confirms entry timing.
+# Designed to work in both bull and bear markets by following the higher timeframe trend while using lower timeframe for entry precision.
+# Target: 15-25 trades/year per symbol with disciplined risk management.
 
-name = "6h_Weekly_Trend_Daily_Momentum"
-timeframe = "6h"
+name = "12h_Combined_Strategy_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,6 +20,7 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -28,23 +29,14 @@ def generate_signals(prices):
     
     close_1w = df_1w['close'].values
     
-    # Calculate weekly SMA50
-    sma_50 = np.full_like(close_1w, np.nan)
+    # Calculate weekly SMA50 for trend filter
+    sma_50_1w = np.full_like(close_1w, np.nan)
     if len(close_1w) >= 50:
-        sma_50[49] = np.mean(close_1w[0:50])
+        sma_50_1w[49] = np.mean(close_1w[0:50])
         for i in range(50, len(close_1w)):
-            sma_50[i] = (sma_50[i-1] * 49 + close_1w[i]) / 50
+            sma_50_1w[i] = (sma_50_1w[i-1] * 49 + close_1w[i]) / 50
     
-    # Weekly trend: 1 if close > SMA50, -1 if close < SMA50
-    weekly_trend = np.full_like(close_1w, 0)
-    valid_sma = ~np.isnan(sma_50)
-    weekly_trend[valid_sma & (close_1w > sma_50)] = 1
-    weekly_trend[valid_sma & (close_1w < sma_50)] = -1
-    
-    # Align weekly trend to 6h timeframe
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # Get daily data for momentum (RSI)
+    # Get daily data for RSI
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 14:
         return np.zeros(n)
@@ -59,58 +51,67 @@ def generate_signals(prices):
     avg_gain = np.full_like(close_1d, np.nan)
     avg_loss = np.full_like(close_1d, np.nan)
     
-    if len(close_1d) >= 14:
+    if len(gain) >= 14:
         avg_gain[13] = np.mean(gain[0:14])
         avg_loss[13] = np.mean(loss[0:14])
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+        for i in range(14, len(gain)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = np.where(avg_loss != 0, 100 - (100 / (1 + rs)), 50)
-    # For first 14 values, RSI is undefined (set to 50 neutral)
-    rsi[:14] = 50
+    rs = np.full_like(close_1d, np.nan)
+    valid_avg = (~np.isnan(avg_gain)) & (~np.isnan(avg_loss)) & (avg_loss != 0)
+    rs[valid_avg] = avg_gain[valid_avg] / avg_loss[valid_avg]
     
-    # Align daily RSI to 6h timeframe
+    rsi = np.full_like(close_1d, np.nan)
+    rsi[valid_avg] = 100 - (100 / (1 + rs[valid_avg]))
+    
+    # Align weekly and daily indicators to 12h timeframe
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Calculate 12h momentum (rate of change over 3 periods)
+    roc = np.full_like(close, np.nan)
+    if len(close) >= 3:
+        roc[2:] = (close[2:] - close[:-2]) / close[:-2] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(1, 1)  # Start from second bar to allow for previous bar comparison
+    start_idx = max(50, 14, 2)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(weekly_trend_aligned[i]) or np.isnan(rsi_aligned[i]):
+        if np.isnan(sma_50_1w_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(roc[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        weekly_trend_val = weekly_trend_aligned[i]
-        rsi_val = rsi_aligned[i]
+        # Determine weekly trend: above SMA50 = uptrend, below = downtrend
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
         
         if position == 0:
-            # Enter long: Weekly uptrend AND daily RSI > 55 (bullish momentum)
-            if weekly_trend_val == 1 and rsi_val > 55:
+            # Enter long: Weekly uptrend, RSI oversold (<30), and positive momentum
+            if weekly_uptrend and rsi_aligned[i] < 30 and roc[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Weekly downtrend AND daily RSI < 45 (bearish momentum)
-            elif weekly_trend_val == -1 and rsi_val < 45:
+            # Enter short: Weekly downtrend, RSI overbought (>70), and negative momentum
+            elif weekly_downtrend and rsi_aligned[i] > 70 and roc[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Weekly trend turns down OR RSI falls below 50 (momentum fade)
-            if weekly_trend_val == -1 or rsi_val < 50:
+            # Exit long: Weekly trend turns down OR RSI overbought (>70)
+            if not weekly_uptrend or rsi_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Weekly trend turns up OR RSI rises above 50 (momentum fade)
-            if weekly_trend_val == 1 or rsi_val > 50:
+            # Exit short: Weekly trend turns up OR RSI oversold (<30)
+            if not weekly_downtrend or rsi_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
