@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_RSI_Chop_v2"
-timeframe = "4h"
+name = "12h_Choppiness_Filtered_Keltner_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    4h KAMA trend + RSI + Chop filter. 
-    - KAMA direction: long when price > KAMA, short when price < KAMA
-    - RSI filter: long only when RSI > 50, short only when RSI < 50
-    - Chop filter: only trade when Chop > 61.8 (ranging) for mean reversion
-    - Exit: opposite signal or Chop < 38.2 (trending)
-    - Uses 14-period RSI and 14-period Chop
-    - Target: 20-40 trades/year on 4h timeframe
+    12h Keltner Channel breakout with 1d Choppiness filter.
+    - Long: Close > Upper Keltner Band (EMA20 + 2*ATR) and daily CHOP > 61.8 (ranging)
+    - Short: Close < Lower Keltner Band (EMA20 - 2*ATR) and daily CHOP > 61.8 (ranging)
+    - Exit: Opposite signal or price crosses EMA20
+    - Uses 20-period EMA and ATR for bands
+    - Target: 15-35 trades/year on 12h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -25,82 +24,97 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     
-    # Calculate KAMA (10-period ER, 2 and 30 SC)
+    # Get 1d data for Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate 20-period EMA for Keltner
     close_s = pd.Series(close)
-    change = abs(close_s.diff(10))
-    volatility = close_s.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate RSI (14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate ATR(20) for Keltner width
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Chop (14)
-    atr = np.zeros_like(close)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Keltner Bands
+    upper_keltner = ema20 + 2 * atr
+    lower_keltner = ema20 - 2 * atr
     
-    max_high = pd.Series(high).rolling(14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(14, min_periods=14).min().values
-    chop = 100 * np.log10(np.sum(atr, axis=1) / (max_high - min_low)) / np.log10(14)
-    chop = chop.values
+    # Calculate Choppiness Index on daily
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
+    
+    # True Range for 1d
+    tr1_1d = high_1d - low_1d
+    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
+    tr_1d[0] = tr1_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Highest High and Lowest Low over 14 periods
+    highest_high = high_1d.rolling(window=14, min_periods=14).max().values
+    lowest_low = low_1d.rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: 100 * log10(sum(ATR_14) / (HH - LL)) / log10(14)
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr_14 / (highest_high - lowest_low)) / np.log10(14)
+    chop[np.isnan(chop) | np.isinf(chop)] = 50  # default to middle when invalid
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # ensure sufficient warmup
+    start_idx = 40  # ensure sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        # Skip if CHOP data not ready
+        if np.isnan(chop_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Only trade in ranging market (Chop > 61.8)
-            if chop[i] > 61.8:
-                # Long: price above KAMA and RSI > 50
-                if close[i] > kama[i] and rsi[i] > 50:
+        # Only trade in ranging markets (CHOP > 61.8)
+        if chop_aligned[i] > 61.8:
+            if position == 0:
+                # Long: Close above upper Keltner band
+                if close[i] > upper_keltner[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: price below KAMA and RSI < 50
-                elif close[i] < kama[i] and rsi[i] < 50:
+                # Short: Close below lower Keltner band
+                elif close[i] < lower_keltner[i]:
                     signals[i] = -0.25
                     position = -1
-        
-        elif position == 1:
-            # Exit long: opposite signal or trending market (Chop < 38.2)
-            if close[i] < kama[i] or rsi[i] < 50 or chop[i] < 38.2:
+            
+            elif position == 1:
+                # Exit long: Close crosses below EMA20 or opposite signal
+                if close[i] < ema20[i] or close[i] < lower_keltner[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            
+            elif position == -1:
+                # Exit short: Close crosses above EMA20 or opposite signal
+                if close[i] > ema20[i] or close[i] > upper_keltner[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # Trending market: stay flat or exit
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: opposite signal or trending market (Chop < 38.2)
-            if close[i] > kama[i] or rsi[i] > 50 or chop[i] < 38.2:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
