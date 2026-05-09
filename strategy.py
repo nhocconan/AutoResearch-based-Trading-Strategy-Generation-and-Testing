@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R3_S3_Breakout_WeeklyTrend_VolumeSpike
-# Hypothesis: Daily timeframe strategy using weekly Camarilla R3/S3 breakouts with 1-week EMA trend filter and volume spike confirmation.
-# Uses 1d primary timeframe and 1w HTF for trend context to avoid counter-trend trades. Volume spike confirms institutional interest.
-# R3/S3 levels from weekly chart provide strong institutional support/resistance for breakouts.
-# Designed to work in both bull and bear markets by filtering with weekly trend.
-# Target: 30-100 trades over 4 years (7-25/year) with low frequency to minimize fee drag.
+# 4h_Keltner_Breakout_VolumeSpike_EMATrend
+# Hypothesis: Keltner channel breakouts with EMA trend filter and volume spike confirmation.
+# Works in bull/bear: EMA trend filter avoids counter-trend trades, volume spike confirms institutional interest.
+# Keltner channels adapt to volatility, providing dynamic support/resistance for breakouts.
+# Uses EMA20 for trend and volume ratio (current/20-bar average) for confirmation.
+# Target: 20-40 trades/year per symbol to minimize fee drag.
 
-name = "1d_Camarilla_R3_S3_Breakout_WeeklyTrend_VolumeSpike"
-timeframe = "1d"
+name = "4h_Keltner_Breakout_VolumeSpike_EMATrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,38 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly Camarilla levels from previous week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate Keltner Channel from 1h data (using 1h EMA and ATR)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1h = df_1h['close'].values
+    high_1h = df_1h['high'].values
+    low_1h = df_1h['low'].values
     
-    # Previous week's values for Camarilla calculation
-    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
-    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
-    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
+    # EMA20 for middle line
+    ema_20 = np.full_like(close_1h, np.nan)
+    if len(close_1h) >= 20:
+        ema_20[19] = np.mean(close_1h[0:20])
+        for i in range(20, len(close_1h)):
+            ema_20[i] = (ema_20[i-1] * 19 + close_1h[i]) / 20
     
-    # Camarilla R3 and S3 levels (weekly)
-    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
-    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
+    # ATR(10) for channel width
+    tr1 = high_1h[1:] - low_1h[1:]
+    tr2 = np.abs(high_1h[1:] - close_1h[:-1])
+    tr3 = np.abs(low_1h[1:] - close_1h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[0], tr])  # first TR is 0
     
-    # Align Camarilla levels to daily timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    atr_10 = np.full_like(tr, np.nan)
+    if len(tr) >= 10:
+        atr_10[9] = np.mean(tr[0:10])
+        for i in range(10, len(tr)):
+            atr_10[i] = (atr_10[i-1] * 9 + tr[i]) / 10
     
-    # Calculate 1-week EMA50 for trend filter
-    if len(close_1w) < 50:
-        return np.zeros(n)
+    # Keltner Bands: EMA20 ± 2 * ATR(10)
+    keltner_middle = ema_20
+    keltner_upper = keltner_middle + 2 * atr_10
+    keltner_lower = keltner_middle - 2 * atr_10
     
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    ema_50_1w[49] = np.mean(close_1w[0:50])
-    for i in range(50, len(close_1w)):
-        ema_50_1w[i] = (ema_50_1w[i-1] * 49 + close_1w[i]) / 50
+    # Align Keltner levels to 4h timeframe
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_1h, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_1h, keltner_lower)
+    keltner_middle_aligned = align_htf_to_ltf(prices, df_1h, keltner_middle)
     
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # EMA50 trend filter from 4h data
+    ema_50 = np.full_like(close, np.nan)
+    if len(close) >= 50:
+        ema_50[49] = np.mean(close[0:50])
+        for i in range(50, len(close)):
+            ema_50[i] = (ema_50[i-1] * 49 + close[i]) / 50
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -71,42 +84,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(50, 20)  # Ensure EMA50 and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or
+            np.isnan(ema_50[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above weekly R3 AND weekly uptrend (price > weekly EMA50) AND volume spike
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_1w_aligned[i] and 
+            # Enter long: price breaks above upper Keltner AND uptrend (price > EMA50) AND volume spike
+            if (close[i] > keltner_upper_aligned[i] and 
+                close[i] > ema_50[i] and 
                 volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below weekly S3 AND weekly downtrend (price < weekly EMA50) AND volume spike
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_1w_aligned[i] and 
+            # Enter short: price breaks below lower Keltner AND downtrend (price < EMA50) AND volume spike
+            elif (close[i] < keltner_lower_aligned[i] and 
+                  close[i] < ema_50[i] and 
                   volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below weekly S3 OR trend reversal (price < weekly EMA50)
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Exit long: price breaks below middle Keltner OR trend reversal (price < EMA50)
+            if close[i] < keltner_middle_aligned[i] or close[i] < ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above weekly R3 OR trend reversal (price > weekly EMA50)
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Exit short: price breaks above middle Keltner OR trend reversal (price > EMA50)
+            if close[i] > keltner_middle_aligned[i] or close[i] > ema_50[i]:
                 signals[i] = 0.0
                 position = 0
             else:
