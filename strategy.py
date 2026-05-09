@@ -3,111 +3,99 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Donchian20_Volume_Spike_RsiTrend"
-timeframe = "1h"
+name = "6h_WeeklyPivotBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = pd.DatetimeIndex(prices['open_time'])
-    hours = open_time.hour
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate EMA20 on 4h close for trend filter
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
     
-    # Get 1d data for Donchian channel
+    # Weekly R1 and S1: R1 = 2*P - L, S1 = 2*P - H
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align weekly pivots to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period) on 1d high/low
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_high = align_htf_to_ltf(prices, df_1d, high_max)
-    donchian_low = align_htf_to_ltf(prices, df_1d, low_min)
+    # Calculate EMA20 on daily close for trend filter
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Volume spike filter: current volume > 1.8 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
-    
-    # RSI(14) for momentum filter
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    volume_spike = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for Donchian and volume MA
+    start_idx = max(20, 20)  # Need enough data for EMA20 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema20_4h_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(volume_spike[i]) or
-            np.isnan(rsi_values[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema20_1d_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema20 = ema20_4h_aligned[i]
-        upper = donchian_high[i]
-        lower = donchian_low[i]
+        r1 = r1_aligned[i]
+        s1 = s1_aligned[i]
+        ema20 = ema20_1d_aligned[i]
         vol_spike = volume_spike[i]
-        rsi_val = rsi_values[i]
-        hour = hours[i]
-        
-        # Session filter: 08-20 UTC
-        in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Enter long: Close breaks above Donchian high + 4h uptrend + volume spike + RSI > 50 + session
-            if in_session and close[i] > upper and close[i] > ema20 and vol_spike and rsi_val > 50:
-                signals[i] = 0.20
+            # Enter long: Close breaks above weekly R1 + daily uptrend + volume spike
+            if close[i] > r1 and close[i] > ema20 and vol_spike:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below Donchian low + 4h downtrend + volume spike + RSI < 50 + session
-            elif in_session and close[i] < lower and close[i] < ema20 and vol_spike and rsi_val < 50:
-                signals[i] = -0.20
+            # Enter short: Close breaks below weekly S1 + daily downtrend + volume spike
+            elif close[i] < s1 and close[i] < ema20 and vol_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below Donchian low or 4h trend turns down
-            if close[i] < lower or close[i] < ema20:
+            # Exit long: Close falls below weekly S1 or daily trend turns down
+            if close[i] < s1 or close[i] < ema20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above Donchian high or 4h trend turns up
-            if close[i] > upper or close[i] > ema20:
+            # Exit short: Close rises above weekly R1 or daily trend turns up
+            if close[i] > r1 or close[i] > ema20:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
