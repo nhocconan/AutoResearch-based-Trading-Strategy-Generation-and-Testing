@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12H_Daily_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4H_Daily_Camarilla_R1S1_Breakout_VolumeTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,24 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 12h strategy (HTF)
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels (R1, S1)
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
+    # Calculate pivot and ranges
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     
-    # Camarilla levels (tighter breakout levels)
+    # Camarilla levels (R1, S1) - tighter breakout levels
     r1_1d = pivot_1d + (range_1d * 1.1 / 6)
     s1_1d = pivot_1d - (range_1d * 1.1 / 6)
     
-    # Align to 12h
+    # Align to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
@@ -46,7 +47,7 @@ def generate_signals(prices):
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 2.0)
     
-    # RSI(14) for momentum filter
+    # RSI(14) for additional momentum filter
     delta = pd.Series(close).diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -97,9 +98,3 @@ def generate_signals(prices):
                 signals[i] = -0.25
     
     return signals
-
-# Hypothesis: Daily Camarilla R1/S1 breakouts with trend and volume filters work on 12h timeframe.
-# The 12h timeframe reduces trade frequency vs 4h while capturing significant moves.
-# Daily trend filter (EMA34) ensures alignment with higher timeframe momentum.
-# Volume confirmation and RSI filter avoid false breakouts.
-# Expected: 50-150 trades over 4 years, works in both bull and bear markets via short/long symmetry.
