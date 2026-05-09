@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot breakout on 12h with 1-day trend filter and volume confirmation.
-# Uses 1-day EMA34 for trend direction (works in bull/bear via trend filter).
-# Long when 1d trend up and price breaks above R3 level with volume > 1.5x average.
-# Short when 1d trend down and price breaks below S3 level with volume > 1.5x average.
-# Camarilla levels provide institutional support/resistance, trend filter reduces whipsaw.
-# Target: 15-30 trades/year per symbol with disciplined risk management.
+# 4h_RSI2_MeanReversion_Bollinger_Bands
+# Hypothesis: Mean reversion strategy using 2-period RSI and Bollinger Bands (20,2.0) for BTC/ETH/SOL.
+# Enters long when RSI(2) < 10 and price touches lower Bollinger Band; short when RSI(2) > 90 and price touches upper band.
+# Exits when RSI(2) crosses above 50 (long) or below 50 (short) or price reaches middle band.
+# Bollinger Band width acts as volatility filter: only trade when width > 20th percentile (avoid low volatility chop).
+# Designed to work in both bull and bear markets by capturing short-term reversals.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI2_MeanReversion_Bollinger_Bands"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,95 +21,99 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Calculate 2-period RSI
+    delta = np.diff(close)
+    delta = np.insert(delta, 0, 0)  # align with close
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    close_1d = df_1d['close'].values
+    # Wilder's smoothing for RSI
+    rsi_gain = np.full_like(close, np.nan)
+    rsi_loss = np.full_like(close, np.nan)
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
+    if len(gain) >= 2:
+        rsi_gain[1] = np.mean(gain[0:2])
+        rsi_loss[1] = np.mean(loss[0:2])
+        for i in range(2, len(gain)):
+            rsi_gain[i] = (rsi_gain[i-1] * 1 + gain[i]) / 2
+            rsi_loss[i] = (rsi_loss[i-1] * 1 + loss[i]) / 2
     
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    rsi = np.full_like(close, np.nan)
+    valid = (~np.isnan(rsi_loss)) & (rsi_loss != 0)
+    rsi[valid] = 100 - (100 / (1 + rsi_gain[valid] / rsi_loss[valid]))
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    camarilla_r3 = np.full_like(close, np.nan)
-    camarilla_s3 = np.full_like(close, np.nan)
+    # Calculate Bollinger Bands (20, 2.0)
+    bb_length = 20
+    bb_mult = 2.0
     
-    # Use previous day's OHLC (1d data shifted by 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Middle band (SMA)
+    bb_mid = np.full_like(close, np.nan)
+    if len(close) >= bb_length:
+        bb_mid[bb_length-1] = np.mean(close[0:bb_length])
+        for i in range(bb_length, len(close)):
+            bb_mid[i] = (bb_mid[i-1] * (bb_length-1) + close[i]) / bb_length
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r3_1d = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3_1d = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # Standard deviation
+    bb_std = np.full_like(close, np.nan)
+    if len(close) >= bb_length:
+        for i in range(bb_length-1, len(close)):
+            bb_std[i] = np.std(close[i-bb_length+1:i+1])
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    # Upper and lower bands
+    bb_upper = np.full_like(close, np.nan)
+    bb_lower = np.full_like(close, np.nan)
+    valid_bb = ~np.isnan(bb_mid) & ~np.isnan(bb_std)
+    bb_upper[valid_bb] = bb_mid[valid_bb] + bb_mult * bb_std[valid_bb]
+    bb_lower[valid_bb] = bb_mid[valid_bb] - bb_mult * bb_std[valid_bb]
     
-    # Volume filter: current volume vs 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    # Bollinger Band width
+    bb_width = np.full_like(close, np.nan)
+    bb_width[valid_bb] = (bb_upper[valid_bb] - bb_lower[valid_bb]) / bb_mid[valid_bb]
     
-    volume_ratio = np.full_like(volume, np.nan)
-    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
-    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
+    # Volatility filter: BB width > 20th percentile (avoid low volatility chop)
+    bb_width_valid = bb_width[~np.isnan(bb_width)]
+    if len(bb_width_valid) >= 20:
+        bb_width_threshold = np.percentile(bb_width_valid, 20)
+        vol_filter = bb_width > bb_width_threshold
+    else:
+        vol_filter = np.ones_like(close, dtype=bool)  # default to true if not enough data
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 1d EMA and volume MA
+    start_idx = max(bb_length, 2)  # Need BB and RSI
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(rsi[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
+            np.isnan(bb_mid[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close[i] > ema34_1d_aligned[i]
-        
         if position == 0:
-            # Enter long: 1d trend up + price breaks above R3 + volume confirmation
-            if trend_up and close[i] > camarilla_r3_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter long: RSI(2) < 10 and price at or below lower Bollinger Band
+            if rsi[i] < 10 and close[i] <= bb_lower[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: 1d trend down + price breaks below S3 + volume confirmation
-            elif not trend_up and close[i] < camarilla_s3_aligned[i] and volume_ratio[i] > 1.5:
+            # Enter short: RSI(2) > 90 and price at or above upper Bollinger Band
+            elif rsi[i] > 90 and close[i] >= bb_upper[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: 1d trend turns down or price breaks below S3
-            if not trend_up or close[i] < camarilla_s3_aligned[i]:
+            # Exit long: RSI(2) crosses above 50 or price reaches middle band
+            if rsi[i] > 50 or close[i] >= bb_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 1d trend turns up or price breaks above R3
-            if trend_up or close[i] > camarilla_r3_aligned[i]:
+            # Exit short: RSI(2) crosses below 50 or price reaches middle band
+            if rsi[i] < 50 or close[i] <= bb_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
