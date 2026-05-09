@@ -3,79 +3,88 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Alligator_ElderRay_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Elder Ray and Alligator
+    # Get daily data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13
-    bear_power = df_1d['low'].values - ema13
+    # Calculate daily EMA34 for trend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Alligator: Jaw (13), Teeth (8), Lips (5) - all SMAs
-    jaw = pd.Series(df_1d['close']).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(df_1d['close']).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().values
+    # Get daily data for Camarilla pivot levels (R3, S3)
+    # Using previous day's OHLC to avoid look-ahead
+    prev_close = df_1d['close'].shift(1)
+    prev_high = df_1d['high'].shift(1)
+    prev_low = df_1d['low'].shift(1)
     
-    # Align all indicators to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) / 2
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
+    
+    # Volume filter: current 4h volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(13, n):
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])):
+    start_idx = max(34, 20)  # EMA34 and volume MA
+    
+    for i in range(start_idx, n):
+        if (np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
+        r3 = camarilla_r3_aligned[i]
+        s3 = camarilla_s3_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Bull Power > 0, Bear Power < 0, and Lips > Teeth > Jaw (bullish alignment)
-            if bull > 0 and bear < 0 and lips_val > teeth_val > jaw_val:
+            # Enter long: close above R3 + above daily EMA34 trend + volume filter
+            if close[i] > r3 and close[i] > ema34_val and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power > 0, Bull Power < 0, and Lips < Teeth < Jaw (bearish alignment)
-            elif bear > 0 and bull < 0 and lips_val < teeth_val < jaw_val:
+            # Enter short: close below S3 + below daily EMA34 trend + volume filter
+            elif close[i] < s3 and close[i] < ema34_val and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bull Power turns negative or Bear Power turns positive
-            if bull <= 0 or bear >= 0:
+            # Exit long: close below daily EMA34 trend
+            if close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bear Power turns negative or Bull Power turns positive
-            if bear <= 0 or bull >= 0:
+            # Exit short: close above daily EMA34 trend
+            if close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
