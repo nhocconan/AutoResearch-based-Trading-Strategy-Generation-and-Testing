@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,62 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA parameters
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(10))
+    volatility = abs(close_series.diff(1)).rolling(window=10, min_periods=1).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla levels: Range = High - Low
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.0833)
-    r2 = close_1d + (range_1d * 1.1666)
-    r3 = close_1d + (range_1d * 1.2500)
-    r4 = close_1d + (range_1d * 1.3333)
-    s1 = close_1d - (range_1d * 1.0833)
-    s2 = close_1d - (range_1d * 1.1666)
-    s3 = close_1d - (range_1d * 1.2500)
-    s4 = close_1d - (range_1d * 1.3333)
+    # Align weekly trend
+    weekly_close = df_1w['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # Use previous day's levels (shift by 1 to avoid look-ahead)
-    r1_shifted = np.roll(r1, 1)
-    r2_shifted = np.roll(r2, 1)
-    r3_shifted = np.roll(r3, 1)
-    r4_shifted = np.roll(r4, 1)
-    s1_shifted = np.roll(s1, 1)
-    s2_shifted = np.roll(s2, 1)
-    s3_shifted = np.roll(s3, 1)
-    s4_shifted = np.roll(s4, 1)
-    r1_shifted[0] = np.nan
-    r2_shifted[0] = np.nan
-    r3_shifted[0] = np.nan
-    r4_shifted[0] = np.nan
-    s1_shifted[0] = np.nan
-    s2_shifted[0] = np.nan
-    s3_shifted[0] = np.nan
-    s4_shifted[0] = np.nan
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Align to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_shifted)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2_shifted)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3_shifted)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4_shifted)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_shifted)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2_shifted)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3_shifted)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4_shifted)
-    
-    # Daily EMA34 trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike filter: volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema20)
+    # Choppiness Index (14)
+    atr1 = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
+    atr1[0] = high[0] - low[0]
+    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=1).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=1).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=1).min().values
+    chop = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
+    chop = np.nan_to_num(chop, nan=50.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,10 +64,8 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(r1_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or
-            np.isnan(s1_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema20[i])):
+        # Skip if weekly trend data unavailable
+        if np.isnan(weekly_ema50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -92,26 +74,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and above daily EMA34
-            if (price > r1_4h[i] and vol_spike[i] and price > ema_34_1d_aligned[i]):
+            # Long: price above KAMA, RSI > 50, chop < 61.8 (trending), weekly uptrend
+            if (price > kama[i] and rsi[i] > 50 and chop[i] < 61.8 and price > weekly_ema50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and below daily EMA34
-            elif (price < s1_4h[i] and vol_spike[i] and price < ema_34_1d_aligned[i]):
+            # Short: price below KAMA, RSI < 50, chop < 61.8 (trending), weekly downtrend
+            elif (price < kama[i] and rsi[i] < 50 and chop[i] < 61.8 and price < weekly_ema50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below S1 (mean reversion to support)
-            if price < s1_4h[i]:
+            # Exit long: price below KAMA or chop > 61.8 (ranging)
+            if price < kama[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above R1 (mean reversion to resistance)
-            if price > r1_4h[i]:
+            # Exit short: price above KAMA or chop > 61.8 (ranging)
+            if price > kama[i] or chop[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
