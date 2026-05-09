@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WilliamsFractal_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dEMA_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,94 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Williams fractal and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Williams fractal from weekly high/low
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Bearish fractal: high[n-2] < high[n-1] and high[n] < high[n-1]
-    # Bullish fractal: low[n-2] > low[n-1] and low[n] > low[n-1]
-    bearish_fractal = np.zeros(len(high_1w), dtype=bool)
-    bullish_fractal = np.zeros(len(low_1w), dtype=bool)
-    
-    for i in range(2, len(high_1w)-2):
-        if (high_1w[i-2] < high_1w[i-1] and 
-            high_1w[i] < high_1w[i-1] and
-            high_1w[i+1] < high_1w[i-1] and
-            high_1w[i+2] < high_1w[i-1]):
-            bearish_fractal[i] = True
-            
-        if (low_1w[i-2] > low_1w[i-1] and 
-            low_1w[i] > low_1w[i-1] and
-            low_1w[i+1] > low_1w[i-1] and
-            low_1w[i+2] > low_1w[i-1]):
-            bullish_fractal[i] = True
-    
-    # Align fractals to 6h with 2-bar delay for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal.astype(float), additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal.astype(float), additional_delay_bars=2)
-    
-    # Weekly trend: EMA34 of weekly close
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_6h = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Daily volume spike filter
+    # Get 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = align_htf_to_ltf(prices, df_1d, (vol_1d > vol_avg_1d * 2.0).astype(float))
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Get 1d data for Camarilla pivot levels (based on previous day's OHLC)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate pivot and levels from previous day's OHLC
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
+    
+    prev_daily_range = prev_high_1d - prev_low_1d
+    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
+    r1 = pivot + 1.1 * prev_daily_range / 6
+    s1 = pivot - 1.1 * prev_daily_range / 6
+    
+    # Align Camarilla levels to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 20-period volume average for spike detection
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bearish_fractal_aligned[i]) or np.isnan(bullish_fractal_aligned[i]) or 
-            np.isnan(ema34_6h[i]) or np.isnan(vol_spike_1d[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema34_12h[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: daily volume spike
-        vol_spike = vol_spike_1d[i] > 0.5
+        # Volume condition: current volume > 2.5 x 20-period average (tighter filter)
+        vol_spike = volume[i] > vol_avg[i] * 2.5
         
         if position == 0:
-            # Long: Bullish fractal + above weekly EMA34 + volume spike
-            if (bullish_fractal_aligned[i] > 0.5 and 
-                close[i] > ema34_6h[i] and 
-                vol_spike):
+            # Long: Break above Camarilla R1 with uptrend and volume spike
+            if close[i] > r1_12h[i] and close[i] > ema34_12h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish fractal + below weekly EMA34 + volume spike
-            elif (bearish_fractal_aligned[i] > 0.5 and 
-                  close[i] < ema34_6h[i] and 
-                  vol_spike):
+            # Short: Break below Camarilla S1 with downtrend and volume spike
+            elif close[i] < s1_12h[i] and close[i] < ema34_12h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bearish fractal OR price below weekly EMA34
-            if (bearish_fractal_aligned[i] > 0.5 or 
-                close[i] < ema34_6h[i]):
+            # Exit long: Price falls back below Camarilla S1 OR trend turns down
+            if close[i] < s1_12h[i] or close[i] < ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bullish fractal OR price above weekly EMA34
-            if (bullish_fractal_aligned[i] > 0.5 or 
-                close[i] > ema34_6h[i]):
+            # Exit short: Price rises back above Camarilla R1 OR trend turns up
+            if close[i] > r1_12h[i] or close[i] > ema34_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
