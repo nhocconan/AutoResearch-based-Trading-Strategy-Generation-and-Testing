@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Williams Alligator + Elder Ray + Vortex with 1w trend filter
-# Uses Williams Alligator (SMAs) for trend direction, Elder Ray for bull/bear power,
-# and Vortex indicator for trend confirmation. Long when green line above red,
-# bull power > 0, bear power < 0, and VI+ > VI-. Short when opposite conditions.
-# Weekly trend filter ensures alignment with higher timeframe trend.
-# Position size: 0.25 to limit drawdown. Target: 15-25 trades/year.
+# Hypothesis: 4h KAMA direction + RSI(14) + Choppiness filter for trend-following in trending markets and mean-reversion in ranging markets
+# Uses 1d timeframe for Choppiness Index regime filter (chop > 61.8 = range, chop < 38.2 = trend)
+# Long when: KAMA rising, RSI > 50, chop < 38.2 (trending) OR RSI < 30 (oversold in range)
+# Short when: KAMA falling, RSI < 50, chop < 38.2 (trending) OR RSI > 70 (overbought in range)
+# Exit when: KAMA direction reverses OR RSI crosses 50 in trending mode OR RSI exits extreme in ranging mode
+# Position size: 0.25 to balance risk and return. Target: 30-60 trades/year.
 
-name = "1d_Williams_Alligator_ElderRay_Vortex_1wTrend"
-timeframe = "1d"
+name = "4h_KAMA_RSI_Chop_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,52 +19,104 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # KAMA (Kaufman Adaptive Moving Average) parameters
+    er_len = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle first er_len values
+    er = np.full_like(change, np.nan, dtype=np.float64)
+    er[er_len-1:] = change[er_len-1:] / volatility[er_len-1:]
+    # Fill beginning with 0
+    er = np.concatenate([np.full(er_len-1, 0.0), er])
+    
+    # Smoothing Constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan, dtype=np.float64)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    kama_prev = np.roll(kama, 1)
+    kama_prev[0] = kama[0]
+    kama_rising = kama > kama_prev
+    kama_falling = kama < kama_prev
+    
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full_like(gain, np.nan, dtype=np.float64)
+    avg_loss = np.full_like(loss, np.nan, dtype=np.float64)
+    
+    # First average
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    # Wilder smoothing
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, 50.0), rsi])  # First 14 values as 50
+    
+    # Get 1d data for Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Weekly EMA(21) for trend filter
-    close_1w = df_1w['close']
-    ema_21_1w = close_1w.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_prev = np.roll(ema_21_1w, 1)
-    ema_21_1w_prev[0] = ema_21_1w[0]
-    ema_rising_1w = ema_21_1w > ema_21_1w_prev
-    ema_falling_1w = ema_21_1w < ema_21_1w_prev
-    ema_rising_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_rising_1w)
-    ema_falling_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_falling_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator: SMA(13,8), SMA(8,5), SMA(5,3)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # Blue line
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # Red line
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # Green line
+    # True Range (TR) for Choppiness
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([np.array([high_1d[0] - low_1d[0]]), tr])  # First TR
     
-    # Align Alligator lines
-    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
-    lips_aligned = align_htf_to_ltf(prices, prices, lips)
+    # Sum of TR over 14 periods
+    tr_sum = np.convolve(tr, np.ones(14), mode='valid')
+    tr_sum = np.concatenate([np.full(13, np.nan), tr_sum])
     
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Max(high) - Min(low) over 14 periods
+    max_high = np.zeros_like(high_1d)
+    min_low = np.zeros_like(low_1d)
+    for i in range(len(high_1d)):
+        start_idx = max(0, i - 13)
+        end_idx = i + 1
+        max_high[i] = np.max(high_1d[start_idx:end_idx])
+        min_low[i] = np.min(low_1d[start_idx:end_idx])
     
-    # Vortex Indicator: VI+ and VI-
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
+    range_14 = max_high - min_low
     
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    # Choppiness Index (CHOP)
+    chop = np.full_like(range_14, np.nan, dtype=np.float64)
+    valid_idx = ~np.isnan(tr_sum) & (range_14 != 0)
+    chop[valid_idx] = 100 * np.log10(tr_sum[valid_idx] / range_14[valid_idx]) / np.log10(14)
     
-    vi_plus = vm_plus14 / tr14
-    vi_minus = vm_minus14 / tr14
+    # Align 1d indicators to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    kama_rising_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama_rising.astype(float))
+    kama_falling_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), kama_falling.astype(float))
+    rsi_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,44 +125,45 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lips_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(jaw_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or
-            np.isnan(ema_rising_1w_aligned[i]) or np.isnan(ema_falling_1w_aligned[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(kama_rising_aligned[i]) or
+            np.isnan(kama_falling_aligned[i]) or np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        chop_val = chop_aligned[i]
+        kama_rise = kama_rising_aligned[i]
+        kama_fall = kama_falling_aligned[i]
+        rsi_val = rsi_aligned[i]
+        
         if position == 0:
-            # Enter long: lips > teeth (green above red), bull power > 0, bear power < 0, VI+ > VI-, weekly trend up
-            if (lips_aligned[i] > teeth_aligned[i] and 
-                bull_power[i] > 0 and 
-                bear_power[i] < 0 and 
-                vi_plus[i] > vi_minus[i] and
-                ema_rising_1w_aligned[i]):
+            # Enter long: trending up OR oversold in range
+            if ((chop_val < 38.2 and kama_rise and rsi_val > 50) or  # Trending up
+                (chop_val >= 38.2 and rsi_val < 30)):  # Oversold in range
                 signals[i] = 0.25
                 position = 1
-            # Enter short: lips < teeth (green below red), bull power < 0, bear power > 0, VI- > VI+, weekly trend down
-            elif (lips_aligned[i] < teeth_aligned[i] and 
-                  bull_power[i] < 0 and 
-                  bear_power[i] > 0 and 
-                  vi_minus[i] > vi_plus[i] and
-                  ema_falling_1w_aligned[i]):
+            # Enter short: trending down OR overbought in range
+            elif ((chop_val < 38.2 and kama_fall and rsi_val < 50) or  # Trending down
+                  (chop_val >= 38.2 and rsi_val > 70)):  # Overbought in range
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: lips < teeth OR weekly trend turns down
-            if (lips_aligned[i] < teeth_aligned[i]) or (not ema_rising_1w_aligned[i]):
+            # Exit long: trend reversal OR RSI crosses 50 in trend OR exits oversold in range
+            if ((chop_val < 38.2 and not kama_rise) or  # Trend down
+                (chop_val < 38.2 and rsi_val < 50) or  # RSI crosses below 50 in trend
+                (chop_val >= 38.2 and rsi_val > 30)):  # Exits oversold in range
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: lips > teeth OR weekly trend turns up
-            if (lips_aligned[i] > teeth_aligned[i]) or (not ema_falling_1w_aligned[i]):
+            # Exit short: trend reversal OR RSI crosses 50 in trend OR exits overbought in range
+            if ((chop_val < 38.2 and not kama_fall) or  # Trend up
+                (chop_val < 38.2 and rsi_val > 50) or  # RSI crosses above 50 in trend
+                (chop_val >= 38.2 and rsi_val < 70)):  # Exits overbought in range
                 signals[i] = 0.0
                 position = 0
             else:
