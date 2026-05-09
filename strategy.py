@@ -1,18 +1,10 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike_v2
-# Strategy: Camarilla R1/S1 breakout with 1d trend filter and volume spike
-# Timeframe: 12h (primary), HTF: 1d for trend
-# Hypothesis: In both bull and bear markets, price breaking Camarilla R1/S1 levels with strong volume and aligned daily trend captures institutional breakout moves while avoiding false breakouts in ranging markets.
-# Expected trades: 15-30/year per symbol (60-120 total over 4 years), balancing signal quality and trade frequency.
-# Risk management: Position size 0.25, exit on trend reversal or opposite level break.
-
-#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Spike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,7 +31,7 @@ def generate_signals(prices):
     r1 = pivot + (prev_high - prev_low) * 1.1 / 12
     s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # Align pivot levels to 12h timeframe
+    # Align pivot levels to 4h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -48,7 +40,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume spike detection (12h timeframe)
+    # Volume spike detection (4h timeframe)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
