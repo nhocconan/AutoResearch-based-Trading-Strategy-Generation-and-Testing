@@ -3,16 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Choppiness Index + Donchian breakout with volume confirmation
-# Works in bull (breakouts) and bear (mean reversion in chop)
-# Limited trades via chop filter (avoid whipsaw) and volume confirmation
-name = "4h_Choppiness_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,102 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Choppiness Index (14-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter and Camarilla calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Choppiness Index on daily timeframe
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    # where ATR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    atr_list = []
-    prev_close = df_1d['close'].shift(1)
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - prev_close)
-    tr3 = abs(df_1d['low'] - prev_close)
-    atr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # 1w EMA20 for trend direction (weekly trend)
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Sum of ATR over 14 periods
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    # Max high and min low over 14 periods
-    max_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
+    # Calculate Camarilla levels from previous weekly OHLC
+    prev_close = df_1w['close'].shift(1).values
+    prev_high = df_1w['high'].shift(1).values
+    prev_low = df_1w['low'].shift(1).values
+    prev_range = prev_high - prev_low
     
-    # Choppiness Index
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Camarilla levels R3/S3 (most relevant for breakouts)
+    R3 = prev_close + 1.1 * prev_range / 4
+    S3 = prev_close - 1.1 * prev_range / 4
     
-    # Get 4h data for Donchian channels (20-period)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
+    # Align to 1d timeframe
+    R3_1d = align_htf_to_ltf(prices, df_1w, R3)
+    S3_1d = align_htf_to_ltf(prices, df_1w, S3)
     
-    # Donchian channels
-    upper_4h = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().values
-    lower_4h = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().values
-    upper_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    
-    # Volume filter: above 1.5x 20-period average on 4h
+    # Volume filter: above 1.8x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Wait for indicators to stabilize
+    start_idx = 30  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chop_aligned[i]) or np.isnan(upper_aligned[i]) or 
-            np.isnan(lower_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R3_1d[i]) or np.isnan(S3_1d[i]) or 
+            np.isnan(ema_20_1w[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
-        chop_value = chop_aligned[i]
-        
-        # Determine regime: chop > 61.8 = ranging (mean revert), chop < 38.2 = trending
-        is_ranging = chop_value > 61.8
-        is_trending = chop_value < 38.2
+        vol_ok = volume[i] > 1.8 * vol_ma[i]  # Volume confirmation
         
         if position == 0:
-            # In trending regime: Donchian breakout
-            if is_trending and vol_ok:
-                if close[i] > upper_aligned[i]:
-                    signals[i] = 0.30
-                    position = 1
-                elif close[i] < lower_aligned[i]:
-                    signals[i] = -0.30
-                    position = -1
-            # In ranging regime: mean reversion at Donchian bands
-            elif is_ranging and vol_ok:
-                if close[i] < lower_aligned[i]:
-                    signals[i] = 0.30  # Buy at lower band
-                    position = 1
-                elif close[i] > upper_aligned[i]:
-                    signals[i] = -0.30  # Sell at upper band
-                    position = -1
+            # Long breakout: price breaks above R3 with 1w uptrend
+            if (close[i] > R3_1d[i] and 
+                close[i] > ema_20_1w[i] and  # 1w uptrend
+                vol_ok):
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price breaks below S3 with 1w downtrend
+            elif (close[i] < S3_1d[i] and 
+                  close[i] < ema_20_1w[i] and  # 1w downtrend
+                  vol_ok):
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: opposite signal or chop extreme
-            if (is_ranging and close[i] > upper_aligned[i]) or \
-               (is_trending and close[i] < lower_aligned[i]) or \
-               chop_value > 70:  # Extreme chop - exit
+            # Exit long: price falls back below S3 (mean reversion)
+            if close[i] < S3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: opposite signal or chop extreme
-            if (is_ranging and close[i] < lower_aligned[i]) or \
-               (is_trending and close[i] > upper_aligned[i]) or \
-               chop_value > 70:  # Extreme chop - exit
+            # Exit short: price rises back above R3 (mean reversion)
+            if close[i] > R3_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
