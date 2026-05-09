@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 6h timeframe with daily volatility breakout and weekly trend filter.
-# Uses daily ATR-based volatility breakout (price > close + k*ATR for long, price < close - k*ATR for short)
-# combined with weekly EMA50 trend filter to avoid counter-trend trades.
-# Volatility breakouts capture momentum bursts, while weekly trend filter reduces whipsaw in ranging markets.
-# Designed to work in both bull and bear markets by filtering trades with higher timeframe trend.
+# Hypothesis: 12h timeframe with weekly price channel structure and daily momentum filter.
+# Uses weekly Donchian channel (20-period) for breakout entries and 1d RSI for momentum confirmation.
+# Weekly Donchian provides robust support/resistance that adapts to volatility, working in both bull and bear markets.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Weekly data changes slowly, reducing whipsaw and improving win rate in ranging markets.
 
-name = "6h_ATRBreakout_WeeklyTrend_Filter"
-timeframe = "6h"
+name = "12h_Donchian20_1dRSI_Momentum"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,67 +24,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily ATR(14) for volatility breakout
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volatility breakout: k=0.5 (breakout when price moves 0.5x ATR from close)
-    k = 0.5
-    breakout_up = close > (close + k * atr)
-    breakout_down = close < (close - k * atr)
-    
-    # Get weekly data for EMA50 trend filter
+    # Calculate weekly Donchian channel (20-period) from previous week
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1w EMA50 trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Weekly high and low for Donchian channel
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    trend_up = close > ema_50_1w_aligned
-    trend_down = close < ema_50_1w_aligned
+    # Calculate 20-period Donchian bands
+    upper_band = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    lower_band = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    
+    # Align to 12h timeframe (wait for weekly bar to close)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    
+    # Breakout conditions: price must close beyond the band
+    breakout_up = close > upper_band_aligned
+    breakout_down = close < lower_band_aligned
+    
+    # Get daily data for RSI momentum filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # Calculate 14-period RSI
+    delta = np.diff(df_1d['close'].values, prepend=np.nan)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi[avg_loss == 0] = 100  # Avoid division by zero
+    
+    # Align RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # Momentum filters: RSI > 50 for longs, RSI < 50 for shorts
+    rsi_long_filter = rsi_aligned > 50
+    rsi_short_filter = rsi_aligned < 50
+    
+    # Volume filter: current volume > 1.5x 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(atr[i])):
+            np.isnan(rsi_long_filter[i]) or np.isnan(rsi_short_filter[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: volatility breakout up + weekly uptrend
-            if breakout_up[i] and trend_up[i]:
+            # Long: breakout above upper band + RSI > 50 + volume filter
+            if breakout_up[i] and rsi_long_filter[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: volatility breakout down + weekly downtrend
-            elif breakout_down[i] and trend_down[i]:
+            # Short: breakout below lower band + RSI < 50 + volume filter
+            elif breakout_down[i] and rsi_short_filter[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: volatility contraction or trend reversal
-            if close[i] < (close[i-1] + 0.25 * atr[i]) or not trend_up[i]:
+            # Exit long: price returns to lower band or RSI < 50
+            if close[i] <= lower_band_aligned[i] or not rsi_long_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: volatility contraction or trend reversal
-            if close[i] > (close[i-1] - 0.25 * atr[i]) or not trend_down[i]:
+            # Exit short: price returns to upper band or RSI > 50
+            if close[i] >= upper_band_aligned[i] or not rsi_short_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
