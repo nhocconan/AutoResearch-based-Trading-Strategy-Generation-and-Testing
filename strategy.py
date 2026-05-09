@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullPower_BearPower_12hTrend_Filter
-# Hypothesis: Elder Ray indicator (bull power = high - EMA13, bear power = EMA13 - low) on 6h with 12h EMA trend filter.
-# Long when bull power > 0 and rising AND 12h trend up.
-# Short when bear power < 0 and falling AND 12h trend down.
-# Uses Elder Ray to measure bull/bear strength relative to EMA, with trend filter to avoid counter-trend whipsaw.
-# Target: 50-150 trades over 4 years (~12-37/year) with controlled risk.
+# 1d_KAMA_Trend_RSI_MeanReversion_v2
+# Hypothesis: On daily timeframe, use KAMA for trend direction, RSI for mean-reversion entries, and volume confirmation.
+# Long when KAMA up (bullish trend) + RSI < 30 (oversold) + volume > 1.3x average.
+# Short when KAMA down (bearish trend) + RSI > 70 (overbought) + volume > 1.3x average.
+# Uses weekly trend filter to avoid counter-trend trades in strong trends.
+# Designed for low trade frequency (<25/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "6h_ElderRay_BullPower_BearPower_12hTrend_Filter"
-timeframe = "6h"
+name = "1d_KAMA_Trend_RSI_MeanReversion_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,72 +22,163 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for trend filter (higher timeframe)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA34 for trend filter
-    ema34_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[0:34])
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = (close_12h[i] * 2 + ema34_12h[i-1] * 32) / 34
+    # Get daily data for KAMA and RSI
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (6h timeframe)
-    ema13 = np.full_like(close, np.nan)
-    if len(close) >= 13:
-        ema13[12] = np.mean(close[0:13])
-        for i in range(13, len(close)):
-            ema13[i] = (close[i] * 2 + ema13[i-1] * 11) / 13
+    close_1d = df_1d['close'].values
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13  # high - EMA13
-    bear_power = ema13 - low   # EMA13 - low
+    # Calculate KAMA ( Kaufman Adaptive Moving Average ) on daily
+    # Using ER (Efficiency Ratio) with 10-day fast, 30-day slow
+    def calculate_kama(close, fast=10, slow=30):
+        n = len(close)
+        kama = np.full(n, np.nan)
+        if n < slow:
+            return kama
+        
+        # Initialize first value
+        kama[slow-1] = close[slow-1]
+        
+        for i in range(slow, n):
+            # Direction
+            direction = abs(close[i] - close[i-10])
+            
+            # Volatility
+            volatility = 0
+            for j in range(i-9, i+1):
+                if j > 0:
+                    volatility += abs(close[j] - close[j-1])
+            
+            # Avoid division by zero
+            if volatility == 0:
+                er = 0
+            else:
+                er = direction / volatility
+            
+            # Smoothing constants
+            sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+            
+            # KAMA calculation
+            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
+        
+        return kama
     
-    # Align 12h indicators to 6h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
+    kama_1d = calculate_kama(close_1d, 10, 30)
+    
+    # Calculate RSI (14) on daily
+    def calculate_rsi(close, period=14):
+        n = len(close)
+        rsi = np.full(n, np.nan)
+        if n < period + 1:
+            return rsi
+        
+        # Calculate changes
+        delta = np.diff(close)
+        
+        # Separate gains and losses
+        gains = np.where(delta > 0, delta, 0)
+        losses = np.where(delta < 0, -delta, 0)
+        
+        # First average
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period])
+        
+        # Avoid division by zero
+        if avg_loss == 0:
+            rsi[period] = 100
+        else:
+            rsi[period] = 100 - (100 / (1 + avg_gain / avg_loss))
+        
+        # Subsequent values using Wilder's smoothing
+        for i in range(period + 1, n):
+            avg_gain = (gains[i-1] + (period - 1) * avg_gain) / period
+            avg_loss = (losses[i-1] + (period - 1) * avg_loss) / period
+            
+            if avg_loss == 0:
+                rsi[i] = 100
+            else:
+                rsi[i] = 100 - (100 / (1 + avg_gain / avg_loss))
+        
+        return rsi
+    
+    rsi_1d = calculate_rsi(close_1d, 14)
+    
+    # Calculate weekly EMA for trend filter
+    ema20_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 20:
+        ema20_1w[19] = np.mean(close_1w[0:20])
+        for i in range(20, len(close_1w)):
+            ema20_1w[i] = (close_1w[i] * 2 + ema20_1w[i-1] * 18) / 20
+    
+    # Align weekly EMA to daily timeframe
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # Align daily indicators to daily timeframe (no alignment needed, but using for consistency)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Volume filter: current volume vs 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 13)  # Need 12h EMA and 6h EMA
+    start_idx = max(30, 20, 20)  # Need KAMA, RSI, weekly EMA, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema34_12h_aligned[i]) or np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 12h trend
-        trend_up = close[i] > ema34_12h_aligned[i]
+        # Determine trends
+        kama_up = close[i] > kama_1d_aligned[i]
+        weekly_up = close[i] > ema20_1w_aligned[i]
         
         if position == 0:
-            # Enter long: bull power positive AND rising AND 12h trend up
-            if bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and trend_up:
+            # Enter long: KAMA up (bullish trend) + RSI < 30 (oversold) + volume confirmation
+            # Only take long if weekly trend is also up to avoid fighting strong downtrends
+            if kama_up and rsi_1d_aligned[i] < 30 and volume_ratio[i] > 1.3 and weekly_up:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bear power positive AND rising AND 12h trend down
-            elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1] and not trend_up:
+            # Enter short: KAMA down (bearish trend) + RSI > 70 (overbought) + volume confirmation
+            # Only take short if weekly trend is also down to avoid fighting strong uptrends
+            elif not kama_up and rsi_1d_aligned[i] > 70 and volume_ratio[i] > 1.3 and not weekly_up:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bull power turns negative OR 12h trend turns down
-            if bull_power[i] <= 0 or not trend_up:
+            # Exit long: KAMA turns down or RSI > 70 (overbought)
+            if not kama_up or rsi_1d_aligned[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bear power turns negative OR 12h trend turns up
-            if bear_power[i] <= 0 or trend_up:
+            # Exit short: KAMA turns up or RSI < 30 (oversold)
+            if kama_up or rsi_1d_aligned[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
