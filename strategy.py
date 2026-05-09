@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6H_Ichimoku_Cloud_Filter_1dTrend_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,73 +17,96 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend filter
+    # Get daily data for Ichimoku cloud and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels (S1, R1) from previous day
-    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3.0
-    range_ = high_1d[:-1] - low_1d[:-1]
-    s1 = close_1d[:-1] - 1.05 * range_ / 2.0
-    r1 = close_1d[:-1] + 1.05 * range_ / 2.0
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_b_period = 52
     
-    # Shift to get previous day's levels
-    s1_prev = np.concatenate([[np.nan], s1[:-1]])
-    r1_prev = np.concatenate([[np.nan], r1[:-1]])
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() +
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Calculate 20-day EMA for trend filter
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() +
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # Align all daily data to 4h timeframe
-    s1_prev_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
-    r1_prev_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # Volume confirmation: current volume > 1.5x 20-period average volume
-    volume_ma = np.convolve(volume, np.ones(20)/20, mode='same')
-    volume_ma[:10] = np.nan  # insufficient data for convolution at start
-    volume_confirm = volume > volume_ma * 1.5
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_b_period, min_periods=senkou_b_period).max() +
+                     pd.Series(low_1d).rolling(window=senkou_b_period, min_periods=senkou_b_period).min()) / 2
+    
+    # Current Kumo (cloud) top and bottom
+    kumo_top = np.maximum(senkou_span_a, senkou_span_b)
+    kumo_bottom = np.minimum(senkou_span_a, senkou_span_b)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data for indicators
-    start_idx = 20
+    start_idx = 52
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if np.isnan(s1_prev_aligned[i]) or np.isnan(r1_prev_aligned[i]) or np.isnan(ema20_1d_aligned[i]):
+        # Skip if Ichimoku data not ready
+        if np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or \
+           np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation: current volume > 1.5x 20-period average volume
+        if i >= 20:
+            avg_volume = np.mean(volume[i-20:i])
+            volume_confirm = volume[i] > avg_volume * 1.5
+        else:
+            volume_confirm = False
+        
         if position == 0:
-            # Enter long: price breaks above R1 + above daily EMA20 + volume confirmation
-            if close[i] > r1_prev_aligned[i] and close[i] > ema20_1d_aligned[i] and volume_confirm[i]:
+            # Enter long: TK cross up + price above cloud + volume confirmation
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and
+                close[i] > kumo_top_aligned[i] and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + below daily EMA20 + volume confirmation
-            elif close[i] < s1_prev_aligned[i] and close[i] < ema20_1d_aligned[i] and volume_confirm[i]:
+            # Enter short: TK cross down + price below cloud + volume confirmation
+            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                  tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and
+                  close[i] < kumo_bottom_aligned[i] and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S1 or below daily EMA20
-            if close[i] < s1_prev_aligned[i] or close[i] < ema20_1d_aligned[i]:
+            # Exit long: TK cross down or price below cloud
+            if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]) or \
+               close[i] < kumo_bottom_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R1 or above daily EMA20
-            if close[i] > r1_prev_aligned[i] or close[i] > ema20_1d_aligned[i]:
+            # Exit short: TK cross up or price above cloud
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]) or \
+               close[i] > kumo_top_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
