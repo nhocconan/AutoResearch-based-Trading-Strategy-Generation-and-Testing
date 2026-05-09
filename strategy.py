@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyDonchian_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_PivotHighLow_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 20:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,67 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly Donchian(20) breakout levels
-    high_20w = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
-    low_20w = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly levels to daily
-    high_20w_aligned = align_htf_to_ltf(prices, df_1w, high_20w)
-    low_20w_aligned = align_htf_to_ltf(prices, df_1w, low_20w)
+    # 1d volume average for volume filter (20-period)
+    vol_1d_series = pd.Series(df_1d['volume'])
+    vol_ma_1d = vol_1d_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Weekly EMA50 trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Daily volume filter: current volume > 2.0 * 20-day average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    # Calculate 6h-period high/low for breakout levels (20-period = ~5 days)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
+    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 50)  # Need enough data for calculations
+    start_idx = max(20, 50)  # Need enough data for breakout levels and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20w_aligned[i]) or np.isnan(low_20w_aligned[i]) or
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        upper = high_20w_aligned[i]
-        lower = low_20w_aligned[i]
-        trend = ema50_1w_aligned[i]
-        vol_filter = volume_filter[i]
+        hh = highest_20[i]
+        ll = lowest_20[i]
+        trend = ema50_1d_aligned[i]
+        vol_ma = vol_ma_1d_aligned[i]
+        vol_ratio = volume[i] / vol_ma if vol_ma > 0 else 0
         
         if position == 0:
-            # Enter long: break above weekly Donchian high with volume and above trend
-            if close[i] > upper and close[i] > trend and vol_filter:
+            # Enter long: break above 20-period high with volume and above trend
+            if close[i] > hh and volume[i] > vol_ma * 1.5 and close[i] > trend:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below weekly Donchian low with volume and below trend
-            elif close[i] < lower and close[i] < trend and vol_filter:
+            # Enter short: break below 20-period low with volume and below trend
+            elif close[i] < ll and volume[i] > vol_ma * 1.5 and close[i] < trend:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below weekly Donchian low (mean reversion)
-            if close[i] < lower:
+            # Exit long: close below 20-period low (mean reversion)
+            if close[i] < ll:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above weekly Donchian high (mean reversion)
-            if close[i] > upper:
+            # Exit short: close above 20-period high (mean reversion)
+            if close[i] > hh:
                 signals[i] = 0.0
                 position = 0
             else:
