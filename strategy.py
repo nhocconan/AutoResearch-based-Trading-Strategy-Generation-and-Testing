@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d Williams %R with 1w trend filter and volume confirmation
-# Long when Williams %R crosses above -20 from oversold (<-80) with 1w EMA uptrend and volume spike
-# Short when Williams %R crosses below -80 from overbought (>-20) with 1w EMA downtrend and volume spike
-# Exit when Williams %R returns to neutral zone (-50) or opposite extreme
-# Williams %R identifies overbought/oversold conditions; 1w EMA filters trend direction; volume confirms momentum
-# Designed to capture mean reversion in ranging markets and pullbacks in trending markets
-# Target: 50-100 total trades over 4 years (12-25/year) with size 0.25
+# Hypothesis: 6h Williams %R + 12h EMA50 trend filter + volume spike
+# Long when Williams %R crosses above -20 from below, EMA50 rising, volume > 2x average
+# Short when Williams %R crosses below -80 from above, EMA50 falling, volume > 2x average
+# Exit when Williams %R crosses back below -80 (long) or above -20 (short)
+# Designed to capture momentum reversals in both trending and ranging markets with controlled frequency
+# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
 
-name = "1d_WilliamsR_1wEMA_Trend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsR_12hEMA50_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,65 +24,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Williams %R (14-period)
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max()
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.values  # Convert to numpy array
-    
-    # Calculate 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Calculate 12h Williams %R (14-period)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
         return np.zeros(n)
     
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    highest_high = pd.Series(df_12h['high']).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(df_12h['low']).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - df_12h['close']) / (highest_high - lowest_low)
+    williams_r = williams_r.replace(0, np.nan)  # Avoid division by zero
+    williams_r_values = williams_r.values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Align Williams %R to 6h timeframe
+    williams_r_aligned = align_htf_to_ltf(prices, df_12h, williams_r_values)
+    
+    # Calculate 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Volume confirmation: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    vol_confirm = volume > (2.0 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for Williams %R calculation
+    start_idx = 50  # Need enough data for EMA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(williams_r[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(williams_r_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(williams_r_aligned[i-1]) or np.isnan(ema50_12h_aligned[i-1]) or
+            np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Williams %R crosses above -20 from oversold (<-80), 1w EMA uptrend, volume spike
-            if (williams_r[i] > -20 and williams_r[i-1] <= -20 and  # Cross above -20
-                williams_r[i-1] < -80 and  # Was oversold
-                ema34_1w_aligned[i] > ema34_1w_aligned[i-1] and  # EMA rising
+            # Enter long: Williams %R crosses above -20 from below, EMA50 rising, volume spike
+            if (williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20 and
+                ema50_12h_aligned[i] > ema50_12h_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Williams %R crosses below -80 from overbought (>-20), 1w EMA downtrend, volume spike
-            elif (williams_r[i] < -80 and williams_r[i-1] >= -80 and  # Cross below -80
-                  williams_r[i-1] > -20 and  # Was overbought
-                  ema34_1w_aligned[i] < ema34_1w_aligned[i-1] and  # EMA falling
+            # Enter short: Williams %R crosses below -80 from above, EMA50 falling, volume spike
+            elif (williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80 and
+                  ema50_12h_aligned[i] < ema50_12h_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Williams %R returns to neutral (-50) or drops below -80 (oversold again)
-            if (williams_r[i] >= -50) or (williams_r[i] < -80):
+            # Exit long: Williams %R crosses back below -80
+            if williams_r_aligned[i] < -80 and williams_r_aligned[i-1] >= -80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Williams %R returns to neutral (-50) or rises above -20 (overbought again)
-            if (williams_r[i] <= -50) or (williams_r[i] > -20):
+            # Exit short: Williams %R crosses back above -20
+            if williams_r_aligned[i] > -20 and williams_r_aligned[i-1] <= -20:
                 signals[i] = 0.0
                 position = 0
             else:
