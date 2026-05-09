@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Alligator_ElderRay_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,87 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and Alligator
+    # Get 1d data for trend filter and Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d EMA13 for Alligator Jaw
+    # Calculate 1d EMA34 for trend filter
     close_1d = pd.Series(df_1d['close'].values)
-    ema13 = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
+    ema_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d EMA8 for Alligator Teeth
-    ema8 = close_1d.ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema8_aligned = align_htf_to_ltf(prices, df_1d, ema8)
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
     
-    # Calculate 1d EMA5 for Alligator Lips
-    ema5 = close_1d.ewm(span=5, adjust=False, min_periods=5).mean().values
-    ema5_aligned = align_htf_to_ltf(prices, df_1d, ema5)
+    pivot = (high_1d + low_1d + close_1d_arr) / 3
+    range_1d = high_1d - low_1d
     
-    # Calculate 13-period EMA for Elder Ray Bull/Bear Power
-    ema13_1d = close_1d.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = (df_1d['high'].values - ema13_1d)  # High - EMA13
-    bear_power = (df_1d['low'].values - ema13_1d)   # Low - EMA13
+    # Resistance and Support levels
+    R1 = close_1d_arr + (range_1d * 1.0833) / 2
+    S1 = close_1d_arr - (range_1d * 1.0833) / 2
     
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # 6-period RSI for entry timing
-    rsi_period = 6
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Volume spike detection (12h timeframe)
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema13_aligned[i]) or np.isnan(ema8_aligned[i]) or np.isnan(ema5_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(rsi[i])):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator conditions: aligned for trend
-        jaw = ema13_aligned[i]
-        teeth = ema8_aligned[i]
-        lips = ema5_aligned[i]
-        
-        # Elder Ray: positive bull power = buying pressure, negative bear power = selling pressure
-        bull = bull_power_aligned[i]
-        bear = bear_power_aligned[i]
+        vol_ok = volume[i] > 1.5 * vol_ma20[i]
         
         if position == 0:
-            # Long: Alligator aligned up (lips > teeth > jaw) + bull power positive + RSI not overbought
-            if lips > teeth > jaw and bull > 0 and rsi[i] < 70:
+            # Long: Price breaks above R1 with uptrend and volume
+            if close[i] > R1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator aligned down (lips < teeth < jaw) + bear power negative + RSI not oversold
-            elif lips < teeth < jaw and bear < 0 and rsi[i] > 30:
+            # Short: Price breaks below S1 with downtrend and volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator turns down OR bear power turns negative
-            if lips < teeth or bear < 0:
+            # Exit long: Price falls below S1
+            if close[i] < S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator turns up OR bull power turns positive
-            if lips > teeth or bull > 0:
+            # Exit short: Price rises above R1
+            if close[i] > R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
