@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_4hDonchian20_1dEMA34_Volume_20"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,44 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Camarilla pivot levels from daily timeframe (based on previous day's OHLC)
+    # 4h Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 4h ATR (14) for volatility filter and stop
+    tr1 = high[1:] - low[:-1]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[:-1] - close[:-1])
+    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Daily EMA34 (trend filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
-    
-    # Previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values  # shift(1) for previous day
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Camarilla levels: R1, S1 (most significant for intraday reversals)
-    # R1 = Close + (High - Low) * 1.12
-    # S1 = Close - (High - Low) * 1.12
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.12
-    s1 = prev_close - camarilla_range * 1.12
-    
-    # Align Camarilla levels to 12h timeframe (wait for daily bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily trend filter: EMA34 on 1d timeframe
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume confirmation: volume > 1.5 * 20-period average volume
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma20
+    # Volume filter: current > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # sufficient warmup for all indicators
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(atr[i]) or np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,38 +56,38 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R1 level + daily uptrend + volume confirmation
-            if (price > r1_aligned[i] and 
+            # Long: price breaks above Donchian high + daily uptrend + volume
+            if (price > highest_high[i] and 
                 price > ema34_1d_aligned[i] and 
-                volume_filter[i]):
-                signals[i] = 0.25
+                vol_filter[i]):
+                signals[i] = 0.20
                 position = 1
                 continue
             
-            # Short: price breaks below S1 level + daily downtrend + volume confirmation
-            elif (price < s1_aligned[i] and 
+            # Short: price breaks below Donchian low + daily downtrend + volume
+            elif (price < lowest_low[i] and 
                   price < ema34_1d_aligned[i] and 
-                  volume_filter[i]):
-                signals[i] = -0.25
+                  vol_filter[i]):
+                signals[i] = -0.20
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price returns to S1 level or daily trend fails
-            if (price < s1_aligned[i] or 
+            # Exit long: price retreats below Donchian low or daily trend fails
+            if (price < lowest_low[i] or 
                 price < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns to R1 level or daily trend fails
-            if (price > r1_aligned[i] or 
+            # Exit short: price rises above Donchian high or daily trend fails
+            if (price > highest_high[i] or 
                 price > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
