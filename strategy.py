@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_PivotHighLow_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_MultiFactor_Breakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,66 +17,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume context
+    # Get 1d data for higher timeframe context
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # === PRE-COMPUTE INDICATORS OUTSIDE LOOP ===
     
-    # 1d volume average for volume filter (20-period)
-    vol_1d_series = pd.Series(df_1d['volume'])
-    vol_ma_1d = vol_1d_series.rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # 1d EMA for trend filter
+    ema20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Calculate 6h-period high/low for breakout levels (20-period = ~5 days)
+    # 1d ATR for volatility filter
+    tr1 = np.maximum(df_1d['high'], df_1d['close'].shift(1)) - np.minimum(df_1d['low'], df_1d['close'].shift(1))
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr10_1d = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    atr10_1d_aligned = align_htf_to_ltf(prices, df_1d, atr10_1d)
+    
+    # 4h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    highest_20 = high_series.rolling(window=20, min_periods=20).max().values
-    lowest_20 = low_series.rolling(window=20, min_periods=20).min().values
+    donch_high = high_series.rolling(window=20, min_periods=20).max().values
+    donch_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # 4h volume filter: current volume > 1.5 * 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
+    
+    # 4h price change momentum (3-period ROC)
+    roc_series = pd.Series(close)
+    roc = roc_series.pct_change(periods=3) * 100
+    roc_values = roc.values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 50)  # Need enough data for breakout levels and EMA
+    start_idx = max(20, 50)  # Ensure sufficient data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
+        # Skip if any required data is not available
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(atr10_1d_aligned[i]) or
+            np.isnan(volume_filter[i]) or np.isnan(roc_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        hh = highest_20[i]
-        ll = lowest_20[i]
-        trend = ema50_1d_aligned[i]
-        vol_ma = vol_ma_1d_aligned[i]
-        vol_ratio = volume[i] / vol_ma if vol_ma > 0 else 0
+        # Current values
+        dh = donch_high[i]
+        dl = donch_low[i]
+        trend = ema20_1d_aligned[i]
+        atr = atr10_1d_aligned[i]
+        vol_ok = volume_filter[i]
+        roc_val = roc_values[i]
+        
+        # Dynamic thresholds based on volatility
+        atr_mult = 0.5  # Multiple of ATR for breakout threshold
         
         if position == 0:
-            # Enter long: break above 20-period high with volume and above trend
-            if close[i] > hh and volume[i] > vol_ma * 1.5 and close[i] > trend:
+            # Long entry: price breaks above Donchian high with volume, trend alignment, and positive momentum
+            if (close[i] > dh + atr * atr_mult and 
+                close[i] > trend and 
+                vol_ok and 
+                roc_val > 0):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below 20-period low with volume and below trend
-            elif close[i] < ll and volume[i] > vol_ma * 1.5 and close[i] < trend:
+            # Short entry: price breaks below Donchian low with volume, trend alignment, and negative momentum
+            elif (close[i] < dl - atr * atr_mult and 
+                  close[i] < trend and 
+                  vol_ok and 
+                  roc_val < 0):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below 20-period low (mean reversion)
-            if close[i] < ll:
+            # Exit long: price breaks below Donchian low or trend deteriorates
+            if close[i] < dl or close[i] < trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above 20-period high (mean reversion)
-            if close[i] > hh:
+            # Exit short: price breaks above Donchian high or trend deteriorates
+            if close[i] > dh or close[i] > trend:
                 signals[i] = 0.0
                 position = 0
             else:
