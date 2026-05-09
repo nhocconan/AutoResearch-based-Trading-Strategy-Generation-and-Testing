@@ -1,9 +1,14 @@
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Breakouts at R1/S1 levels (minor sentiment extremes) with 12h trend filter and volume confirmation.
+# R1/S1 provides tighter stops and more frequent entries than R3/S3. 12h trend ensures alignment with medium-term bias.
+# Volume filters low-liquidity breakouts. Designed for 20-50 trades/year in both bull and bear markets.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,72 +22,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Previous day's close for Camarilla calculation (R3, S3)
+    # Get 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Previous day's close for Camarilla calculation (R1, S1)
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate Camarilla levels (R3, S3)
-    r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.25  # R3 = C + 1.1*(H-L)*1.25
-    s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.25  # S3 = C - 1.1*(H-L)*1.25
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Trend filter: 12h EMA34
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 4h volume > 1.5 * 20-period average
+    # Volume filter: current 4h volume > 1.3 * 30-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma * 1.3)
     
     # Align all to 4h (primary timeframe)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_12h_4h = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
+    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema34_12h_4h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_4h[i]
-        s3_val = s3_4h[i]
-        trend = ema34_1d_4h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema34_12h_4h[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: break above R3 with volume and above trend
-            if close[i] > r3_val and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with volume and below trend
-            elif close[i] < s3_val and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 (mean reversion to center)
-            if close[i] < s3_val:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 (mean reversion to center)
-            if close[i] > r3_val:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
