@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_Pivot_4hTrend_Volume_v4"
-timeframe = "1h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,14 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and daily context
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 4h data for Camarilla pivots
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 12h data for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
     # Previous 1d close for trend filter
@@ -32,23 +32,27 @@ def generate_signals(prices):
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Previous 4h bar's OHLC for Camarilla calculation
-    prev_close_4h = df_4h['close'].shift(1).values
-    prev_high_4h = df_4h['high'].shift(1).values
-    prev_low_4h = df_4h['low'].shift(1).values
+    # Previous 12h bar's OHLC for Camarilla calculation
+    prev_close_12h = df_12h['close'].shift(1).values
+    prev_high_12h = df_12h['high'].shift(1).values
+    prev_low_12h = df_12h['low'].shift(1).values
     
-    # Calculate Camarilla levels (using previous 4h bar's range)
-    range_4h = prev_high_4h - prev_low_4h
-    camarilla_h4 = prev_close_4h + 1.5 * range_4h  # Resistance level 4
-    camarilla_l4 = prev_close_4h - 1.5 * range_4h  # Support level 4
+    # Calculate Camarilla levels (using previous 12h bar's range)
+    range_12h = prev_high_12h - prev_low_12h
+    camarilla_h4 = prev_close_12h + 1.5 * range_12h  # Resistance level 4
+    camarilla_l4 = prev_close_12h - 1.5 * range_12h  # Support level 4
+    camarilla_h3 = prev_close_12h + 1.125 * range_12h  # Resistance level 3
+    camarilla_l3 = prev_close_12h - 1.125 * range_12h  # Support level 3
     
-    # Align Camarilla levels to 1h
-    camarilla_h4_1h = align_htf_to_ltf(prices, df_4h, camarilla_h4)
-    camarilla_l4_1h = align_htf_to_ltf(prices, df_4h, camarilla_l4)
+    # Align Camarilla levels to 12h
+    camarilla_h4_12h = align_htf_to_ltf(prices, df_12h, camarilla_h4)
+    camarilla_l4_12h = align_htf_to_ltf(prices, df_12h, camarilla_l4)
+    camarilla_h3_12h = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l3_12h = align_htf_to_ltf(prices, df_12h, camarilla_l3)
     
-    # Volume filter: above 2x 24-period average (24*1h = 24h)
+    # Volume filter: above 2x 24-period average (24*12h = 12d)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
@@ -58,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_h4_1h[i]) or np.isnan(camarilla_l4_1h[i]) or 
-            np.isnan(ema_50_1h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_h4_12h[i]) or np.isnan(camarilla_l4_12h[i]) or 
+            np.isnan(ema_50_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,38 +77,34 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above Camarilla H4 with 1d uptrend
-            if (close[i] > camarilla_h4_1h[i] and 
-                close[i] > ema_50_1h[i] and  # 1d uptrend
+            if (close[i] > camarilla_h4_12h[i] and 
+                close[i] > ema_50_12h[i] and  # 1d uptrend
                 vol_ok and 
                 in_session):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short: price breaks below Camarilla L4 with 1d downtrend
-            elif (close[i] < camarilla_l4_1h[i] and 
-                  close[i] < ema_50_1h[i] and  # 1d downtrend
+            elif (close[i] < camarilla_l4_12h[i] and 
+                  close[i] < ema_50_12h[i] and  # 1d downtrend
                   vol_ok and 
                   in_session):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price falls back below Camarilla H3 (strong resistance)
-            camarilla_h3 = prev_close_4h + 1.125 * range_4h  # Resistance level 3
-            camarilla_h3_1h = align_htf_to_ltf(prices, df_4h, camarilla_h3)
-            if not np.isnan(camarilla_h3_1h[i]) and close[i] < camarilla_h3_1h[i]:
+            if not np.isnan(camarilla_h3_12h[i]) and close[i] < camarilla_h3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
             # Exit short: price rises back above Camarilla L3 (strong support)
-            camarilla_l3 = prev_close_4h - 1.125 * range_4h  # Support level 3
-            camarilla_l3_1h = align_htf_to_ltf(prices, df_4h, camarilla_l3)
-            if not np.isnan(camarilla_l3_1h[i]) and close[i] > camarilla_l3_1h[i]:
+            if not np.isnan(camarilla_l3_12h[i]) and close[i] > camarilla_l3_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
