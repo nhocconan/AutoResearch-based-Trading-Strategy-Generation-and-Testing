@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Choppiness_Filtered_Camarilla_Breakout"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,46 +17,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot and trend
+    # Get daily data for TRIX and chop filter
     df_d = get_htf_data(prices, '1d')
     if len(df_d) < 50:
         return np.zeros(n)
     
-    # Daily high, low, close for Camarilla pivot calculation
-    daily_high = df_d['high'].values
-    daily_low = df_d['low'].values
-    daily_close = df_d['close'].values
+    close_d = df_d['close'].values
+    high_d = df_d['high'].values
+    low_d = df_d['low'].values
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1 / 12
-    # S1 = Pivot - (H - L) * 1.1 / 12
-    pivot = (daily_high + daily_low + daily_close) / 3
-    r1 = pivot + (daily_high - daily_low) * 1.1 / 12
-    s1 = pivot - (daily_high - daily_low) * 1.1 / 12
+    # Calculate TRIX (15-period EMA of EMA of EMA)
+    close_series = pd.Series(close_d)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = 100 * (ema3.diff() / ema3.shift(1))
+    trix = trix.replace([np.inf, -np.inf], np.nan).fillna(0).values
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Align to 12h timeframe (Camarilla levels from previous day)
-    r1_aligned = align_htf_to_ltf(prices, df_d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_d, s1)
+    # Calculate Choppiness Index (14-period)
+    atr_d = []
+    tr_d = []
+    for i in range(len(high_d)):
+        if i == 0:
+            tr = high_d[i] - low_d[i]
+        else:
+            tr = max(high_d[i] - low_d[i], abs(high_d[i] - close_d[i-1]), abs(low_d[i] - close_d[i-1]))
+        tr_d.append(tr)
+        atr_d.append(np.nan)
     
-    # Daily EMA(34) for trend filter
-    close_d = pd.Series(daily_close)
-    ema34_d = close_d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_d_aligned = align_htf_to_ltf(prices, df_d, ema34_d)
+    tr_d = np.array(tr_d)
+    atr_series = pd.Series(tr_d)
+    atr14 = atr_series.rolling(window=14, min_periods=14).mean().values
     
-    # Choppiness Index on 1d timeframe (trend/range filter)
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    tr1 = np.maximum(high[1:], daily_close[:-1]) - np.minimum(low[1:], daily_close[:-1])
-    tr1 = np.concatenate([[np.nan], tr1])
-    atr1 = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    sum_atr1 = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    max_high1 = pd.Series(daily_high).rolling(window=14, min_periods=14).max().values
-    min_low1 = pd.Series(daily_low).rolling(window=14, min_periods=14).min().values
-    chop1 = 100 * np.log10(sum_atr1 / (max_high1 - min_low1)) / np.log10(14)
-    chop1 = np.where((max_high1 - min_low1) == 0, 50, chop1)  # avoid div by zero
-    chop1_aligned = align_htf_to_ltf(prices, df_d, chop1)
+    max_high = pd.Series(high_d).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low_d).rolling(window=14, min_periods=14).min().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    chop = 100 * np.log10(atr14.sum() / (max_high - min_low)) / np.log10(14)
+    chop = np.where((max_high - min_low) == 0, 50, chop)
+    
+    # Align TRIX signal and chop to 4h
+    trix_signal_aligned = align_htf_to_ltf(prices, df_d, trix_signal)
+    chop_aligned = align_htf_to_ltf(prices, df_d, chop)
+    
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
@@ -67,39 +71,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_d_aligned[i]) or np.isnan(vol_ma20[i]) or 
-            np.isnan(chop1_aligned[i])):
+        if (np.isnan(trix_signal_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
-        # Range market: CHOP > 61.8, Trending market: CHOP < 38.2
-        ranging = chop1_aligned[i] > 61.8
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
+        chop_ok = chop_aligned[i] > 61.8  # choppy/range market
         
         if position == 0:
-            # Long: Price breaks above R1 with volume, in ranging market, and above daily EMA trend
-            if close[i] > r1_aligned[i] and vol_ok and ranging and close[i] > ema34_d_aligned[i]:
+            # Long: TRIX crosses above signal line in choppy market with volume
+            if trix[i] > trix_signal_aligned[i] and trix[i-1] <= trix_signal_aligned[i-1] and vol_ok and chop_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume, in ranging market, and below daily EMA trend
-            elif close[i] < s1_aligned[i] and vol_ok and ranging and close[i] < ema34_d_aligned[i]:
+            # Short: TRIX crosses below signal line in choppy market with volume
+            elif trix[i] < trix_signal_aligned[i] and trix[i-1] >= trix_signal_aligned[i-1] and vol_ok and chop_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses below S1 (reversion to mean) or strong trend (CHOP < 38.2)
-            if close[i] < s1_aligned[i] or chop1_aligned[i] < 38.2:
+            # Exit long: TRIX crosses below signal line
+            if trix[i] < trix_signal_aligned[i] and trix[i-1] >= trix_signal_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses above R1 (reversion to mean) or strong trend (CHOP < 38.2)
-            if close[i] > r1_aligned[i] or chop1_aligned[i] < 38.2:
+            # Exit short: TRIX crosses above signal line
+            if trix[i] > trix_signal_aligned[i] and trix[i-1] <= trix_signal_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
