@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and daily trend filter.
-# Uses 4h timeframe to balance trade frequency and signal quality.
-# Donchian(20) breakouts capture strong momentum moves with volume confirmation.
-# Daily EMA50 filter ensures alignment with higher timeframe trend.
-# Designed to work in both bull and bear markets by following daily trend.
-name = "4h_Donchian20_1dEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 12h TRIX momentum with volume spike and weekly trend filter.
+# TRIX (12-period) filters noise and captures momentum turns.
+# Volume surge confirms breakout strength.
+# Weekly EMA20 trend ensures alignment with higher timeframe trend.
+# Designed for low-frequency, high-conviction trades in both bull and bear markets.
+name = "12h_TRIX12_VolumeSpike_1wEMA20"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,32 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Daily EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # TRIX (12-period) on 12h close
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1-period percent change
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = np.zeros(n)
+    trix[12:] = (ema3[12:] - ema3[11:-1]) / ema3[11:-1] * 100  # percent change
     
-    # 4h Donchian channels (20-period)
-    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA20 trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_12h = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Volume spike filter: volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema20)
+    # Volume spike: volume > 2.0x 30-period EMA
+    vol_ema30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    vol_spike = volume > (2.0 * vol_ema30)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(high_4h[i]) or np.isnan(low_4h[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema_20_12h[i]) or
+            np.isnan(vol_ema30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,26 +60,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above 20-period high with volume spike and above daily EMA50
-            if (price > high_4h[i] and vol_spike[i] and price > ema_50_4h[i]):
+            # Long: TRIX turns positive with volume spike and above weekly EMA20
+            if (trix[i] > 0 and trix[i-1] <= 0 and vol_spike[i] and price > ema_20_12h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low with volume spike and below daily EMA50
-            elif (price < low_4h[i] and vol_spike[i] and price < ema_50_4h[i]):
+            # Short: TRIX turns negative with volume spike and below weekly EMA20
+            elif (trix[i] < 0 and trix[i-1] >= 0 and vol_spike[i] and price < ema_20_12h[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below 20-period low (mean reversion to support)
-            if price < low_4h[i]:
+            # Exit long: TRIX turns negative (momentum reversal)
+            if trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above 20-period high (mean reversion to resistance)
-            if price > high_4h[i]:
+            # Exit short: TRIX turns positive (momentum reversal)
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
