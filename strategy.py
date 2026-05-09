@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 2025-06-22 | 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA trend filter and volume spike confirmation.
-# Uses 12h timeframe to reduce trade frequency (target: 12-37/year) and minimize fee drag.
-# Daily EMA50 provides robust trend filter adapting to bull/bear markets. Volume spike (>2x 24-period average)
-# confirms breakout strength. Designed for low trade frequency to minimize fee drift.
+# 2025-06-22 | 4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v3
+# Hypothesis: Breakouts from daily Camarilla R1/S1 levels with 1d EMA50 trend filter and volume spike confirmation.
+# Daily EMA50 provides robust trend filter that adapts to bull/bear markets. Volume spike (>2x 24-period average)
+# confirms breakout strength. Designed for low trade frequency (19-50/year) to minimize fee drift.
+# Version 3: Added 2-bar confirmation for breakout to reduce false signals and lower trade frequency.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align daily Camarilla levels to 12h timeframe
+    # Align daily Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume spike filter: current volume / 24-period average volume (24*12h = 12 days)
+    # Volume spike filter: current volume / 24-period average volume (24*4h = 4 days)
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 24:
         vol_ma[23] = np.mean(volume[0:24])
@@ -85,37 +85,45 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > r1_aligned[i] and 
+            # Enter long: price closes above R1 for 2 consecutive bars AND uptrend (price > EMA50) AND volume spike
+            if (close[i] > r1_aligned[i] and close[i-1] > r1_aligned[i-1] and 
                 close[i] > ema_50_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 bars_since_entry = 0
-            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # Enter short: price closes below S1 for 2 consecutive bars AND downtrend (price < EMA50) AND volume spike
+            elif (close[i] < s1_aligned[i] and close[i-1] < s1_aligned[i-1] and 
                   close[i] < ema_50_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: price breaks below S1 OR trend reversal (price < EMA50)
-            if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Minimum holding period: 4 bars
+            if bars_since_entry < 4:
+                signals[i] = 0.20
             else:
-                signals[i] = 0.25
+                # Exit long: price breaks below S1 OR trend reversal (price < EMA50)
+                if close[i] < s1_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price breaks above R1 OR trend reversal (price > EMA50)
-            if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Minimum holding period: 4 bars
+            if bars_since_entry < 4:
+                signals[i] = -0.20
             else:
-                signals[i] = -0.25
+                # Exit short: price breaks above R1 OR trend reversal (price > EMA50)
+                if close[i] > r1_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
