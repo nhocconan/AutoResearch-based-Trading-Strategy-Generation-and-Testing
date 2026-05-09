@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_1dTrend_Volume
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d EMA34 trend filter and volume confirmation
-# Combines precise support/resistance from Camarilla levels with trend filter from 1d EMA34
-# and volume confirmation to reduce false breakouts. Designed for 12h timeframe with
-# target of 50-150 trades over 4 years (12-37/year). Works in bull/bear markets by
-# requiring trend alignment and volume confirmation.
+"""
+6h_HeikinAshi_1dTrend_Volume
+Hypothesis: Use Heikin-Ashi candles on 6h for smooth trend visualization, filtered by 1d EMA50 trend direction and volume spikes.
+Heikin-Ashi reduces noise and highlights true trend direction, ideal for 6h timeframe to avoid whipsaws.
+In bull markets: go long when HA closes above opens with 1d uptrend and volume spike.
+In bear markets: go short when HA closes below opens with 1d downtrend and volume spike.
+Volume confirmation ensures breakouts have participation, reducing false signals.
+Designed for low trade frequency (~20-50/year) with high win rate by requiring confluence.
+"""
 
-name = "12h_Camarilla_R3_S3_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_HeikinAshi_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,79 +27,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter and Camarilla levels
+    # Calculate Heikin-Ashi close and open
+    ha_close = (high + low + close + close) / 4  # Using current close as approximation for prior close in HA calc
+    # For HA open: ( prior HA open + prior HA close ) / 2
+    # We'll compute iteratively but vectorized approximation: use prior close for simplicity in trend detection
+    # More accurate: compute ha_open recursively, but for trend direction, ha_close - ha_open ~ close - prior_close smoothed
+    # Instead, use: ha_open = (previous ha_open + previous ha_close)/2 -> complex in vector
+    # Alternative: use actual HA calculation via loop for clarity (only 50-100 iterations needed for warmup)
+    ha_open = np.zeros(n)
+    ha_close_calc = np.zeros(n)
+    ha_open[0] = (open_price := prices['open'].iloc[0])  # seed
+    ha_close_calc[0] = (high[0] + low[0] + close[0] + open_price) / 4
+    for i in range(1, n):
+        ha_open[i] = (ha_open[i-1] + ha_close_calc[i-1]) / 2
+        ha_close_calc[i] = (high[i] + low[i] + close[i] + ha_open[i]) / 4
+    
+    # Get 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_6h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels from previous 1d
-    # Using previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    R4 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    S4 = prev_close - 1.1 * (prev_high - prev_low) / 2
-    
-    # Align Camarilla levels to 12h
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
-    R4_12h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_12h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
+    # Volume filter: current volume > 2x 20-period average volume (strict for fewer trades)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    volume_filter = volume > (2.0 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and Camarilla calculations
+    start_idx = 50  # Need enough data for EMA and HA calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_12h[i]) or np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
-            np.isnan(R4_12h[i]) or np.isnan(S4_12h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(ema_50_6h[i]) or np.isnan(ha_open[i]) or np.isnan(ha_close_calc[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > R3_12h[i-1]  # Break above R3
-        short_breakout = close[i] < S3_12h[i-1]  # Break below S3
+        # Heikin-Ashi trend: bullish when close > open, bearish when close < open
+        ha_bullish = ha_close_calc[i] > ha_open[i]
+        ha_bearish = ha_close_calc[i] < ha_open[i]
         
-        trend_up = close[i] > ema_34_12h[i]
-        trend_down = close[i] < ema_34_12h[i]
+        trend_up = close[i] > ema_50_6h[i]
+        trend_down = close[i] < ema_50_6h[i]
         
         if position == 0:
-            # Long: bullish breakout + uptrend + volume confirmation
-            if long_breakout and trend_up and volume_filter[i]:
+            # Long: HA bullish + 1d uptrend + volume spike
+            if ha_bullish and trend_up and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish breakout + downtrend + volume confirmation
-            elif short_breakout and trend_down and volume_filter[i]:
+            # Short: HA bearish + 1d downtrend + volume spike
+            elif ha_bearish and trend_down and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish breakout below S3 or trend reversal
-            if close[i] < S3_12h[i] or not trend_up:
+            # Exit long: HA bearish or trend reversal
+            if ha_bearish or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish breakout above R3 or trend reversal
-            if close[i] > R3_12h[i] or not trend_down:
+            # Exit short: HA bullish or trend reversal
+            if ha_bullish or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
