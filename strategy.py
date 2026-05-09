@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Reversal_1dTrend_Volume
-# Hypothesis: Fade at weekly pivot levels (R1/S1) in trending markets, using 1d trend filter and volume spike.
-# In bull/bear markets, price often reverts from weekly R1/S1 to weekly pivot (PP). 
-# Uses 1d EMA50 for trend direction and volume spike for entry confirmation.
-# Targets 15-30 trades/year to minimize fee drag.
+# 12h_WeeklyPivot_PivotBounce_1dTrend_Volume
+# Hypothesis: Price rejection at weekly pivot points with daily trend and volume confirmation.
+# Works in bull/bear: Trend filter ensures trades align with higher timeframe momentum.
+# Weekly pivots provide strong institutional support/resistance with fewer false breaks.
+# Focus on bounce trades from pivot levels to reduce whipsaw and trade frequency.
 
-name = "6h_WeeklyPivot_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_PivotBounce_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot points
+    # Get weekly data for pivot calculation
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
@@ -37,15 +37,22 @@ def generate_signals(prices):
     pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
     pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
     
-    # Calculate weekly pivot levels
-    pp = (ph + pl + pc) / 3.0
-    r1 = 2 * pp - pl
-    s1 = 2 * pp - ph
+    # Calculate weekly pivot point (P) and support/resistance levels
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    pivot = (ph + pl + pc) / 3.0
+    r1 = 2 * pivot - pl
+    s1 = 2 * pivot - ph
+    r2 = pivot + (ph - pl)
+    s2 = pivot - (ph - pl)
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    # Align weekly pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -81,8 +88,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,30 +97,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price rejects S1 (bounces above) AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > s1_aligned[i] and close[i] < s1_aligned[i] * 1.005 and  # bounced off S1
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_ratio[i] > 2.0):
+            # Enter long: price bounces off S1 or S2 AND uptrend (price > EMA50) AND volume spike
+            if (((low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]) or
+                 (low[i] <= s2_aligned[i] and close[i] > s2_aligned[i])) and
+                close[i] > ema_50_1d_aligned[i] and
+                volume_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price rejects R1 (falls below) AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < r1_aligned[i] and close[i] > r1_aligned[i] * 0.995 and  # rejected at R1
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_ratio[i] > 2.0):
+            # Enter short: price bounces off R1 or R2 AND downtrend (price < EMA50) AND volume spike
+            elif (((high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]) or
+                   (high[i] >= r2_aligned[i] and close[i] < r2_aligned[i])) and
+                  close[i] < ema_50_1d_aligned[i] and
+                  volume_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches PP or trend reversal
-            if close[i] >= pp_aligned[i] or close[i] < ema_50_1d_aligned[i]:
+            # Exit long: price reaches R1 or R2 OR trend reversal (price < EMA50)
+            if (high[i] >= r1_aligned[i] or high[i] >= r2_aligned[i] or
+                close[i] < ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches PP or trend reversal
-            if close[i] <= pp_aligned[i] or close[i] > ema_50_1d_aligned[i]:
+            # Exit short: price reaches S1 or S2 OR trend reversal (price > EMA50)
+            if (low[i] <= s1_aligned[i] or low[i] <= s2_aligned[i] or
+                close[i] > ema_50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
