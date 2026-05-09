@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Donchian20_VolumeTrend_4hEMA200"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,31 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot levels
+    # Get 1d data for trend filter and volatility regime
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
+    # 1d EMA200 for long-term trend filter
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
+    # 1d ATR for volatility regime (filter out low volatility periods)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr2[0] = tr1[0]  # first value
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=30, min_periods=30).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    # Camarilla R3, S3 levels: (H-L)*1.1/6
-    camarilla_range = (high_1d - low_1d) * 1.1 / 6
-    r3_level = close_1d_vals + camarilla_range * 4
-    s3_level = close_1d_vals - camarilla_range * 4
+    # 4h Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+    # 4h EMA200 for trend confirmation
+    ema200_4h = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume spike filter: current volume > 1.5 * 30-period average
+    # 4h volume spike filter
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
     volume_spike = volume > (vol_ma * 1.5)
@@ -49,45 +59,62 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
+    start_idx = max(200, 30)  # Need enough data for EMA200 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema200_4h[i]) or
+            np.isnan(volume_spike[i]) or
+            np.isnan(atr_1d_aligned[i]) or
+            np.isnan(atr_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34 = ema34_1d_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
+        ema200_1d_val = ema200_1d_aligned[i]
+        dh = donchian_high[i]
+        dl = donchian_low[i]
+        ema200_4h_val = ema200_4h[i]
         vol_spike = volume_spike[i]
+        atr_1d_val = atr_1d_aligned[i]
+        atr_ma_1d_val = atr_ma_1d_aligned[i]
+        
+        # Volatility regime filter: only trade when volatility is elevated
+        vol_regime = atr_1d_val > atr_ma_1d_val * 0.8  # Avoid extremely low vol
         
         if position == 0:
-            # Enter long: Close breaks above R3 + 1d uptrend + volume spike
-            if close[i] > r3 and close[i] > ema34 and vol_spike:
+            # Enter long: Price breaks above Donchian high + above 4h EMA200 + 1d uptrend + volume spike + vol regime
+            if (close[i] > dh and 
+                close[i] > ema200_4h_val and 
+                close[i] > ema200_1d_val and 
+                vol_spike and 
+                vol_regime):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below S3 + 1d downtrend + volume spike
-            elif close[i] < s3 and close[i] < ema34 and vol_spike:
+            # Enter short: Price breaks below Donchian low + below 4h EMA200 + 1d downtrend + volume spike + vol regime
+            elif (close[i] < dl and 
+                  close[i] < ema200_4h_val and 
+                  close[i] < ema200_1d_val and 
+                  vol_spike and 
+                  vol_regime):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below S3 or 1d trend turns down
-            if close[i] < s3 or close[i] < ema34:
+            # Exit long: Price falls below Donchian low or 4h EMA200 turns down
+            if close[i] < dl or close[i] < ema200_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above R3 or 1d trend turns up
-            if close[i] > r3 or close[i] > ema34:
+            # Exit short: Price rises above Donchian high or 4h EMA200 turns up
+            if close[i] > dh or close[i] > ema200_4h_val:
                 signals[i] = 0.0
                 position = 0
             else:
