@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+name = "4h_Donchian20_Breakout_VolumeTrend_4hEMA200"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
-    
-    # Camarilla levels: R3/S3 for exit, R4/S4 for entry
-    R3 = prev_close + 1.1 * prev_range / 6
-    S3 = prev_close - 1.1 * prev_range / 6
-    R4 = prev_close + 1.1 * prev_range / 2
-    S4 = prev_close - 1.1 * prev_range / 2
-    
-    # Align to 4h timeframe
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Daily EMA34 for trend filter
-    daily_close = df_1d['close'].values
-    daily_ema = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_ema_4h = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # 4h EMA200 for trend filter
+    ema200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
     # Volume filter: above 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,13 +30,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 200  # Wait for indicators to stabilize
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
-            np.isnan(R4_4h[i]) or np.isnan(S4_4h[i]) or 
-            np.isnan(daily_ema_4h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema200[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,32 +48,32 @@ def generate_signals(prices):
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above R4 with daily uptrend
-            if (close[i] > R4_4h[i] and 
-                close[i] > daily_ema_4h[i] and  # daily uptrend
+            # Long breakout: price breaks above Donchian high with uptrend
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema200[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S4 with daily downtrend
-            elif (close[i] < S4_4h[i] and 
-                  close[i] < daily_ema_4h[i] and  # daily downtrend
+            # Short breakdown: price breaks below Donchian low with downtrend
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema200[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below R3 (mean reversion)
-            if close[i] < R3_4h[i]:
+            # Exit long: price falls below Donchian low (trend reversal)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above S3 (mean reversion)
-            if close[i] > S3_4h[i]:
+            # Exit short: price rises above Donchian high (trend reversal)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
