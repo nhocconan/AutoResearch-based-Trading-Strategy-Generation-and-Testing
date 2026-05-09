@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Weekly_Range_Breakout_Volume
-# Hypothesis: Combines weekly range breakouts with volume confirmation and RSI filter.
-# Uses weekly high/low for entry, volume spike for confirmation, and RSI to avoid overextended moves.
-# Designed to work in both trending and ranging markets by capturing breakouts from weekly ranges.
-# Target: 10-25 trades/year per symbol with disciplined risk to avoid fee drag.
+# 6h_OrderFlow_Imbalance_Pullback
+# Hypothesis: Combines order flow imbalance detection with pullback entries in 6h timeframe.
+# Uses volume delta (buy vs sell volume) to detect institutional accumulation/distribution.
+# Enters on pullbacks to VWAP during strong order flow imbalances, filtered by 12h trend.
+# Works in bull markets (accumulation on dips) and bear markets (distribution on rallies).
+# Target: 15-25 trades/year per symbol with strict entry criteria to minimize fee drag.
 
-name = "1d_Weekly_Range_Breakout_Volume"
-timeframe = "1d"
+name = "6h_OrderFlow_Imbalance_Pullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,87 +23,92 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # Get weekly data for range calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Calculate volume delta (buying pressure - selling pressure)
+    # taker_buy_volume = volume * (buy side)
+    # volume - taker_buy_volume = volume * (sell side)
+    volume_delta = 2 * taker_buy_volume - volume  # buy_volume - sell_volume
+    
+    # Calculate VWAP for 6h timeframe
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    
+    # Cumulative VWAP with reset conditions (reset when price gaps significantly)
+    cum_pv = np.cumsum(pv)
+    cum_volume = np.cumsum(volume)
+    vwap = np.divide(cum_pv, cum_volume, out=np.full_like(cum_pv, np.nan), where=cum_volume!=0)
+    
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly high and low
-    weekly_high = high_1w
-    weekly_low = low_1w
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[0:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (close_12h[i] * 2 + ema_50_12h[i-1] * 49) / 50
     
-    # Align weekly levels to daily timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Align 12h indicators to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate RSI(14) on daily closes
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Use Wilder's smoothing (alpha = 1/period)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average of first 14 periods
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: daily volume / 20-day average volume
-    vol_ma = np.zeros_like(volume)
-    vol_ma[:19] = np.nan
-    if len(volume) >= 20:
-        vol_ma[19] = np.mean(volume[0:20])
-        for i in range(20, len(volume)):
-            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
-    
-    volume_ratio = np.divide(volume, vol_ma, out=np.full_like(volume, np.nan), where=vol_ma!=0)
+    # Calculate volume delta momentum (3-period sum)
+    volume_delta_momentum = np.full_like(volume_delta, np.nan)
+    if len(volume_delta) >= 3:
+        for i in range(2, len(volume_delta)):
+            volume_delta_momentum[i] = volume_delta[i] + volume_delta[i-1] + volume_delta[i-2]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need RSI and volume MA
+    start_idx = max(50, 2)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or \
-           np.isnan(rsi[i]) or np.isnan(volume_ratio[i]):
+        if (np.isnan(vwap[i]) or np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(volume_delta_momentum[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine 12h trend
+        uptrend_12h = close[i] > ema_50_12h_aligned[i]
+        downtrend_12h = close[i] < ema_50_12h_aligned[i]
+        
+        # Strong order flow imbalance thresholds
+        strong_buying = volume_delta_momentum[i] > 0 and volume_delta[i] > 0
+        strong_selling = volume_delta_momentum[i] < 0 and volume_delta[i] < 0
+        
         if position == 0:
-            # Enter long: Price breaks above weekly high AND volume confirmation AND RSI not overbought
-            if close[i] > weekly_high_aligned[i] and volume_ratio[i] > 1.8 and rsi[i] < 70:
+            # Enter long: Pullback to VWAP during strong buying pressure in uptrend
+            if (uptrend_12h and strong_buying and 
+                low[i] <= vwap[i] <= high[i]):  # Price touches VWAP
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below weekly low AND volume confirmation AND RSI not oversold
-            elif close[i] < weekly_low_aligned[i] and volume_ratio[i] > 1.8 and rsi[i] > 30:
+            # Enter short: Pullback to VWAP during strong selling pressure in downtrend
+            elif (downtrend_12h and strong_selling and 
+                  low[i] <= vwap[i] <= high[i]):  # Price touches VWAP
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price breaks below weekly low OR RSI overbought
-            if close[i] < weekly_low_aligned[i] or rsi[i] > 75:
+            # Exit long: Price moves above VWAP significantly or order flow turns negative
+            if (close[i] > vwap[i] * 1.01 or  # 1% above VWAP
+                volume_delta[i] < -volume[i] * 0.1):  # Significant selling pressure
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price breaks above weekly high OR RSI oversold
-            if close[i] > weekly_high_aligned[i] or rsi[i] < 25:
+            # Exit short: Price moves below VWAP significantly or order flow turns positive
+            if (close[i] < vwap[i] * 0.99 or  # 1% below VWAP
+                volume_delta[i] > volume[i] * 0.1):  # Significant buying pressure
                 signals[i] = 0.0
                 position = 0
             else:
