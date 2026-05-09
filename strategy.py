@@ -1,16 +1,15 @@
-# 6h_RSI_Divergence_Trend_Follow
-# Hypothesis: Combines RSI divergence detection with daily trend filter and volume confirmation.
-# RSI divergence signals potential reversals, while daily trend filter ensures we trade with higher timeframe momentum.
-# Volume spike confirms institutional participation. Designed for low trade frequency (<30/year) to minimize fee drag.
-# Works in bull markets (trend continuation on pullbacks) and bear markets (mean reversion at extremes via divergence).
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI_Divergence_Trend_Follow"
-timeframe = "6h"
+name = "1h_4h1d_Trend_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,108 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 4h and 1d data for trend confirmation
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period EMA on 1d close for trend filter
+    # 4h EMA20 for trend filter
+    close_4h = df_4h['close'].values
+    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    
+    # 1d EMA50 for higher timeframe trend
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 14-period RSI on 6h
-    if n < 14:
-        return np.zeros(n)
-    
-    delta = np.diff(close)
+    # 1h RSI for entry timing
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    rsi = np.full(n, 50.0)  # Initialize with neutral RSI
-    
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[:14])
-    avg_loss[13] = np.mean(loss[:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-        if avg_loss[i] != 0:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    
-    # Detect RSI divergence (lookback 5 periods)
-    bullish_div = np.zeros(n, dtype=bool)
-    bearish_div = np.zeros(n, dtype=bool)
-    
-    lookback = 5
-    for i in range(lookback, n):
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        if low[i] < low[i-lookback] and rsi[i] > rsi[i-lookback]:
-            # Check if it's a meaningful divergence
-            if low[i] == np.min(low[i-lookback:i+1]) and rsi[i] == np.max(rsi[i-lookback:i+1]):
-                bullish_div[i] = True
-        
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        if high[i] > high[i-lookback] and rsi[i] < rsi[i-lookback]:
-            # Check if it's a meaningful divergence
-            if high[i] == np.max(high[i-lookback:i+1]) and rsi[i] == np.min(rsi[i-lookback:i+1]):
-                bearish_div[i] = True
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, lookback)
+    start_idx = max(14, 20, 50)  # RSI(14) + EMA20(4h) + EMA50(1d)
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(ema_20_1d_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_20_1d_aligned[i]
-        vol = volume[i]
-        
-        # Calculate 20-period volume average for spike detection
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-        else:
-            vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
+        ema_4h = ema_20_4h_aligned[i]
+        ema_1d = ema_50_1d_aligned[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Enter long: Bullish RSI divergence AND price > 1d EMA20 (uptrend) AND volume > 1.8x average
-            if bullish_div[i] and close[i] > ema_1d and vol > 1.8 * vol_ma:
-                signals[i] = 0.25
+            # Enter long: RSI < 30 (oversold) AND price > 4h EMA20 AND price > 1d EMA50
+            if rsi_val < 30 and close[i] > ema_4h and close[i] > ema_1d:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Bearish RSI divergence AND price < 1d EMA20 (downtrend) AND volume > 1.8x average
-            elif bearish_div[i] and close[i] < ema_1d and vol > 1.8 * vol_ma:
-                signals[i] = -0.25
+            # Enter short: RSI > 70 (overbought) AND price < 4h EMA20 AND price < 1d EMA50
+            elif rsi_val > 70 and close[i] < ema_4h and close[i] < ema_1d:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: Bearish RSI divergence OR trend reverses (price < 1d EMA20)
-            if bearish_div[i] or close[i] < ema_1d:
+            # Exit long: RSI > 70 (overbought) OR trend weakens (price < 4h EMA20)
+            if rsi_val > 70 or close[i] < ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: Bullish RSI divergence OR trend reverses (price > 1d EMA20)
-            if bullish_div[i] or close[i] > ema_1d:
+            # Exit short: RSI < 30 (oversold) OR trend weakens (price > 4h EMA20)
+            if rsi_val < 30 or close[i] > ema_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
