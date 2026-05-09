@@ -1,11 +1,12 @@
-# 12h_Combined_Strategy_v1
-# Hypothesis: Combines weekly trend (above/below SMA50), daily RSI mean reversion, and 12h momentum for high-probability entries.
-# Weekly trend provides directional bias, daily RSI identifies overbought/oversold conditions within the trend, and 12h momentum confirms entry timing.
-# Designed to work in both bull and bear markets by following the higher timeframe trend while using lower timeframe for entry precision.
-# Target: 15-25 trades/year per symbol with disciplined risk management.
+#!/usr/bin/env python3
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
+# Hypothesis: Combines 12h EMA50 trend with 1d Camarilla R1/S1 breakout and volume confirmation.
+# Uses 12h EMA50 for trend direction, 1d Camarilla R1/S1 for breakout levels, and volume > 2x average for confirmation.
+# Designed to work in both bull and bear markets by only taking trades in the direction of the 12h trend.
+# Target: 20-35 trades/year per symbol with disciplined risk.
 
-name = "12h_Combined_Strategy_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,96 +23,91 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for EMA50 trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate weekly SMA50 for trend filter
-    sma_50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        sma_50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            sma_50_1w[i] = (sma_50_1w[i-1] * 49 + close_1w[i]) / 50
+    # Calculate 12h EMA50
+    ema_12h_50 = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
+        ema_12h_50[49] = np.mean(close_12h[0:50])
+        for i in range(50, len(close_12h)):
+            ema_12h_50[i] = (close_12h[i] * 2 + ema_12h_50[i-1] * 49) / 51
     
-    # Get daily data for RSI
+    # Align 12h EMA50 to 4h timeframe
+    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily RSI(14)
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate daily Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    daily_range = high_1d - low_1d
+    camarilla_R1 = close_1d + daily_range * 1.1 / 12
+    camarilla_S1 = close_1d - daily_range * 1.1 / 12
     
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
+    # Align daily Camarilla levels to 4h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    if len(gain) >= 14:
-        avg_gain[13] = np.mean(gain[0:14])
-        avg_loss[13] = np.mean(loss[0:14])
-        for i in range(14, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Volume filter: 4h volume / 20-period average volume
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    rs = np.full_like(close_1d, np.nan)
-    valid_avg = (~np.isnan(avg_gain)) & (~np.isnan(avg_loss)) & (avg_loss != 0)
-    rs[valid_avg] = avg_gain[valid_avg] / avg_loss[valid_avg]
-    
-    rsi = np.full_like(close_1d, np.nan)
-    rsi[valid_avg] = 100 - (100 / (1 + rs[valid_avg]))
-    
-    # Align weekly and daily indicators to 12h timeframe
-    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Calculate 12h momentum (rate of change over 3 periods)
-    roc = np.full_like(close, np.nan)
-    if len(close) >= 3:
-        roc[2:] = (close[2:] - close[:-2]) / close[:-2] * 100
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14, 2)
+    start_idx = max(50, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(sma_50_1w_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(roc[i]):
+        if np.isnan(ema_12h_50_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or \
+           np.isnan(camarilla_S1_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend: above SMA50 = uptrend, below = downtrend
-        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
-        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
+        # Determine trend direction from 12h EMA50
+        trend_up = close[i] > ema_12h_50_aligned[i]
+        trend_down = close[i] < ema_12h_50_aligned[i]
         
         if position == 0:
-            # Enter long: Weekly uptrend, RSI oversold (<30), and positive momentum
-            if weekly_uptrend and rsi_aligned[i] < 30 and roc[i] > 0:
+            # Enter long: Price breaks above Camarilla R1 AND trend up AND volume confirmation
+            if close[i] > camarilla_R1_aligned[i] and trend_up and volume_ratio[i] > 2.0:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Weekly downtrend, RSI overbought (>70), and negative momentum
-            elif weekly_downtrend and rsi_aligned[i] > 70 and roc[i] < 0:
+            # Enter short: Price breaks below Camarilla S1 AND trend down AND volume confirmation
+            elif close[i] < camarilla_S1_aligned[i] and trend_down and volume_ratio[i] > 2.0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Weekly trend turns down OR RSI overbought (>70)
-            if not weekly_uptrend or rsi_aligned[i] > 70:
+            # Exit conditions: Price breaks below Camarilla S1 OR trend turns down
+            if close[i] < camarilla_S1_aligned[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Weekly trend turns up OR RSI oversold (<30)
-            if not weekly_downtrend or rsi_aligned[i] < 30:
+            # Exit conditions: Price breaks above Camarilla R1 OR trend turns up
+            if close[i] > camarilla_R1_aligned[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
