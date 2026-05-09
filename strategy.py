@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_WeeklyPivot_Breakout_1dTrend_Volume
+# 4h_WeeklyPivot_Breakout_1dTrend_Volume
 # Hypothesis: Breakout above/below weekly pivot levels (R2/S2) with volume >1.8x 30-bar average and trend filter from 1d EMA50.
 # Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA50), buy breakout above R2; in downtrend (price < EMA50), sell breakdown below S2.
-# Volume filter ensures only high-conviction moves trigger entries. Designed for 12-37 trades/year on 12h timeframe.
+# Volume filter ensures only high-conviction moves trigger entries. Designed for 20-50 trades/year on 4h timeframe.
 
-name = "12h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 48) / 50
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Get weekly data for pivot levels
@@ -53,11 +53,11 @@ def generate_signals(prices):
     weekly_R2 = pivot + weekly_range  # R2 = P + (H-L)
     weekly_S2 = pivot - weekly_range  # S2 = P - (H-L)
     
-    # Align weekly pivot levels to 12h timeframe
+    # Align weekly pivot levels to 4h timeframe
     weekly_R2_aligned = align_htf_to_ltf(prices, df_1w, weekly_R2)
     weekly_S2_aligned = align_htf_to_ltf(prices, df_1w, weekly_S2)
     
-    # Volume filter: 12h volume / 30-period average volume
+    # Volume filter: 4h volume / 30-period average volume
     vol_ma = np.full_like(volume, np.nan)
     if len(volume) >= 30:
         vol_ma[29] = np.mean(volume[0:30])
