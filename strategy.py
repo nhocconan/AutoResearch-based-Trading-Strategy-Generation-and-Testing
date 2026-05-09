@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2
-# Hypothesis: Refined version with stricter volume threshold and volume decay exit to reduce trade frequency while maintaining edge.
-# Uses same core logic but requires volume > 2.0x average for entry and exits when volume drops below average.
-# This should reduce trades from ~230 to ~80-120 range while preserving the edge seen in prior versions.
+# 6h_TRIX_ZeroCross_1dTrend_VolumeSpike
+# Hypothesis: TRIX zero-cross with 1d EMA trend filter and volume spike confirmation.
+# TRIX (triple smoothed EMA) filters out noise and identifies momentum shifts.
+# Zero-cross signals trend changes; 1d EMA filter ensures alignment with higher timeframe trend.
+# Volume spike confirms institutional participation. Designed for 6h timeframe to balance
+# signal frequency and noise reduction, targeting 12-35 trades/year.
+# Works in bull/bear markets: trend filter avoids counter-trend trades, volume adds confirmation.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2"
-timeframe = "4h"
+name = "6h_TRIX_ZeroCross_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,41 +25,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
+    # Calculate TRIX (15-period triple EMA) - momentum oscillator
+    def calculate_trix(price_array, period=15):
+        if len(price_array) < period * 3:
+            return np.full_like(price_array, np.nan)
+        # First EMA
+        ema1 = np.full_like(price_array, np.nan)
+        alpha = 2 / (period + 1)
+        ema1[period-1] = np.mean(price_array[0:period])
+        for i in range(period, len(price_array)):
+            ema1[i] = alpha * price_array[i] + (1 - alpha) * ema1[i-1]
+        # Second EMA
+        ema2 = np.full_like(price_array, np.nan)
+        ema2[2*period-1] = np.mean(ema1[period-1:2*period])
+        for i in range(2*period, len(price_array)):
+            ema2[i] = alpha * ema1[i] + (1 - alpha) * ema2[i-1]
+        # Third EMA
+        ema3 = np.full_like(price_array, np.nan)
+        ema3[3*period-1] = np.mean(ema2[2*period-1:3*period])
+        for i in range(3*period, len(price_array)):
+            ema3[i] = alpha * ema2[i] + (1 - alpha) * ema3[i-1]
+        # TRIX = % change of third EMA
+        trix = np.full_like(price_array, np.nan)
+        for i in range(3*period, len(price_array)):
+            if ema3[i-1] != 0:
+                trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+        return trix
+    
+    trix = calculate_trix(close, 15)
+    
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        alpha = 2 / (34 + 1)
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     
-    # Previous day's values for Camarilla calculation
-    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
-    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
-    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
-    
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
-    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
-    
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -72,46 +83,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(45, 20)  # Ensure TRIX and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or  # Need previous TRIX for zero-cross
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike (>2.0x)
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_ratio[i] > 2.0):
+            # Enter long: TRIX crosses above zero AND uptrend (price > EMA34) AND volume spike
+            if (trix[i-1] <= 0 and trix[i] > 0 and  # Zero-cross up
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_ratio[i] > 1.8):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike (>2.0x)
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_ratio[i] > 2.0):
+            # Enter short: TRIX crosses below zero AND downtrend (price < EMA34) AND volume spike
+            elif (trix[i-1] >= 0 and trix[i] < 0 and  # Zero-cross down
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_ratio[i] > 1.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below S3 OR trend reversal (price < EMA50) OR volume drops below average
-            if (close[i] < camarilla_s3_aligned[i] or 
-                close[i] < ema_50_12h_aligned[i] or 
-                volume_ratio[i] < 1.0):
+            # Exit long: TRIX crosses below zero OR trend reversal (price < EMA34)
+            if (trix[i-1] >= 0 and trix[i] < 0) or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above R3 OR trend reversal (price > EMA50) OR volume drops below average
-            if (close[i] > camarilla_r3_aligned[i] or 
-                close[i] > ema_50_12h_aligned[i] or 
-                volume_ratio[i] < 1.0):
+            # Exit short: TRIX crosses above zero OR trend reversal (price > EMA34)
+            if (trix[i-1] <= 0 and trix[i] > 0) or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
