@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Trend_With_1d_Regime_Filter
-Hypothesis: KAMA (adaptive moving average) on 4h defines trend direction, filtered by 1d Choppiness Index (range vs trend).
-In trending markets (CHOP < 38.2): follow KAMA direction. In ranging markets (CHOP > 61.8): fade moves at Bollinger Bands.
-This avoids whipsaws in sideways markets while capturing trends. Designed for low trade frequency (~20-40/year) to minimize fee drag.
-Works in both bull and bear markets via regime adaptation.
+6h_Weekly_Pivot_Reversal_Breakout
+Hypothesis: Price often reverses at weekly pivot levels (R1/S1) in ranging markets, but breaks through with momentum in trending markets. Uses weekly pivot points (calculated from prior week) as dynamic support/resistance. Entry: break of R1/S1 with volume confirmation (>1.5x 24-period average) and EMA50 filter (price > EMA for longs, < EMA for shorts) to avoid false breakouts. Exits on opposite pivot touch or EMA crossover. Designed for 6h timeframe to capture multi-day moves while avoiding excessive whipsaw. Weekly pivot provides robust levels that work in both bull and bear markets as it adapts to recent price action.
 """
 
-name = "4h_KAMA_Trend_With_1d_Regime_Filter"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Reversal_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,190 +22,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 4h Indicators: KAMA (trend) and Bollinger Bands (mean reversion) ---
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
-    
-    # Recompute volatility properly
-    volatility = np.zeros_like(close)
-    for i in range(er_len, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-er_len+1:i+1])))
-    
-    er = np.zeros_like(close)
-    er[er_len:] = change[er_len:] / np.where(volatility[er_len:] == 0, 1, volatility[er_len:])
-    
-    # Smoothing Constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # KAMA
-    kama = np.full_like(close, np.nan)
-    kama[er_len] = close[er_len]  # seed
-    for i in range(er_len + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Bollinger Bands (20, 2)
-    bb_len = 20
-    bb_mult = 2
-    sma = np.full_like(close, np.nan)
-    bb_std = np.full_like(close, np.nan)
-    upper = np.full_like(close, np.nan)
-    lower = np.full_like(close, np.nan)
-    
-    if len(close) >= bb_len:
-        sma[bb_len-1] = np.mean(close[0:bb_len])
-        for i in range(bb_len, len(close)):
-            sma[i] = sma[i-1] + (close[i] - close[i-bb_len]) / bb_len
-        
-        for i in range(bb_len-1, len(close)):
-            bb_std[i] = np.std(close[i-bb_len+1:i+1])
-        
-        upper = sma + bb_mult * bb_std
-        lower = sma - bb_mult * bb_std
-    
-    # --- 1d Indicators: Choppiness Index (regime filter) ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with index
+    # Previous week's values for weekly pivot calculation (standard formula)
+    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
+    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
+    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
     
-    # ATR(14)
-    atr_len = 14
-    atr = np.full_like(close_1d, np.nan)
-    if len(tr) >= atr_len + 1:
-        atr[atr_len] = np.nanmean(tr[1:atr_len+1])  # seed
-        for i in range(atr_len + 1, len(close_1d)):
-            atr[i] = (atr[i-1] * (atr_len - 1) + tr[i]) / atr_len
+    # Weekly Pivot Point (PP) and support/resistance levels
+    pp = (ph + pl + pc) / 3.0
+    r1 = 2 * pp - pl          # Resistance 1
+    s1 = 2 * pp - ph          # Support 1
+    r2 = pp + (ph - pl)       # Resistance 2
+    s2 = pp - (ph - pl)       # Support 2
     
-    # Sum of ATR over CHOP period
-    chop_len = 14
-    atr_sum = np.full_like(close_1d, np.nan)
-    if len(atr) >= chop_len:
-        for i in range(chop_len-1, len(close_1d)):
-            atr_sum[i] = np.nansum(atr[i-chop_len+1:i+1])
+    # Align weekly pivot levels to 6h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Highest high and lowest low over CHOP period
-    highest_high = np.full_like(close_1d, np.nan)
-    lowest_low = np.full_like(close_1d, np.nan)
-    if len(high_1d) >= chop_len:
-        for i in range(chop_len-1, len(high_1d)):
-            highest_high[i] = np.max(high_1d[i-chop_len+1:i+1])
-            lowest_low[i] = np.min(low_1d[i-chop_len+1:i+1])
+    # EMA50 on weekly close for trend filter
+    ema_50_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[0:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (ema_50_1w[i-1] * 49 + close_1w[i]) / 50
     
-    # Choppiness Index
-    chop = np.full_like(close_1d, 50.0)  # default neutral
-    valid = (~np.isnan(atr_sum)) & (atr_sum != 0) & (~np.isnan(highest_high)) & (~np.isnan(lowest_low))
-    chop[valid] = 100 * np.log10(atr_sum[valid] / (highest_high[valid] - lowest_low[valid])) / np.log10(chop_len)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 1d indicators to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama[:len(close_1d)])  # dummy align - will replace
-    
-    # Actually align 4h indicators properly
-    # Re-get 4h data for proper alignment (but we already have close)
-    # Instead, we'll compute KAMA on 4h directly and it's already aligned
-    # Chop is the only true HTF indicator needing alignment
-    
-    # Volume filter: avoid low liquidity periods
-    vol_ma_len = 20
+    # Volume spike filter: current volume / 24-period average volume (24*6h = 6 days)
     vol_ma = np.full_like(volume, np.nan)
-    if len(volume) >= vol_ma_len:
-        vol_ma[vol_ma_len-1] = np.mean(volume[0:vol_ma_len])
-        for i in range(vol_ma_len, len(volume)):
-            vol_ma[i] = vol_ma[i-1] + (volume[i] - volume[i-vol_ma_len]) / vol_ma_len
+    if len(volume) >= 24:
+        vol_ma[23] = np.mean(volume[0:24])
+        for i in range(24, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 23 + volume[i]) / 24
     
-    volume_filter = np.ones_like(volume, dtype=bool)
-    if len(volume) >= vol_ma_len:
-        volume_filter = volume > 0.5 * vol_ma  # at least half average volume
+    volume_ratio = np.full_like(volume, np.nan)
+    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(er_len, bb_len, vol_ma_len) + 5
+    start_idx = max(24, 50)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(chop_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
+        bars_since_entry += 1
+        
         if position == 0:
-            # Regime-based entry
-            if chop_aligned[i] < 38.2:  # Trending market
-                # Follow KAMA direction
-                if close[i] > kama[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif chop_aligned[i] > 61.8:  # Ranging market
-                # Mean reversion at Bollinger Bands
-                if close[i] <= lower[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] >= upper[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Else: neutral chop (38.2-61.8) - stay flat
+            # Enter long: price breaks above R1 AND uptrend (price > EMA50) AND volume confirmation
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1w_aligned[i] and 
+                volume_ratio[i] > 1.5):
+                signals[i] = 0.25
+                position = 1
+                bars_since_entry = 0
+            # Enter short: price breaks below S1 AND downtrend (price < EMA50) AND volume confirmation
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1w_aligned[i] and 
+                  volume_ratio[i] > 1.5):
+                signals[i] = -0.25
+                position = -1
+                bars_since_entry = 0
         
-        elif position == 1:  # Long
-            # Exit conditions
-            if chop_aligned[i] < 38.2:  # Still trending
-                if close[i] <= kama[i]:  # Trend reversal
+        elif position == 1:
+            # Minimum holding period: 2 bars
+            if bars_since_entry < 2:
+                signals[i] = 0.25
+            else:
+                # Exit conditions: touch S1 (contrarian exit) OR trend reversal (price < EMA50)
+                if close[i] < s1_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                else:
-                    signals[i] = 0.25
-            elif chop_aligned[i] > 61.8:  # Ranging - take profit at mean
-                if close[i] >= sma[i]:  # Return to mean
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Neutral chop
-                if close[i] <= lower[i] or close[i] >= upper[i]:  # Outside bands
-                    signals[i] = 0.0
-                    position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
         
-        elif position == -1:  # Short
-            # Exit conditions
-            if chop_aligned[i] < 38.2:  # Still trending
-                if close[i] >= kama[i]:  # Trend reversal
+        elif position == -1:
+            # Minimum holding period: 2 bars
+            if bars_since_entry < 2:
+                signals[i] = -0.25
+            else:
+                # Exit conditions: touch R1 (contrarian exit) OR trend reversal (price > EMA50)
+                if close[i] > r1_aligned[i] or close[i] > ema_50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                else:
-                    signals[i] = -0.25
-            elif chop_aligned[i] > 61.8:  # Ranging - take profit at mean
-                if close[i] <= sma[i]:  # Return to mean
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Neutral chop
-                if close[i] <= lower[i] or close[i] >= upper[i]:  # Outside bands
-                    signals[i] = 0.0
-                    position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
