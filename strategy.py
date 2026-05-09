@@ -1,13 +1,8 @@
-#!/usr/bin/env python3
-# 12h Williams Alligator Trend Strategy
-# Uses Williams Alligator (Jaws, Teeth, Lips) on 1d timeframe to determine trend direction
-# Enters long when price > Lips in uptrend, short when price < Lips in downtrend
-# Uses volume confirmation on 12h to avoid false breakouts
-# Target: 20-40 trades/year (~80-160 total over 4 years)
-# Works in bull (trend following) and bear (avoids counter-trend via Alligator alignment)
+# Hypothesis: This strategy targets breakouts at key Fibonacci retracement levels (0.618, 1.618) from daily ranges, filtered by volume surge and higher timeframe trend (1d EMA50), to capture strong directional moves in both bull and bear markets while minimizing false signals. Fibonacci levels act as natural support/resistance where breakouts often indicate institutional participation, and volume confirmation ensures momentum. The 1d EMA50 filter avoids counter-trend trades during strong trends. Designed for low trade frequency (target: 20-40 trades/year) to reduce fee drag.
 
-name = "12h_Williams_Alligator_Trend"
-timeframe = "12h"
+# 4h Fibonacci Breakout with Volume and Trend Filter
+name = "4h_Fibonacci_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,52 +19,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Williams Alligator calculation
+    # Get 1d data for Fibonacci levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough data for SMAs
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Williams Alligator components (SMAs with specific periods)
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = (close_1d[i] * 2 + ema50_1d[i-1] * 48) / 50
     
-    def smma(arr, period):
-        """Smoothed Moving Average (SMMA)"""
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[0:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align 1d EMA50 to 4h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    jaw_raw = smma(close_1d, 13)
-    teeth_raw = smma(close_1d, 8)
-    lips_raw = smma(close_1d, 5)
+    # Calculate daily Fibonacci levels (0.618 and 1.618 extensions)
+    fib_upper_1d = np.full_like(close_1d, np.nan)
+    fib_lower_1d = np.full_like(close_1d, np.nan)
     
-    # Apply forward shifts (Jaw: +8, Teeth: +5, Lips: +3)
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            daily_range = high_1d[i] - low_1d[i]
+            fib_upper_1d[i] = close_1d[i] + 1.618 * daily_range
+            fib_lower_1d[i] = close_1d[i] - 0.618 * daily_range
     
-    if len(jaw_raw) > 8:
-        jaw[8:] = jaw_raw[:-8]
-    if len(teeth_raw) > 5:
-        teeth[5:] = teeth_raw[:-5]
-    if len(lips_raw) > 3:
-        lips[3:] = lips_raw[:-3]
-    
-    # Align Alligator components to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align Fibonacci levels to 4h timeframe
+    fib_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, fib_upper_1d)
+    fib_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, fib_lower_1d)
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -85,54 +67,47 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Need volume MA and Alligator components
+    start_idx = max(50, 20)  # Need 1d EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(fib_upper_1d_aligned[i]) or 
+            np.isnan(fib_lower_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend based on Alligator alignment
-        # In uptrend: Lips > Teeth > Jaw (all above price typically)
-        # In downtrend: Jaw > Teeth > Lips (all below price typically)
-        lips_above_teeth = lips_aligned[i] > teeth_aligned[i]
-        teeth_above_jaw = teeth_aligned[i] > jaw_aligned[i]
-        jaw_above_teeth = jaw_aligned[i] > teeth_aligned[i]
-        teeth_above_lips = teeth_aligned[i] > lips_aligned[i]
-        
-        uptrend = lips_above_teeth and teeth_above_jaw
-        downtrend = jaw_above_teeth and teeth_above_lips
-        
-        volume_surge = volume_ratio[i] > 1.5  # Require 1.5x average volume
+        # Determine market conditions
+        trend_up = close[i] > ema50_1d_aligned[i]
+        volume_surge = volume_ratio[i] > 2.0
         
         if position == 0:
-            # Enter long: Uptrend + price above Lips + volume surge
-            if uptrend and close[i] > lips_aligned[i] and volume_surge:
+            # Enter long: Uptrend + price breaks above Fibonacci extension + volume surge
+            if trend_up and close[i] > fib_upper_1d_aligned[i] and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Downtrend + price below Lips + volume surge
-            elif downtrend and close[i] < lips_aligned[i] and volume_surge:
+            # Enter short: Downtrend + price breaks below Fibonacci retracement + volume surge
+            elif not trend_up and close[i] < fib_lower_1d_aligned[i] and volume_surge:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Trend changes to downtrend OR price crosses below Lips
-            if not uptrend or close[i] < lips_aligned[i]:
+            # Exit long: Trend turns down OR price breaks below Fibonacci retracement
+            if not trend_up or close[i] < fib_lower_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Trend changes to uptrend OR price crosses above Lips
-            if not downtrend or close[i] > lips_aligned[i]:
+            # Exit short: Trend turns up OR price breaks above Fibonacci extension
+            if trend_up or close[i] > fib_upper_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+#!/usr/bin/env python3
