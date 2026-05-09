@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses Donchian channel breakouts for trend following, filtered by 1d EMA50 to avoid counter-trend trades.
-# Volume confirmation ensures breakouts have conviction. Designed to work in both bull and bear markets
-# by following the 1d trend. Low-frequency signals reduce fee drag.
-name = "12h_Donchian20_1dEMA50_Trend_Volume"
-timeframe = "12h"
+# Hypothesis: 1h 4-period RSI with 4h/1d trend filter and volume confirmation.
+# Long when RSI(4) < 30 (oversold) in uptrend (price > 4h EMA50 > 1d EMA200) with volume spike.
+# Short when RSI(4) > 70 (overbought) in downtrend (price < 4h EMA50 < 1d EMA200) with volume spike.
+# Designed to capture mean reversions in both bull and bear markets by following higher timeframe trends.
+# RSI(4) is sensitive for timely entries; 4h/1d EMA filters ensure trend alignment.
+# Volume confirmation avoids low-conviction moves.
+name = "1h_RSI4_4h1dEMA_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,29 +23,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # 4h data for trend filter and entry timing
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # 1d data for higher timeframe trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Donchian Channel (20-period)
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.max(arr[i-window+1:i+1])
-        return result
+    # RSI(4) on 1h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/4, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/4, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            result[i] = np.min(arr[i-window+1:i+1])
-        return result
+    # 4h EMA50 trend filter
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    upper_channel = rolling_max(high, 20)
-    lower_channel = rolling_min(low, 20)
-    
-    # 1d EMA50 trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA200 trend filter
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume confirmation: volume > 1.5x 20-period EMA
@@ -57,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,31 +71,31 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper channel + volume + 1d EMA up
-            if (price > upper_channel[i] and 
-                vol_confirm[i] and price > ema_1d_aligned[i]):
-                signals[i] = 0.25
+            # Long: RSI(4) < 30 (oversold) + price > 4h EMA50 > 1d EMA200 + volume
+            if (rsi[i] < 30 and price > ema_4h_aligned[i] and ema_4h_aligned[i] > ema_1d_aligned[i] and
+                vol_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below lower channel + volume + 1d EMA down
-            elif (price < lower_channel[i] and 
-                  vol_confirm[i] and price < ema_1d_aligned[i]):
-                signals[i] = -0.25
+            # Short: RSI(4) > 70 (overbought) + price < 4h EMA50 < 1d EMA200 + volume
+            elif (rsi[i] > 70 and price < ema_4h_aligned[i] and ema_4h_aligned[i] < ema_1d_aligned[i] and
+                  vol_confirm[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below lower channel or price below 1d EMA
-            if price < lower_channel[i] or price < ema_1d_aligned[i]:
+            # Exit long: RSI(4) > 70 (overbought) or price < 4h EMA50
+            if rsi[i] > 70 or price < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price breaks above upper channel or price above 1d EMA
-            if price > upper_channel[i] or price > ema_1d_aligned[i]:
+            # Exit short: RSI(4) < 30 (oversold) or price > 4h EMA50
+            if rsi[i] < 30 or price > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
