@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyTrend_DailyMeanReversion
-# Hypothesis: Weekly trend direction (via weekly close vs 34 EMA) determines bias.
-# In uptrend: buy dips to daily 34 EMA with volume confirmation.
-# In downtrend: sell rallies to daily 34 EMA with volume confirmation.
-# Uses 6h for entry timing, targeting mean reversion within trend.
-# Designed to work in both bull and bear markets by trading pullbacks in established weekly trends.
-# Target: 15-30 trades/year per symbol with disciplined entries.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Uses daily Camarilla R1/S1 levels for breakouts, filtered by 1d EMA trend and volume spike.
+# Designed to capture strong moves in both bull and bear markets with tight entry conditions.
+# Target: 15-25 trades/year per symbol with disciplined risk to avoid fee drag.
 
-name = "6h_WeeklyTrend_DailyMeanReversion"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,92 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    # Get daily data for EMA and volume average
+    # Get daily data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Weekly trend: close vs 34 EMA
-    ema_34_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 34:
-        ema_34_1w[33] = np.mean(close_1w[0:34])
-        for i in range(34, len(close_1w)):
-            ema_34_1w[i] = (close_1w[i] * 2 + ema_34_1w[i-1] * 33) / 34
+    # Calculate daily EMA(34) for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_34 = close_1d_series.ewm(span=34, adjust=False).values
     
-    weekly_uptrend = close_1w > ema_34_1w  # True when above EMA
+    # Calculate daily range for Camarilla levels
+    daily_range = high_1d - low_1d
+    camarilla_R1 = close_1d + daily_range * 1.1 / 12
+    camarilla_S1 = close_1d - daily_range * 1.1 / 12
     
-    # Daily mean reversion target: 34 EMA
-    ema_34_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[0:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 33) / 34
+    # Align daily indicators to 12h timeframe
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
     
-    # Daily volume average (20-period) for confirmation
-    vol_ma_20_1d = np.full_like(volume_1d, np.nan)
-    if len(volume_1d) >= 20:
-        vol_ma_20_1d[19] = np.mean(volume_1d[0:20])
-        for i in range(20, len(volume_1d)):
-            vol_ma_20_1d[i] = (volume_1d[i] * 19 + vol_ma_20_1d[i-1]) / 20
+    # Volume filter: 12h volume / 20-period average volume
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    # Align all indicators to 6h timeframe
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 1)
+    start_idx = max(20, 1)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(weekly_uptrend_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or \
-           np.isnan(vol_ma_20_1d_aligned[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or \
+           np.isnan(camarilla_S1_aligned[i]) or np.isnan(volume_ratio[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current 6h volume > 1.5x daily average volume
-        # Approximate daily volume from 6h: 4 bars per day, so scale accordingly
-        vol_threshold = vol_ma_20_1d_aligned[i] * 1.5 / 4.0  # Scale daily avg to per 6h bar
-        volume_ok = volume[i] > vol_threshold
-        
         if position == 0:
-            # In weekly uptrend: look for long entries on dips to daily EMA
-            if weekly_uptrend_aligned[i] > 0.5:  # Weekly uptrend
-                # Buy when price touches or dips slightly below daily EMA with volume
-                if close[i] <= ema_34_1d_aligned[i] * 1.002 and volume_ok:  # Within 0.2% above/below
-                    signals[i] = 0.25
-                    position = 1
-            # In weekly downtrend: look for short entries on rallies to daily EMA
-            else:  # Weekly downtrend
-                # Sell when price touches or rallies slightly above daily EMA with volume
-                if close[i] >= ema_34_1d_aligned[i] * 0.998 and volume_ok:  # Within 0.2% above/below
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: Price breaks above Camarilla R1 AND price above EMA(34) AND volume spike
+            if close[i] > camarilla_R1_aligned[i] and close[i] > ema_34_aligned[i] and volume_ratio[i] > 2.5:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: Price breaks below Camarilla S1 AND price below EMA(34) AND volume spike
+            elif close[i] < camarilla_S1_aligned[i] and close[i] < ema_34_aligned[i] and volume_ratio[i] > 2.5:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price moves significantly above EMA (trend resumption) or weekly trend fails
-            if close[i] > ema_34_1d_aligned[i] * 1.015 or weekly_uptrend_aligned[i] < 0.5:
+            # Exit: Price breaks below Camarilla S1
+            if close[i] < camarilla_S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price moves significantly below EMA or weekly trend fails
-            if close[i] < ema_34_1d_aligned[i] * 0.985 or weekly_uptrend_aligned[i] > 0.5:
+            # Exit: Price breaks above Camarilla R1
+            if close[i] > camarilla_R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
