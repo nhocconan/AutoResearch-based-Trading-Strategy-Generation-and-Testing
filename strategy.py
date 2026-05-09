@@ -3,85 +3,110 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Fisher Transform (Ehlers) with 1d trend filter and volume confirmation.
-# Fisher Transform normalizes price to create clear turning points.
-# Long when Fisher crosses above -1.5 with 1d uptrend and volume confirmation.
-# Short when Fisher crosses below +1.5 with 1d downtrend and volume confirmation.
-# Designed to catch reversals in both bull and bear markets with clear signals.
-# Works well in ranging markets (2025-2026) and catches trend changes.
-name = "6h_FisherTransform_1dTrend_Volume"
-timeframe = "6h"
+# Hypothesis: 12h Choppiness Index regime filter + 1w Donchian breakout with volume confirmation.
+# Uses weekly Donchian channels (20-period) for breakout signals, filtered by 12h Choppiness Index
+# to avoid whipsaw in ranging markets (CHOP > 61.8) and only trade in strong trends (CHOP < 38.2).
+# Volume confirmation ensures breakouts have conviction. Designed to work in both bull and bear
+# markets by capturing strong trending moves while avoiding choppy periods.
+# Weekly timeframe provides fewer, higher-quality signals suitable for 12h chart.
+name = "12h_ChopFilter_1wDonchian_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for Donchian channels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Fisher Transform (Ehlers)
-    def fishert_transform(high_arr, low_arr, length=10):
-        # Median price
-        hl2 = (high_arr + low_arr) / 2
-        
-        # Min and max over lookback period
-        min_hll = np.full_like(hl2, np.nan)
-        max_hll = np.full_like(hl2, np.nan)
-        
-        for i in range(length-1, len(hl2)):
-            min_hll[i] = np.min(hl2[i-length+1:i+1])
-            max_hll[i] = np.max(hl2[i-length+1:i+1])
-        
-        # Normalize to [-1, 1] range
-        numerator = 2 * ((hl2 - min_hll) / (max_hll - min_hll + 1e-10) - 0.5)
-        # Smooth with 2-period EMA
-        smoothed = np.full_like(numerator, np.nan)
-        ema_weight = 2 / (2 + 1)  # 2-period EMA
-        for i in range(len(numerator)):
-            if np.isnan(numerator[i]):
-                smoothed[i] = np.nan
-            elif np.isnan(smoothed[i-1]) if i > 0 else False:
-                smoothed[i] = numerator[i]
-            else:
-                smoothed[i] = ema_weight * numerator[i] + (1 - ema_weight) * smoothed[i-1]
-        
-        # Fisher Transform: 0.5 * ln((1 + smoothed) / (1 - smoothed))
-        fish = np.full_like(smoothed, np.nan)
-        for i in range(len(smoothed)):
-            if np.isnan(smoothed[i]) or abs(smoothed[i]) >= 1:
-                fish[i] = np.nan
-            else:
-                fish[i] = 0.5 * np.log((1 + smoothed[i]) / (1 - smoothed[i]))
-        
-        return fish
+    # Weekly Donchian channels: 20-period high/low
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    fish = fishert_transform(high, low, length=10)
+    # Calculate Donchian channels using rolling window
+    donchian_high = np.full_like(high_1w, np.nan)
+    donchian_low = np.full_like(low_1w, np.nan)
     
-    # 1d EMA trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    for i in range(len(high_1w)):
+        if i >= 19:  # 20-period lookback
+            donchian_high[i] = np.max(high_1w[i-19:i+1])
+            donchian_low[i] = np.min(low_1w[i-19:i+1])
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Align Donchian levels to 12h timeframe (wait for weekly bar to close)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    
+    # 12h data for Choppiness Index
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 14:
+        return np.zeros(n)
+    
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range calculation
+    tr1 = np.abs(high_12h[1:] - low_12h[1:])
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Prepend first TR as high-low for first period
+    tr = np.concatenate([[high_12h[0] - low_12h[0]], tr])
+    
+    # ATR (14-period)
+    atr = np.full_like(close_12h, np.nan)
+    if len(tr) >= 14:
+        atr[13] = np.mean(tr[:14])  # First ATR is simple average
+        for i in range(14, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
+    
+    # Sum of ATR over 14 periods
+    atr_sum = np.full_like(close_12h, np.nan)
+    for i in range(len(atr_sum)):
+        if i >= 13 and not np.isnan(atr[i]):
+            # Sum of last 14 ATR values
+            start_idx = max(0, i - 13)
+            atr_sum[i] = np.sum(atr[start_idx:i+1])
+    
+    # Choppiness Index: 100 * log10(ATR_sum / (highest_high - lowest_low)) / log10(14)
+    highest_high = np.full_like(close_12h, np.nan)
+    lowest_low = np.full_like(close_12h, np.nan)
+    
+    for i in range(len(high_12h)):
+        if i >= 13:  # 14-period lookback
+            highest_high[i] = np.max(high_12h[i-13:i+1])
+            lowest_low[i] = np.min(low_12h[i-13:i+1])
+    
+    chop = np.full_like(close_12h, np.nan)
+    for i in range(len(chop)):
+        if i >= 13 and not np.isnan(atr_sum[i]) and highest_high[i] > lowest_low[i]:
+            chop[i] = 100 * np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(14)
+    
+    # Align Choppiness Index to 12h timeframe (no extra delay needed as it's based on completed 12h bar)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA on 12h timeframe
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Ensure enough data for indicators
+    start_idx = max(50, 20)  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(fish[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,28 +115,28 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: Fisher crosses above -1.5 (from below) + 1d uptrend + volume
-            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and 
-                price > ema_1d_aligned[i] and vol_confirm[i]):
+            # Long: price breaks above weekly Donchian high + trend regime (CHOP < 38.2) + volume
+            if (price > donchian_high_aligned[i] and 
+                chop_aligned[i] < 38.2 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Fisher crosses below +1.5 (from above) + 1d downtrend + volume
-            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and 
-                  price < ema_1d_aligned[i] and vol_confirm[i]):
+            # Short: price breaks below weekly Donchian low + trend regime (CHOP < 38.2) + volume
+            elif (price < donchian_low_aligned[i] and 
+                  chop_aligned[i] < 38.2 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Fisher crosses below +1.5 or 1d trend turns down
-            if fish[i] < 1.5 or price < ema_1d_aligned[i]:
+            # Exit long: price breaks below weekly Donchian low OR choppy regime (CHOP > 61.8)
+            if price < donchian_low_aligned[i] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Fisher crosses above -1.5 or 1d trend turns up
-            if fish[i] > -1.5 or price > ema_1d_aligned[i]:
+            # Exit short: price breaks above weekly Donchian high OR choppy regime (CHOP > 61.8)
+            if price > donchian_high_aligned[i] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
