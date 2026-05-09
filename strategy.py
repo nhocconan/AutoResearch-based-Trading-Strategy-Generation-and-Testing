@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,27 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate EMA20 on 1d close for trend filter
+    # Calculate EMA34 on 1d close for trend filter
     close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get 1d data for Camarilla pivot levels (same timeframe)
+    # Calculate Camarilla levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_vals = df_1d['close'].values
     
     # Camarilla R3, S3 levels: (H-L)*1.1/6
     camarilla_range = (high_1d - low_1d) * 1.1 / 6
-    r3_level = close_1d + camarilla_range * 4
-    s3_level = close_1d - camarilla_range * 4
+    r3_level = close_1d_vals + camarilla_range * 4
+    s3_level = close_1d_vals - camarilla_range * 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
@@ -49,11 +49,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Need enough data for EMA20 and volume MA
+    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema20_1d_aligned[i]) or 
+        if (np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or
             np.isnan(volume_spike[i])):
@@ -62,24 +62,24 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        ema20 = ema20_1d_aligned[i]
+        ema34 = ema34_1d_aligned[i]
         r3 = r3_aligned[i]
         s3 = s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
             # Enter long: Close breaks above R3 + 1d uptrend + volume spike
-            if close[i] > r3 and close[i] > ema20 and vol_spike:
+            if close[i] > r3 and close[i] > ema34 and vol_spike:
                 signals[i] = 0.25
                 position = 1
             # Enter short: Close breaks below S3 + 1d downtrend + volume spike
-            elif close[i] < s3 and close[i] < ema20 and vol_spike:
+            elif close[i] < s3 and close[i] < ema34 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: Close falls below S3 or 1d trend turns down
-            if close[i] < s3 or close[i] < ema20:
+            if close[i] < s3 or close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -87,7 +87,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: Close rises above R3 or 1d trend turns up
-            if close[i] > r3 or close[i] > ema20:
+            if close[i] > r3 or close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
