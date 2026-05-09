@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA_Trend_Volume_v4"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1S1_Breakout_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,18 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 21-period EMA on weekly close for trend filter
+    ema21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_1d = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # Get 1d data for Camarilla pivot levels (based on previous day's OHLC)
+    # Get daily data for Camarilla pivot levels (based on previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -48,9 +48,9 @@ def generate_signals(prices):
     r1 = pivot + 1.1 * prev_daily_range / 6
     s1 = pivot - 1.1 * prev_daily_range / 6
     
-    # Align Camarilla levels to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to daily (no alignment needed as both are daily)
+    r1_1d = r1
+    s1_1d = s1
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,33 +58,33 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema50_4h[i]) or 
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(ema21_1d[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.0 x 20-period average (balanced for BTC/ETH)
+        # Volume condition: current volume > 2.0 x 20-period average
         vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
             # Long: Break above Camarilla R1 with uptrend and volume spike
-            if close[i] > r1_4h[i] and close[i] > ema50_4h[i] and vol_spike:
+            if close[i] > r1_1d[i] and close[i] > ema21_1d[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
             # Short: Break below Camarilla S1 with downtrend and volume spike
-            elif close[i] < s1_4h[i] and close[i] < ema50_4h[i] and vol_spike:
+            elif close[i] < s1_1d[i] and close[i] < ema21_1d[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: Price falls back below Camarilla S1 OR trend turns down
-            if close[i] < s1_4h[i] or close[i] < ema50_4h[i]:
+            if close[i] < s1_1d[i] or close[i] < ema21_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,7 +92,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: Price rises back above Camarilla R1 OR trend turns up
-            if close[i] > r1_4h[i] or close[i] > ema50_4h[i]:
+            if close[i] > r1_1d[i] or close[i] > ema21_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
