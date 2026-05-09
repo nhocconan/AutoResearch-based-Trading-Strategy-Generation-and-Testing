@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1wTrend
-# Hypothesis: Breakouts at weekly Camarilla R3/S3 levels with 1-day EMA50 trend filter.
-# Weekly trend ensures alignment with higher timeframe momentum, reducing false breakouts.
-# Works in bull/bear: Trend filter avoids counter-trend trades, weekly structure provides strong support/resistance.
+# 4h_KAMA_Trend_Strength_With_Adaptive_Bandwidth
+# Hypothesis: KAMA adapts to market noise—low volatility follows trend, high volatility mean-reverts.
+# Uses KAMA direction (trend) + Bollinger Band width (volatility regime) + volume confirmation.
+# In low volatility (BB width < 50th percentile), follow KAMA trend. In high volatility, mean-revert at Bollinger Bands.
+# Works in bull/bear: adapts to regime. Volatility filter reduces whipsaws. Volume confirms institutional participation.
 
-name = "4h_Camarilla_R3_S3_Breakout_1wTrend"
+name = "4h_KAMA_Trend_Strength_With_Adaptive_Bandwidth"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,89 +15,144 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate weekly Camarilla levels from previous week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate KAMA (adaptive moving average)
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Proper ER calculation over 10 periods
+    er = np.full_like(close, np.nan)
+    for i in range(10, n):
+        directional_change = np.abs(close[i] - close[i-10])
+        total_change = np.sum(np.abs(np.diff(close[i-9:i+1])))
+        if total_change > 0:
+            er[i] = directional_change / total_change
+        else:
+            er[i] = 0
     
-    # Previous week's values for Camarilla calculation
-    ph = np.concatenate([[high_1w[0]], high_1w[:-1]])  # previous high
-    pl = np.concatenate([[low_1w[0]], low_1w[:-1]])   # previous low
-    pc = np.concatenate([[close_1w[0]], close_1w[:-1]]) # previous close
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Camarilla R3 and S3 levels (weekly)
-    camarilla_r3 = pc + (ph - pl) * 1.1 / 4
-    camarilla_s3 = pc - (ph - pl) * 1.1 / 4
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    if n > 0:
+        kama[0] = close[0]
+        for i in range(1, n):
+            if not np.isnan(sc[i]):
+                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+            else:
+                kama[i] = kama[i-1]
     
-    # Align weekly Camarilla levels to 4h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    # Bollinger Bands (20, 2) for volatility regime
+    bb_period = 20
+    bb_std = 2
+    sma = np.full_like(close, np.nan)
+    bb_std_dev = np.full_like(close, np.nan)
     
-    # Calculate 1-day EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    if n >= bb_period:
+        for i in range(bb_period-1, n):
+            sma[i] = np.mean(close[i-bb_period+1:i+1])
+            bb_std_dev[i] = np.std(close[i-bb_period+1:i+1])
     
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full_like(close_1d, np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[0:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (ema_50_1d[i-1] * 49 + close_1d[i]) / 50
+    bb_upper = sma + bb_std * bb_std_dev
+    bb_lower = sma - bb_std * bb_std_dev
+    bb_width = (bb_upper - bb_lower) / sma  # normalized width
     
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Percentile of BB width for regime detection (use 50th percentile as threshold)
+    bb_width_median = np.full_like(bb_width, np.nan)
+    lookback = 50
+    for i in range(lookback, n):
+        if i >= lookback:
+            window = bb_width[i-lookback+1:i+1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                bb_width_median[i] = np.median(valid)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    if n >= 20:
+        for i in range(19, n):
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+    
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure EMA is ready
+    start_idx = max(bb_period, 10, 20)  # Ensure all indicators are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(kama[i]) or np.isnan(sma[i]) or np.isnan(bb_width[i]) or 
+            np.isnan(bb_width_median[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine regime: low volatility (trend following) or high volatility (mean reversion)
+        is_low_vol = bb_width[i] < bb_width_median[i]
+        
         if position == 0:
-            # Enter long: price breaks above weekly R3 AND uptrend (price > EMA50)
-            if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below weekly S3 AND downtrend (price < EMA50)
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            if is_low_vol:
+                # Low volatility: follow KAMA trend
+                if close[i] > kama[i] and volume_ratio[i] > 1.5:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < kama[i] and volume_ratio[i] > 1.5:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # High volatility: mean reversion at Bollinger Bands
+                if close[i] <= bb_lower[i] and volume_ratio[i] > 1.5:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] >= bb_upper[i] and volume_ratio[i] > 1.5:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: price breaks below weekly S3 OR trend reversal (price < EMA50)
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            if is_low_vol:
+                # Exit long trend: price below KAMA
+                if close[i] < kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # Exit long mean reversion: price above SMA (mean)
+                if close[i] >= sma[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above weekly R3 OR trend reversal (price > EMA50)
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            if is_low_vol:
+                # Exit short trend: price above KAMA
+                if close[i] > kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # Exit short mean reversion: price below SMA (mean)
+                if close[i] <= sma[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
