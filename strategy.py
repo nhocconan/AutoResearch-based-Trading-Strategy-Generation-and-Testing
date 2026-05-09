@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4H_Daily_Camarilla_R3S3_Breakout_Trend_Volume_v3"
-timeframe = "4h"
+name = "1D_Weekly_Camarilla_R3S3_Breakout_Trend_Volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Get weekly data for Camarilla levels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Calculate pivot and ranges
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
     
     # Camarilla levels (R3, S3) - breakout levels
-    r3_1d = pivot_1d + (range_1d * 1.1 / 2)
-    s3_1d = pivot_1d - (range_1d * 1.1 / 2)
+    r3_1w = pivot_1w + (range_1w * 1.1 / 2)
+    s3_1w = pivot_1w - (range_1w * 1.1 / 2)
     
-    # Align to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align to daily
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,29 +62,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above R3 + above daily EMA34 + volume confirmation
+            # Enter long: price breaks above R3 + above weekly EMA34 + volume confirmation
             if close[i] > r3_aligned[i] and close[i] > ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Enter short: price breaks below S3 + below daily EMA34 + volume confirmation
+            # Enter short: price breaks below S3 + below weekly EMA34 + volume confirmation
             elif close[i] < s3_aligned[i] and close[i] < ema34_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily EMA34 (trend change)
+            # Exit long: price below weekly EMA34 (trend change)
             if close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         
         elif position == -1:
-            # Exit short: price above daily EMA34 (trend change)
+            # Exit short: price above weekly EMA34 (trend change)
             if close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
