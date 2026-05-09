@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla Pivot R3/S3 breakout with 1d EMA34 trend filter and volume spike confirmation.
-# Camarilla levels provide institutional support/resistance; breakout above R3 or below S3 with volume
-# confirms institutional participation. 1d EMA34 filters for trend direction, avoiding counter-trend trades.
-# Volume spike (>2x average) ensures momentum. Designed for low-frequency, high-conviction trades.
-# Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag.
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+# Hypothesis: 1-day Keltner Channel breakout with 1-week EMA50 trend filter and volume spike confirmation.
+# Keltner Channel (ATR-based) captures volatility breakouts, weekly EMA50 ensures trend alignment,
+# volume spike (>1.5x average) confirms institutional interest. Designed to work in both bull
+# and bear markets by following the weekly trend direction. Target: 20-80 total trades over 4 years.
+name = "1d_KeltnerBreakout_1wEMA50_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,55 +21,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1-week data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 34-period EMA on 1d close
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 50-period EMA on 1w close
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Using rolling window of previous day's data (shifted by 1 to avoid look-ahead)
-    # We need daily OHLC, so we resample conceptually but use actual 1d data from get_htf_data
-    # Camarilla formulas: 
-    # R4 = close + 1.5*(high-low)
-    # R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low)
-    # We'll use the previous completed day's data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Calculate ATR(20) for Keltner Channel
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels for each day (using that day's OHLC for next day's levels)
-    # But we must use only completed days, so we shift by 1
-    # R3 = close + 1.1*(high-low)
-    # S3 = close - 1.1*(high-low)
-    camarilla_r3 = close_1d_vals + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d_vals - 1.1 * (high_1d - low_1d)
-    
-    # Align Camarilla levels to 4h timeframe (using previous day's levels for current day's trading)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate Keltner Channel: EMA(20) ± 2*ATR
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    kc_upper = ema_20 + 2.0 * atr
+    kc_lower = ema_20 - 2.0 * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need 34 periods for EMA13 and 1d EMA34
+    start_idx = 50  # Need 50 periods for 1w EMA50 and ATR20
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_34_1d_aligned[i]
-        r3_level = camarilla_r3_aligned[i]
-        s3_level = camarilla_s3_aligned[i]
+        ema_1w = ema_50_1w_aligned[i]
+        upper = kc_upper[i]
+        lower = kc_lower[i]
+        ema20 = ema_20[i]
         vol = volume[i]
         
         # Calculate 20-period volume average for spike detection
@@ -80,26 +69,26 @@ def generate_signals(prices):
             vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
         if position == 0:
-            # Enter long: Price breaks above R3 AND uptrend (price > 1d EMA34) AND volume spike
-            if close[i] > r3_level and close[i] > ema_1d and vol > 2.0 * vol_ma:
+            # Enter long: Close > KC Upper AND price > 1w EMA50 (uptrend) AND volume > 1.5x average
+            if close[i] > upper and close[i] > ema_1w and vol > 1.5 * vol_ma:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price breaks below S3 AND downtrend (price < 1d EMA34) AND volume spike
-            elif close[i] < s3_level and close[i] < ema_1d and vol > 2.0 * vol_ma:
+            # Enter short: Close < KC Lower AND price < 1w EMA50 (downtrend) AND volume > 1.5x average
+            elif close[i] < lower and close[i] < ema_1w and vol > 1.5 * vol_ma:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price re-enters below R3 OR trend reverses (price < 1d EMA34)
-            if close[i] < r3_level or close[i] < ema_1d:
+            # Exit long: Close < EMA(20) OR trend reverses (price < 1w EMA50)
+            if close[i] < ema20 or close[i] < ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price re-enters above S3 OR trend reverses (price > 1d EMA34)
-            if close[i] > s3_level or close[i] > ema_1d:
+            # Exit short: Close > EMA(20) OR trend reverses (price > 1w EMA50)
+            if close[i] > ema20 or close[i] > ema_1w:
                 signals[i] = 0.0
                 position = 0
             else:
