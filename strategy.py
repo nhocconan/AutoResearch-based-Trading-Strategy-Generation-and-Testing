@@ -3,8 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_R3S3_Breakout_Trend_Volume_v2"
-timeframe = "6h"
+# Hypothesis: 12h timeframe with Camarilla pivot levels (R1/S1) from daily data,
+# filtered by 1-day EMA34 trend and volume spike (>1.5x 20-day average).
+# Enter long when price breaks above R1 with volume and above trend.
+# Enter short when price breaks below S1 with volume and below trend.
+# Exit on mean reversion to opposite level (S1 for longs, R1 for shorts).
+# Designed to work in both bull and bear markets by following the 1-day trend
+# while using mean-reversion exits to avoid trend exhaustion. Targets 20-50 trades/year.
+name = "12h_1d_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,79 +24,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 10:
+    # Get 1d data for Camarilla levels, trend, and volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous week's OHLC for weekly pivot
-    prev_high_w = df_w['high'].shift(1).values
-    prev_low_w = df_w['low'].shift(1).values
-    prev_close_w = df_w['close'].shift(1).values
+    # Previous day's close for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate weekly pivot points
-    pivot_w = (prev_high_w + prev_low_w + prev_close_w) / 3
-    r3_w = pivot_w + 1.1 * (prev_high_w - prev_low_w)
-    s3_w = pivot_w - 1.1 * (prev_high_w - prev_low_w)
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Get daily data for trend and volume filter
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 20:
-        return np.zeros(n)
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily EMA50 for trend filter
-    ema50_d = pd.Series(df_d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
     
-    # Daily volume filter: current volume > 1.5 * 20-day average
-    vol_series_d = pd.Series(df_d['volume'].values)
-    vol_ma_d = vol_series_d.rolling(window=20, min_periods=20).mean().values
-    volume_filter_d = df_d['volume'].values > (vol_ma_d * 1.5)
-    
-    # Align all to 6h timeframe
-    r3_w_6h = align_htf_to_ltf(prices, df_w, r3_w)
-    s3_w_6h = align_htf_to_ltf(prices, df_w, s3_w)
-    ema50_d_6h = align_htf_to_ltf(prices, df_d, ema50_d)
-    volume_filter_6h = align_htf_to_ltf(prices, df_d, volume_filter_d)
+    # Align all to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_12h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_w_6h[i]) or np.isnan(s3_w_6h[i]) or
-            np.isnan(ema50_d_6h[i]) or np.isnan(volume_filter_6h[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
+            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_filter_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_w_6h[i]
-        s3_val = s3_w_6h[i]
-        trend = ema50_d_6h[i]
-        vol_filter = volume_filter_6h[i]
+        r1_val = r1_12h[i]
+        s1_val = s1_12h[i]
+        trend = ema34_1d_12h[i]
+        vol_filter = volume_filter_12h[i]
         
         if position == 0:
-            # Enter long: break above R3 with volume and above trend
-            if close[i] > r3_val and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S3 with volume and below trend
-            elif close[i] < s3_val and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 (mean reversion to pivot)
-            if close[i] < s3_val:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 (mean reversion to pivot)
-            if close[i] > r3_val:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
