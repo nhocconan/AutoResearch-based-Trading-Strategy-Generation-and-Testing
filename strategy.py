@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1D_1W_RSI_MeanReversion_TrendFilter
-# Hypothesis: On 1d timeframe, enter long when weekly RSI < 30 and daily price > daily EMA50 (uptrend filter).
-# Enter short when weekly RSI > 70 and daily price < daily EMA50 (downtrend filter).
-# Uses weekly RSI for extreme mean-reversion signals and daily EMA50 for trend alignment.
-# Target: 10-25 trades/year per symbol (40-100 total over 4 years).
+# 6h_LiquiditySweep_Reversal_12hTrend
+# Hypothesis: On 6h timeframe, liquidity sweeps (price briefly breaks swing high/low then reverses)
+# followed by 12h trend continuation capture high-probability reversals in both bull/bear markets.
+# Uses 12h trend filter to avoid counter-trend trades. Entry on reversal confirmation with volume spike.
+# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
 
-name = "1D_1W_RSI_MeanReversion_TrendFilter"
-timeframe = "1d"
+name = "6h_LiquiditySweep_Reversal_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,82 +15,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
+    # 12h trend: EMA(34) on close
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_12h = close_12h > ema_34_12h
     
-    # Calculate weekly RSI(14)
-    delta = np.diff(close_1w)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Swing points on 6h: lookback 20 periods
+    lookback = 20
+    swing_high = np.full(n, np.nan)
+    swing_low = np.full(n, np.nan)
     
-    avg_gain = np.zeros_like(close_1w)
-    avg_loss = np.zeros_like(close_1w)
+    for i in range(lookback, n):
+        swing_high[i] = np.max(high[i-lookback:i])
+        swing_low[i] = np.min(low[i-lookback:i])
     
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[:14])
-    avg_loss[13] = np.mean(loss[:14])
+    # Align 12h trend to 6h
+    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
     
-    for i in range(14, len(close_1w)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1w = 100 - (100 / (1 + rs))
-    rsi_1w = np.concatenate([np.full(14, np.nan), rsi_1w[13:]])
-    
-    # Daily EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up = close > ema_50
-    
-    # Align weekly RSI to daily
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Volume confirmation: current volume > 2.0x 20-period average
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_avg * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = lookback + 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(rsi_1w_aligned[i]):
+        if np.isnan(trend_up_12h_aligned[i]) or np.isnan(swing_high[i]) or np.isnan(swing_low[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: weekly RSI < 30 (oversold) + daily uptrend
-            if rsi_1w_aligned[i] < 30 and trend_up[i]:
+            # Bullish liquidity sweep reversal: price breaks swing low then closes above it
+            if (low[i] < swing_low[i] and 
+                close[i] > swing_low[i] and 
+                trend_up_12h_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly RSI > 70 (overbought) + daily downtrend
-            elif rsi_1w_aligned[i] > 70 and not trend_up[i]:
+            # Bearish liquidity sweep reversal: price breaks swing high then closes below it
+            elif (high[i] > swing_high[i] and 
+                  close[i] < swing_high[i] and 
+                  not trend_up_12h_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly RSI > 50 (mean reversion complete) or trend fails
-            if rsi_1w_aligned[i] > 50 or not trend_up[i]:
+            # Exit long: price breaks swing low or trend changes
+            if low[i] < swing_low[i] or not trend_up_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly RSI < 50 (mean reversion complete) or trend fails
-            if rsi_1w_aligned[i] < 50 or trend_up[i]:
+            # Exit short: price breaks swing high or trend changes
+            if high[i] > swing_high[i] or trend_up_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
