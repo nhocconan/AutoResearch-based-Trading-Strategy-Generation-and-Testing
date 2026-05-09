@@ -3,12 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h price closes outside Bollinger Bands (20,2) with volume confirmation (>1.5x 20 EMA volume) and 12h EMA50 trend filter.
-# Bollinger breakouts capture volatility expansion; volume confirms institutional interest; 12h EMA50 ensures alignment with higher timeframe trend.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Uses Bollinger Bands for volatility-based breakout detection, which adapts to changing market conditions.
-name = "4h_BollingerBreakout_12hEMA50_Volume"
-timeframe = "4h"
+# Hypothesis: 1h momentum with 4h trend filter and volume confirmation. 
+# Uses 4h EMA20 for trend direction (bullish if close > EMA20, bearish if close < EMA20) 
+# and 1h RSI(14) for momentum entries (long when RSI < 30 and rising, short when RSI > 70 and falling).
+# Volume confirmation requires current volume > 1.5x 20 EMA volume. 
+# Session filter (08-20 UTC) reduces noise. 
+# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+# Target: 15-37 trades/year to avoid fee drag.
+
+name = "1h_RSI_Momentum_4hEMA20_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,24 +25,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2)
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + (2 * std_20)
-    lower_band = sma_20 - (2 * std_20)
-    
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h EMA20 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 12h EMA50 trend filter
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 1h RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Volume confirmation: volume > 1.5x 20 EMA volume
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ema20)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,39 +57,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(ema_12h_aligned[i]) or 
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ema20[i]) or 
+            np.isnan(rsi[i-1])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price = close[i]
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long: close > upper Bollinger Band + volume confirmation + 12h EMA50 up
-            if (price > upper_band[i] and vol_confirm[i] and price > ema_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: RSI < 30 and rising (RSI > previous RSI) + 4h EMA20 up + volume
+            if (rsi[i] < 30 and rsi[i] > rsi[i-1] and close[i] > ema_4h_aligned[i] and vol_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: close < lower Bollinger Band + volume confirmation + 12h EMA50 down
-            elif (price < lower_band[i] and vol_confirm[i] and price < ema_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: RSI > 70 and falling (RSI < previous RSI) + 4h EMA20 down + volume
+            elif (rsi[i] > 70 and rsi[i] < rsi[i-1] and close[i] < ema_4h_aligned[i] and vol_confirm[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: close crosses below middle Bollinger Band (SMA20)
-            if price < sma_20[i]:
+            # Exit long: RSI > 70 or trend change
+            if rsi[i] > 70 or close[i] < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: close crosses above middle Bollinger Band (SMA20)
-            if price > sma_20[i]:
+            # Exit short: RSI < 30 or trend change
+            if rsi[i] < 30 or close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
