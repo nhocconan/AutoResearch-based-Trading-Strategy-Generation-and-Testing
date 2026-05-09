@@ -1,10 +1,12 @@
-# 4H DOW JONES TREND FOLLOWING WITH VOLUME CONFIRMATION
-# Strategy: Uses 4h Dow Jones Industrial Average proxy (BTC/ETH average) trend direction
-# with volume confirmation and ATR-based stoploss. Designed for 25-40 trades/year.
-# Works in bull markets via trend following and bear markets via short signals.
+#!/usr/bin/env python3
+# Hypothesis: 12h timeframe with 1-day KAMA trend and 12h volume confirmation.
+# In trending markets (KAMA slope > 0), enter long on volume breakout above 20-period average.
+# In ranging markets (KAMA slope < 0), enter short on volume breakout below 20-period average.
+# Uses 1-week ADX to filter weak trends (ADX < 20) and avoid whipsaws.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_DowJones_Trend_Volume"
-timeframe = "4h"
+name = "12h_KAMA_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -13,69 +15,112 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Calculate Dow Jones proxy: average of BTC and ETH closing prices
-    # Since we don't have direct ETH data, we'll use a volatility-adjusted proxy
-    # Using close price adjusted by ATR to simulate multi-asset behavior
-    atr_period = 14
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(np.concatenate([[high[0]], high[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(np.concatenate([[low[0]], low[:-1]]) - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
+    # 1-day KAMA for trend direction
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Dow Jones trend proxy: price position relative to ATR-adjusted mean
-    price_normalized = close / (1 + atr * 0.01)  # Normalize by volatility
-    dow_trend = pd.Series(price_normalized).ewm(span=30, adjust=False, min_periods=30).mean().values
+    close_1d = df_1d['close']
+    # Efficiency ratio
+    change = abs(close_1d.diff(10))
+    volatility = close_1d.diff().abs().rolling(window=10).sum()
+    er = change / volatility.replace(0, 1e-10)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA calculation
+    kama = np.zeros(len(close_1d))
+    kama[0] = close_1d.iloc[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc.iloc[i] * (close_1d.iloc[i] - kama[i-1])
+    kama = pd.Series(kama, index=close_1d.index)
+    kama_slope = kama.diff()
+    kama_slope_values = kama_slope.values
+    kama_slope_aligned = align_htf_to_ltf(prices, df_1d, kama_slope_values)
     
-    # Volume confirmation: volume > 1.5x average volume
-    avg_volume = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirmed = volume > (avg_volume * 1.5)
+    # 1-week ADX for trend strength filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Entry conditions
-    long_entry = (close > dow_trend) & volume_confirmed
-    short_entry = (close < dow_trend) & volume_confirmed
+    high_1w = df_1w['high']
+    low_1w = df_1w['low']
+    close_1w = df_1w['close']
     
-    # Exit conditions: trend reversal or volume drop
-    long_exit = (close < dow_trend) | (volume < (avg_volume * 0.8))
-    short_exit = (close > dow_trend) | (volume < (avg_volume * 0.8))
+    # True Range
+    tr1 = high_1w - low_1w
+    tr2 = abs(high_1w - close_1w.shift(1))
+    tr3 = abs(low_1w - close_1w.shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    dm_plus = np.where((high_1w - high_1w.shift(1)) > (low_1w.shift(1) - low_1w), 
+                       np.maximum(high_1w - high_1w.shift(1), 0), 0)
+    dm_minus = np.where((low_1w.shift(1) - low_1w) > (high_1w - high_1w.shift(1)), 
+                        np.maximum(low_1w.shift(1) - low_1w, 0), 0)
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    dm_plus_14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum()
+    dm_minus_14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum()
+    
+    # DI and DX
+    di_plus = 100 * dm_plus_14 / tr_14
+    di_minus = 100 * dm_minus_14 / tr_14
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus).replace(0, 1e-10)
+    adx = dx.rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx_values)
+    
+    # 12h volume average for confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_ma_values = volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(dow_trend[i]) or np.isnan(avg_volume[i]):
+        # Skip if data not ready
+        if (np.isnan(kama_slope_aligned[i]) or
+            np.isnan(adx_aligned[i]) or
+            np.isnan(volume_ma_values[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            if long_entry[i]:
-                signals[i] = 0.25
-                position = 1
-            elif short_entry[i]:
-                signals[i] = -0.25
-                position = -1
+            # Only trade when trend is strong enough (ADX >= 20)
+            if adx_aligned[i] >= 20:
+                # Trending up: KAMA slope positive + volume above average
+                if kama_slope_aligned[i] > 0 and volume[i] > volume_ma_values[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Trending down: KAMA slope negative + volume above average
+                elif kama_slope_aligned[i] < 0 and volume[i] > volume_ma_values[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            if long_exit[i]:
+            # Exit long: trend weakens (ADX < 20) or KAMA slope turns negative
+            if adx_aligned[i] < 20 or kama_slope_aligned[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            if short_exit[i]:
+            # Exit short: trend weakens (ADX < 20) or KAMA slope turns positive
+            if adx_aligned[i] < 20 or kama_slope_aligned[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
