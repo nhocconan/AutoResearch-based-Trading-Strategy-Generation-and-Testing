@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal with 1d volume spike and 1d EMA34 trend filter.
-# Camarilla levels (R3/S3) act as strong support/resistance; reversal on touch with volume confirms institutional interest.
-# EMA34 on 1d filters for trend alignment. Works in both bull (buy S3 in uptrend) and bear (sell R3 in downtrend).
-# Low-frequency signals reduce fee drag; pivot levels provide structure in ranging markets.
-name = "4h_Camarilla_R3S3_Reversal_1dEMA34_Volume"
-timeframe = "4h"
+# Hypothesis: 1d price closes outside Bollinger Bands (20,2) with volume confirmation (>1.5x 20 EMA volume) and 1-week EMA10 trend filter.
+# Bollinger breakouts capture volatility expansion; volume confirms institutional interest; 1w EMA10 ensures alignment with higher timeframe trend.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Uses Bollinger Bands for volatility-based breakout detection, which adapts to changing market conditions.
+name = "1d_BollingerBreakout_1wEMA10_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,42 +21,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots, trend filter, and volume
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Bollinger Bands (20,2)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma_20 + (2 * std_20)
+    lower_band = sma_20 - (2 * std_20)
+    
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Camarilla levels from previous 1d bar
-    c_high = df_1d['high'].values
-    c_low = df_1d['low'].values
-    c_close = df_1d['close'].values
+    # 1w EMA10 trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate Camarilla R3, S3 levels for each 1d bar
-    camarilla_r3 = np.zeros_like(c_close)
-    camarilla_s3 = np.zeros_like(c_close)
-    for i in range(len(c_close)):
-        if i == 0:
-            camarilla_r3[i] = np.nan
-            camarilla_s3[i] = np.nan
-        else:
-            # Previous day's range
-            prev_range = c_high[i-1] - c_low[i-1]
-            camarilla_r3[i] = c_close[i-1] + (1.1 * prev_range / 6)
-            camarilla_s3[i] = c_close[i-1] - (1.1 * prev_range / 6)
-    
-    # Align Camarilla levels to 4h (previous day's levels available at 4h open)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 1d EMA34 trend filter
-    ema_1d = pd.Series(c_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1d volume confirmation: volume > 1.5x 20 EMA volume
-    vol_ema_1d = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_1d)
-    vol_spike = df_1d['volume'].values > (1.5 * vol_ema_1d)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike)
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,8 +47,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ema_aligned[i])):
+        if (np.isnan(sma_20[i]) or np.isnan(std_20[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,30 +57,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price touches S3 + volume spike + price > EMA34 (uptrend)
-            if (price <= camarilla_s3_aligned[i] * 1.001 and  # Allow small tolerance for touch
-                vol_spike_aligned[i] and 
-                price > ema_1d_aligned[i]):
+            # Long: close > upper Bollinger Band + volume confirmation + 1w EMA10 up
+            if (price > upper_band[i] and vol_confirm[i] and price > ema_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches R3 + volume spike + price < EMA34 (downtrend)
-            elif (price >= camarilla_r3_aligned[i] * 0.999 and  # Allow small tolerance for touch
-                  vol_spike_aligned[i] and 
-                  price < ema_1d_aligned[i]):
+            # Short: close < lower Bollinger Band + volume confirmation + 1w EMA10 down
+            elif (price < lower_band[i] and vol_confirm[i] and price < ema_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses above R3 (breakout) or crosses below S3 (failed hold)
-            if price >= camarilla_r3_aligned[i] * 0.999 or price <= camarilla_s3_aligned[i] * 1.001:
+            # Exit long: close crosses below middle Bollinger Band (SMA20)
+            if price < sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses below S3 (breakdown) or crosses above R3 (failed hold)
-            if price <= camarilla_s3_aligned[i] * 1.001 or price >= camarilla_r3_aligned[i] * 0.999:
+            # Exit short: close crosses above middle Bollinger Band (SMA20)
+            if price > sma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
