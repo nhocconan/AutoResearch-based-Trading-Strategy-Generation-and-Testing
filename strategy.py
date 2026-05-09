@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4H_Daily_Camarilla_R1S1_Breakout_VolumeTrend_v3"
+name = "4H_Daily_Camarilla_R1S1_Breakout_Pullback"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,6 +45,10 @@ def generate_signals(prices):
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (volume_avg * 1.5)
     
+    # Pullback filter: pullback to EMA34 after breakout
+    pullback_long = close < ema34_1d_aligned
+    pullback_short = close > ema34_1d_aligned
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -60,26 +64,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above R1 + above 1d EMA34 + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above R1, then pulls back to EMA34, with volume confirmation
+            if (close[i] > r1_aligned[i] and pullback_long[i] and 
+                ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and  # rising trend
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S1 + below 1d EMA34 + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below S1, then pulls back to EMA34, with volume confirmation
+            elif (close[i] < s1_aligned[i] and pullback_short[i] and 
+                  ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and  # falling trend
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below 1d EMA34 (trend change)
-            if close[i] < ema34_1d_aligned[i]:
+            # Exit long: price below EMA34 or below S1 (failed breakout)
+            if close[i] < ema34_1d_aligned[i] or close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above 1d EMA34 (trend change)
-            if close[i] > ema34_1d_aligned[i]:
+            # Exit short: price above EMA34 or above R1 (failed breakout)
+            if close[i] > ema34_1d_aligned[i] or close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
