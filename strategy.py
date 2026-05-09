@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian breakout with 1d ATR-based volatility filter and volume confirmation
-# Long when price breaks above 12h Donchian upper (20) with 1d ATR low (volatility contraction) and volume spike
-# Short when price breaks below 12h Donchian lower (20) with 1d ATR low and volume spike
-# Exit when price reverts to the 12h midline (mean of upper/lower) or opposite breakout occurs
-# Designed to capture volatility breakouts in both trending and ranging markets with controlled frequency
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
-# Works in bull/bear: volatility breakouts occur in all regimes; ATR filter avoids choppy false signals
+# Hypothesis: 1h Fibonacci pullback strategy with 4h EMA21 trend filter and volume spike
+# Long when price pulls back to 0.618 Fib level in uptrend (4h EMA21 rising) with volume > 1.5x average
+# Short when price pulls back to 0.382 Fib level in downtrend (4h EMA21 falling) with volume > 1.5x average
+# Exit when price reaches opposite Fib level or shows reversal signs
+# Uses 4h for trend direction, 1h for precise entry timing during pullbacks
+# Target: 80-120 total trades over 4 years (20-30/year) with size 0.20
 
-name = "12h_Donchian_Breakout_1dATR_Volume"
-timeframe = "12h"
+name = "1h_Fibonacci_Pullback_4hEMA21_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,40 +24,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Calculate 1d ATR(14) for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Calculate 4h EMA21 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    ema21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate 1h swing high/low for Fibonacci levels (20-period lookback)
+    def calculate_fib_levels(high_arr, low_arr, lookback=20):
+        fib_levels = np.full_like(high_arr, np.nan)
+        for i in range(lookback, len(high_arr)):
+            window_high = np.max(high_arr[i-lookback:i])
+            window_low = np.min(low_arr[i-lookback:i])
+            diff = window_high - window_low
+            if diff > 0:
+                fib_levels[i] = window_high - 0.618 * diff  # 0.618 retracement for longs
+                # Also calculate 0.382 for shorts
+        return fib_levels
     
-    # ATR with Wilder's smoothing (equivalent to RMA)
-    atr = np.zeros_like(tr)
-    atr[13] = np.mean(tr[1:14])  # First ATR: simple average of first 14 TR
-    for i in range(14, len(tr)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # ATR ratio: current ATR / 20-period average ATR (to detect volatility contraction)
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr / atr_ma  # < 1 indicates volatility contraction
-    
-    # Align 1d indicators to 12h timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Calculate Fibonacci levels
+    fib_618 = calculate_fib_levels(high, low)
+    fib_382 = np.full_like(high, np.nan)
+    for i in range(20, len(high)):
+        window_high = np.max(high[i-20:i])
+        window_low = np.min(low[i-20:i])
+        diff = window_high - window_low
+        if diff > 0:
+            fib_382[i] = window_low + 0.382 * diff  # 0.382 retracement for shorts
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -67,12 +61,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for all calculations
+    start_idx = 40  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(atr_ratio_aligned[i]) or 
+        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(fib_618[i]) or np.isnan(fib_382[i]) or
             np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,33 +73,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above Donchian high, volatility contraction (ATR ratio < 0.8), volume spike
-            if (close[i] > donchian_high[i] and 
-                atr_ratio_aligned[i] < 0.8 and 
+            # Enter long: pullback to 0.618 Fib in uptrend with volume spike
+            if (low[i] <= fib_618[i] and  # Price touches or goes below 0.618 level
+                ema21_4h_aligned[i] > ema21_4h_aligned[i-1] and  # 4h EMA21 rising
                 vol_confirm[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below Donchian low, volatility contraction, volume spike
-            elif (close[i] < donchian_low[i] and 
-                  atr_ratio_aligned[i] < 0.8 and 
+            # Enter short: pullback to 0.382 Fib in downtrend with volume spike
+            elif (high[i] >= fib_382[i] and  # Price touches or goes above 0.382 level
+                  ema21_4h_aligned[i] < ema21_4h_aligned[i-1] and  # 4h EMA21 falling
                   vol_confirm[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to midline or breaks below Donchian low (reversal)
-            if (close[i] <= donchian_mid[i]) or (close[i] < donchian_low[i]):
+            # Exit long: price reaches 0.382 Fib level or shows weakness
+            if (high[i] >= fib_382[i]) or (close[i] < close[i-1] and low[i] < fib_618[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: price returns to midline or breaks above Donchian high (reversal)
-            if (close[i] >= donchian_mid[i]) or (close[i] > donchian_high[i]):
+            # Exit short: price reaches 0.618 Fib level or shows strength
+            if (low[i] <= fib_618[i]) or (close[i] > close[i-1] and high[i] > fib_382[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
