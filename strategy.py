@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Vortex_Trend_With_Volume_Spike
-# Hypothesis: Uses Vortex indicator (VI+) and (VI-) to detect trend direction on 4h timeframe.
-# Long when VI+ > VI- (bullish trend) with volume confirmation (volume > 2x 20-period average).
-# Short when VI- > VI+ (bearish trend) with volume confirmation.
-# Includes volatility filter using ATR: only trade when ATR(14) > ATR(50) (volatility expansion).
-# Exit when trend reverses (VI+ < VI- for long, VI- < VI+ for short) or volume drops below average.
-# Designed to work in both bull and bear markets by following strong trending moves with volume confirmation.
-# Target: 20-40 trades/year per symbol with disciplined risk management.
+# 1d_Donchian_Breakout_WeeklyTrend_Volume
+# Hypothesis: Uses weekly trend filter with daily Donchian(20) breakout on 1d timeframe.
+# Long when weekly trend up and price breaks above Donchian upper band with volume confirmation.
+# Short when weekly trend down and price breaks below Donchian lower band with volume confirmation.
+# Weekly trend determined by price above/below weekly EMA34.
+# Target: 15-30 trades/year per symbol with disciplined risk management.
 
-name = "4h_Vortex_Trend_With_Volume_Spike"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,120 +16,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate True Range components
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan  # First value has no previous close
-    tr2[0] = np.nan
-    tr3[0] = np.nan
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 34:
+        return np.zeros(n)
     
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    close_weekly = df_weekly['close'].values
     
-    # Calculate Vortex Indicator components
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.nan
-    vm_minus[0] = np.nan
+    # Calculate weekly EMA34 for trend filter
+    ema34_weekly = np.full_like(close_weekly, np.nan)
+    if len(close_weekly) >= 34:
+        ema34_weekly[33] = np.mean(close_weekly[0:34])
+        for i in range(34, len(close_weekly)):
+            ema34_weekly[i] = (close_weekly[i] * 2 + ema34_weekly[i-1] * 32) / 34
     
-    # Smooth using Wilder's smoothing (similar to RSI/Wilder MA)
-    def WilderSmooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # Initial value: simple average
-        result[period-1] = np.nanmean(data[:period])
-        # Wilder smoothing: (prev * (period-1) + current) / period
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
     
-    period = 14
-    vm_plus_smooth = WilderSmooth(vm_plus, period)
-    vm_minus_smooth = WilderSmooth(vm_minus, period)
-    tr_smooth = WilderSmooth(tr, period)
+    # Get daily data for Donchian channels
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 20:
+        return np.zeros(n)
     
-    # Calculate VI+ and VI-
-    vi_plus = np.divide(vm_plus_smooth, tr_smooth, out=np.full_like(tr_smooth, np.nan), where=tr_smooth!=0)
-    vi_minus = np.divide(vm_minus_smooth, tr_smooth, out=np.full_like(tr_smooth, np.nan), where=tr_smooth!=0)
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
     
-    # Calculate ATR for volatility filter
-    atr = tr_smooth  # Already smoothed TR is ATR
+    # Calculate Donchian channels (20-period)
+    donchian_upper = np.full_like(high_daily, np.nan)
+    donchian_lower = np.full_like(low_daily, np.nan)
     
-    # Long-term ATR for volatility regime filter (50-period)
-    def WilderSmooth_long(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    for i in range(len(df_daily)):
+        if i < 19:
+            continue
+        donchian_upper[i] = np.max(high_daily[i-19:i+1])
+        donchian_lower[i] = np.min(low_daily[i-19:i+1])
     
-    atr_long = WilderSmooth_long(tr, 50)
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower)
     
-    # Volume filter: 20-period average
-    def WilderSmooth_vol(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        result[period-1] = np.nanmean(data[:period])
-        for i in range(period, len(data)):
-            if not np.isnan(data[i]):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
+    # Volume filter: current volume vs 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    vol_ma = WilderSmooth_vol(volume, 20)
-    volume_ratio = np.divide(volume, vol_ma, out=np.full_like(volume, np.nan), where=vol_ma!=0)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need ATR long and volume MA
+    start_idx = max(34, 20, 1)  # Need weekly EMA, daily Donchian, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(atr[i]) or np.isnan(atr_long[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(ema34_weekly_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or 
+            np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility filter: only trade when current ATR > long-term ATR (volatility expansion)
-        vol_expansion = atr[i] > atr_long[i]
+        # Determine weekly trend
+        weekly_up = close[i] > ema34_weekly_aligned[i]
         
         if position == 0:
-            # Enter long: VI+ > VI- (bullish trend) + volume confirmation + volatility expansion
-            if vi_plus[i] > vi_minus[i] and volume_ratio[i] > 2.0 and vol_expansion:
+            # Enter long: weekly trend up + price breaks above Donchian upper + volume confirmation
+            if weekly_up and close[i] > donchian_upper_aligned[i] and volume_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: VI- > VI+ (bearish trend) + volume confirmation + volatility expansion
-            elif vi_minus[i] > vi_plus[i] and volume_ratio[i] > 2.0 and vol_expansion:
+            # Enter short: weekly trend down + price breaks below Donchian lower + volume confirmation
+            elif not weekly_up and close[i] < donchian_lower_aligned[i] and volume_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend turns bearish (VI- > VI+) or volume drops below average
-            if vi_minus[i] > vi_plus[i] or volume_ratio[i] < 1.0:
+            # Exit long: weekly trend turns down or price breaks below Donchian lower
+            if not weekly_up or close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend turns bullish (VI+ > VI-) or volume drops below average
-            if vi_plus[i] > vi_minus[i] or volume_ratio[i] < 1.0:
+            # Exit short: weekly trend turns up or price breaks above Donchian upper
+            if weekly_up or close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
