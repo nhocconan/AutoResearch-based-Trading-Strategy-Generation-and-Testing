@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 6h Donchian breakout with weekly RSI filter and volume confirmation
-# Long when price breaks above 6h Donchian upper channel (20), weekly RSI > 50 (bullish bias), and volume spike
-# Short when price breaks below 6h Donchian lower channel (20), weekly RSI < 50 (bearish bias), and volume spike
-# Exit when price crosses the 6h Donchian midline or weekly RSI crosses 50 in opposite direction
-# Weekly RSI acts as regime filter to avoid counter-trend trades in strong weekly trends
-# Position size: 0.25 to limit drawdown. Target: 50-150 total trades over 4 years.
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume confirmation
+# Long when: close > R3, 1d EMA(34) rising, volume spike (>1.5x 20-period average)
+# Short when: close < S3, 1d EMA(34) falling, volume spike
+# Exit when: price crosses the midpoint of R3/S3 (Camarilla pivot) OR trend reverses
+# Position size: 0.25 (25% of capital) to limit drawdown. Target: 12-37 trades/year.
+# Designed to work in both bull (breakouts) and bear (mean-reversion at extremes) markets.
 
-name = "6h_Donchian_WeeklyRSI_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,30 +24,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channel (20-period)
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Weekly data for RSI filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # Get daily data for Camarilla pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly RSI(14)
-    close_1w = df_1w['close'].values
-    delta = np.diff(close_1w, prepend=close_1w[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla levels from previous day's high, low, close
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1w = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels
+    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.2500)
+    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.2500)
+    camarilla_pivot = (camarilla_r3 + camarilla_s3) / 2  # Midpoint for exit
     
-    # Align weekly RSI to 6h timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Align daily Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    
+    # 1d EMA(34) for trend filter
+    close_1d_series = pd.Series(df_1d['close'])
+    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_prev = np.roll(ema_34_1d, 1)
+    ema_34_1d_prev[0] = ema_34_1d[0]
+    ema_rising = ema_34_1d > ema_34_1d_prev
+    ema_falling = ema_34_1d < ema_34_1d_prev
+    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_rising)
+    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_falling)
     
     # Volume spike: current volume > 1.5x 20-period average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -56,43 +61,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)  # Ensure enough data for all indicators
+    start_idx = 100  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(donchian_mid[i]) or np.isnan(rsi_1w_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(camarilla_pivot_aligned[i]) or np.isnan(ema_rising_aligned[i]) or
+            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > Donchian high + weekly RSI > 50 + volume spike
-            if (close[i] > donchian_high[i] and 
-                rsi_1w_aligned[i] > 50 and 
+            # Enter long: price > Camarilla R3 + 1d EMA rising + volume spike
+            if (close[i] > camarilla_r3_aligned[i] and 
+                ema_rising_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < Donchian low + weekly RSI < 50 + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  rsi_1w_aligned[i] < 50 and 
+            # Enter short: price < Camarilla S3 + 1d EMA falling + volume spike
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  ema_falling_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below Donchian mid OR weekly RSI < 50
-            if (close[i] < donchian_mid[i]) or (rsi_1w_aligned[i] < 50):
+            # Exit long: price crosses below Camarilla pivot OR trend turns down
+            if (close[i] < camarilla_pivot_aligned[i]) or (not ema_rising_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above Donchian mid OR weekly RSI > 50
-            if (close[i] > donchian_mid[i]) or (rsi_1w_aligned[i] > 50):
+            # Exit short: price crosses above Camarilla pivot OR trend turns up
+            if (close[i] > camarilla_pivot_aligned[i]) or (not ema_falling_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
