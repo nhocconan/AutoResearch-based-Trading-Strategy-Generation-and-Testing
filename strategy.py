@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_RSI20_Trend_Filter_V1"
-timeframe = "4h"
+name = "1h_4h1d_Trend_Volume_SessionFilter"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,71 +17,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h RSI(20) with proper smoothing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # Pre-compute hour-of-day for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/20, adjust=False, min_periods=20).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 12h EMA(50) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 4h EMA20 for trend
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Volume filter: current volume > 1.3 * 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    # Get 1d data for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # 1d volume average (20-period)
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # RSI and volume MA
+    start_idx = 20  # Need enough data for EMA20 and volume average
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        # Skip if required data unavailable (NaN from indicators)
+        if np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
-        ema50_12h_val = ema50_12h_aligned[i]
-        vol_filt = volume_filter[i]
+        # Session filter: only trade between 08:00 and 20:00 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        if position == 0:
-            # Long: RSI < 20 (oversold) + uptrend + volume
-            if rsi_val < 20 and close[i] > ema50_12h_val and vol_filt:
-                signals[i] = 0.25
+        ema20_4h_val = ema20_4h_aligned[i]
+        vol_avg_1d_val = vol_avg_1d_aligned[i]
+        vol_spike = volume[i] > (vol_avg_1d_val * 1.5)
+        
+        if position == 0 and in_session:
+            # Enter long: Price above 4h EMA20 + volume spike
+            if close[i] > ema20_4h_val and vol_spike:
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI > 80 (overbought) + downtrend + volume
-            elif rsi_val > 80 and close[i] < ema50_12h_val and vol_filt:
-                signals[i] = -0.25
+            # Enter short: Price below 4h EMA20 + volume spike
+            elif close[i] < ema20_4h_val and vol_spike:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI > 60 or trend turns down
-            if rsi_val > 60 or close[i] < ema50_12h_val:
+            # Exit long: Price falls below 4h EMA20 or outside session
+            if close[i] < ema20_4h_val or not in_session:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: RSI < 40 or trend turns up
-            if rsi_val < 40 or close[i] > ema50_12h_val:
+            # Exit short: Price rises above 4h EMA20 or outside session
+            if close[i] > ema20_4h_val or not in_session:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
