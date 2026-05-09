@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ADX_Alligator_Trend_Follow"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,125 +17,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX and Alligator
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate ADX (14) on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA34 for trend filter
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # True Range
-    tr1 = np.abs(high_1d[1:] - low_1d[1:])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate daily Camarilla levels (R3, S3) using previous day's OHLC
+    prev_close = np.roll(df_1d['close'], 1)
+    prev_high = np.roll(df_1d['high'], 1)
+    prev_low = np.roll(df_1d['low'], 1)
+    prev_close[0] = np.nan
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Camarilla levels: R3 and S3
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[1:period]) if not np.all(np.isnan(arr[1:period])) else np.nan
-        # Wilder smoothing
-        for i in range(period, len(arr)):
-            if np.isnan(result[i-1]) or np.isnan(arr[i]):
-                result[i] = np.nan
-            else:
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    atr = smooth_wilder(tr, 14)
-    dm_plus_smooth = smooth_wilder(dm_plus, 14)
-    dm_minus_smooth = smooth_wilder(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smooth_wilder(dx, 14)
-    
-    # Alligator: SMMA(13,8), SMMA(8,5), SMMA(5,3)
-    def smma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        sma = np.nansum(arr[:period]) / period
-        result[period-1] = sma
-        for i in range(period, len(arr)):
-            if np.isnan(arr[i]) or np.isnan(result[i-1]):
-                result[i] = np.nan
-            else:
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    jaw = smma(close_1d, 13)  # Blue line
-    teeth = smma(close_1d, 8)  # Red line
-    lips = smma(close_1d, 5)   # Green line
-    
-    # Align to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Volume spike detection: volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Enough for ADX and Alligator calculation
+    start_idx = 35  # Need 34 for EMA + 1 for roll
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable
-        if (np.isnan(adx_aligned[i]) or np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i])):
+        # Skip if required data unavailable (NaN from indicators)
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        jaw_val = jaw_aligned[i]
-        teeth_val = teeth_aligned[i]
-        lips_val = lips_aligned[i]
-        
-        # Alligator alignment: lips > teeth > jaw = uptrend, lips < teeth < jaw = downtrend
-        alligator_long = lips_val > teeth_val and teeth_val > jaw_val
-        alligator_short = lips_val < teeth_val and teeth_val < jaw_val
+        ema_1d = ema_34_1d_aligned[i]
+        r3 = R3_aligned[i]
+        s3 = S3_aligned[i]
+        vol_spike_now = vol_spike[i]
         
         if position == 0:
-            # Enter long: ADX > 25 (trending) + Alligator aligned up
-            if adx_val > 25 and alligator_long:
+            # Enter long: Break above R3 in uptrend with volume spike
+            if close[i] > r3 and close[i] > ema_1d and vol_spike_now:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: ADX > 25 (trending) + Alligator aligned down
-            elif adx_val > 25 and alligator_short:
+            # Enter short: Break below S3 in downtrend with volume spike
+            elif close[i] < s3 and close[i] < ema_1d and vol_spike_now:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: ADX < 20 (no trend) or Alligator misaligned
-            if adx_val < 20 or not alligator_long:
+            # Exit long: Price closes below EMA34 (trend change) or drops below S3 (stop)
+            if close[i] < ema_1d or close[i] < s3:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: ADX < 20 (no trend) or Alligator misaligned
-            if adx_val < 20 or not alligator_short:
+            # Exit short: Price closes above EMA34 (trend change) or rises above R3 (stop)
+            if close[i] > ema_1d or close[i] > r3:
                 signals[i] = 0.0
                 position = 0
             else:
