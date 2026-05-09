@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: Camarilla R3/S3 breakout on 4h with 12h EMA trend filter and volume confirmation.
-# Long when 12h trend up and price breaks above R3 with volume > 1.5x average.
-# Short when 12h trend down and price breaks below S3 with volume > 1.5x average.
-# Uses 12h timeframe for trend and structure, 4h for entry timing to balance signal frequency and avoid overtrading.
+# 1h_MeanReversion_LB_4hTrend_Volume
+# Hypothesis: 1h mean reversion using 20-period Bollinger Bands with 4h trend filter.
+# Long when price touches lower Bollinger Band and 4h trend is up (close > 4h EMA20).
+# Short when price touches upper Bollinger Band and 4h trend is down (close < 4h EMA20).
+# Bollinger Band width < 50th percentile indicates ranging market for mean reversion.
+# Uses 4h EMA20 for trend filter to avoid counter-trend trades in strong trends.
+# Volume confirmation: current volume > 1.5x 20-period average to filter low-volume noise.
+# Designed for low trade frequency (15-30/year) to minimize fee drag on 1h timeframe.
+# Works in both bull and bear markets by fading extremes only when 4h trend supports reversion.
 
-name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_MeanReversion_LB_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,39 +27,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter and Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA34 for trend filter
-    ema34_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 34:
-        ema34_12h[33] = np.mean(close_12h[0:34])
-        for i in range(34, len(close_12h)):
-            ema34_12h[i] = (close_12h[i] * 2 + ema34_12h[i-1] * 32) / 34
+    # Calculate 4h EMA20 for trend filter
+    ema20_4h = np.full_like(close_4h, np.nan)
+    if len(close_4h) >= 20:
+        ema20_4h[19] = np.mean(close_4h[0:20])
+        for i in range(20, len(close_4h)):
+            ema20_4h[i] = (close_4h[i] * 2 + ema20_4h[i-1] * 18) / 20
     
-    # Calculate Camarilla levels (R3, S3) from previous 12h bar
-    camarilla_r3_12h = np.full_like(high_12h, np.nan)
-    camarilla_s3_12h = np.full_like(low_12h, np.nan)
+    # Align 4h EMA20 to 1h timeframe
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    for i in range(1, len(close_12h)):
-        # Use previous 12h bar's data
-        ph = high_12h[i-1]
-        pl = low_12h[i-1]
-        pc = close_12h[i-1]
-        
-        camarilla_r3_12h[i] = pc + (ph - pl) * 1.1 / 4
-        camarilla_s3_12h[i] = pc - (ph - pl) * 1.1 / 4
+    # Bollinger Bands (20, 2) on 1h
+    bb_period = 20
+    bb_std = 2
+    sma = np.full_like(close, np.nan)
+    if len(close) >= bb_period:
+        sma[bb_period-1] = np.mean(close[0:bb_period])
+        for i in range(bb_period, len(close)):
+            sma[i] = (sma[i-1] * (bb_period-1) + close[i]) / bb_period
     
-    # Align 12h indicators to 4h timeframe
-    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
-    camarilla_r3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3_12h)
-    camarilla_s3_12h_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3_12h)
+    variance = np.full_like(close, np.nan)
+    if len(close) >= bb_period:
+        for i in range(bb_period-1, len(close)):
+            if i == bb_period-1:
+                variance[i] = np.mean((close[0:bb_period] - sma[i]) ** 2)
+            else:
+                variance[i] = (variance[i-1] * (bb_period-1) + (close[i] - sma[i]) ** 2) / bb_period
+    
+    std_dev = np.sqrt(variance)
+    upper_band = sma + bb_std * std_dev
+    lower_band = sma - bb_std * std_dev
+    
+    # Bollinger Band Width for regime filter
+    bb_width = (upper_band - lower_band) / sma
+    
+    # Percentile rank of BB width (50-period lookback)
+    bb_width_rank = np.full_like(bb_width, np.nan)
+    lookback = 50
+    for i in range(lookback-1, len(bb_width)):
+        if not np.isnan(bb_width[i-lookback+1:i+1]).any():
+            sorted_width = np.sort(bb_width[i-lookback+1:i+1])
+            rank = np.searchsorted(sorted_width, bb_width[i]) / lookback * 100
+            bb_width_rank[i] = rank
     
     # Volume filter: current volume vs 20-period average
     vol_ma = np.full_like(volume, np.nan)
@@ -71,44 +91,49 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 1, 20)  # Need 12h EMA, Camarilla, and volume MA
+    start_idx = max(bb_period, 20, lookback-1, 20)  # Need BB, 4h EMA, BB width rank, volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema34_12h_aligned[i]) or np.isnan(camarilla_r3_12h_aligned[i]) or 
-            np.isnan(camarilla_s3_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(sma[i]) or np.isnan(std_dev[i]) or np.isnan(ema20_4h_aligned[i]) or 
+            np.isnan(bb_width_rank[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 12h trend
-        trend_up = close[i] > ema34_12h_aligned[i]
+        # Determine 4h trend
+        trend_up = close[i] > ema20_4h_aligned[i]
+        
+        # Mean reversion conditions: price at band + ranging market (BB width < 50th percentile)
+        at_lower_band = close[i] <= lower_band[i]
+        at_upper_band = close[i] >= upper_band[i]
+        ranging_market = bb_width_rank[i] < 50
         
         if position == 0:
-            # Enter long: 12h trend up + price breaks above R3 + volume confirmation
-            if trend_up and close[i] > camarilla_r3_12h_aligned[i] and volume_ratio[i] > 1.5:
-                signals[i] = 0.25
+            # Enter long: price at lower BB + ranging market + 4h trend up + volume
+            if at_lower_band and ranging_market and trend_up and volume_ratio[i] > 1.5:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: 12h trend down + price breaks below S3 + volume confirmation
-            elif not trend_up and close[i] < camarilla_s3_12h_aligned[i] and volume_ratio[i] > 1.5:
-                signals[i] = -0.25
+            # Enter short: price at upper BB + ranging market + 4h trend down + volume
+            elif at_upper_band and ranging_market and not trend_up and volume_ratio[i] > 1.5:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: 12h trend turns down or price breaks below S3
-            if not trend_up or close[i] < camarilla_s3_12h_aligned[i]:
+            # Exit long: price returns to middle (SMA) or 4h trend turns down
+            if close[i] >= sma[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: 12h trend turns up or price breaks above R3
-            if trend_up or close[i] > camarilla_r3_12h_aligned[i]:
+            # Exit short: price returns to middle (SMA) or 4h trend turns up
+            if close[i] <= sma[i] or trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
