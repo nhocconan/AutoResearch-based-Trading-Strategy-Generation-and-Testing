@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Williams Alligator trend filter + 1d RSI mean-reversion with volume confirmation.
-# Uses Williams Alligator (Jaw/Teeth/Lips) to identify trend direction on 4h, enters on 1d RSI extremes
-# only when price is aligned with the trend. Volume spike confirms momentum. Designed to work in
-# both bull (trend following) and bear (mean reversion within trend) markets.
-# Target: 20-50 total trades over 4 years (5-12/year) with size 0.25.
+# Hypothesis: 1d timeframe with 1-week RSI extremes and weekly volume confirmation. 
+# In overbought conditions (weekly RSI > 70) with high volume, price tends to reverse downward in both bull and bear markets. 
+# In oversold conditions (weekly RSI < 30) with high volume, price tends to reverse upward. 
+# Uses weekly RSI with volume filter to avoid false signals in low-volume environments. 
+# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
 
-name = "4h_WilliamsAlligator_1dRSI_Volume"
-timeframe = "4h"
+name = "1d_WeeklyRSI_Volume_Reversal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,91 +15,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator on 4h: Jaw (13), Teeth (8), Lips (5) SMAs of median price
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 13:
+    # Get weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    median_price_4h = (df_4h['high'] + df_4h['low']) / 2
-    jaw = median_price_4h.rolling(window=13, min_periods=13).mean()
-    teeth = median_price_4h.rolling(window=8, min_periods=8).mean()
-    lips = median_price_4h.rolling(window=5, min_periods=5).mean()
-    
-    jaw_vals = jaw.values
-    teeth_vals = teeth.values
-    lips_vals = lips.values
-    
-    jaw_aligned = align_htf_to_ltf(prices, df_4h, jaw_vals)
-    teeth_aligned = align_htf_to_ltf(prices, df_4h, teeth_vals)
-    lips_aligned = align_htf_to_ltf(prices, df_4h, lips_vals)
-    
-    # Trend: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-    uptrend = lips_aligned > teeth_aligned
-    downtrend = lips_aligned < teeth_aligned
-    
-    # 1-day RSI for mean-reversion signals
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close']
-    delta = close_1d.diff()
+    # Calculate weekly RSI (14-period)
+    close_1w = df_1w['close']
+    delta = close_1w.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_vals = rsi.values
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_vals)
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi_1w = 100 - (100 / (1 + rs))
+    rsi_1w_values = rsi_1w.values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Calculate weekly volume average (20-period)
+    vol_1w = df_1w['volume']
+    vol_avg_1w = vol_1w.rolling(window=20, min_periods=20).mean()
+    vol_avg_1w_values = vol_avg_1w.values
+    
+    # Align weekly indicators to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w_values)
+    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w_values)
+    
+    # Volume condition: current weekly volume > 1.5x average weekly volume
+    # Need to get current weekly volume - use the weekly volume data aligned
+    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w.values)
+    volume_condition = vol_1w_aligned > 1.5 * vol_avg_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(rsi_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(rsi_1w_aligned[i]) or 
+            np.isnan(volume_condition[i]) or
+            np.isnan(vol_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: uptrend + RSI oversold (<30) + volume spike
-            if uptrend[i] and (rsi_aligned[i] < 30) and volume_spike[i]:
+            # Enter long: oversold (RSI < 30) + high volume
+            if rsi_1w_aligned[i] < 30 and volume_condition[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: downtrend + RSI overbought (>70) + volume spike
-            elif downtrend[i] and (rsi_aligned[i] > 70) and volume_spike[i]:
+            # Enter short: overbought (RSI > 70) + high volume
+            elif rsi_1w_aligned[i] > 70 and volume_condition[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend breaks (lips < teeth) OR RSI overbought (>70)
-            if (not uptrend[i]) or (rsi_aligned[i] > 70):
+            # Exit long: RSI returns to neutral (40-60) or overbought
+            if rsi_1w_aligned[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend breaks (lips > teeth) OR RSI oversold (<30)
-            if (not downtrend[i]) or (rsi_aligned[i] < 30):
+            # Exit short: RSI returns to neutral (40-60) or oversold
+            if rsi_1w_aligned[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
