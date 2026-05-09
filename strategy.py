@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Consolidation_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,63 +17,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 1:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d data for Camarilla levels
+    # Previous week's OHLC for pivot calculation
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    
+    # Shift by 1 week to avoid look-ahead
+    pivot_1w_shift = np.roll(pivot_1w, 1)
+    r1_1w_shift = np.roll(r1_1w, 1)
+    s1_1w_shift = np.roll(s1_1w, 1)
+    r2_1w_shift = np.roll(r2_1w, 1)
+    s2_1w_shift = np.roll(s2_1w, 1)
+    r3_1w_shift = np.roll(r3_1w, 1)
+    s3_1w_shift = np.roll(s3_1w, 1)
+    # Set first element to nan
+    pivot_1w_shift[0] = np.nan
+    r1_1w_shift[0] = np.nan
+    s1_1w_shift[0] = np.nan
+    r2_1w_shift[0] = np.nan
+    s2_1w_shift[0] = np.nan
+    r3_1w_shift[0] = np.nan
+    s3_1w_shift[0] = np.nan
+    
+    # Align weekly pivot to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot_1w_shift)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1_1w_shift)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1_1w_shift)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2_1w_shift)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2_1w_shift)
+    r3_6h = align_htf_to_ltf(prices, df_1w, r3_1w_shift)
+    s3_6h = align_htf_to_ltf(prices, df_1w, s3_1w_shift)
+    
+    # Daily trend filter (EMA 34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate EMA50 on 4h close for trend filter
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Previous day's OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_6h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels: Range = High - Low
-    range_1d = high_1d - low_1d
-    r1 = close_1d + (range_1d * 1.0833)
-    s1 = close_1d - (range_1d * 1.0833)
+    # Volume filter: volume > 1.5x 50-period EMA
+    vol_ema50 = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
+    vol_filter = volume > (1.5 * vol_ema50)
     
-    # Use previous day's levels (shift by 1 to avoid look-ahead)
-    r1_shifted = np.roll(r1, 1)
-    s1_shifted = np.roll(s1, 1)
-    r1_shifted[0] = np.nan
-    s1_shifted[0] = np.nan
-    
-    # Align Camarilla levels to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1_shifted)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1_shifted)
-    
-    # Volume spike filter: volume > 2.0x 24-period EMA (1 day of 1h bars)
-    vol_ema24 = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
-    vol_spike = volume > (2.0 * vol_ema24)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # 6-period ATR for breakout confirmation
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(np.maximum(tr1, tr2), tr3)])
+    atr6 = pd.Series(tr).ewm(span=6, adjust=False, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ema24[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not in_session[i]:
+        if (np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or
+            np.isnan(ema_34_1d_6h[i]) or np.isnan(vol_ema50[i]) or np.isnan(atr6[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,29 +100,31 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and above 4h EMA50 (uptrend)
-            if (price > r1_1h[i] and vol_spike[i] and price > ema_50_4h_aligned[i]):
-                signals[i] = 0.20
+            # Long breakout: price breaks above R2 with volume and above daily EMA
+            if (price > r2_6h[i] and vol_filter[i] and price > ema_34_1d_6h[i] and 
+                price > close[i-1] + 0.5 * atr6[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and below 4h EMA50 (downtrend)
-            elif (price < s1_1h[i] and vol_spike[i] and price < ema_50_4h_aligned[i]):
-                signals[i] = -0.20
+            # Short breakdown: price breaks below S2 with volume and below daily EMA
+            elif (price < s2_6h[i] and vol_filter[i] and price < ema_34_1d_6h[i] and 
+                  price < close[i-1] - 0.5 * atr6[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below S1 (mean reversion to support)
-            if price < s1_1h[i]:
+            # Exit long: price falls back to pivot or below
+            if price <= pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above R1 (mean reversion to resistance)
-            if price > r1_1h[i]:
+            # Exit short: price rises back to pivot or above
+            if price >= pivot_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
