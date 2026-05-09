@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_1dTrend_Volume_Spike_v2"
-timeframe = "4h"
+name = "6h_Donchian20_WeeklyPivot_Direction"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +17,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for pivot calculation
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 1:
         return np.zeros(n)
     
-    # Calculate EMA34 on 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate weekly pivot points (standard)
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # Calculate Camarilla R3, S3 levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_vals = df_1d['close'].values
+    # Standard pivot: P = (H + L + C)/3
+    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Resistance/Support levels
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
+    r2_w = pivot_w + (high_w - low_w)
+    s2_w = pivot_w - (high_w - low_w)
+    r3_w = high_w + 2 * (pivot_w - low_w)
+    s3_w = low_w - 2 * (high_w - pivot_w)
     
-    # Camarilla R3, S3 levels: (H-L)*1.1/4
-    camarilla_range = (high_1d - low_1d) * 1.1 / 4
-    r3_level = close_1d_vals + camarilla_range
-    s3_level = close_1d_vals - camarilla_range
+    # Align weekly pivot levels to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
+    r1_w_aligned = align_htf_to_ltf(prices, df_w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_w, s1_w)
+    r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
+    s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
+    r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_w, s3_w)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+    # Get daily data for trend filter
+    df_d = get_htf_data(prices, '1d')
+    if len(df_d) < 50:
+        return np.zeros(n)
     
-    # Volume spike filter: current volume > 2.0 * 20-period average
+    # Calculate 50-period EMA on daily close for trend filter
+    close_d = df_d['close'].values
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_d_aligned = align_htf_to_ltf(prices, df_d, ema50_d)
+    
+    # Volume spike filter: current volume > 1.5 * 30-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need enough data for EMA34 (1d) and volume MA
+    start_idx = max(50, 30)  # Need enough data for EMA50 (daily) and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema50_d_aligned[i]) or 
+            np.isnan(pivot_w_aligned[i]) or
+            np.isnan(r1_w_aligned[i]) or
+            np.isnan(s1_w_aligned[i]) or
+            np.isnan(r2_w_aligned[i]) or
+            np.isnan(s2_w_aligned[i]) or
+            np.isnan(r3_w_aligned[i]) or
+            np.isnan(s3_w_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema34_1d_val = ema34_1d_aligned[i]
-        r3 = r3_aligned[i]
-        s3 = s3_aligned[i]
+        ema50_d_val = ema50_d_aligned[i]
+        pivot_w_val = pivot_w_aligned[i]
+        r1_w_val = r1_w_aligned[i]
+        s1_w_val = s1_w_aligned[i]
+        r2_w_val = r2_w_aligned[i]
+        s2_w_val = s2_w_aligned[i]
+        r3_w_val = r3_w_aligned[i]
+        s3_w_val = s3_w_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Enter long: Close breaks above R3 + 1d uptrend + volume spike
-            if close[i] > r3 and close[i] > ema34_1d_val and vol_spike:
+            # Enter long: Price above weekly pivot + daily uptrend + volume spike
+            if close[i] > pivot_w_val and close[i] > ema50_d_val and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close breaks below S3 + 1d downtrend + volume spike
-            elif close[i] < s3 and close[i] < ema34_1d_val and vol_spike:
+            # Enter short: Price below weekly pivot + daily downtrend + volume spike
+            elif close[i] < pivot_w_val and close[i] < ema50_d_val and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close falls below S3 or 1d trend turns down
-            if close[i] < s3 or close[i] < ema34_1d_val:
+            # Exit long: Price falls below weekly pivot or daily trend turns down
+            if close[i] < pivot_w_val or close[i] < ema50_d_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close rises above R3 or 1d trend turns up
-            if close[i] > r3 or close[i] > ema34_1d_val:
+            # Exit short: Price rises above weekly pivot or daily trend turns up
+            if close[i] > pivot_w_val or close[i] > ema50_d_val:
                 signals[i] = 0.0
                 position = 0
             else:
