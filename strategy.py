@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,14 +37,14 @@ def generate_signals(prices):
     r3_level = close_1d_vals + camarilla_range * 4
     s3_level = close_1d_vals - camarilla_range * 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume spike filter: current volume > 2.0 * 30-period average (stricter)
+    # Volume spike filter: current volume > 1.5 * 30-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
