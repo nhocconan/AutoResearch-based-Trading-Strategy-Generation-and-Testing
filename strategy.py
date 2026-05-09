@@ -3,15 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Williams Alligator with 1w EMA trend filter and volume spike.
-# The Alligator (Jaw, Teeth, Lips) identifies trend absence/presence. 
-# Long when Lips > Teeth > Jaw (bullish alignment) with 1w uptrend and volume spike.
-# Short when Lips < Teeth < Jaw (bearish alignment) with 1w downtrend and volume spike.
-# Uses Williams Alligator (SMMA based) to avoid whipsaws in ranging markets.
-# Designed for 12h timeframe to target 12-37 trades/year, avoiding fee drag.
-# Works in bull markets (follow 1w uptrend) and bear markets (follow 1w downtrend).
-name = "12h_Williams_Alligator_1wEMA_VolumeSpike"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume spike.
+# Uses actual Donchian channels from 20-period high/low to identify institutional breakout levels.
+# Long when price breaks above upper band with 1d uptrend and volume spike; short when breaks below lower band with 1d downtrend.
+# Designed to work in both bull (follow 1d uptrend) and bear (follow 1d downtrend) markets.
+# Target: 20-50 trades/year to avoid fee drag.
+name = "4h_Donchian20_1dEMA_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,47 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Williams Alligator on 12h data (SMMA = Smoothed Moving Average)
-    # Jaw: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
-    def smma(arr, period, shift):
-        # Smoothed Moving Average: similar to EMA but with different smoothing
-        if len(arr) < period + shift:
-            return np.full_like(arr, np.nan, dtype=float)
-        result = np.full_like(arr, np.nan, dtype=float)
-        # First value is simple average
-        result[period + shift - 1] = np.mean(arr[shift:period + shift])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_VALUE) / period
-        for i in range(period + shift, len(arr)):
-            result[i] = (result[i-1] * (period - 1) + arr[i]) / period
-        return result
+    # Calculate Donchian(20) channels on 4h data
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    jaw = smma(close, 13, 8)
-    teeth = smma(close, 8, 5)
-    lips = smma(close, 5, 3)
+    # 1d EMA(34) for trend filter
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1w EMA(34) for trend filter
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation: volume > 2.0x 50-period EMA (high threshold for fewer trades)
-    vol_ema50 = pd.Series(volume).ewm(span=50, adjust=False, min_periods=50).mean().values
-    vol_confirm = volume > (2.0 * vol_ema50)
+    # Volume confirmation: volume > 1.8x 20-period EMA (higher threshold for fewer trades)
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (1.8 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need sufficient data for Alligator
+    start_idx = 20  # Need at least 20 periods for Donchian
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ema50[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,28 +57,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Enter long: Lips > Teeth > Jaw (bullish alignment) + 1w uptrend + volume spike
-            if (lips[i] > teeth[i] and teeth[i] > jaw[i] and 
-                price > ema_34_1w_aligned[i] and vol_confirm[i]):
+            # Enter long: price breaks above upper band + 1d uptrend + volume spike
+            if (price > high_20[i] and price > ema_34_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Lips < Teeth < Jaw (bearish alignment) + 1w downtrend + volume spike
-            elif (lips[i] < teeth[i] and teeth[i] < jaw[i] and 
-                  price < ema_34_1w_aligned[i] and vol_confirm[i]):
+            # Enter short: price breaks below lower band + 1d downtrend + volume spike
+            elif (price < low_20[i] and price < ema_34_1d_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bullish alignment breaks or trend reverses
-            if not (lips[i] > teeth[i] and teeth[i] > jaw[i]) or price < ema_34_1w_aligned[i]:
+            # Exit long: price returns below lower band or trend reverses
+            if price < low_20[i] or price < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bearish alignment breaks or trend reverses
-            if not (lips[i] < teeth[i] and teeth[i] < jaw[i]) or price > ema_34_1w_aligned[i]:
+            # Exit short: price returns above upper band or trend reverses
+            if price > high_20[i] or price > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
