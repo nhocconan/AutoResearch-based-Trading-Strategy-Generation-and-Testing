@@ -3,18 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_Pivot_R1S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_atr(high, low, close, period):
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0
-    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,87 +17,91 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 1:
+    # Get 4h data for Camarilla pivot levels and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # Calculate 4h Camarilla pivot levels: based on previous day's OHLC
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Using previous 4h bar to avoid look-ahead
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate pivot levels using previous bar
+    R1 = close_4h + (high_4h - low_4h) * 1.1 / 12
+    S1 = close_4h - (high_4h - low_4h) * 1.1 / 12
     
-    # Get 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
-        return np.zeros(n)
+    # Shift to align with current bar (use previous bar's levels)
+    R1 = np.roll(R1, 1)
+    S1 = np.roll(S1, 1)
+    R1[0] = np.nan
+    S1[0] = np.nan
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Get 4h trend: EMA20
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Camarilla pivot levels (R3, S3)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + (range_1d * 1.1 / 4)
-    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    # Align 4h indicators to 1h
+    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Align 1d Camarilla levels to 4h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    
-    # Volume filter: current 4h volume > 1.5 * 20-period average
+    # Volume filter: current 1h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)
+    start_idx = max(20, 20)  # EMA20 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(ema20_4h_aligned[i]) or
+            np.isnan(volume_filter[i]) or
+            np.isnan(session_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_12h_aligned[i]
-        r3_val = r3_1d_aligned[i]
-        s3_val = s3_1d_aligned[i]
+        r1_val = R1_aligned[i]
+        s1_val = S1_aligned[i]
+        ema20_val = ema20_4h_aligned[i]
         vol_filter = volume_filter[i]
+        sess_filter = session_filter[i]
         
         if position == 0:
-            # Enter long: close above R3 + above 12h EMA50 + volume filter
-            if close[i] > r3_val and close[i] > ema50_val and vol_filter:
-                signals[i] = 0.30
+            # Enter long: close above R1 + above EMA20 + volume + session
+            if close[i] > r1_val and close[i] > ema20_val and vol_filter and sess_filter:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: close below S3 + below 12h EMA50 + volume filter
-            elif close[i] < s3_val and close[i] < ema50_val and vol_filter:
-                signals[i] = -0.30
+            # Enter short: close below S1 + below EMA20 + volume + session
+            elif close[i] < s1_val and close[i] < ema20_val and vol_filter and sess_filter:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3
-            if close[i] < s3_val:
+            # Exit long: close below EMA20
+            if close[i] < ema20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: close above R3
-            if close[i] > r3_val:
+            # Exit short: close above EMA20
+            if close[i] > ema20_val:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.20
     
     return signals
