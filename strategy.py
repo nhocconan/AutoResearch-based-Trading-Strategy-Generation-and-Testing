@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_RSI_Divergence_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,100 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and momentum
+    # Get 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 1d close
+    # Calculate EMA34 on 1d close for trend filter
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.concatenate([np.full(14, np.nan), rsi_1d])
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate EMA50 on 1d close for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Calculate 6-period RSI for divergence detection
-    delta_6 = np.diff(close)
-    gain_6 = np.where(delta_6 > 0, delta_6, 0)
-    loss_6 = np.where(delta_6 < 0, -delta_6, 0)
-    avg_gain_6 = pd.Series(gain_6).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    avg_loss_6 = pd.Series(loss_6).ewm(alpha=1/6, adjust=False, min_periods=6).mean().values
-    rs_6 = avg_gain_6 / (avg_loss_6 + 1e-10)
-    rsi_6 = 100 - (100 / (1 + rs_6))
-    rsi_6 = np.concatenate([np.full(6, np.nan), rsi_6])
+    # Camarilla R3, S3 levels: (H-L)*1.1/6
+    camarilla_range = (high_1d - low_1d) * 1.1 / 6
+    r3_level = close_1d_vals + camarilla_range * 4
+    s3_level = close_1d_vals - camarilla_range * 4
     
-    # Align 1d indicators to 6h timeframe
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume spike filter: current volume > 1.8 * 20-period average
+    # Volume spike filter: current volume > 1.5 * 30-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.8)
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(rsi_6[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or
             np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_1d_val = rsi_1d_aligned[i]
-        ema50 = ema50_1d_aligned[i]
-        rsi_6_val = rsi_6[i]
+        ema34 = ema34_1d_aligned[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
         vol_spike = volume_spike[i]
         
         if position == 0:
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            # Plus 1d uptrend (price > EMA50) and volume spike
-            if (i >= 2 and 
-                close[i] < close[i-1] and 
-                close[i-1] < close[i-2] and
-                rsi_6_val > rsi_6[i-1] and 
-                rsi_6[i-1] > rsi_6[i-2] and
-                close[i] > ema50 and 
-                vol_spike):
+            # Enter long: Close breaks above R3 + 1d uptrend + volume spike
+            if close[i] > r3 and close[i] > ema34 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            # Plus 1d downtrend (price < EMA50) and volume spike
-            elif (i >= 2 and 
-                  close[i] > close[i-1] and 
-                  close[i-1] > close[i-2] and
-                  rsi_6_val < rsi_6[i-1] and 
-                  rsi_6[i-1] < rsi_6[i-2] and
-                  close[i] < ema50 and 
-                  vol_spike):
+            # Enter short: Close breaks below S3 + 1d downtrend + volume spike
+            elif close[i] < s3 and close[i] < ema34 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI overbought or trend turns down
-            if rsi_6_val > 70 or close[i] < ema50:
+            # Exit long: Close falls below S3 or 1d trend turns down
+            if close[i] < s3 or close[i] < ema34:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI oversold or trend turns up
-            if rsi_6_val < 30 or close[i] > ema50:
+            # Exit short: Close rises above R3 or 1d trend turns up
+            if close[i] > r3 or close[i] > ema34:
                 signals[i] = 0.0
                 position = 0
             else:
