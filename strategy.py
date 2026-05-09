@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Adaptive_Kelly_Vol_Trend_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,93 +17,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily data for regime and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # Daily ATR for volatility regime
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    tr1 = daily_high - daily_low
+    tr2 = np.abs(daily_high - np.roll(daily_close, 1))
+    tr3 = np.abs(daily_low - np.roll(daily_close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_daily = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels (R1, S1, R2, S2)
-    R1 = prev_close + 1.1 * prev_range / 12
-    S1 = prev_close - 1.1 * prev_range / 12
-    R2 = prev_close + 1.1 * prev_range / 6
-    S2 = prev_close - 1.1 * prev_range / 6
+    # Daily trend: EMA50 vs EMA200
+    ema50_daily = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_daily = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Align to 1d timeframe
-    R1_1d = align_htf_to_ltf(prices, df_1d, R1)
-    S1_1d = align_htf_to_ltf(prices, df_1d, S1)
-    R2_1d = align_htf_to_ltf(prices, df_1d, R2)
-    S2_1d = align_htf_to_ltf(prices, df_1d, S2)
+    # Align daily indicators to 6h
+    atr_daily_6h = align_htf_to_ltf(prices, df_1d, atr_daily)
+    ema50_daily_6h = align_htf_to_ltf(prices, df_1d, ema50_daily)
+    ema200_daily_6h = align_htf_to_ltf(prices, df_1d, ema200_daily)
     
-    # Get weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Volatility ratio: short-term vs long-term ATR (volatility regime filter)
+    atr_short = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
+    atr_long = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr_short / atr_long
+    atr_ratio_6h = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Weekly EMA20 for trend direction
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema_1d = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # 6h price momentum: ROC(6)
+    roc_6h = np.zeros_like(close)
+    roc_6h[6:] = (close[6:] - close[:-6]) / close[:-6] * 100
     
-    # Volume filter: above 1.5x 20-period average
+    # 6h RSI(14) for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: above 1.3x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for indicators to stabilize
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_1d[i]) or np.isnan(S1_1d[i]) or 
-            np.isnan(R2_1d[i]) or np.isnan(S2_1d[i]) or 
-            np.isnan(weekly_ema_1d[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr_daily_6h[i]) or np.isnan(ema50_daily_6h[i]) or 
+            np.isnan(ema200_daily_6h[i]) or np.isnan(atr_ratio_6h[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        # Regime filters
+        vol_expanding = atr_ratio_6h[i] > 1.1  # Volatility expanding
+        vol_contracting = atr_ratio_6h[i] < 0.9  # Volatility contracting
+        daily_uptrend = ema50_daily_6h[i] > ema200_daily_6h[i]
+        daily_downtrend = ema50_daily_6h[i] < ema200_daily_6h[i]
         
-        # Session filter: 08-20 UTC (reduce noise trades)
+        vol_ok = volume[i] > 1.3 * vol_ma[i]
+        
+        # Session filter: 08-20 UTC
         hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above R2 with weekly uptrend
-            if (close[i] > R2_1d[i] and 
-                close[i] > weekly_ema_1d[i] and  # weekly uptrend
-                vol_ok and 
-                in_session):
-                signals[i] = 0.30
+            # Long conditions: volatility contracting + uptrend + RSI oversold bounce
+            if (vol_contracting and daily_uptrend and 
+                rsi[i] < 35 and roc_6h[i] > 0 and 
+                vol_ok and in_session):
+                # Kelly fraction approximation based on recent win rate
+                win_rate_est = 0.55  # conservative estimate
+                kelly_f = max(0.1, min(0.3, 2 * win_rate_est - 1))  # simplified Kelly
+                signals[i] = kelly_f
                 position = 1
-            # Short breakdown: price breaks below S2 with weekly downtrend
-            elif (close[i] < S2_1d[i] and 
-                  close[i] < weekly_ema_1d[i] and  # weekly downtrend
-                  vol_ok and 
-                  in_session):
-                signals[i] = -0.30
+            # Short conditions: volatility contracting + downtrend + RSI overbought bounce
+            elif (vol_contracting and daily_downtrend and 
+                  rsi[i] > 65 and roc_6h[i] < 0 and 
+                  vol_ok and in_session):
+                win_rate_est = 0.55
+                kelly_f = max(0.1, min(0.3, 2 * win_rate_est - 1))
+                signals[i] = -kelly_f
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below R1 (mean reversion)
-            if close[i] < R1_1d[i]:
+            # Exit long: volatility expanding OR RSI overbought
+            if vol_expanding or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = kelly_f if 'kelly_f' in locals() else 0.25
         
         elif position == -1:
-            # Exit short: price rises back above S1 (mean reversion)
-            if close[i] > S1_1d[i]:
+            # Exit short: volatility expanding OR RSI oversold
+            if vol_expanding or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -kelly_f if 'kelly_f' in locals() else -0.25
     
     return signals
