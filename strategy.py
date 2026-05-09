@@ -1,15 +1,21 @@
+# 143706: 4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakouts with 1d trend filter and volume spike.
+# Works in bull (breakouts continue) and bear (mean reversion from extremes).
+# Uses 4h timeframe for optimal trade frequency (~25-50/year) and low fee drag.
+# 1d trend avoids counter-trend trades; volume confirms breakout strength.
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Keltner_Channel_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,90 +23,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 100:
         return np.zeros(n)
     
-    # Calculate daily Keltner Channel (20, 2)
-    atr_period = 20
-    ma_period = 20
-    mult = 2.0
+    # Get 4h data for volume filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 100:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Previous day's close for Camarilla calculation (R3, S3)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # ATR
-    atr = np.zeros(n)
-    atr[:atr_period] = np.nan
-    for i in range(atr_period, n):
-        if np.isnan(atr[i-1]):
-            atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
-        else:
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Calculate Camarilla levels (R3, S3)
+    r3 = prev_close + 1.1 * (prev_high - prev_low) * 3 / 4
+    s3 = prev_close - 1.1 * (prev_high - prev_low) * 3 / 4
     
-    # EMA for middle line
-    ema = np.zeros(n)
-    ema[:ma_period] = np.nan
-    for i in range(ma_period, n):
-        if np.isnan(ema[i-1]):
-            ema[i] = np.nanmean(close[i-ma_period+1:i+1])
-        else:
-            ema[i] = (close[i] - ema[i-1]) * (2 / (ma_period + 1)) + ema[i-1]
+    # Trend filter: 1d EMA50
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Keltner Bands
-    upper = ema + (atr * mult)
-    lower = ema - (atr * mult)
+    # Volume filter: current 4h volume > 1.5 * 20-period average
+    vol_series = pd.Series(df_4h['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_4h = df_4h['volume'].values > (vol_ma * 1.5)
     
-    # Weekly trend: 20-period EMA
-    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume filter: current volume > 1.5 * 20-period average
-    vol_ma = np.zeros(n)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_filter = volume > (vol_ma * 1.5)
-    
-    # Align weekly trend to daily
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align all to 4h
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_filter_4h_aligned = align_htf_to_ltf(prices, df_4h, volume_filter_4h)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(ma_period, atr_period, 20)  # Need enough data
+    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
+            np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        r3_val = r3_4h[i]
+        s3_val = s3_4h[i]
+        trend = ema50_1d_4h[i]
+        vol_filter = volume_filter_4h_aligned[i]
+        
         if position == 0:
-            # Enter long: close above upper Keltner band with volume and above weekly trend
-            if close[i] > upper[i] and close[i] > ema20_1w_aligned[i] and vol_filter[i]:
+            # Enter long: break above R3 with volume and above trend
+            if close[i] > r3_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: close below lower Keltner band with volume and below weekly trend
-            elif close[i] < lower[i] and close[i] < ema20_1w_aligned[i] and vol_filter[i]:
+            # Enter short: break below S3 with volume and below trend
+            elif close[i] < s3_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below middle line (EMA)
-            if close[i] < ema[i]:
+            # Exit long: close below S3 (mean reversion to center)
+            if close[i] < s3_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above middle line (EMA)
-            if close[i] > ema[i]:
+            # Exit short: close above R3 (mean reversion to center)
+            if close[i] > r3_val:
                 signals[i] = 0.0
                 position = 0
             else:
