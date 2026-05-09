@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_KAMA_Trend_With_RSI_And_Volume"
-timeframe = "4h"
+name = "6h_Williams_Alligator_Trend_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,86 +17,101 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and RSI
+    # Get 1d data for Alligator and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate KAMA on 1d close for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # KAMA parameters: ER period=10, fast=2, slow=30
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = change[1:] / np.where(volatility.sum(axis=0) == 0, 1, volatility.sum(axis=0))  # Simplified ER calculation
-    # Correct ER calculation: efficiency ratio = |net change| / sum|changes|
-    net_change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    total_change = np.cumsum(np.abs(np.diff(close_1d)))
-    total_change = np.insert(total_change, 0, 0)
-    er = np.where(total_change > 0, net_change / total_change, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Calculate RSI on 1d close
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Williams Alligator lines
+    # Jaw (blue): 13-period SMMA, 8 bars ahead
+    # Teeth (red): 8-period SMMA, 5 bars ahead
+    # Lips (green): 5-period SMMA, 3 bars ahead
     
-    # Volume spike filter: current volume > 1.5 * 20-period average
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        result = np.full_like(arr, np.nan, dtype=float)
+        sma = np.mean(arr[:period])
+        result[period-1] = sma
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
+    
+    jaw = smma(median_prices_1d := (high_1d + low_1d) / 2, 13)
+    teeth = smma(median_prices_1d, 8)
+    lips = smma(median_prices_1d, 5)
+    
+    # Shift jaw by 8, teeth by 5, lips by 3 (Alligator's future shift)
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    
+    # Align to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Trend filter: 50 EMA on 1d close
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA and indicators
+    start_idx = 50  # Need enough data for EMA50 and Alligator
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(kama_1d_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        kama_val = kama_1d_aligned[i]
-        rsi_val = rsi_1d_aligned[i]
-        vol_spike = volume_spike[i]
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
+        ema_1d = ema_50_1d_aligned[i]
+        vol_ok = volume_filter[i]
+        
+        # Alligator alignment: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
+        bullish_align = lips_val > teeth_val > jaw_val
+        bearish_align = lips_val < teeth_val < jaw_val
         
         if position == 0:
-            # Enter long: Close > KAMA and RSI > 50 with volume spike
-            if close[i] > kama_val and rsi_val > 50 and vol_spike:
+            # Enter long: Bullish alignment + price above 1d EMA50 + volume
+            if bullish_align and close[i] > ema_1d and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < KAMA and RSI < 50 with volume spike
-            elif close[i] < kama_val and rsi_val < 50 and vol_spike:
+            # Enter short: Bearish alignment + price below 1d EMA50 + volume
+            elif bearish_align and close[i] < ema_1d and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < KAMA or RSI < 40
-            if close[i] < kama_val or rsi_val < 40:
+            # Exit long: Bearish alignment or price below EMA50
+            if bearish_align or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > KAMA or RSI > 60
-            if close[i] > kama_val or rsi_val > 60:
+            # Exit short: Bullish alignment or price above EMA50
+            if bullish_align or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
