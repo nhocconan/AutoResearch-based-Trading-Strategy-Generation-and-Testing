@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_RSI_Sticky_Trend_Reversal"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and trend filter
+    # Get 1d data for RSI and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Camarilla R3, S3, R4, S4 levels
-    R3 = prev_close + 1.0 * (prev_high - prev_low)
-    S3 = prev_close - 1.0 * (prev_high - prev_low)
-    R4 = prev_high + 1.0 * (prev_high - prev_low)
-    S4 = prev_low - 1.0 * (prev_high - prev_low)
-    
-    # Align to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Calculate 34-period EMA on 1d close for trend filter
+    # Calculate 14-period RSI on 1d close
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate 50-period EMA on 1d close for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Calculate 20-period volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,46 +43,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need 34 for EMA, 20 for volume average
+    start_idx = max(14, 20)  # Need 14 for RSI, 20 for volume average
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3 = R3_aligned[i]
-        s3 = S3_aligned[i]
-        r4 = R4_aligned[i]
-        s4 = S4_aligned[i]
-        ema_1d = ema_34_1d_aligned[i]
+        rsi = rsi_1d_aligned[i]
+        ema_1d = ema_50_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Close > R3 AND price > 1d EMA34 (uptrend) AND volume > 2.0x average
-            if close[i] > r3 and close[i] > ema_1d and vol > 2.0 * vol_ma_val:
+            # Enter long: RSI < 30 (oversold) AND price > 1d EMA50 (uptrend) AND volume > 1.5x average
+            if rsi < 30 and close[i] > ema_1d and vol > 1.5 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S3 AND price < 1d EMA34 (downtrend) AND volume > 2.0x average
-            elif close[i] < s3 and close[i] < ema_1d and vol > 2.0 * vol_ma_val:
+            # Enter short: RSI > 70 (overbought) AND price < 1d EMA50 (downtrend) AND volume > 1.5x average
+            elif rsi > 70 and close[i] < ema_1d and vol > 1.5 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < S3 OR trend reverses (price < 1d EMA34)
-            if close[i] < s3 or close[i] < ema_1d:
+            # Exit long: RSI > 50 (exit overbought) OR trend reverses (price < 1d EMA50)
+            if rsi > 50 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > R3 OR trend reverses (price > 1d EMA34)
-            if close[i] > r3 or close[i] > ema_1d:
+            # Exit short: RSI < 50 (exit oversold) OR trend reverses (price > 1d EMA50)
+            if rsi < 50 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
