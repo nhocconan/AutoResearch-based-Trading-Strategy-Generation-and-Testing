@@ -1,19 +1,15 @@
-# NOTE: The code below is a direct copy of the working strategy from experiment #143763.
-# It follows all the rules: uses 6h timeframe, HTF data loaded once, proper discrete sizing,
-# and has demonstrated sufficient trade frequency and Sharpe in prior testing.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_HT"
-timeframe = "6h"
+name = "12h_KAMA_RSI_Chop"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,31 +17,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and Camarilla levels
+    # Get 1d data for Choppiness index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 for trend
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # 1d Camarilla levels (R3, S3)
+    # 1d Choppiness Index (CHOP)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
-    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
     
-    # 1d volume average for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # Align all to 6h
-    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    camarilla_high_6h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_6h = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    vol_avg_1d_6h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop = 100 * log10(sum(trr14)/(hh-ll)) / log10(14)
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    denominator = hh - ll
+    chop = 100 * np.log10(sum_tr / denominator) / np.log10(14)
+    
+    chop = np.where(denominator == 0, 50, chop)  # avoid division by zero
+    
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 12h KAMA
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_12h, k=10))  # 10-period change
+    change = np.concatenate([[np.nan]*10, change])  # align
+    
+    volatility = np.abs(np.diff(close_12h))
+    volatility = np.concatenate([[np.nan], volatility])
+    vol_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum().values
+    
+    er = change / vol_sum
+    er = np.where(vol_sum == 0, 0, er)
+    
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2  # fast=2, slow=30
+    kama = np.zeros_like(close_12h)
+    kama[0] = close_12h[0]
+    for i in range(1, len(close_12h)):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    
+    kama_12h = align_htf_to_ltf(prices, df_12h, kama)
+    
+    # 12h RSI
+    delta = np.diff(close_12h)
+    delta = np.concatenate([[np.nan], delta])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    
+    rs = avg_gain / avg_loss
+    rs = np.where(avg_loss == 0, 0, rs)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_12h = align_htf_to_ltf(prices, df_12h, rsi)
     
     signals = np.zeros(n)
     position = 0
@@ -53,43 +98,58 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_6h[i]) or np.isnan(camarilla_high_6h[i]) or 
-            np.isnan(camarilla_low_6h[i]) or np.isnan(vol_avg_1d_6h[i])):
+        if (np.isnan(chop_12h[i]) or np.isnan(kama_12h[i]) or 
+            np.isnan(rsi_12h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema34_1d_6h[i]
-        resistance = camarilla_high_6h[i]
-        support = camarilla_low_6h[i]
-        vol_avg = vol_avg_1d_6h[i]
-        vol_ok = volume[i] > vol_avg * 1.5
+        chop_val = chop_12h[i]
+        kama_val = kama_12h[i]
+        rsi_val = rsi_12h[i]
+        price = close[i]
         
-        if position == 0:
-            # Long: break above R3 with volume and above 1d EMA34
-            if close[i] > resistance and vol_ok and close[i] > trend:
-                signals[i] = 0.25
-                position = 1
-            # Short: break below S3 with volume and below 1d EMA34
-            elif close[i] < support and vol_ok and close[i] < trend:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Exit long: close below S3 or trend reversal
-            if close[i] < support or close[i] < trend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: close above R3 or trend reversal
-            if close[i] > resistance or close[i] > trend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Chop filter: range when > 61.8, trend when < 38.2
+        if chop_val > 61.8:  # ranging market - mean revert
+            if position == 0:
+                if price < kama_val and rsi_val < 40:
+                    signals[i] = 0.25  # long
+                    position = 1
+                elif price > kama_val and rsi_val > 60:
+                    signals[i] = -0.25  # short
+                    position = -1
+            elif position == 1:
+                if price > kama_val or rsi_val > 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                if price < kama_val or rsi_val < 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:  # trending market - follow trend
+            if position == 0:
+                if price > kama_val and rsi_val > 50:
+                    signals[i] = 0.25  # long
+                    position = 1
+                elif price < kama_val and rsi_val < 50:
+                    signals[i] = -0.25  # short
+                    position = -1
+            elif position == 1:
+                if price < kama_val or rsi_val < 40:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                if price > kama_val or rsi_val > 60:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
