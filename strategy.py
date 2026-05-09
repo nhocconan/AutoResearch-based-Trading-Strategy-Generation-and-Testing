@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_TRIX_VolumeSpike_ChopRegime"
-timeframe = "4h"
+name = "1d_WeeklyDonchian_Breakout_Trend_Volume_v4"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,76 +17,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for TRIX and chop filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate TRIX (15-period) on 1d close
-    close_1d = df_1d['close'].values
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix_raw = np.where(ema2[:-1] != 0, (ema3[1:] - ema2[:-1]) / ema2[:-1] * 100, 0)
-    trix_raw = np.concatenate([[0], trix_raw])  # align length
+    # Get daily data for Donchian channels (based on previous day)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Align TRIX to 4h
-    trix = align_htf_to_ltf(prices, df_1d, trix_raw)
+    # Calculate Donchian channels (20-day high/low) based on previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Chop filter on 1d (14-period)
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[0], tr2])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 20-period high and low of previous prices
+    high_series = pd.Series(prev_high)
+    low_series = pd.Series(prev_low)
+    upper_channel = high_series.rolling(window=20, min_periods=20).max().values
+    lower_channel = low_series.rolling(window=20, min_periods=20).min().values
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_1d * 14 / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) != 0, chop, 50)
-    chop = align_htf_to_ltf(prices, df_1d, chop)
+    # Align Donchian channels to daily
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
     
-    # Volume spike filter: current 4h volume > 2.0 * 30-period average
+    # Trend filter: 50-period EMA on weekly
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume filter: current daily volume > 1.5 * 20-day average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need enough data for TRIX and chop
+    start_idx = max(20, 50)  # Need enough data for calculations
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(chop[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        t = trix[i]
-        c = chop[i]
-        vol_spike = volume_spike[i]
+        upper = upper_aligned[i]
+        lower = lower_aligned[i]
+        trend = ema50_1w_aligned[i]
+        vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: TRIX crosses above -0.1, chop > 61.8 (range), volume spike
-            if t > -0.1 and trix[i-1] <= -0.1 and c > 61.8 and vol_spike:
+            # Enter long: break above upper channel with volume and above weekly trend
+            if close[i] > upper and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX crosses below +0.1, chop > 61.8 (range), volume spike
-            elif t < 0.1 and trix[i-1] >= 0.1 and c > 61.8 and vol_spike:
+            # Enter short: break below lower channel with volume and below weekly trend
+            elif close[i] < lower and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: TRIX crosses below zero OR chop < 38.2 (trend)
-            if t < 0 and trix[i-1] >= 0 or c < 38.2:
+            # Exit long: close below lower channel (mean reversion)
+            if close[i] < lower:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: TRIX crosses above zero OR chop < 38.2 (trend)
-            if t > 0 and trix[i-1] <= 0 or c < 38.2:
+            # Exit short: close above upper channel (mean reversion)
+            if close[i] > upper:
                 signals[i] = 0.0
                 position = 0
             else:
