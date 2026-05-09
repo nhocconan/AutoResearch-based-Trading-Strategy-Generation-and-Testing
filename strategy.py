@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-# Hypothesis: 1-day KAMA trend with 1-week EMA trend filter and volume confirmation
-# Long when KAMA is rising and price > KAMA, with 1-week EMA50 > EMA200 (bullish regime) and volume > 1.5x average
-# Short when KAMA is falling and price < KAMA, with 1-week EMA50 < EMA200 (bearish regime) and volume > 1.5x average
-# Exit when price crosses back through KAMA
-# Uses adaptive trend (KAMA) with higher timeframe regime filter to avoid false signals
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25
+# Hypothesis: 6h Ichimoku Cloud with daily trend filter - Long when price above cloud and TK cross bullish with daily close > weekly VWAP, short when price below cloud and TK cross bearish with daily close < weekly VWAP
+# Uses Ichimoku for trend/momentum and weekly VWAP for institutional bias. Works in bull/bear by following institutional flow.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25
 
-name = "1d_KAMA_1wEMA_Trend_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_1dWeeklyVWAP"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,107 +13,104 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (adaptive moving average)
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
+    # Ichimoku components (9, 26, 52 periods)
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_period))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1) if len(close) > 1 else np.array([])
-    # Pad volatility to match change length
-    if len(volatility) > 0:
-        volatility = np.concatenate([np.full(er_period-1, np.nan), volatility])
-    else:
-        volatility = np.full_like(change, np.nan)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    er = np.concatenate([np.full(er_period-1, np.nan), er])
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
     
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    sc = np.where(np.isnan(sc), 0, sc)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    if len(close) > er_period:
-        kama[er_period] = close[er_period]  # Seed
-        for i in range(er_period + 1, len(close)):
-            if not np.isnan(sc[i]):
-                kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            else:
-                kama[i] = kama[i-1]
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
     
-    # Get 1-week EMA data for regime filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # Not used for signals to avoid look-ahead
+    
+    # Get 1d data for weekly VWAP
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Calculate EMA50 and EMA200 on weekly data
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False).mean().values
+    # Calculate weekly VWAP from daily data
+    # Approximate weekly VWAP using 5-day period
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_num = (typical_price * df_1d['volume']).rolling(window=5, min_periods=5).sum()
+    vwap_den = df_1d['volume'].rolling(window=5, min_periods=5).sum()
+    weekly_vwap = vwap_num / vwap_den
     
-    # Regime: bullish if EMA50 > EMA200, bearish if EMA50 < EMA200
-    regime_bullish = ema50_1w > ema200_1w
-    regime_bearish = ema50_1w < ema200_1w
-    
-    # Align regime to daily timeframe
-    regime_bullish_aligned = align_htf_to_ltf(prices, df_1w, regime_bullish.astype(float))
-    regime_bearish_aligned = align_htf_to_ltf(prices, df_1w, regime_bearish.astype(float))
-    
-    # Volume confirmation: current volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    # Align Ichimoku and weekly VWAP to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, prices, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, prices, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, prices, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, prices, senkou_span_b.values)
+    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1d, weekly_vwap.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure enough data for indicators
+    start_idx = max(60, senkou_span_b_period)  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(regime_bullish_aligned[i]) or 
-            np.isnan(regime_bearish_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(weekly_vwap_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
+        # TK cross signals
+        tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
         if position == 0:
-            # Enter long: KAMA rising, price > KAMA, bullish regime, volume confirmation
-            if (close[i] > kama[i] and 
-                i > 0 and close[i-1] <= kama[i-1] and  # KAMA just turned up / price crossed above
-                regime_bullish_aligned[i] and
-                vol_confirm[i]):
+            # Enter long: price above cloud, TK cross bullish, and price above weekly VWAP
+            if (close[i] > cloud_top and 
+                tk_cross_bullish and
+                close[i] > weekly_vwap_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA falling, price < KAMA, bearish regime, volume confirmation
-            elif (close[i] < kama[i] and 
-                  i > 0 and close[i-1] >= kama[i-1] and  # KAMA just turned down / price crossed below
-                  regime_bearish_aligned[i] and
-                  vol_confirm[i]):
+            # Enter short: price below cloud, TK cross bearish, and price below weekly VWAP
+            elif (close[i] < cloud_bottom and 
+                  tk_cross_bearish and
+                  close[i] < weekly_vwap_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below KAMA
-            if close[i] < kama[i]:
+            # Exit long: price falls below cloud or TK cross turns bearish
+            if close[i] < cloud_bottom or not tk_cross_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above KAMA
-            if close[i] > kama[i]:
+            # Exit short: price rises above cloud or TK cross turns bullish
+            if close[i] > cloud_top or tk_cross_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
