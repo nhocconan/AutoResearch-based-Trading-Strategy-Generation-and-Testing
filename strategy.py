@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R1/S1 breakout with daily EMA trend filter and volume spike.
-# Uses price structure from daily pivots, trend filter from daily EMA34, and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume spike.
+# Uses price structure from 20-bar high/low, trend filter from 12h EMA50, and volume confirmation.
 # Designed to work in both bull and bear markets by requiring alignment with higher timeframe trend.
-# Target: 20-50 trades/year to minimize fee drag and improve generalization.
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+# Target: 25-40 trades/year to minimize fee drag and improve generalization.
+name = "4h_Donchian20_Breakout_12hEMA50_Volume"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,30 +21,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate daily pivot points (using prior day's OHLC)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Pivot Point = (H + L + C) / 3
-    pp = (daily_high + daily_low + daily_close) / 3.0
-    # Resistance 1 = (2 * PP) - Low
-    r1 = (2 * pp) - daily_low
-    # Support 1 = (2 * PP) - High
-    s1 = (2 * pp) - daily_high
-    
-    # Align daily pivot to 4h timeframe (with 1-bar delay for completed daily bar)
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: spike above 2.0x 24-period average (1 day of 4h bars)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -52,12 +40,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 24)  # Wait for EMA34 and volume MA
+    start_idx = max(50, 20, 24)  # Wait for EMA50, Donchian, and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i])):
+        if (np.isnan(ema_50_4h[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,32 +59,32 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         if position == 0:
-            # Long: price above daily S1, daily uptrend (price > EMA34), volume breakout
-            if (close[i] > s1_4h[i] and 
-                close[i] > ema_34_4h[i] and 
+            # Long: price breaks above 20-period high, 12h uptrend (price > EMA50), volume confirmation
+            if (close[i] > high_20[i] and 
+                close[i] > ema_50_4h[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below daily R1, daily downtrend (price < EMA34), volume breakdown
-            elif (close[i] < r1_4h[i] and 
-                  close[i] < ema_34_4h[i] and 
+            # Short: price breaks below 20-period low, 12h downtrend (price < EMA50), volume confirmation
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema_50_4h[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below daily S1 or trend reversal
-            if close[i] < s1_4h[i] or close[i] < ema_34_4h[i]:
+            # Exit long: price below 20-period low or trend reversal
+            if close[i] < low_20[i] or close[i] < ema_50_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above daily R1 or trend reversal
-            if close[i] > r1_4h[i] or close[i] > ema_34_4h[i]:
+            # Exit short: price above 20-period high or trend reversal
+            if close[i] > high_20[i] or close[i] > ema_50_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
