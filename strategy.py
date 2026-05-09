@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 4h timeframe with daily pivot structure (from 1d) and 4h trend filter.
-# Uses daily Camarilla levels (R1/S1) for breakout entries and 4h EMA20 for trend filter.
-# Daily pivot provides structural support/resistance that works in both bull and bear markets.
+# Hypothesis: 6h timeframe with daily volatility breakout and weekly trend filter.
+# Uses daily ATR-based volatility breakout (price > close + k*ATR for long, price < close - k*ATR for short)
+# combined with weekly EMA50 trend filter to avoid counter-trend trades.
+# Volatility breakouts capture momentum bursts, while weekly trend filter reduces whipsaw in ranging markets.
+# Designed to work in both bull and bear markets by filtering trades with higher timeframe trend.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
-# Daily data changes slowly, reducing whipsaw and improving win rate in ranging markets.
-# Volume confirmation ensures breakouts have conviction.
 
-name = "4h_Camarilla_R1_S1_4hEMA20_Trend_Volume"
-timeframe = "4h"
+name = "6h_ATRBreakout_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,72 +25,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R1, S1) from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
+    # Calculate daily ATR(14) for volatility breakout
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 12
-    s1 = prev_close - 1.1 * camarilla_range / 12
+    # Volatility breakout: k=0.5 (breakout when price moves 0.5x ATR from close)
+    k = 0.5
+    breakout_up = close > (close + k * atr)
+    breakout_down = close < (close - k * atr)
     
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r1
-    breakout_down = close < s1
-    
-    # Get 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 4h EMA20 trend filter
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Calculate 1w EMA50 trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    trend_up = close > ema_20_4h_aligned
-    trend_down = close < ema_20_4h_aligned
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * avg_volume)
+    trend_up = close > ema_50_1w_aligned
+    trend_down = close < ema_50_1w_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
             np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R1 + 4h uptrend + volume filter
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: volatility breakout up + weekly uptrend
+            if breakout_up[i] and trend_up[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + 4h downtrend + volume filter
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: volatility breakout down + weekly downtrend
+            elif breakout_down[i] and trend_down[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: volatility contraction or trend reversal
+            if close[i] < (close[i-1] + 0.25 * atr[i]) or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: volatility contraction or trend reversal
+            if close[i] > (close[i-1] - 0.25 * atr[i]) or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
