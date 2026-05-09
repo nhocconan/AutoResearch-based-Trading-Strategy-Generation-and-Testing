@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_4h_1d_Trend_Following_with_Volume_Confirmation
-Hypothesis: Use 4h trend (EMA34) and 1d momentum (RSI) for direction, with 1h entry on pullbacks to EMA21 confirmed by volume spikes. This captures trend continuation in both bull and bear markets while avoiding counter-trend trades. Low frequency expected due to multiple confluence requirements.
+6h_WilliamsAlligator_ElderRay_1wTrend
+Hypothesis: Williams Alligator (Jaw, Teeth, Lips) defines market structure, Elder Ray (Bull/Bear Power) measures momentum, 1w EMA200 filters trend direction.
+Long when: price above Teeth, Bull Power > 0, and close > 1w EMA200.
+Short when: price below Teeth, Bear Power < 0, and close < 1w EMA200.
+Uses 6h timeframe for execution with weekly trend filter to avoid whipsaws in ranging markets.
+Designed for low trade frequency (12-37/year) to minimize fee drag.
 """
 
-name = "1h_4h_1d_Trend_Following_with_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_WilliamsAlligator_ElderRay_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,87 +24,115 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h EMA34 for trend direction
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for momentum filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Calculate weekly EMA200 for trend filter
+    ema_200_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 200:
+        ema_200_1w[199] = np.mean(close_1w[0:200])
+        for i in range(200, len(close_1w)):
+            ema_200_1w[i] = (ema_200_1w[i-1] * 199 + close_1w[i]) / 200
     
-    # 1d RSI for momentum
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # 1h EMA21 for entry timing
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False).mean().values
+    # Williams Alligator: SMAs of median price (HL/2)
+    median_price = (high + low) / 2
     
-    # Volume spike: current volume / 20-period average
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False).mean().values
-    volume_ratio = volume / (vol_ma + 1e-10)
+    # Jaw: 13-period SMA, shifted 8 bars
+    jaw = np.full_like(median_price, np.nan)
+    if len(median_price) >= 13:
+        for i in range(12, len(median_price)):
+            jaw[i] = np.mean(median_price[i-12:i+1])
+    jaw = np.roll(jaw, 8)  # shift 8 bars forward
+    
+    # Teeth: 8-period SMA, shifted 5 bars
+    teeth = np.full_like(median_price, np.nan)
+    if len(median_price) >= 8:
+        for i in range(7, len(median_price)):
+            teeth[i] = np.mean(median_price[i-7:i+1])
+    teeth = np.roll(teeth, 5)  # shift 5 bars forward
+    
+    # Lips: 5-period SMA, shifted 3 bars
+    lips = np.full_like(median_price, np.nan)
+    if len(median_price) >= 5:
+        for i in range(4, len(median_price)):
+            lips[i] = np.mean(median_price[i-4:i+1])
+    lips = np.roll(lips, 3)  # shift 3 bars forward
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = np.full_like(close, np.nan)
+    if len(close) >= 13:
+        ema13[12] = np.mean(close[0:13])
+        for i in range(13, len(close)):
+            ema13[i] = (ema13[i-1] * 12 + close[i]) / 13
+    
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    start_idx = max(34, 21, 20)  # Ensure all indicators are ready
+    start_idx = max(20, 13)  # Ensure Alligator and EMA13 are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(ema_21[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(teeth[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
+        bars_since_entry += 1
+        
         if position == 0:
-            # Enter long: 4h uptrend, 1d bullish momentum, price pulls back to EMA21 with volume spike
-            if (ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1] and  # 4h EMA rising
-                rsi_1d_aligned[i] > 50 and  # 1d bullish momentum
-                close[i] <= ema_21[i] * 1.005 and  # Near or slightly above EMA21 (pullback)
-                volume_ratio[i] > 1.5):  # Volume confirmation
-                signals[i] = 0.20
+            # Enter long: price above Teeth, Bull Power positive, and above weekly EMA200
+            if (close[i] > teeth[i] and 
+                bull_power[i] > 0 and 
+                close[i] > ema_200_1w_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: 4h downtrend, 1d bearish momentum, price bounces to EMA21 with volume spike
-            elif (ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1] and  # 4h EMA falling
-                  rsi_1d_aligned[i] < 50 and  # 1d bearish momentum
-                  close[i] >= ema_21[i] * 0.995 and  # Near or slightly below EMA21 (bounce)
-                  volume_ratio[i] > 1.5):  # Volume confirmation
-                signals[i] = -0.20
+                bars_since_entry = 0
+            # Enter short: price below Teeth, Bear Power negative, and below weekly EMA200
+            elif (close[i] < teeth[i] and 
+                  bear_power[i] < 0 and 
+                  close[i] < ema_200_1w_aligned[i]):
+                signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         
         elif position == 1:
-            # Exit long: 4h trend turns down OR 1d momentum turns bearish
-            if (ema_34_4h_aligned[i] < ema_34_4h_aligned[i-1] or  # 4h EMA falling
-                rsi_1d_aligned[i] < 50):  # 1d momentum bearish
-                signals[i] = 0.0
-                position = 0
+            # Minimum holding period: 2 bars
+            if bars_since_entry < 2:
+                signals[i] = 0.25
             else:
-                signals[i] = 0.20
+                # Exit long: price crosses below Teeth OR trend reversal (below weekly EMA200)
+                if close[i] < teeth[i] or close[i] < ema_200_1w_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: 4h trend turns up OR 1d momentum turns bullish
-            if (ema_34_4h_aligned[i] > ema_34_4h_aligned[i-1] or  # 4h EMA rising
-                rsi_1d_aligned[i] > 50):  # 1d momentum bullish
-                signals[i] = 0.0
-                position = 0
+            # Minimum holding period: 2 bars
+            if bars_since_entry < 2:
+                signals[i] = -0.25
             else:
-                signals[i] = -0.20
+                # Exit short: price crosses above Teeth OR trend reversal (above weekly EMA200)
+                if close[i] > teeth[i] or close[i] > ema_200_1w_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
