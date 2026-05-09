@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Keltner Channel breakout with 1-week EMA50 trend filter and volume spike confirmation.
-# Keltner Channel (ATR-based) captures volatility breakouts, weekly EMA50 ensures trend alignment,
-# volume spike (>1.5x average) confirms institutional interest. Designed to work in both bull
-# and bear markets by following the weekly trend direction. Target: 20-80 total trades over 4 years.
-name = "1d_KeltnerBreakout_1wEMA50_VolumeSpike"
-timeframe = "1d"
+# Hypothesis: 6h Choppiness Index regime filter with 12h Donchian breakout.
+# Choppiness Index > 61.8 indicates ranging market (mean reversion), < 38.2 indicates trending.
+# In trending regime, take Donchian breakout in direction of trend; in ranging regime,
+# take mean reversion at Donchian channel extremes. Uses 12h for trend/structure to avoid
+# whipsaws. Designed for low-frequency, high-conviction trades in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year).
+name = "6h_Chop_DonchianBreakout_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,74 +23,104 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for Donchian channels and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 40:
         return np.zeros(n)
     
-    # Calculate 50-period EMA on 1w close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 20-period Donchian channels on 12h high/low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate ATR(20) for Keltner Channel
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Donchian upper/lower (20-period high/low)
+    donch_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Keltner Channel: EMA(20) ± 2*ATR
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2.0 * atr
-    kc_lower = ema_20 - 2.0 * atr
+    # Calculate 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 12h indicators to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_12h, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_12h, donch_low)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Calculate Choppiness Index on 6h data (14-period)
+    # CHOP = 100 * log10(sum(ATR over n) / (max(high) - min(low))) / log10(n)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    # Avoid division by zero
+    hl_range = highest_high - lowest_low
+    chop = np.where(hl_range > 0, 100 * np.log10(atr_sum / hl_range) / np.log10(14), 50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need 50 periods for 1w EMA50 and ATR20
+    start_idx = 50  # Need 50 periods for EMA50 and other indicators
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema_20[i]):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1w = ema_50_1w_aligned[i]
-        upper = kc_upper[i]
-        lower = kc_lower[i]
-        ema20 = ema_20[i]
-        vol = volume[i]
+        donch_high_val = donch_high_aligned[i]
+        donch_low_val = donch_low_aligned[i]
+        ema_12h = ema_50_12h_aligned[i]
+        chop_val = chop[i]
+        curr_close = close[i]
         
-        # Calculate 20-period volume average for spike detection
+        # Calculate volume spike for confirmation (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
         else:
             vol_ma = np.mean(volume[:i]) if i > 0 else volume[i]
         
+        vol_spike = volume[i] > 1.5 * vol_ma  # Require 1.5x average volume
+        
         if position == 0:
-            # Enter long: Close > KC Upper AND price > 1w EMA50 (uptrend) AND volume > 1.5x average
-            if close[i] > upper and close[i] > ema_1w and vol > 1.5 * vol_ma:
+            # Enter long: Donchian breakout above upper band AND uptrend (price > EMA50) AND volume spike
+            # Only in trending regime (CHOP < 38.2) or strong breakout in any regime
+            if (curr_close > donch_high_val and curr_close > ema_12h and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < KC Lower AND price < 1w EMA50 (downtrend) AND volume > 1.5x average
-            elif close[i] < lower and close[i] < ema_1w and vol > 1.5 * vol_ma:
+            # Enter short: Donchian breakdown below lower band AND downtrend (price < EMA50) AND volume spike
+            elif (curr_close < donch_low_val and curr_close < ema_12h and vol_spike):
                 signals[i] = -0.25
                 position = -1
+            # Mean reversion in ranging market: buy at support, sell at resistance
+            elif chop_val > 61.8:  # Ranging market
+                if curr_close <= donch_low_val and vol_spike:  # Near support, go long
+                    signals[i] = 0.25
+                    position = 1
+                elif curr_close >= donch_high_val and vol_spike:  # Near resistance, go short
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: Close < EMA(20) OR trend reverses (price < 1w EMA50)
-            if close[i] < ema20 or close[i] < ema_1w:
+            # Exit long: price returns to EMA50 OR Donchian lower band touched OR trend reversal
+            if (curr_close <= ema_12h or curr_close <= donch_low_val or 
+                chop_val > 61.8):  # Exit if market becomes ranging
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > EMA(20) OR trend reverses (price > 1w EMA50)
-            if close[i] > ema20 or close[i] > ema_1w:
+            # Exit short: price returns to EMA50 OR Donchian upper band touched OR trend reversal
+            if (curr_close >= ema_12h or curr_close >= donch_high_val or 
+                chop_val > 61.8):  # Exit if market becomes ranging
                 signals[i] = 0.0
                 position = 0
             else:
