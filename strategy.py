@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -50,6 +50,14 @@ def generate_signals(prices):
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     vol_spike = volume > (1.5 * vol_ema20)
     
+    # Weekly trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_14_1w = pd.Series(close_1w).ewm(span=14, adjust=False, min_periods=14).mean().values
+    ema_14_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_14_1w)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -57,8 +65,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_14_1w_aligned[i]) or
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,12 +76,14 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and above daily EMA34
-            if (price > r1_4h[i] and vol_spike[i] and price > ema_34_1d_aligned[i]):
+            # Long: price breaks above R1 with volume spike, above daily EMA34, and above weekly EMA14
+            if (price > r1_4h[i] and vol_spike[i] and 
+                price > ema_34_1d_aligned[i] and price > ema_14_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and below daily EMA34
-            elif (price < s1_4h[i] and vol_spike[i] and price < ema_34_1d_aligned[i]):
+            # Short: price breaks below S1 with volume spike, below daily EMA34, and below weekly EMA14
+            elif (price < s1_4h[i] and vol_spike[i] and 
+                  price < ema_34_1d_aligned[i] and price < ema_14_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
