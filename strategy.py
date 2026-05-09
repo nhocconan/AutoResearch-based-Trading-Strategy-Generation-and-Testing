@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Donchian20_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_KAMA_Direction_RSI_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,68 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and volume profile
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # KAMA (Kaufman Adaptive Moving Average) - 14 period
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    er[1:] = np.where(volatility[1:] != 0, change[1:] / volatility[1:], 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate daily average volume for volume spike filter
-    volume_1d = df_1d['volume'].values
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 for Donchian channels
+    start_idx = 20  # Need enough for RSI/KAMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(avg_volume_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or np.isnan(low_20[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema_1d = ema_34_1d_aligned[i]
-        avg_vol = avg_volume_1d_aligned[i]
-        upper_donchian = high_20[i]
-        lower_donchian = low_20[i]
-        
-        # Volume spike condition: current volume > 1.5x daily average
-        volume_spike = volume[i] > 1.5 * avg_vol
+        kama_val = kama_aligned[i]
+        rsi_val = rsi_aligned[i]
         
         if position == 0:
-            # Enter long: Break above upper Donchian + uptrend + volume spike
-            if close[i] > upper_donchian and close[i] > ema_1d and volume_spike:
+            # Enter long: Price above KAMA and RSI > 50 (bullish momentum)
+            if close[i] > kama_val and rsi_val > 50:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Break below lower Donchian + downtrend + volume spike
-            elif close[i] < lower_donchian and close[i] < ema_1d and volume_spike:
+            # Enter short: Price below KAMA and RSI < 50 (bearish momentum)
+            elif close[i] < kama_val and rsi_val < 50:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price closes below lower Donchian or trend reverses
-            if close[i] < lower_donchian or close[i] < ema_1d:
+            # Exit long: Price crosses below KAMA or RSI < 40 (momentum loss)
+            if close[i] < kama_val or rsi_val < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price closes above upper Donchian or trend reverses
-            if close[i] > upper_donchian or close[i] > ema_1d:
+            # Exit short: Price crosses above KAMA or RSI > 60 (momentum loss)
+            if close[i] > kama_val or rsi_val > 60:
                 signals[i] = 0.0
                 position = 0
             else:
