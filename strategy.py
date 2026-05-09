@@ -3,8 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+# Hypothesis: 6h timeframe with weekly pivot structure (R2/S2) as trend filter,
+# daily RSI(14) for overbought/oversold conditions, and volume confirmation.
+# Weekly pivot provides structural support/resistance that works in both bull/bear markets.
+# RSI avoids chasing extremes, volume confirms institutional participation.
+# Target: 20-60 trades/year (80-240 over 4 years) to minimize fee drag.
+name = "6h_WeeklyPivot_R2S2_RSI14_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,43 +22,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter and 1d data for Camarilla pivots
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot calculation and daily data for RSI
+    df_weekly = get_htf_data(prices, '1w')
+    df_daily = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_weekly) < 50 or len(df_daily) < 50:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Weekly pivot points from previous week's OHLC
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate pivot and levels from previous day's OHLC
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    prev_weekly_high = np.roll(weekly_high, 1)
+    prev_weekly_low = np.roll(weekly_low, 1)
+    prev_weekly_close = np.roll(weekly_close, 1)
+    prev_weekly_high[0] = np.nan
+    prev_weekly_low[0] = np.nan
+    prev_weekly_close[0] = np.nan
     
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_close_1d[0] = np.nan
+    prev_weekly_range = prev_weekly_high - prev_weekly_low
+    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    r2 = weekly_pivot + (prev_weekly_high - prev_weekly_low)
+    s2 = weekly_pivot - (prev_weekly_high - prev_weekly_low)
     
-    prev_daily_range = prev_high_1d - prev_low_1d
-    pivot = (prev_high_1d + prev_low_1d + prev_close_1d) / 3
-    r1 = pivot + 1.1 * prev_daily_range / 6
-    s1 = pivot - 1.1 * prev_daily_range / 6
+    # Daily RSI(14)
+    close_daily = pd.Series(df_daily['close'].values)
+    delta = close_daily.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Align Camarilla levels to 1h
-    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
+    # Volume average (24-period for 6h = 4 days)
+    vol_avg = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    # Volume spike detection (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Align weekly R2/S2 and daily RSI to 6h timeframe
+    r2_6h = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_6h = align_htf_to_ltf(prices, df_weekly, s2)
+    rsi_6h = align_htf_to_ltf(prices, df_daily, rsi_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,45 +72,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema50_1h[i]) or 
+        if (np.isnan(r2_6h[i]) or np.isnan(s2_6h[i]) or np.isnan(rsi_6h[i]) or 
             np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        # Volume condition: current volume > 2.5 x 20-period average
-        vol_spike = volume[i] > vol_avg[i] * 2.5
+        # Volume condition: current volume > 2.0 x 24-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            if in_session:
-                # Long: Break above Camarilla R1 with uptrend and volume spike
-                if close[i] > r1_1h[i] and close[i] > ema50_1h[i] and vol_spike:
-                    signals[i] = 0.20
-                    position = 1
-                # Short: Break below Camarilla S1 with downtrend and volume spike
-                elif close[i] < s1_1h[i] and close[i] < ema50_1h[i] and vol_spike:
-                    signals[i] = -0.20
-                    position = -1
+            # Long: Price above weekly R2 with RSI < 70 (not overbought) and volume spike
+            if close[i] > r2_6h[i] and rsi_6h[i] < 70 and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Short: Price below weekly S2 with RSI > 30 (not oversold) and volume spike
+            elif close[i] < s2_6h[i] and rsi_6h[i] > 30 and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below Camarilla S1 OR trend turns down
-            if close[i] < s1_1h[i] or close[i] < ema50_1h[i]:
+            # Exit long: Price falls back below weekly S2 OR RSI > 70 (overbought)
+            if close[i] < s2_6h[i] or rsi_6h[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above Camarilla R1 OR trend turns up
-            if close[i] > r1_1h[i] or close[i] > ema50_1h[i]:
+            # Exit short: Price rises back above weekly R2 OR RSI < 30 (oversold)
+            if close[i] > r2_6h[i] or rsi_6h[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
