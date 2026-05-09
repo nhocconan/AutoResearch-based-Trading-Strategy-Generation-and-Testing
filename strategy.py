@@ -3,32 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_TrixMomentum_VolumeRegime"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_camarilla(high, low, close):
-    # Camarilla pivot levels: H3, L3, H4, L4
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    h3 = close + range_val * 1.1 / 2
-    l3 = close - range_val * 1.1 / 2
-    h4 = close + range_val * 1.1
-    l4 = close - range_val * 1.1
-    return h3, l3, h4, l4
-
-def calculate_atr(high, low, close, period):
-    tr1 = np.abs(high - low)
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0
-    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -36,92 +17,107 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla, trend, and volatility
+    # Get 1d data for TRIX and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d TRIX (TRIPLE EXPONENTIAL MOVING AVERAGE)
     close_1d = df_1d['close'].values
-    h3_1d, l3_1d, h4_1d, l4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix_raw = (ema3 / ema3.shift(1) - 1) * 100
+    trix = trix_raw.fillna(0).values
     
-    # Calculate 1d ATR for volatility filter
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 10)
+    # Align 1d TRIX to 4h
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
     
-    # Calculate 1d EMA34 trend
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d indicators to 12h timeframe
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume filter: current 12h volume > 1.5 * 20-period average
+    # Volume filter: current 4h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Volatility filter: current 12h ATR > 0.8 * 1d ATR (ensures sufficient volatility)
-    tr_12h = np.maximum(np.abs(high - low), np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr_12h[0] = 0
-    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
-    vol_filter = atr_12h > (atr_1d_aligned * 0.8)
+    # Choppiness regime filter (1d) - avoids choppy markets
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d_arr, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d_arr, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    
+    # ATR(14)
+    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Highest high and lowest low over 14 periods
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    
+    # Chop calculation: 100 * log10(sum(ATR14)/ (HH - LL)) / log10(14)
+    sum_atr = pd.Series(atr14).rolling(window=14, min_periods=14).sum().values
+    hh_ll = highest_high - lowest_low
+    chop = np.where(hh_ll > 0, 100 * np.log10(sum_atr / hh_ll) / np.log10(14), 50)
+    chop = np.nan_to_num(chop, nan=50)
+    
+    # Align chop to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)
+    start_idx = max(30, 20)  # Warmup for TRIX and volume
     
     for i in range(start_idx, n):
-        if (np.isnan(h3_1d_aligned[i]) or
-            np.isnan(l3_1d_aligned[i]) or
-            np.isnan(h4_1d_aligned[i]) or
-            np.isnan(l4_1d_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
-            np.isnan(volume_filter[i]) or
-            np.isnan(vol_filter[i])):
+        if (np.isnan(trix_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        h3_val = h3_1d_aligned[i]
-        l3_val = l3_1d_aligned[i]
-        h4_val = h4_1d_aligned[i]
-        l4_val = l4_1d_aligned[i]
-        ema34_val = ema34_1d_aligned[i]
-        vol_filt = volume_filter[i]
-        vol_filt2 = vol_filter[i]
+        trix_val = trix_aligned[i]
+        chop_val = chop_aligned[i]
+        vol_filter = volume_filter[i]
         
+        # Only trade in trending markets (Chop < 61.8) or ranging markets (Chop > 61.8) with momentum
         if position == 0:
-            # Enter long: price > H3 + above EMA34 + volume filter + volatility filter
-            if close[i] > h3_val and close[i] > ema34_val and vol_filt and vol_filt2:
+            # Enter long: TRIX > 0 (bullish momentum) + volume filter + not extreme chop
+            if trix_val > 0 and vol_filter and chop_val < 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < L3 + below EMA34 + volume filter + volatility filter
-            elif close[i] < l3_val and close[i] < ema34_val and vol_filt and vol_filt2:
+            # Enter short: TRIX < 0 (bearish momentum) + volume filter + not extreme chop
+            elif trix_val < 0 and vol_filter and chop_val < 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < L3 or below EMA34
-            if close[i] < l3_val or close[i] < ema34_val:
+            # Exit long: TRIX turns negative or chop becomes too high (range)
+            if trix_val < 0 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > H3 or above EMA34
-            if close[i] > h3_val or close[i] > ema34_val:
+            # Exit short: TRIX turns positive or chop becomes too high (range)
+            if trix_val > 0 or chop_val > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+if __name__ == "__main__":
+    # Quick self-test
+    import yfinance as yf
+    data = yf.download("BTC-USD", start="2021-01-01", end="2024-01-01", interval="1h")
+    data.reset_index(inplace=True)
+    data.rename(columns={"Datetime": "open_time"}, inplace=True)
+    # For testing only - real implementation uses 4h data from Binance
+    print("Self-test placeholder - actual testing uses 4h Binance data")
