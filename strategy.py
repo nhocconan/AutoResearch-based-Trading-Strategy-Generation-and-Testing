@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4H_1D_Camarilla_R1_S1_Breakout_TrendFilter_Bounded
-# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend (EMA34 > EMA89) and volume confirmation.
-# Short when price breaks below Camarilla S1 level with 1d downtrend (EMA34 < EMA89) and volume confirmation.
-# Uses dual EMA trend filter for stronger trend confirmation and avoids sideways markets.
-# Includes maximum holding period of 30 bars (15 days) to prevent overtrading and reduce tail risk.
-# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
+# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
 
-name = "4H_1D_Camarilla_R1_S1_Breakout_TrendFilter_Bounded"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,10 +41,9 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
     camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # 1d trend: EMA(34) and EMA(89) for stronger trend filter
+    # 1d trend: EMA(34) on close
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_89 = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    trend_up = ema_34 > ema_89  # Strong uptrend
+    trend_up = close_1d > ema_34
     
     # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,7 +56,6 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
     # Start after we have enough data
     start_idx = 100
@@ -69,16 +66,6 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
-            continue
-        
-        bars_since_entry += 1
-        
-        # Force exit after 30 bars (15 days) to prevent overtrading
-        if position != 0 and bars_since_entry >= 30:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
             continue
         
         if position == 0:
@@ -86,19 +73,16 @@ def generate_signals(prices):
             if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
             # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
             elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         
         elif position == 1:
             # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
             if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         
@@ -107,7 +91,6 @@ def generate_signals(prices):
             if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
