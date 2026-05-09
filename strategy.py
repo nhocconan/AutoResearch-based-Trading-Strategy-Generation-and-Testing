@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA20 trend filter.
-# Uses price channel breakouts for trend following, volume to confirm institutional interest,
-# and 12h EMA20 to filter counter-trend trades. Designed for fewer, higher-quality trades
-# to avoid fee drag while capturing trends in both bull and bear markets.
-name = "4h_Donchian20_Volume_12hEMA20"
-timeframe = "4h"
+# Hypothesis: 1d KAMA trend filter with 1w RSI extremes and volume confirmation.
+# KAMA adapts to market conditions - fast in trends, slow in ranges.
+# Weekly RSI >70 or <30 identifies extremes in the longer trend.
+# Volume > 1.5x 20-day average confirms institutional participation.
+# Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+name = "1d_KAMA_RSI_Extremes_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,35 +22,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA20 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # 1d KAMA trend filter
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.6645 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1w RSI for extreme conditions
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate 12h EMA20
-    ema_20_12h = pd.Series(df_12h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    rsi_period = 14
+    delta = np.diff(df_1w['close'].values, prepend=df_1w['close'].values[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Donchian channels (20-period) on 4h data
-    # Using pandas for rolling window, then converting to numpy
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike filter: volume > 1.5x 20-period EMA
+    # Align 1w RSI to 1d
+    rsi_1d = align_htf_to_ltf(prices, df_1w, rsi)
+    
+    # Volume confirmation: volume > 1.5x 20-day EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema20)
+    vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need 20 periods for Donchian
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi_1d[i]) or 
+            np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,26 +71,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above Donchian high with volume spike and above 12h EMA20
-            if (price > donchian_high[i] and vol_spike[i] and price > ema_20_12h_aligned[i]):
+            # Long: price above KAMA (uptrend) + weekly RSI < 30 (oversold) + volume confirmation
+            if (price > kama[i] and rsi_1d[i] < 30 and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with volume spike and below 12h EMA20
-            elif (price < donchian_low[i] and vol_spike[i] and price < ema_20_12h_aligned[i]):
+            # Short: price below KAMA (downtrend) + weekly RSI > 70 (overbought) + volume confirmation
+            elif (price < kama[i] and rsi_1d[i] > 70 and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below Donchian low (mean reversion)
-            if price < donchian_low[i]:
+            # Exit long: price crosses below KAMA (trend change) or weekly RSI > 70 (overbought)
+            if price < kama[i] or rsi_1d[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above Donchian high (mean reversion)
-            if price > donchian_high[i]:
+            # Exit short: price crosses above KAMA (trend change) or weekly RSI < 30 (oversold)
+            if price > kama[i] or rsi_1d[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
