@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h price crossing 1w EMA50 with 1d RSI(14) mean reversion filter.
-# Uses 1w EMA for trend direction, 1d RSI to avoid overbought/oversold extremes,
-# and price crossovers for entries. Designed to capture trend continuations
-# while avoiding counter-trend trades in ranging markets. Target: 12-30 trades/year.
-name = "12h_EMA50_1w_1dRSI_MeanReversion"
-timeframe = "12h"
+# Hypothesis: 6h price crossing 6h VWAP with 1d ADX(14) trend filter and volume spike confirmation.
+# Uses VWAP as dynamic support/resistance, ADX to ensure trending conditions, and volume spike
+# to confirm institutional participation. Designed to capture trend continuations in strong moves
+# while avoiding choppy markets. Target: 20-40 trades/year.
+name = "6h_VWAP_ADX_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,79 +17,109 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1w data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Calculate 50-period EMA on 1w close
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get 1d data for RSI filter
+    # Get 1d data for ADX filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 14-period RSI on 1d close
+    # Calculate ADX(14) on 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) < period:
+            return result
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr = wilder_smooth(tr, 14)
+    dm_plus_smooth = wilder_smooth(dm_plus, 14)
+    dm_minus_smooth = wilder_smooth(dm_minus, 14)
+    
+    # DI and DX
+    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
+    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, 14)
+    
+    # Align ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Calculate VWAP for 6h
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, np.nan)
+    
+    # Volume spike: current volume > 2.0 * 20-period average volume
+    vol_ma = np.convolve(volume, np.ones(20)/20, mode='same')
+    vol_ma[:10] = np.nan
+    vol_ma[-9:] = np.nan
+    vol_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need 50 periods for EMA
+    start_idx = 50  # Need sufficient data for indicators
     
     for i in range(start_idx, n):
-        # Skip if required data unavailable (NaN from indicators)
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(rsi_aligned[i]):
+        # Skip if required data unavailable
+        if np.isnan(adx_aligned[i]) or np.isnan(vwap[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        ema = ema_50_1w_aligned[i]
-        rsi_val = rsi_aligned[i]
+        adx_val = adx_aligned[i]
+        vwap_val = vwap[i]
+        vol_spike_now = vol_spike[i]
         
         if position == 0:
-            # Enter long: price crosses above EMA50 AND RSI < 70 (not overbought)
-            if price > ema and rsi_val < 70:
+            # Enter long: price above VWAP, ADX > 25 (trending), volume spike
+            if price > vwap_val and adx_val > 25 and vol_spike_now:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below EMA50 AND RSI > 30 (not oversold)
-            elif price < ema and rsi_val > 30:
+            # Enter short: price below VWAP, ADX > 25 (trending), volume spike
+            elif price < vwap_val and adx_val > 25 and vol_spike_now:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below EMA50 OR RSI > 70 (overbought)
-            if price < ema or rsi_val > 70:
+            # Exit long: price crosses below VWAP OR ADX < 20 (trend weakening)
+            if price < vwap_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above EMA50 OR RSI < 30 (oversold)
-            if price > ema or rsi_val < 30:
+            # Exit short: price crosses above VWAP OR ADX < 20 (trend weakening)
+            if price > vwap_val or adx_val < 20:
                 signals[i] = 0.0
                 position = 0
             else:
