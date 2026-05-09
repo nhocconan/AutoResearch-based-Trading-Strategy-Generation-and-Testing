@@ -1,15 +1,15 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_WeeklyTrend_WeeklyVolatilityBreakout_v1"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,69 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend and volatility filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for EMA13 trend and Elder Ray calculations
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Weekly EMA21 for trend filter
-    ema21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate EMA13 for 1d close (trend filter)
+    close_1d = df_1d['close'].values
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Weekly ATR(14) for volatility filter
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1 = np.maximum(high_1w[1:] - low_1w[1:], np.abs(high_1w[1:] - close_1w[:-1]), np.abs(low_1w[1:] - close_1w[:-1]))
-    tr = np.concatenate([[high_1w[0] - low_1w[0]], tr1])
-    atr14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate Elder Ray components for 1d
+    # Bull Power = High - EMA13
+    # Bear Power = Low - EMA13
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = df_1d['low'].values - ema13_1d
     
-    # Daily Donchian(20) breakout levels
-    donch_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # Volume filter: current 1d volume > 1.3 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.3)
     
-    # Align weekly indicators to daily
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    # Align all to 6h
+    ema13_1d_6h = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
+    volume_filter_6h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Need enough data for Donchian
+    start_idx = 20  # Need enough data for EMA13 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(atr14_1w_aligned[i]) or
-            np.isnan(donch_high_20[i]) or np.isnan(donch_low_20[i])):
+        if (np.isnan(ema13_1d_6h[i]) or np.isnan(bull_power_6h[i]) or
+            np.isnan(bear_power_6h[i]) or np.isnan(volume_filter_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema21_1w_aligned[i]
-        atr = atr14_1w_aligned[i]
-        upper = donch_high_20[i]
-        lower = donch_low_20[i]
+        trend = ema13_1d_6h[i]
+        bull = bull_power_6h[i]
+        bear = bear_power_6h[i]
+        vol_filter = volume_filter_6h[i]
         
         if position == 0:
-            # Enter long: break above upper band with volatility expansion and above weekly trend
-            if close[i] > upper and atr > 0 and close[i] > trend:
+            # Enter long: Bull Power > 0 (bullish momentum) with volume and above EMA13
+            if bull > 0 and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below lower band with volatility expansion and below weekly trend
-            elif close[i] < lower and atr > 0 and close[i] < trend:
+            # Enter short: Bear Power < 0 (bearish momentum) with volume and below EMA13
+            elif bear < 0 and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below lower band (mean reversion)
-            if close[i] < lower:
+            # Exit long: Bear Power turns negative (momentum shift)
+            if bear < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above upper band (mean reversion)
-            if close[i] > upper:
+            # Exit short: Bull Power turns positive (momentum shift)
+            if bull > 0:
                 signals[i] = 0.0
                 position = 0
             else:
