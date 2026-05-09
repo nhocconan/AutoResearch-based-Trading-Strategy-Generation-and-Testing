@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,86 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend and Camarilla calculation
-    df_d = get_htf_data(prices, '1d')
-    if len(df_d) < 2:
+    # Get 1d data for Elder Ray calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from daily OHLC
-    high_d = df_d['high'].values
-    low_d = df_d['low'].values
-    close_d = df_d['close'].values
+    # Calculate 13-period EMA on 1d close
+    close_1d = df_1d['close'].values
+    ema_13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Camarilla formula: Range = High - Low
-    range_d = high_d - low_d
-    # Resistance levels
-    r3_d = close_d + range_d * 1.1 / 4
-    r4_d = close_d + range_d * 1.1 / 2
-    # Support levels
-    s3_d = close_d - range_d * 1.1 / 4
-    s4_d = close_d - range_d * 1.1 / 2
+    # Bull Power = High - EMA13
+    bull_power = df_1d['high'].values - ema_13
+    # Bear Power = Low - EMA13
+    bear_power = df_1d['low'].values - ema_13
     
-    # Align Camarilla levels to 4h timeframe
-    r3_d_aligned = align_htf_to_ltf(prices, df_d, r3_d)
-    r4_d_aligned = align_htf_to_ltf(prices, df_d, r4_d)
-    s3_d_aligned = align_htf_to_ltf(prices, df_d, s3_d)
-    s4_d_aligned = align_htf_to_ltf(prices, df_d, s4_d)
+    # Align to 6h timeframe
+    ema_13_aligned = align_htf_to_ltf(prices, df_1d, ema_13)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Daily trend: EMA(34) on close
-    ema34_d = pd.Series(close_d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_d_aligned = align_htf_to_ltf(prices, df_d, ema34_d)
-    
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Need enough data for EMA and volume MA
+    start_idx = max(20, 13)
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(r3_d_aligned[i]) or 
-            np.isnan(r4_d_aligned[i]) or
-            np.isnan(s3_d_aligned[i]) or
-            np.isnan(s4_d_aligned[i]) or
-            np.isnan(ema34_d_aligned[i]) or
+        if (np.isnan(ema_13_aligned[i]) or 
+            np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r3_val = r3_d_aligned[i]
-        r4_val = r4_d_aligned[i]
-        s3_val = s3_d_aligned[i]
-        s4_val = s4_d_aligned[i]
-        ema34_val = ema34_d_aligned[i]
+        ema_val = ema_13_aligned[i]
+        bull_val = bull_power_aligned[i]
+        bear_val = bear_power_aligned[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: Price above R3 + above daily EMA34 + volume filter
-            if close[i] > r3_val and close[i] > ema34_val and vol_filter:
+            # Enter long: Bull Power > 0 (bullish momentum) + volume filter
+            if bull_val > 0 and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Price below S3 + below daily EMA34 + volume filter
-            elif close[i] < s3_val and close[i] < ema34_val and vol_filter:
+            # Enter short: Bear Power < 0 (bearish momentum) + volume filter
+            elif bear_val < 0 and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below S3 or below EMA34
-            if close[i] < s3_val or close[i] < ema34_val:
+            # Exit long: Bull Power turns negative (momentum fading)
+            if bull_val <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above R3 or above EMA34
-            if close[i] > r3_val or close[i] > ema34_val:
+            # Exit short: Bear Power turns positive (momentum fading)
+            if bear_val >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
