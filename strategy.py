@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA21 trend filter and volume confirmation
-# Long when price breaks above upper band with EMA21 uptrend and volume > 1.5x average
-# Short when price breaks below lower band with EMA21 downtrend and volume > 1.5x average
-# Exit when price crosses the 20-period EMA (middle band) or reverses to opposite band
-# Uses Donchian channels for breakout structure, EMA for trend, volume for conviction
-# Designed to capture sustained moves in trending markets with controlled frequency
-# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA20 trend filter and volume confirmation
+# Long when price breaks above 20-day high with 1w EMA20 uptrend and volume > 1.5x average
+# Short when price breaks below 20-day low with 1w EMA20 downtrend and volume > 1.5x average
+# Exit when price retraces to 10-day EMA or opposite 10-day Donchian channel
+# Uses daily price structure for breakouts, weekly trend for bias, volume for conviction
+# Designed to capture medium-term trends in both bull and bear markets with low frequency
+# Target: 30-70 total trades over 4 years (7-17/year) with size 0.25
 
-name = "4h_Donchian20_EMA21_Trend_Volume"
-timeframe = "4h"
+name = "1d_Donchian20_1wEMA20_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,70 +25,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period high/low)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Calculate 1w EMA20 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate upper and lower bands (20-period high/low)
-    upper = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
-    lower = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
+    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Calculate middle band (20-period EMA)
-    middle = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 10-day EMA for exit
+    ema10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Align Donchian levels to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_12h, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_12h, lower)
-    middle_aligned = align_htf_to_ltf(prices, df_12h, middle)
-    
-    # Calculate 12h EMA21 for trend filter
-    ema21_12h = pd.Series(df_12h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    # Calculate 20-day Donchian channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.5 * vol_ma.values)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA calculation
+    start_idx = 30  # Need enough data for Donchian calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(middle_aligned[i]) or
-            np.isnan(ema21_12h_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(ema10[i]) or np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price breaks above upper band, EMA21 uptrend, volume confirmation
-            if (close[i] > upper_aligned[i] and 
-                ema21_12h_aligned[i] > ema21_12h_aligned[i-1] and  # EMA rising
+            # Enter long: price breaks above 20-day high, 1w EMA20 uptrend, volume spike
+            if (close[i] > high_20[i] and 
+                ema20_1w_aligned[i] > ema20_1w_aligned[i-1] and  # EMA rising
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below lower band, EMA21 downtrend, volume confirmation
-            elif (close[i] < lower_aligned[i] and 
-                  ema21_12h_aligned[i] < ema21_12h_aligned[i-1] and  # EMA falling
+            # Enter short: price breaks below 20-day low, 1w EMA20 downtrend, volume spike
+            elif (close[i] < low_20[i] and 
+                  ema20_1w_aligned[i] < ema20_1w_aligned[i-1] and  # EMA falling
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below middle band or reverses to lower band
-            if (close[i] < middle_aligned[i]) or (close[i] < lower_aligned[i]):
+            # Exit long: price retraces to 10-day EMA or breaks below 10-day low
+            if (close[i] <= ema10[i]) or (close[i] < pd.Series(low).rolling(window=10, min_periods=10).min().values[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above middle band or reverses to upper band
-            if (close[i] > middle_aligned[i]) or (close[i] > upper_aligned[i]):
+            # Exit short: price retraces to 10-day EMA or breaks above 10-day high
+            if (close[i] >= ema10[i]) or (close[i] > pd.Series(high).rolling(window=10, min_periods=10).max().values[i]):
                 signals[i] = 0.0
                 position = 0
             else:
