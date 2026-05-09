@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slim"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,20 +17,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla calculation (using previous day)
-    df_1d_prev = get_htf_data(prices, '1d')
-    if len(df_1d_prev) < 50:
-        return np.zeros(n)
-    
     # Previous day's close for Camarilla calculation (R1, S1)
-    prev_close = df_1d_prev['close'].shift(1).values
-    prev_high = df_1d_prev['high'].shift(1).values
-    prev_low = df_1d_prev['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
     # Calculate Camarilla levels (R1, S1)
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
@@ -39,32 +34,32 @@ def generate_signals(prices):
     # Trend filter: 1d EMA50
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume filter: current 12h volume > 1.3 * 20-period average
+    # Volume filter: current 4h volume > 1.5 * 24-period average (more selective)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
-    # Align all to 12h (primary timeframe)
-    r1_12h = align_htf_to_ltf(prices, df_1d_prev, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d_prev, s1)
-    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align all to 4h (primary timeframe)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)  # Need enough data for EMA50 and volume MA
+    start_idx = max(50, 24)  # Need enough data for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or
-            np.isnan(ema50_1d_12h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema50_1d_4h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_12h[i]
-        s1_val = s1_12h[i]
-        trend = ema50_1d_12h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema50_1d_4h[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
