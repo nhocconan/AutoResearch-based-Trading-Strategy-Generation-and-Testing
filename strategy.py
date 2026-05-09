@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla R4/S4 Breakout + 1d Trend + Volume Spike
-# Camarilla R4/S4 are extreme levels that rarely break, so when they do with volume and trend alignment,
-# it signals strong institutional momentum. Works in both bull (breakouts continue) and bear (sharp reversals).
-# Target: 25-40 trades/year (100-160 over 4 years) to avoid fee drag.
-name = "4h_Camarilla_R4S4_Breakout_1dTrend_Volume"
-timeframe = "4h"
+# Hypothesis: Daily KAMA Trend + Weekly Bollinger Band Breakout with Volume Confirmation
+# Uses KAMA (Kaufman Adaptive Moving Average) on daily timeframe for trend direction,
+# combined with weekly Bollinger Band upper/lower breakouts for entry signals.
+# Volume confirmation filters out false breakouts. Designed to work in both bull and bear markets
+# by adapting to volatility and using multiple timeframe confirmation.
+# Target: 20-30 trades/year (80-120 over 4 years) to minimize fee drag.
+name = "1d_KAMA_Trend_WeeklyBB_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,37 +23,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
+    # Get weekly data for Bollinger Bands
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels using previous day's OHLC (avoid look-ahead)
-    daily_high = df_daily['high'].shift(1).values
-    daily_low = df_daily['low'].shift(1).values
-    daily_close = df_daily['close'].shift(1).values
+    # Get daily data for KAMA calculation
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 30:
+        return np.zeros(n)
     
-    # Camarilla equations
-    spread = daily_high - daily_low
-    camarilla_pivot = (daily_high + daily_low + daily_close) / 3.0
-    r4 = camarilla_pivot + (1.1 * spread / 2)
-    s4 = camarilla_pivot - (1.1 * spread / 2)
-    r3 = camarilla_pivot + (1.1 * spread / 4)
-    s3 = camarilla_pivot - (1.1 * spread / 4)
-    r2 = camarilla_pivot + (1.1 * spread / 6)
-    s2 = camarilla_pivot - (1.1 * spread / 6)
-    r1 = camarilla_pivot + (1.1 * spread / 12)
-    s1 = camarilla_pivot - (1.1 * spread / 12)
+    # Calculate weekly Bollinger Bands (20, 2)
+    weekly_close = df_weekly['close'].values
+    weekly_ma = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
+    weekly_std = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
+    weekly_upper = weekly_ma + 2 * weekly_std
+    weekly_lower = weekly_ma - 2 * weekly_std
     
-    # Align daily Camarilla levels to 4h
-    r4_4h = align_htf_to_ltf(prices, df_daily, r4)
-    s4_4h = align_htf_to_ltf(prices, df_daily, s4)
-    r3_4h = align_htf_to_ltf(prices, df_daily, r3)
-    s3_4h = align_htf_to_ltf(prices, df_daily, s3)
+    # Align weekly Bollinger Bands to daily
+    upper_aligned = align_htf_to_ltf(prices, df_weekly, weekly_upper)
+    lower_aligned = align_htf_to_ltf(prices, df_weekly, weekly_lower)
+    ma_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ma)
     
-    # Daily EMA50 for trend filter
-    ema50_daily = pd.Series(df_daily['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_daily_4h = align_htf_to_ltf(prices, df_daily, ema50_daily)
+    # Calculate KAMA on daily close
+    # Efficiency ratio (ER) over 10 periods
+    change = np.abs(np.diff(df_daily['close'], prepend=df_daily['close'].iloc[0]))
+    volatility = np.abs(np.diff(df_daily['close'])).rolling(window=10, min_periods=10).sum().values
+    volatility = np.concatenate([[np.nan], volatility[:-1]])  # align with change
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # KAMA calculation
+    kama = np.full_like(df_daily['close'], np.nan, dtype=float)
+    kama[0] = df_daily['close'].iloc[0]
+    for i in range(1, len(df_daily)):
+        kama[i] = kama[i-1] + sc[i] * (df_daily['close'].iloc[i] - kama[i-1])
+    kama_values = kama
+    
+    # Align KAMA to daily (same timeframe, no alignment needed but keep for consistency)
+    kama_aligned = align_htf_to_ltf(prices, df_daily, kama_values)
     
     # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,37 +75,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r4_4h[i]) or np.isnan(s4_4h[i]) or np.isnan(r3_4h[i]) or 
-            np.isnan(s3_4h[i]) or np.isnan(ema50_daily_4h[i]) or np.isnan(vol_avg[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(kama_aligned[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 2.0 x 20-period average
-        vol_spike = volume[i] > vol_avg[i] * 2.0
+        # Volume condition: current volume > 1.5 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 1.5
         
         if position == 0:
-            # Long: Break above R4 with daily uptrend and volume spike
-            if close[i] > r4_4h[i] and close[i] > ema50_daily_4h[i] and vol_spike:
+            # Long: Close above weekly upper Bollinger Band with KAMA uptrend and volume spike
+            if close[i] > upper_aligned[i] and close[i] > kama_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S4 with daily downtrend and volume spike
-            elif close[i] < s4_4h[i] and close[i] < ema50_daily_4h[i] and vol_spike:
+            # Short: Close below weekly lower Bollinger Band with KAMA downtrend and volume spike
+            elif close[i] < lower_aligned[i] and close[i] < kama_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls back below R3 OR daily trend turns down
-            if close[i] < r3_4h[i] or close[i] < ema50_daily_4h[i]:
+            # Exit long: Price falls back below weekly middle band OR KAMA turns down
+            if close[i] < ma_aligned[i] or close[i] < kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises back above S3 OR daily trend turns up
-            if close[i] > s3_4h[i] or close[i] > ema50_daily_4h[i]:
+            # Exit short: Price rises back above weekly middle band OR KAMA turns up
+            if close[i] > ma_aligned[i] or close[i] > kama_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
