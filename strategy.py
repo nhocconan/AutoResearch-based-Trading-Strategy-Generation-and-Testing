@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS_v3
-Hypothesis: Tight breakout at Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
-EMA34 is more responsive than EMA50, better capturing trend changes in volatile crypto markets.
-Volume spike (>2x 20-period average) confirms breakout strength.
-Designed for low trade frequency (<50/year) to minimize fee drag in BTC/ETH.
-Works in both bull and bear markets by following the daily trend direction.
-Added 5-bar minimum holding period to reduce whipsaw and overtrading.
+12h_12H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS
+Hypothesis: 12h breakout at Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+Designed for low trade frequency (<30/year) to minimize fee drift. Works in both bull and bear markets
+by following the daily trend direction. Uses 12h timeframe to reduce noise and increase signal quality.
 """
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS_v3"
-timeframe = "4h"
+name = "12h_12H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -46,7 +43,7 @@ def generate_signals(prices):
     r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
     s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -105,8 +102,8 @@ def generate_signals(prices):
                 bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 5 bars
-            if bars_since_entry < 5:
+            # Minimum holding period: 4 bars (2 days)
+            if bars_since_entry < 4:
                 signals[i] = 0.25
             else:
                 # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
@@ -118,8 +115,8 @@ def generate_signals(prices):
                     signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 5 bars
-            if bars_since_entry < 5:
+            # Minimum holding period: 4 bars (2 days)
+            if bars_since_entry < 4:
                 signals[i] = -0.25
             else:
                 # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
