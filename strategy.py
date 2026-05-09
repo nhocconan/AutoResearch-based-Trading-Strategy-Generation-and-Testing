@@ -31,27 +31,28 @@ def generate_signals(prices):
     r3 = prev_close + 1.1 * (prev_high - prev_low) * 3 / 4
     s3 = prev_close - 1.1 * (prev_high - prev_low) * 3 / 4
     
-    # Trend filter: 1d EMA50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 4h volume > 1.5 * 20-period average
+    # Volume filter: current volume > 2.0 * 30-period average (more stringent)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma * 2.0)
     
     # Align all to 4h
     r3_4h = align_htf_to_ltf(prices, df_1d, r3)
     s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_filter_4h = align_htf_to_ltf(prices, df_1d, volume_filter)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Need enough data for EMA50
+    start_idx = max(34, 30)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
         if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(ema50_1d_4h[i])):
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,8 +60,8 @@ def generate_signals(prices):
         
         r3_val = r3_4h[i]
         s3_val = s3_4h[i]
-        trend = ema50_1d_4h[i]
-        vol_filter = volume_filter[i]
+        trend = ema34_1d_4h[i]
+        vol_filter = volume_filter_4h[i]
         
         if position == 0:
             # Enter long: break above R3 with volume and above trend
