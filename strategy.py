@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,9 +23,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate 1d Camarilla pivot levels (R1, S1)
-    # Pivot = (H + L + C) / 3
-    # R1 = Pivot + (H - L) * 1.1 / 2
-    # S1 = Pivot - (H - L) * 1.1 / 2
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -34,7 +31,7 @@ def generate_signals(prices):
     r1_1d = pivot_1d + (high_1d - low_1d) * 1.1 / 2
     s1_1d = pivot_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align 1d Camarilla levels to 4h
+    # Align 1d Camarilla levels to 12h
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
@@ -43,15 +40,15 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current 4h volume > 1.3 * 20-period average
+    # Volume filter: current 12h volume > 1.5 * 30-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)
+    start_idx = max(34, 30)
     
     for i in range(start_idx, n):
         if (np.isnan(pivot_1d_aligned[i]) or
