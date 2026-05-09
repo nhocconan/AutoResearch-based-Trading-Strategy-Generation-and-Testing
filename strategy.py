@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h timeframe with 12h Supertrend for trend direction and volume confirmation for entry.
-# Uses Supertrend to identify market regime: long when price > Supertrend, short when price < Supertrend.
-# Enters only on volume spikes (volume > 1.5x 20-period volume average) during pullbacks to EMA21.
-# Exits when price crosses Supertrend in opposite direction or volume drops below average.
-# Target: 20-50 trades per year with position size 0.25 to manage drawdown and fees.
+# Hypothesis: 1h strategy using 4h ADX for trend strength and 1d RSI for momentum, with price > 4h EMA50 for long bias and < 4h EMA50 for short bias. 
+# In strong trends (ADX > 25), price tends to continue in the direction of the EMA50 trend. 
+# Uses 1h RSI for entry timing: long when RSI < 30 (oversold pullback in uptrend), short when RSI > 70 (overbought pullback in downtrend). 
+# Exit when trend weakens (ADX < 20) or RSI reverts to neutral (40-60 range). 
+# Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades over 4 years (15-37/year) with size 0.20.
 
-name = "4h_Supertrend_Volume_Pullback_12h"
-timeframe = "4h"
+name = "1h_ADX_EMA_RSI_Pullback"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,131 +23,136 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Supertrend calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 10:
-        return np.zeros(n)
-    
-    # Calculate Supertrend on 12h data
-    atr_period = 10
-    multiplier = 3.0
-    
-    hl2 = (df_12h['high'] + df_12h['low']) / 2
-    atr = pd.Series(index=df_12h.index, dtype=float)
-    tr = pd.Series(index=df_12h.index, dtype=float)
-    
-    for i in range(len(df_12h)):
-        if i == 0:
-            tr.iloc[i] = df_12h['high'].iloc[i] - df_12h['low'].iloc[i]
-        else:
-            tr.iloc[i] = max(
-                df_12h['high'].iloc[i] - df_12h['low'].iloc[i],
-                abs(df_12h['high'].iloc[i] - df_12h['close'].iloc[i-1]),
-                abs(df_12h['low'].iloc[i] - df_12h['close'].iloc[i-1])
-            )
-        if i < atr_period:
-            atr.iloc[i] = tr.iloc[:i+1].mean()
-        else:
-            atr.iloc[i] = (atr.iloc[i-1] * (atr_period-1) + tr.iloc[i]) / atr_period
-    
-    upperband = hl2 + multiplier * atr
-    lowerband = hl2 - multiplier * atr
-    
-    supertrend = pd.Series(index=df_12h.index, dtype=float)
-    direction = pd.Series(index=df_12h.index, dtype=int)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(len(df_12h)):
-        if i == 0:
-            supertrend.iloc[i] = lowerband.iloc[i]
-            direction.iloc[i] = 1
-        else:
-            if close_12h := df_12h['close'].iloc[i] if 'close_12h' in locals() else df_12h['close'].iloc[i]:
-                pass
-            close_12h = df_12h['close'].iloc[i]
-            
-            if i < atr_period:
-                supertrend.iloc[i] = lowerband.iloc[i]
-                direction.iloc[i] = 1
-            else:
-                if supertrend.iloc[i-1] == upperband.iloc[i-1]:
-                    if close_12h <= upperband.iloc[i]:
-                        supertrend.iloc[i] = upperband.iloc[i]
-                    else:
-                        supertrend.iloc[i] = lowerband.iloc[i]
-                        direction.iloc[i] = -1
-                else:
-                    if close_12h >= lowerband.iloc[i]:
-                        supertrend.iloc[i] = lowerband.iloc[i]
-                        direction.iloc[i] = -1
-                    else:
-                        supertrend.iloc[i] = upperband.iloc[i]
-                        direction.iloc[i] = 1
-    
-    # Align Supertrend and direction to 4h timeframe
-    supertrend_values = supertrend.values
-    direction_values = direction.values
-    supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend_values)
-    direction_aligned = align_htf_to_ltf(prices, df_12h, direction_values)
-    
-    # Calculate EMA21 on 4h for pullback entries
+    # 4h ADX for trend strength
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    if len(df_4h) < 30:
         return np.zeros(n)
     
+    high_4h = df_4h['high']
+    low_4h = df_4h['low']
     close_4h = df_4h['close']
-    ema_21 = close_4h.ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_4h, ema_21)
     
-    # Volume spike detector: volume > 1.5x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma_20)
+    # True Range
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    up_move = high_4h - np.roll(high_4h, 1)
+    down_move = np.roll(low_4h, 1) - low_4h
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def wilders_smooth(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    atr_4h = wilders_smooth(tr, 14)
+    plus_di_4h = 100 * wilders_smooth(plus_dm, 14) / atr_4h
+    minus_di_4h = 100 * wilders_smooth(minus_dm, 14) / atr_4h
+    dx_4h = 100 * np.abs(plus_di_4h - minus_di_4h) / (plus_di_4h + minus_di_4h)
+    adx_4h = wilders_smooth(dx_4h, 14)
+    
+    # 4h EMA50 for trend direction
+    ema_50_4h = close_4h.ewm(span=50, adjust=False).mean().values
+    
+    # 1d RSI for momentum
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close']
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(com=13, adjust=False).mean()
+    avg_loss = loss.ewm(com=13, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # 1h RSI for entry timing
+    delta_h = pd.Series(close).diff()
+    gain_h = delta_h.where(delta_h > 0, 0)
+    loss_h = -delta_h.where(delta_h < 0, 0)
+    avg_gain_h = gain_h.ewm(com=13, adjust=False).mean()
+    avg_loss_h = loss_h.ewm(com=13, adjust=False).mean()
+    rs_h = avg_gain_h / avg_loss_h
+    rsi_1h = 100 - (100 / (1 + rs_h))
+    
+    # Align HTF indicators to 1h timeframe
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d.values)
+    
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = 50  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        # Skip if any data is not ready
-        if (np.isnan(supertrend_aligned[i]) or
-            np.isnan(direction_aligned[i]) or
-            np.isnan(ema_21_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        # Skip if data not ready
+        if (np.isnan(adx_4h_aligned[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or np.isnan(rsi_1h[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: uptrend (direction=1), price near EMA21 pullback, volume spike
-            if (direction_aligned[i] == 1 and 
-                close[i] >= ema_21_aligned[i] * 0.98 and  # Allow small deviation from EMA
-                close[i] <= ema_21_aligned[i] * 1.02 and
-                volume_spike[i]):
-                signals[i] = 0.25
+            # Enter long: strong uptrend (ADX > 25), price above EMA50, RSI oversold (<30)
+            if (adx_4h_aligned[i] > 25 and 
+                close[i] > ema_50_4h_aligned[i] and 
+                rsi_1h[i] < 30 and 
+                rsi_1d_aligned[i] > 50):  # Additional bullish bias from daily RSI
+                signals[i] = 0.20
                 position = 1
-            # Enter short: downtrend (direction=-1), price near EMA21 pullback, volume spike
-            elif (direction_aligned[i] == -1 and 
-                  close[i] >= ema_21_aligned[i] * 0.98 and
-                  close[i] <= ema_21_aligned[i] * 1.02 and
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # Enter short: strong downtrend (ADX > 25), price below EMA50, RSI overbought (>70)
+            elif (adx_4h_aligned[i] > 25 and 
+                  close[i] < ema_50_4h_aligned[i] and 
+                  rsi_1h[i] > 70 and 
+                  rsi_1d_aligned[i] < 50):  # Additional bearish bias from daily RSI
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit long: trend reverses (direction=-1) or volume drops
-            if direction_aligned[i] == -1 or not volume_spike[i]:
+            # Exit long: trend weakens (ADX < 20) or RSI reverts to neutral (>=50) or price below EMA50
+            if (adx_4h_aligned[i] < 20 or 
+                rsi_1h[i] >= 50 or 
+                close[i] < ema_50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit short: trend reverses (direction=1) or volume drops
-            if direction_aligned[i] == 1 or not volume_spike[i]:
+            # Exit short: trend weakens (ADX < 20) or RSI reverts to neutral (<=50) or price above EMA50
+            if (adx_4h_aligned[i] < 20 or 
+                rsi_1h[i] <= 50 or 
+                close[i] > ema_50_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
