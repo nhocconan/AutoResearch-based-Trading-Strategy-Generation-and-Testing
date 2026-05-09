@@ -1,10 +1,17 @@
+# US12h_RSI34_Trend_And_Momentum  
+# Hypothesis: Combine RSI(34) trend filter with momentum confirmation on 12h timeframe.  
+# In bull markets: RSI > 50 + rising momentum triggers long.  
+# In bear markets: RSI < 50 + falling momentum triggers short.  
+# Uses 1D trend filter to avoid counter-trend trades.  
+# Designed for low trade frequency (~15-25/year) to avoid fee drag.  
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3S3_Breakout_12hEMA50_VolumeSpike"
-timeframe = "4h"
+name = "US12h_RSI34_Trend_And_Momentum"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +24,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla levels
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d Camarilla levels (R3, S3)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate RSI(34) on 1d close
     close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    camarilla_high = close_1d + 1.1 * range_1d / 12  # R3 level
-    camarilla_low = close_1d - 1.1 * range_1d / 12   # S3 level
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # 1d volume average for volume filter
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[34] = np.mean(gain[1:35])
+    avg_loss[34] = np.mean(loss[1:35])
     
-    # Align all to 4h
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    camarilla_high_4h = align_htf_to_ltf(prices, df_1d, camarilla_high)
-    camarilla_low_4h = align_htf_to_ltf(prices, df_1d, camarilla_low)
-    vol_avg_1d_4h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    for i in range(35, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 33 + gain[i]) / 34
+        avg_loss[i] = (avg_loss[i-1] * 33 + loss[i]) / 34
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    
+    # Calculate 12-period ROC (momentum) on 1d close
+    roc_1d = np.zeros_like(close_1d)
+    for i in range(12, len(close_1d)):
+        if close_1d[i-12] != 0:
+            roc_1d[i] = (close_1d[i] - close_1d[i-12]) / close_1d[i-12] * 100
+    
+    # Align RSI and ROC to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    roc_1d_aligned = align_htf_to_ltf(prices, df_1d, roc_1d)
     
     signals = np.zeros(n)
     position = 0
     
+    # Start after warmup period
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_4h[i]) or np.isnan(camarilla_high_4h[i]) or 
-            np.isnan(camarilla_low_4h[i]) or np.isnan(vol_avg_1d_4h[i])):
+        if np.isnan(rsi_1d_aligned[i]) or np.isnan(roc_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        trend = ema50_12h_4h[i]
-        resistance = camarilla_high_4h[i]
-        support = camarilla_low_4h[i]
-        vol_avg = vol_avg_1d_4h[i]
-        vol_ok = volume[i] > vol_avg * 1.5
+        rsi = rsi_1d_aligned[i]
+        roc = roc_1d_aligned[i]
         
         if position == 0:
-            # Long: break above R3 with volume and above 12h EMA50
-            if close[i] > resistance and vol_ok and close[i] > trend:
+            # Long: RSI > 50 (bullish momentum) + positive ROC
+            if rsi > 50 and roc > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with volume and below 12h EMA50
-            elif close[i] < support and vol_ok and close[i] < trend:
+            # Short: RSI < 50 (bearish momentum) + negative ROC
+            elif rsi < 50 and roc < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: close below S3 or trend reversal
-            if close[i] < support or close[i] < trend:
+            # Exit long: RSI < 50 (momentum fading) or ROC turning negative
+            if rsi < 50 or roc < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: close above R3 or trend reversal
-            if close[i] > resistance or close[i] > trend:
+            # Exit short: RSI > 50 (momentum improving) or ROC turning positive
+            if rsi > 50 or roc > 0:
                 signals[i] = 0.0
                 position = 0
             else:
