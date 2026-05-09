@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ElderRay_TRIX_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    6h Elder Ray (Bull/Bear Power) with TRIX filter and volume confirmation.
-    - Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    - TRIX(12) filter: TRIX > 0 = bullish bias, TRIX < 0 = bearish bias
-    - Long: Bull Power > 0, TRIX > 0, volume > 1.5x avg
-    - Short: Bear Power < 0, TRIX < 0, volume > 1.5x avg
-    - Exit: Opposite Elder Ray signal or TRIX crosses zero
-    - Target: 20-40 trades/year on 6h timeframe
+    12h Camarilla R1/S1 breakout with 1d trend filter and volume confirmation.
+    - Long: Close breaks above R1 with volume > 2x average and price > 1d EMA(34)
+    - Short: Close breaks below S1 with volume > 2x average and price < 1d EMA(34)
+    - Exit: Opposite breakout or price crosses back through pivot point (PP)
+    - Uses stricter volume filter (2x) to reduce trade frequency
+    - Target: 10-25 trades/year on 12h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -26,62 +25,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate EMA(13) for Elder Ray
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
+        return np.zeros(n)
     
-    # Calculate Elder Ray components
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate 1d EMA(34) for trend filter
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate TRIX(12, 9) for trend filter
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then % change
-    ema1 = close_series.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix_raw = ema3.pct_change(periods=1) * 100  # Percentage change
-    trix = trix_raw.fillna(0).values
+    # Calculate Camarilla levels from previous 1d session
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Calculate pivot point and Camarilla levels
+    pp = (high_1d + low_1d + close_1d_vals) / 3
+    range_1d = high_1d - low_1d
+    r1 = pp + (range_1d * 1.1 / 12)
+    s1 = pp - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume confirmation: current volume > 2x 20-period average (stricter)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # ensure sufficient warmup for EMA13 and TRIX
+    start_idx = 40  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(trix[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Stricter volume filter
         
         if position == 0:
-            # Long: Bull Power positive, TRIX positive, volume confirmation
-            if bull_power[i] > 0 and trix[i] > 0 and vol_ok:
+            # Long: Close breaks above R1 with volume confirmation and above 1d EMA trend
+            if close[i] > r1_aligned[i] and vol_ok and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative, TRIX negative, volume confirmation
-            elif bear_power[i] < 0 and trix[i] < 0 and vol_ok:
+            # Short: Close breaks below S1 with volume confirmation and below 1d EMA trend
+            elif close[i] < s1_aligned[i] and vol_ok and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bear Power negative or TRIX crosses below zero
-            if bear_power[i] < 0 or trix[i] < 0:
+            # Exit long: Close breaks below PP or opposite signal
+            if close[i] < pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bull Power positive or TRIX crosses above zero
-            if bull_power[i] > 0 or trix[i] > 0:
+            # Exit short: Close breaks above PP or opposite signal
+            if close[i] > pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
