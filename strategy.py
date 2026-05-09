@@ -3,19 +3,33 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Volume-Weighted Average Price (VWAP) deviation with 1d trend filter and 1w volatility filter.
-# Long when price > VWAP(20) + 0.5*ATR(14) and 1d EMA(50) up and 1w ATR(14) < 1.5*1w ATR(50) (low volatility regime).
-# Short when price < VWAP(20) - 0.5*ATR(14) and 1d EMA(50) down and 1w ATR(14) < 1.5*1w ATR(50).
-# Uses VWAP as dynamic mean reversion target and volatility filter to avoid choppy markets.
-# Designed to work in both bull and bear markets by following 1d EMA trend direction.
-# VWAP deviation strategy avoids whipsaw in ranges and captures momentum in trends.
-name = "6h_VWAPDeviation_1dTrend_1wVolFilter"
-timeframe = "6h"
+# Hypothesis: 12h Williams Alligator (SMMA-based) with volume confirmation and 1w trend filter.
+# Uses SMMA (Smoothed Moving Average) to filter noise and identify trend direction.
+# Long when price > Alligator Jaw (13-period SMMA) and Lips > Teeth (bullish alignment) with volume confirmation.
+# Short when price < Jaw and Lips < Teeth (bearish alignment) with volume confirmation.
+# 1w EMA trend filter ensures alignment with higher timeframe trend.
+# Designed to work in both bull and bear markets by following 1w EMA direction.
+# Williams Alligator is effective in trending markets and avoids whipsaw in ranges.
+# 12h timeframe targets 50-150 total trades over 4 years (12-37/year).
+name = "12h_WilliamsAlligator_1wEMA_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
+
+def smma(source, length):
+    """Smoothed Moving Average (SMMA) - same as RMA/Wilder's smoothing"""
+    if len(source) < length:
+        return np.full_like(source, np.nan, dtype=np.float64)
+    result = np.full_like(source, np.nan, dtype=np.float64)
+    # First value is simple average
+    result[length-1] = np.mean(source[:length])
+    # Subsequent values: SMMA = (prev_SMMA * (length-1) + current_price) / length
+    for i in range(length, len(source)):
+        result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,69 +37,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # VWAP (20-period)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.zeros(n)
-    vwap_den = np.zeros(n)
-    for i in range(n):
-        vwap_num[i] = typical_price[i] * volume[i]
-        vwap_den[i] = volume[i]
-        if i >= 20:
-            vwap_num[i] = vwap_num[i-19:i+1].sum()
-            vwap_den[i] = vwap_den[i-19:i+1].sum()
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    
-    # ATR (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = np.zeros(n)
-    for i in range(n):
-        if i < 14:
-            atr[i] = np.nan
-        elif i == 14:
-            atr[i] = np.mean(tr[:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # 1d EMA trend filter (50-period)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1w ATR volatility filter (14 and 50 period)
+    # 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    tr1w = high_1w - low_1w
-    tr2w = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3w = np.abs(low_1w - np.roll(close_1w, 1))
-    trw = np.maximum(tr1w, np.maximum(tr2w, tr3w))
-    trw[0] = tr1w[0]
-    atr14_1w = np.zeros(len(df_1w))
-    atr50_1w = np.zeros(len(df_1w))
-    for i in range(len(df_1w)):
-        if i < 14:
-            atr14_1w[i] = np.nan
-        elif i == 14:
-            atr14_1w[i] = np.mean(trw[:15])
-        else:
-            atr14_1w[i] = (atr14_1w[i-1] * 13 + trw[i]) / 14
-        if i < 50:
-            atr50_1w[i] = np.nan
-        elif i == 50:
-            atr50_1w[i] = np.mean(trw[:51])
-        else:
-            atr50_1w[i] = (atr50_1w[i-1] * 49 + trw[i]) / 50
-    vol_filter = atr14_1w < (1.5 * atr50_1w)
-    vol_filter_aligned = align_htf_to_ltf(prices, df_1w, vol_filter)
+    
+    # Williams Alligator components (13, 8, 5 periods SMMA)
+    # Jaw: 13-period SMMA
+    jaw = smma(close, 13)
+    # Teeth: 8-period SMMA
+    teeth = smma(close, 8)
+    # Lips: 5-period SMMA
+    lips = smma(close, 5)
+    
+    # 1w EMA trend filter (50-period)
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume confirmation: volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_confirm = volume > (1.5 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -94,37 +65,36 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(vwap[i]) or np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_filter_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         price = close[i]
-        vwap_dev = 0.5 * atr[i]
         
         if position == 0:
-            # Long: price > VWAP + 0.5*ATR + 1d EMA up + low vol regime
-            if (price > vwap[i] + vwap_dev and ema_1d_aligned[i] > ema_1d_aligned[i-1] and vol_filter_aligned[i]):
+            # Long: price > Jaw AND Lips > Teeth (bullish alignment) + volume + 1w EMA up
+            if (price > jaw[i] and lips[i] > teeth[i] and vol_confirm[i] and price > ema_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < VWAP - 0.5*ATR + 1d EMA down + low vol regime
-            elif (price < vwap[i] - vwap_dev and ema_1d_aligned[i] < ema_1d_aligned[i-1] and vol_filter_aligned[i]):
+            # Short: price < Jaw AND Lips < Teeth (bearish alignment) + volume + 1w EMA down
+            elif (price < jaw[i] and lips[i] < teeth[i] and vol_confirm[i] and price < ema_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below VWAP or 1d EMA turns down
-            if price < vwap[i] or ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+            # Exit long: price crosses below Jaw or Lips < Teeth (loss of bullish alignment)
+            if price < jaw[i] or lips[i] < teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above VWAP or 1d EMA turns up
-            if price > vwap[i] or ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+            # Exit short: price crosses above Jaw or Lips > Teeth (loss of bearish alignment)
+            if price > jaw[i] or lips[i] > teeth[i]:
                 signals[i] = 0.0
                 position = 0
             else:
