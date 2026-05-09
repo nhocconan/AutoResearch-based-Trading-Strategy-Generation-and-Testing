@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Donchian20_WeeklyPivot_Direction_VolumeFilter"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,74 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot calculation
+    # Get weekly data for trend filter and daily for Camarilla
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1w) < 2 or len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly pivot (based on previous week's OHLC)
-    # Resample daily to weekly OHLC (using actual weekly aggregation)
-    weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1).values  # Previous week high
-    weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1).values    # Previous week low
-    weekly_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1).values  # Previous week close
+    # Weekly EMA50 for trend filter
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Weekly pivot point and key levels
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r4 = weekly_pivot + (weekly_high - weekly_low) * 1.1  # Weekly R4 (breakout level)
-    weekly_s4 = weekly_pivot - (weekly_high - weekly_low) * 1.1  # Weekly S4 (breakdown level)
+    # Daily Camarilla pivot levels (R1, S1) from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align weekly levels to 6h timeframe
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1d, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1d, weekly_s4)
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
     
-    # 6h Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter (6h timeframe)
+    # Volume spike detection (12h timeframe)
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Enough for Donchian and weekly data
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]  # Volume spike filter
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]  # Require strong volume spike
         
         if position == 0:
-            # Long: Price breaks above 6h Donchian high AND weekly R4 with volume
-            if close[i] > donchian_high[i] and close[i] > weekly_r4_aligned[i] and vol_ok:
+            # Long: Price breaks above R1 with weekly uptrend and volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_1w_aligned[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below 6h Donchian low AND weekly S4 with volume
-            elif close[i] < donchian_low[i] and close[i] < weekly_s4_aligned[i] and vol_ok:
+            # Short: Price breaks below S1 with weekly downtrend and volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_1w_aligned[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price falls below 6h Donchian low or weekly S4
-            if close[i] < donchian_low[i] or close[i] < weekly_s4_aligned[i]:
+            # Exit long: Price falls below S1 or weekly trend turns down
+            if close[i] < s1_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price rises above 6h Donchian high or weekly R4
-            if close[i] > donchian_high[i] or close[i] > weekly_r4_aligned[i]:
+            # Exit short: Price rises above R1 or weekly trend turns up
+            if close[i] > r1_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
