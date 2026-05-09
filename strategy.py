@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_KAMA_Trend_RSI25_75_Range_Filter"
-timeframe = "1d"
+name = "6h_Donchian20_WeeklyPivotBreakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,128 +17,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 20:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # KAMA parameters
-    er_length = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
+    # Get 12h data for Donchian and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Calculate Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.sum, 'axis') else np.sum(np.abs(np.diff(close)))
-    # More efficient calculation
-    er = np.zeros_like(close)
-    for i in range(er_length, len(close)):
-        if i - er_length >= 0:
-            price_change = np.abs(close[i] - close[i - er_length])
-            volatility_sum = np.sum(np.abs(np.diff(close[i - er_length + 1:i + 1])))
-            if volatility_sum > 0:
-                er[i] = price_change / volatility_sum
-            else:
-                er[i] = 0
+    # Calculate weekly pivot from previous week's OHLC
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate Smoothing Constant and KAMA
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    prev_weekly_high = np.roll(weekly_high, 1)
+    prev_weekly_low = np.roll(weekly_low, 1)
+    prev_weekly_close = np.roll(weekly_close, 1)
+    prev_weekly_high[0] = np.nan
+    prev_weekly_low[0] = np.nan
+    prev_weekly_close[0] = np.nan
     
-    # Align KAMA to daily (no additional delay needed for KAMA itself)
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    prev_weekly_range = prev_weekly_high - prev_weekly_low
+    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    weekly_r4 = weekly_pivot + 1.1 * prev_weekly_range * 1.1  # R4 = pivot + 1.1*range*1.1
+    weekly_s4 = weekly_pivot - 1.1 * prev_weekly_range * 1.1  # S4 = pivot - 1.1*range*1.1
     
-    # RSI(14) for range/extreme detection
-    rsi_length = 14
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align weekly pivot levels to 6h
+    weekly_r4_6h = align_htf_to_ltf(prices, df_weekly, weekly_r4)
+    weekly_s4_6h = align_htf_to_ltf(prices, df_weekly, weekly_s4)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[rsi_length] = np.mean(gain[1:rsi_length+1])
-    avg_loss[rsi_length] = np.mean(loss[1:rsi_length+1])
+    # Calculate 12h Donchian channel (20-period)
+    donchian_high = pd.Series(df_12h['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_12h['low']).rolling(window=20, min_periods=20).min().values
+    donchian_high_6h = align_htf_to_ltf(prices, df_12h, donchian_high)
+    donchian_low_6h = align_htf_to_ltf(prices, df_12h, donchian_low)
     
-    for i in range(rsi_length + 1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_length - 1) + gain[i]) / rsi_length
-        avg_loss[i] = (avg_loss[i-1] * (rsi_length - 1) + loss[i]) / rsi_length
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:rsi_length+1] = np.nan  # Mark initial values as NaN
-    
-    # Bollinger Bands for volatility/chop regime (20, 2)
-    bb_length = 20
-    bb_mult = 2
-    sma = np.full_like(close, np.nan)
-    bb_std = np.full_like(close, np.nan)
-    
-    for i in range(bb_length, len(close)):
-        sma[i] = np.mean(close[i-bb_length+1:i+1])
-        bb_std[i] = np.std(close[i-bb_length+1:i+1])
-    
-    upper_band = sma + bb_mult * bb_std
-    lower_band = sma - bb_mult * bb_std
-    
-    # Calculate Bollinger Band Width for chop detection
-    bb_width = (upper_band - lower_band) / sma
-    
-    # Bollinger Band Width percentile for regime (252-day lookback ~1 year)
-    bb_width_percentile = np.full_like(close, np.nan)
-    lookback = 252
-    for i in range(lookback, len(close)):
-        if i - lookback >= 0:
-            window = bb_width[i-lookback+1:i+1]
-            valid_vals = window[~np.isnan(window)]
-            if len(valid_vals) > 0:
-                percentile = np.sum(valid_vals <= bb_width[i]) / len(valid_vals) * 100
-                bb_width_percentile[i] = percentile
+    # Volume spike detection (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, er_length, rsi_length+1, bb_length, lookback)
+    start_idx = 60  # Ensure enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(bb_width_percentile[i])):
+        if (np.isnan(weekly_r4_6h[i]) or np.isnan(weekly_s4_6h[i]) or 
+            np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or 
+            np.isnan(ema50_12h_6h[i]) or np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Range condition: BBWidth percentile < 40 (low volatility = range)
-        is_range = bb_width_percentile[i] < 40
+        # Volume condition: current volume > 2.0 x 20-period average
+        vol_spike = volume[i] > vol_avg[i] * 2.0
         
         if position == 0:
-            # Long: Price > KAMA AND RSI < 25 (oversold) AND in range
-            if close[i] > kama_aligned[i] and rsi[i] < 25 and is_range:
+            # Long: Break above weekly R4 AND above 12h Donchian high with uptrend and volume spike
+            if (close[i] > weekly_r4_6h[i] and close[i] > donchian_high_6h[i] and 
+                close[i] > ema50_12h_6h[i] and vol_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA AND RSI > 75 (overbought) AND in range
-            elif close[i] < kama_aligned[i] and rsi[i] > 75 and is_range:
+            # Short: Break below weekly S4 AND below 12h Donchian low with downtrend and volume spike
+            elif (close[i] < weekly_s4_6h[i] and close[i] < donchian_low_6h[i] and 
+                  close[i] < ema50_12h_6h[i] and vol_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price < KAMA OR RSI > 50 (exiting oversold)
-            if close[i] < kama_aligned[i] or rsi[i] > 50:
+            # Exit long: Price falls back below weekly S4 OR below 12h Donchian low OR trend turns down
+            if (close[i] < weekly_s4_6h[i] or close[i] < donchian_low_6h[i] or 
+                close[i] < ema50_12h_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price > KAMA OR RSI < 50 (exiting overbought)
-            if close[i] > kama_aligned[i] or rsi[i] < 50:
+            # Exit short: Price rises back above weekly R4 OR above 12h Donchian high OR trend turns up
+            if (close[i] > weekly_r4_6h[i] or close[i] > donchian_high_6h[i] or 
+                close[i] > ema50_12h_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
