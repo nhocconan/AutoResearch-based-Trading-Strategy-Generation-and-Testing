@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily (1d) price closes above/below Weekly (1w) VWAP with volume confirmation
-# Uses weekly VWAP as dynamic support/resistance, filters by daily close direction
-# Volume spike confirms institutional participation. Works in bull/bear via mean reversion
-# around weekly VWAP (institutional anchor). Target: 15-25 trades/year.
-name = "1d_WeeklyVWAP_Bounce_Volume"
-timeframe = "1d"
+# Hypothesis: 6h Williams %R with 12h Trend Filter and Volume Spike
+# Williams %R identifies overbought/oversold conditions. In strong trends,
+# extreme readings can signal continuation rather than reversal.
+# Combines with 12h EMA50 for trend direction and volume spike for confirmation.
+# Designed for 12-30 trades/year to avoid fee drag.
+name = "6h_WilliamsR_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,62 +22,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for VWAP calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly VWAP: cumulative (price * volume) / cumulative volume
-    # Use typical price for VWAP calculation
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vp = typical_price * df_1w['volume']
-    cum_vp = vp.cumsum()
-    cum_vol = df_1w['volume'].cumsum()
-    vwap = (cum_vp / cum_vol).values
+    # 12h EMA50 for trend filter
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Align weekly VWAP to daily timeframe
-    vwap_daily = align_htf_to_ltf(prices, df_1w, vwap)
+    # Williams %R (14-period) on 6h data
+    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = (highest_high - close) / (highest_high - lowest_low) * -100
     
-    # 20-day volume average for spike detection
+    # 20-period volume average for spike detection
     vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Wait for sufficient data
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(vwap_daily[i]) or np.isnan(vol_avg[i]):
+        if (np.isnan(ema50_6h[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume condition: current volume > 1.8 x 20-day average
+        # Volume condition: current volume > 1.8 x 20-period average
         vol_spike = volume[i] > vol_avg[i] * 1.8
         
         if position == 0:
-            # Long: Price crosses above weekly VWAP with volume spike
-            if close[i] > vwap_daily[i] and close[i-1] <= vwap_daily[i-1] and vol_spike:
+            # Long: Williams %R oversold (< -80) with uptrend and volume spike
+            if williams_r[i] < -80 and close[i] > ema50_6h[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price crosses below weekly VWAP with volume spike
-            elif close[i] < vwap_daily[i] and close[i-1] >= vwap_daily[i-1] and vol_spike:
+            # Short: Williams %R overbought (> -20) with downtrend and volume spike
+            elif williams_r[i] > -20 and close[i] < ema50_6h[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Price crosses back below weekly VWAP
-            if close[i] < vwap_daily[i] and close[i-1] >= vwap_daily[i-1]:
+            # Exit long: Williams %R returns above -50 OR trend turns down
+            if williams_r[i] > -50 or close[i] < ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Price crosses back above weekly VWAP
-            if close[i] > vwap_daily[i] and close[i-1] <= vwap_daily[i-1]:
+            # Exit short: Williams %R returns below -50 OR trend turns up
+            if williams_r[i] < -50 or close[i] > ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
