@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h timeframe with daily donchian breakout + volume confirmation + 1w EMA trend filter.
-# Uses daily donchian breakout (20) for structural breakouts and weekly EMA50 for trend filter.
-# Daily breakout provides clear entry/exit signals while weekly trend filter reduces whipsaw.
-# Volume confirmation ensures breakouts have conviction. Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
+# Hypothesis: 12h timeframe with daily pivot structure and weekly trend filter.
+# Uses daily Camarilla levels (R1/S1) for breakout entries and weekly EMA50 for trend filter.
+# Daily pivot provides intraday structure that works in both bull and bear markets.
+# Weekly trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_Donchian_Breakout_1wEMA50_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_1wEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,15 +23,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Donchian channels (20-day high/low) from previous day
-    prev_high = np.roll(high, 6)   # 6 bars = 1 day * 6 bars per 4h
-    prev_low = np.roll(low, 6)
-    prev_high[:6] = np.nan
-    prev_low[:6] = np.nan
+    # Calculate daily Camarilla levels (R1, S1) from previous day
+    prev_close = np.roll(close, 2)  # 2 bars = 1 day * 2 bars per 12h
+    prev_high = np.roll(high, 2)
+    prev_low = np.roll(low, 2)
+    prev_close[:2] = np.nan  # First values invalid
     
-    # Donchian breakout: price breaks above/below previous day's high/low
-    breakout_up = close > prev_high
-    breakout_down = close < prev_low
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * camarilla_range / 4
+    s1 = prev_close - 1.1 * camarilla_range / 4
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r1
+    breakout_down = close < s1
     
     # Get weekly data for EMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -44,14 +49,14 @@ def generate_signals(prices):
     trend_up = close > ema_50_1w_aligned
     trend_down = close < ema_50_1w_aligned
     
-    # Volume filter: current volume > 1.5x 30-period average volume
-    avg_volume = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume filter: current volume > 1.5x 20-period average volume
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough data for indicators
+    start_idx = 60  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -64,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above previous day's high + 1w uptrend + volume filter
+            # Long: breakout above R1 + weekly uptrend + volume spike
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below previous day's low + 1w downtrend + volume filter
+            # Short: breakout below S1 + weekly downtrend + volume spike
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's low or trend reversal
-            if close[i] <= prev_low[i] or not trend_up[i]:
+            # Exit long: price returns to previous day's close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's high or trend reversal
-            if close[i] >= prev_high[i] or not trend_down[i]:
+            # Exit short: price returns to previous day's close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
