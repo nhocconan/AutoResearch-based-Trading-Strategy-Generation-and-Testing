@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h trend filter and 1d Elder Ray (Bull/Bear Power) for reversal signals.
-# Uses 12h EMA50 for trend direction and 1d Bull/Bear Power to identify exhaustion in the trend.
-# Designed for low trade frequency (12-25/year) to avoid fee drag in 6h timeframe.
-# Works in both bull/bear markets by requiring alignment with 12h trend and Elder Ray divergence.
-name = "6h_ElderRay_12hEMA50_1dTrend"
-timeframe = "6h"
+# Hypothesis: 4h strategy using 1d/1w structure for directional bias and 4h price action for entries.
+# Uses 1d EMA200 for long-term trend and 1w ATR for volatility-based entry triggers.
+# Designed for low trade frequency (<50/year) to minimize fee drag in 4h timeframe.
+# Works in both bull/bear markets by combining trend filter with volatility breakout logic.
+name = "4h_1dEMA200_1wATR_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,85 +21,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Elder Ray calculation
+    # Get 1d data for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate 12h EMA50 trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Get 1w data for ATR calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
     
-    # Calculate 13-period EMA for Elder Ray (standard period)
-    ema_13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate 1d EMA200 trend filter
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_4h = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Elder Ray components
-    bull_power_1d = df_1d['high'].values - ema_13_1d  # High - EMA13
-    bear_power_1d = df_1d['low'].values - ema_13_1d   # Low - EMA13
+    # Calculate 1w ATR(14) for volatility-based entry
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 1d indicators to 6h timeframe
-    ema_50_6h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr1[0] = tr2[0] = tr3[0] = 0  # First value has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_4h = align_htf_to_ltf(prices, df_1w, atr_14_1w)
     
-    # Volume filter: spike above 2.0x 12-period average (2 days of 6h bars)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Calculate 4h Donchian(20) channels for breakout signals
+    high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 12)  # Wait for EMA50 and volume MA
+    start_idx = max(200, 20)  # Wait for EMA200 and Donchian channels
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_50_6h_aligned[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i])):
+        if (np.isnan(ema_200_4h[i]) or np.isnan(atr_14_4h[i]) or 
+            np.isnan(high_4h[i]) or np.isnan(low_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Volume confirmation
-        
-        # Pre-compute hour for session filter (UTC 0-24)
-        hour = pd.DatetimeIndex(prices['open_time']).hour[i]
-        # Trade during active hours (8 AM - 8 PM UTC) to avoid low liquidity
-        in_session = (8 <= hour <= 20)
+        # Volatility filter: require minimum ATR to avoid choppy markets
+        vol_filter = atr_14_4h[i] > 0.01 * close[i]  # At least 1% of price
         
         if position == 0:
-            # Long: Bear power weakening (less negative) while price above 12h EMA50
-            # Indicates selling pressure fading in uptrend
-            if (bear_power_6h[i] > bear_power_6h[i-1] and  # Bear power improving (less negative)
-                close[i] > ema_50_6h_aligned[i] and 
-                vol_ok and 
-                in_session):
+            # Long: price breaks above 4h Donchian high, above 1d EMA200, with volatility
+            if (close[i] > high_4h[i] and 
+                close[i] > ema_200_4h[i] and 
+                vol_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull power weakening (less positive) while price below 12h EMA50
-            # Indicates buying pressure fading in downtrend
-            elif (bull_power_6h[i] < bull_power_6h[i-1] and  # Bull power deteriorating (less positive)
-                  close[i] < ema_50_6h_aligned[i] and 
-                  vol_ok and 
-                  in_session):
+            # Short: price breaks below 4h Donchian low, below 1d EMA200, with volatility
+            elif (close[i] < low_4h[i] and 
+                  close[i] < ema_200_4h[i] and 
+                  vol_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Bear power strengthening (more negative) or trend breakdown
-            if bear_power_6h[i] < bear_power_6h[i-1] or close[i] < ema_50_6h_aligned[i]:
+            # Exit long: price breaks below 4h Donchian low or trend reversal
+            if close[i] < low_4h[i] or close[i] < ema_200_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Bull power strengthening (more positive) or trend reversal
-            if bull_power_6h[i] > bull_power_6h[i-1] or close[i] > ema_50_6h_aligned[i]:
+            # Exit short: price breaks above 4h Donchian high or trend reversal
+            if close[i] > high_4h[i] or close[i] > ema_200_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
