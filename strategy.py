@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 4h timeframe with daily RSI and volume confirmation.
-# Uses daily RSI(14) for overbought/oversold conditions and volume spike for confirmation.
-# RSI extremes work in both bull and bear markets as mean reversion signals.
-# Volume filter ensures only high-confidence signals.
-# Target: 75-200 total trades over 4 years (19-50/year) with size 0.25.
+# Hypothesis: 12h timeframe with daily pivot points and volume confirmation.
+# Uses daily Camarilla levels (R1/S1) for breakout entries and 12h EMA50 for trend filter.
+# Daily pivot provides robust support/resistance that works in both bull and bear markets.
+# 12h EMA50 filter reduces whipsaw by only allowing trades in direction of intermediate trend.
+# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_RSI14_Volume_Confirm"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_12hEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,27 +18,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI14
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Calculate daily Camarilla levels (R1, S1) from previous day
+    prev_close = np.roll(close, 2)  # 2 bars = 1 day (12h timeframe)
+    prev_high = np.roll(high, 2)
+    prev_low = np.roll(low, 2)
+    prev_close[:2] = np.nan  # First values invalid
+    
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * camarilla_range / 4
+    s1 = prev_close - 1.1 * camarilla_range / 4
+    
+    # Breakout conditions: price must close beyond the level (not just touch)
+    breakout_up = close > r1
+    breakout_down = close < s1
+    
+    # Get 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d RSI14
-    close_1d = pd.Series(df_1d['close'].values)
-    delta = close_1d.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_values = rsi_1d.values
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d_values)
+    # Calculate 12h EMA50 trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Volume filter: current volume > 1.5x 20-period average volume
+    trend_up = close > ema_50_12h_aligned
+    trend_down = close < ema_50_12h_aligned
+    
+    # Volume filter: current volume > 1.5x 20-period average volume (balanced to avoid overtrading)
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * avg_volume)
     
@@ -49,33 +60,35 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(rsi_1d_aligned[i]) or np.isnan(volume_filter[i]):
+        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold) + volume spike
-            if rsi_1d_aligned[i] < 30 and volume_filter[i]:
+            # Long: breakout above R1 + 12h uptrend + volume spike
+            if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + volume spike
-            elif rsi_1d_aligned[i] > 70 and volume_filter[i]:
+            # Short: breakout below S1 + 12h downtrend + volume spike
+            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI returns to neutral (50) or overbought
-            if rsi_1d_aligned[i] >= 50:
+            # Exit long: price returns to previous day's close or trend reversal
+            if close[i] <= prev_close[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI returns to neutral (50) or oversold
-            if rsi_1d_aligned[i] <= 50:
+            # Exit short: price returns to previous day's close or trend reversal
+            if close[i] >= prev_close[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
