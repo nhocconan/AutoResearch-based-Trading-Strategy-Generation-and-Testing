@@ -1,8 +1,10 @@
-# 12h_Camarilla_R3_S3_1dTrend_Volume
-# Hypothesis: On 12h timeframe, price breaking above/below daily Camarilla R3/S3 levels with volume spike and aligned daily trend (EMA34) captures institutional moves. Daily trend filter ensures trades align with higher timeframe momentum, reducing false breakouts in sideways markets. Designed for low trade frequency (~15-25/year) with high win rate in both bull and bear markets.
+# 4h_Camarilla_R3_S3_1dEMA34_Trend_Volume
+# Strategy: Breakouts at daily Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation.
+# Works in bull/bear by following daily trend. Designed for low trade frequency (~20-50/year) with high win rate.
+# Uses 4h timeframe for entries and 1d for trend filter.
 
-name = "12h_Camarilla_R3_S3_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,11 +21,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla levels (R3, S3) from previous day
+    # Calculate daily Camarilla levels (R3, S3) from previous day
     prev_close = np.roll(close, 1)
     prev_high = np.roll(high, 1)
     prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
+    prev_close[0] = np.nan  # First value invalid
     
     camarilla_range = prev_high - prev_low
     r3 = prev_close + 1.1 * camarilla_range / 2
@@ -33,11 +35,12 @@ def generate_signals(prices):
     breakout_up = close > r3
     breakout_down = close < s3
     
-    # Get daily data for EMA34 trend filter
+    # Get 1d data for EMA34 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
+    # Calculate 1d EMA34 trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -51,7 +54,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
@@ -64,11 +67,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above R3 + daily uptrend + volume spike
+            # Long: breakout above R3 + 1d uptrend + volume spike
             if breakout_up[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S3 + daily downtrend + volume spike
+            # Short: breakout below S3 + 1d downtrend + volume spike
             elif breakout_down[i] and trend_down[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
