@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Camarilla R3/S3 breakouts with 12h EMA50 trend filter and volume spike filter.
-# Works in bull/bear: Trend filter avoids counter-trend trades, volume spike confirms institutional interest.
-# R3/S3 levels provide institutional-grade support/resistance for breakouts.
-# Uses 12h EMA50 for trend and volume ratio (current/20-bar average) for confirmation.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla R3/S3 breakouts with 1d EMA50 trend filter and volume spike filter.
+# Uses 1d EMA50 for trend (more stable than 12h) and volume ratio (current/20-bar average) for confirmation.
+# Designed to work in both bull and bear markets by filtering with higher-timeframe trend.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_VolumeS"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -45,19 +44,14 @@ def generate_signals(prices):
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Calculate 1d EMA50 for trend filter (more stable than 12h)
+    ema_50_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[0:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (ema_50_1d[i-1] * 49 + close_1d[i]) / 50
     
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
-    
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -78,7 +72,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,20 +81,20 @@ def generate_signals(prices):
         if position == 0:
             # Enter long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike
             if (close[i] > camarilla_r3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
                 volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
             # Enter short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike
             elif (close[i] < camarilla_s3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
                   volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
             # Exit long: price breaks below S3 OR trend reversal (price < EMA50)
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -108,7 +102,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price breaks above R3 OR trend reversal (price > EMA50)
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
