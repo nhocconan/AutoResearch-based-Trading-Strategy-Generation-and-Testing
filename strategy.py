@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_DailyVol"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,12 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots (based on previous day)
+    # Get daily data for Camarilla pivots (based on previous day)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -41,30 +41,34 @@ def generate_signals(prices):
     S1 = pivot - (range_hl * 1.1 / 4)
     S2 = pivot - (range_hl * 1.1 / 2)
     
-    # Align to 4h
+    # Align to 1h
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
     
-    # Trend filter: 12h EMA50
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Trend filter: 4h EMA20
+    ema20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Volume filter: current 4h volume > 1.5 * 20-period average
+    # Volume filter: current 1h volume > 2.0 * 24-period average (daily average)
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    vol_ma = vol_series.rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > (vol_ma * 2.0)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 50)  # Need enough data for volume MA and EMA50
+    start_idx = max(24, 20)  # Need enough data for volume MA and EMA20
     
     for i in range(start_idx, n):
         if (np.isnan(R1_aligned[i]) or np.isnan(R2_aligned[i]) or
             np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_filter[i])):
+            np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,17 +78,18 @@ def generate_signals(prices):
         r2 = R2_aligned[i]
         s1 = S1_aligned[i]
         s2 = S2_aligned[i]
-        trend = ema50_12h_aligned[i]
+        trend = ema20_4h_aligned[i]
         vol_filter = volume_filter[i]
+        in_session = session_filter[i]
         
         if position == 0:
-            # Enter long: break above R1 with volume and above trend
-            if close[i] > r1 and close[i] > trend and vol_filter:
-                signals[i] = 0.25
+            # Enter long: break above R1 with volume, above trend, and in session
+            if close[i] > r1 and close[i] > trend and vol_filter and in_session:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: break below S1 with volume and below trend
-            elif close[i] < s1 and close[i] < trend and vol_filter:
-                signals[i] = -0.25
+            # Enter short: break below S1 with volume, below trend, and in session
+            elif close[i] < s1 and close[i] < trend and vol_filter and in_session:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -93,7 +98,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: close above R1 (reversion to mean)
@@ -101,6 +106,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
