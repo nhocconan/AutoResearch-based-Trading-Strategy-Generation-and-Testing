@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Strict"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_1dTrend_Volume_1hEntry"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,14 +36,18 @@ def generate_signals(prices):
     r3 = close_1d + camarilla_range * 1.250
     s3 = close_1d - camarilla_range * 1.250
     
-    # Align Camarilla R3 and S3 to 4h timeframe
+    # Align Camarilla R3 and S3 to 1h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume spike filter: current volume > 2.0 * 30-period average (stricter)
+    # Volume spike filter: current volume > 2.0 * 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > (vol_ma * 2.0)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,15 +66,16 @@ def generate_signals(prices):
         
         ema_1d = ema_34_1d_aligned[i]
         vol_spike = volume_spike[i]
+        in_session = session_filter[i]
         
         if position == 0:
-            # Enter long: Close > R3 and price above 1d EMA34 with volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_1d and vol_spike:
-                signals[i] = 0.25
+            # Enter long: Close > R3 and price above 1d EMA34 with volume spike and in session
+            if close[i] > r3_aligned[i] and close[i] > ema_1d and vol_spike and in_session:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: Close < S3 and price below 1d EMA34 with volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_1d and vol_spike:
-                signals[i] = -0.25
+            # Enter short: Close < S3 and price below 1d EMA34 with volume spike and in session
+            elif close[i] < s3_aligned[i] and close[i] < ema_1d and vol_spike and in_session:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -79,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: Close > R3 or trend breaks (price > 1d EMA34)
@@ -87,6 +92,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
