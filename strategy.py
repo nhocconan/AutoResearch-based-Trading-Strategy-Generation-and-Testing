@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v4"
-timeframe = "4h"
+name = "6h_PearsonCorr_Momentum_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,79 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
+    # Get 1d data for trend filter and momentum calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 20-period EMA on 1d close for trend filter
+    # 1d close for trend filter
     close_1d = df_1d['close'].values
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    ema_10_1d = pd.Series(close_1d).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_10_1d)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 6h Pearson correlation momentum (5-period correlation with linear trend)
+    # Calculate rolling correlation between close and time index
+    x = np.arange(5)  # [0,1,2,3,4]
+    x_mean = np.mean(x)
+    x_var = np.sum((x - x_mean) ** 2)
     
-    # Camarilla R1, S1, H4, L4 levels
-    R1 = prev_close + 0.25 * (prev_high - prev_low)
-    S1 = prev_close - 0.25 * (prev_high - prev_low)
-    H4 = prev_high + 0.5 * (prev_high - prev_low)
-    L4 = prev_low - 0.5 * (prev_high - prev_low)
+    corr_values = np.full(n, np.nan)
+    for i in range(4, n):
+        y = close[i-4:i+1]
+        y_mean = np.mean(y)
+        # Pearson correlation formula: cov(x,y) / (std(x)*std(y))
+        cov_xy = np.sum((x - x_mean) * (y - y_mean))
+        y_var = np.sum((y - y_mean) ** 2)
+        if y_var > 0 and x_var > 0:
+            corr_values[i] = cov_xy / (np.sqrt(x_var * y_var))
+        else:
+            corr_values[i] = 0.0
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    
-    # Calculate 20-period volume average for spike detection
+    # 6h volume moving average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need 20 for 1d EMA and volume average
+    start_idx = max(20, 10)  # Need 20 for volume MA, 10 for EMA
     
     for i in range(start_idx, n):
         # Skip if required data unavailable (NaN from indicators)
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(corr_values[i]) or np.isnan(ema_10_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1 = R1_aligned[i]
-        s1 = S1_aligned[i]
-        h4 = H4_aligned[i]
-        l4 = L4_aligned[i]
-        ema_1d = ema_20_1d_aligned[i]
+        corr = corr_values[i]
+        ema_1d = ema_10_1d_aligned[i]
         vol = volume[i]
         vol_ma_val = vol_ma[i]
         
         if position == 0:
-            # Enter long: Close > R1 AND price > 1d EMA20 (uptrend) AND volume > 2.5x average
-            if close[i] > r1 and close[i] > ema_1d and vol > 2.5 * vol_ma_val:
+            # Enter long: Positive momentum (corr > 0.3) AND price > 1d EMA10 (uptrend) AND volume > 2x average
+            if corr > 0.3 and close[i] > ema_1d and vol > 2.0 * vol_ma_val:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Close < S1 AND price < 1d EMA20 (downtrend) AND volume > 2.5x average
-            elif close[i] < s1 and close[i] < ema_1d and vol > 2.5 * vol_ma_val:
+            # Enter short: Negative momentum (corr < -0.3) AND price < 1d EMA10 (downtrend) AND volume > 2x average
+            elif corr < -0.3 and close[i] < ema_1d and vol > 2.0 * vol_ma_val:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Close < S1 OR trend reverses (price < 1d EMA20)
-            if close[i] < s1 or close[i] < ema_1d:
+            # Exit long: Momentum turns negative (corr < 0) OR trend reverses (price < 1d EMA10)
+            if corr < 0.0 or close[i] < ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Close > R1 OR trend reverses (price > 1d EMA20)
-            if close[i] > r1 or close[i] > ema_1d:
+            # Exit short: Momentum turns positive (corr > 0) OR trend reverses (price > 1d EMA10)
+            if corr > 0.0 or close[i] > ema_1d:
                 signals[i] = 0.0
                 position = 0
             else:
