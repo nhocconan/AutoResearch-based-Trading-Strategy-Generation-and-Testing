@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,12 +17,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels
+    # Get 1d data for Camarilla levels and volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -36,18 +36,19 @@ def generate_signals(prices):
     r1 = prev_close + 1.1 * (prev_high - prev_low) / 4
     s1 = prev_close - 1.1 * (prev_high - prev_low) / 4
     
-    # Align to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 1h
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Trend filter: 12h EMA50
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Trend filter: 4h EMA50
+    ema50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_1h = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Volume filter: current 4h volume > 2.0 * 20-period average
-    vol_series = pd.Series(volume)
+    # Volume filter: current 1d volume > 1.5 * 20-day average
+    vol_series = pd.Series(df_1d['volume'].values)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter_1d = df_1d['volume'].values > (vol_ma * 1.5)
+    volume_filter_1h = align_htf_to_ltf(prices, df_1d, volume_filter_1d)
     
     signals = np.zeros(n)
     position = 0
@@ -55,26 +56,26 @@ def generate_signals(prices):
     start_idx = max(20, 50)  # Need enough data for volume MA and EMA50
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or
+            np.isnan(ema50_4h_1h[i]) or np.isnan(volume_filter_1h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        r1_val = r1_4h[i]
-        s1_val = s1_4h[i]
-        trend = ema50_12h_4h[i]
-        vol_filter = volume_filter[i]
+        r1_val = r1_1h[i]
+        s1_val = s1_1h[i]
+        trend = ema50_4h_1h[i]
+        vol_filter = volume_filter_1h[i]
         
         if position == 0:
             # Enter long: break above R1 with volume and above trend
             if close[i] > r1_val and close[i] > trend and vol_filter:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Enter short: break below S1 with volume and below trend
             elif close[i] < s1_val and close[i] < trend and vol_filter:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
@@ -83,7 +84,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit short: close above R1 (mean reversion to center)
@@ -91,6 +92,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
