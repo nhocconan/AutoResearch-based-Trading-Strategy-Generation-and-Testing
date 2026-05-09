@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_Camarilla_R3S3_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_RSIRange_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,47 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily ATR(14) for volume filter
-    tr1 = high[1:] - low[:-1]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[:-1] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr14 > 1.5 * atr_ma20
+    # RSI(14) on 6h
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain = np.concatenate([[0], gain])
+    loss = np.concatenate([[0], loss])
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Weekly trend filter: EMA34 on 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Volume filter: volume > 1.5x 20-period SMA
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > 1.5 * vol_sma
+    
+    # 12h trend: EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
-    ema34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Calculate Camarilla levels from previous day's data
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = np.concatenate([[close[0]], close[:-1]])
-    prev_high = np.concatenate([[high[0]], high[:-1]])
-    prev_low = np.concatenate([[low[0]], low[:-1]])
-    
-    # Camarilla R3, R4, S3, S4 levels
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.0 * (high - low)
-    # S3 = close - 1.0 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.0 * camarilla_range
-    r4 = prev_close + 1.5 * camarilla_range
-    s3 = prev_close - 1.0 * camarilla_range
-    s4 = prev_close - 1.5 * camarilla_range
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(atr14[i]) or np.isnan(atr_ma20[i]) or np.isnan(ema34_1w_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,35 +55,35 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume and weekly uptrend
-            if (price > r3[i] and 
-                vol_filter[i] and 
-                price > ema34_1w_aligned[i]):
+            # Long: RSI oversold (<30) + price above 12h EMA50 + volume filter
+            if (rsi[i] < 30 and 
+                price > ema50_12h_aligned[i] and 
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: price breaks below S3 with volume and weekly downtrend
-            elif (price < s3[i] and 
-                  vol_filter[i] and 
-                  price < ema34_1w_aligned[i]):
+            # Short: RSI overbought (>70) + price below 12h EMA50 + volume filter
+            elif (rsi[i] > 70 and 
+                  price < ema50_12h_aligned[i] and 
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price retreats below R3 or weekly trend fails
-            if (price < r3[i] or 
-                price < ema34_1w_aligned[i]):
+            # Exit long: RSI overbought or price below 12h EMA50
+            if (rsi[i] > 70 or 
+                price < ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above S3 or weekly trend fails
-            if (price > s3[i] or 
-                price > ema34_1w_aligned[i]):
+            # Exit short: RSI oversold or price above 12h EMA50
+            if (rsi[i] < 30 or 
+                price > ema50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
