@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
-# Long when: price > Donchian Upper(20), price > 1d EMA(50), volume > 1.5x 20-period average
-# Short when: price < Donchian Lower(20), price < 1d EMA(50), volume > 1.5x 20-period average
-# Exit when: price crosses back below/above Donchian midpoint OR 1d EMA trend reverses
-# Position size: 0.28 (28% of capital) to balance return and drawdown. Target: 15-30 trades/year.
-# Designed to work in both bull (breakout with trend) and bear (breakdown with trend) markets.
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+# Long when: price > upper Donchian(20) and close > 1w EMA50 and volume > 1.5x 20-day average
+# Short when: price < lower Donchian(20) and close < 1w EMA50 and volume > 1.5x 20-day average
+# Exit when: price crosses back below/above Donchian midpoint or EMA trend reverses
+# Position size: 0.25 (25% of capital) to limit drawdown. Target: 15-30 trades/year.
+# Designed to work in both bull (breakouts with trend) and bear (breakouts against trend) markets.
 
-name = "12h_Donchian20_1dEMA50_Volume"
-timeframe = "12h"
+name = "1d_Donchian20_1wEMA50_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -27,21 +27,19 @@ def generate_signals(prices):
     # Calculate Donchian channels (20-period)
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max()
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min()
-    upper = high_20.values
-    lower = low_20.values
-    midpoint = (upper + lower) / 2
+    donchian_mid = (high_20 + low_20) / 2
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50)
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Calculate EMA50 on 1w close
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Volume spike: current volume > 1.5x 20-period average volume
+    # Volume confirmation: current volume > 1.5x 20-day average volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (1.5 * vol_ma.values)
     
@@ -52,7 +50,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(ema_50_aligned[i]) or 
             np.isnan(vol_spike[i])):
             if position != 0:
@@ -61,33 +59,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price > Upper(20), price > EMA50, volume spike
-            if (close[i] > upper[i] and 
+            # Enter long: price > upper Donchian and close > 1w EMA50 and volume spike
+            if (close[i] > high_20[i] and 
                 close[i] > ema_50_aligned[i] and 
                 vol_spike[i]):
-                signals[i] = 0.28
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price < Lower(20), price < EMA50, volume spike
-            elif (close[i] < lower[i] and 
+            # Enter short: price < lower Donchian and close < 1w EMA50 and volume spike
+            elif (close[i] < low_20[i] and 
                   close[i] < ema_50_aligned[i] and 
                   vol_spike[i]):
-                signals[i] = -0.28
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < midpoint OR EMA trend turns bearish (price < EMA50)
-            if (close[i] < midpoint[i]) or (close[i] < ema_50_aligned[i]):
+            # Exit long: price < Donchian midpoint OR close < 1w EMA50 (trend reversal)
+            if (close[i] < donchian_mid[i]) or (close[i] < ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.28
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > midpoint OR EMA trend turns bullish (price > EMA50)
-            if (close[i] > midpoint[i]) or (close[i] > ema_50_aligned[i]):
+            # Exit short: price > Donchian midpoint OR close > 1w EMA50 (trend reversal)
+            if (close[i] > donchian_mid[i]) or (close[i] > ema_50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.28
+                signals[i] = -0.25
     
     return signals
