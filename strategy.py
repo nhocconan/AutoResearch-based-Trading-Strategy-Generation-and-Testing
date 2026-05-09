@@ -1,13 +1,16 @@
-# 6h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2
-# Hypothesis: Breakout at stronger Camarilla R3/S3 levels with 12h trend filter and volume spike.
-# R3/S3 represent stronger support/resistance than R1/S1, reducing false breakouts.
-# 12h trend filter provides intermediate-term direction, better for 6h timeframe.
-# Volume spike (>2x 20-period average) confirms breakout strength.
-# Designed for low trade frequency (12-37/year) to minimize fee drag.
-# Works in both bull and bear markets by following the 12h trend direction.
+#!/usr/bin/env python3
+"""
+4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS_v3
+Hypothesis: Tight breakout at Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+EMA34 is more responsive than EMA50, better capturing trend changes in volatile crypto markets.
+Volume spike (>2x 20-period average) confirms breakout strength.
+Designed for low trade frequency (<50/year) to minimize fee drag in BTC/ETH.
+Works in both bull and bear markets by following the daily trend direction.
+Added 5-bar minimum holding period to reduce whipsaw and overtrading.
+"""
 
-name = "6h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2"
-timeframe = "6h"
+name = "4h_4H_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,37 +27,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Camarilla calculation and trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for Camarilla calculation and EMA
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous day's values for Camarilla calculation (using 12h bars)
-    ph = np.concatenate([[high_12h[0]], high_12h[:-1]])  # previous high
-    pl = np.concatenate([[low_12h[0]], low_12h[:-1]])   # previous low
-    pc = np.concatenate([[close_12h[0]], close_12h[:-1]]) # previous close
+    # Previous day's values for Camarilla calculation
+    ph = np.concatenate([[high_1d[0]], high_1d[:-1]])  # previous high
+    pl = np.concatenate([[low_1d[0]], low_1d[:-1]])   # previous low
+    pc = np.concatenate([[close_1d[0]], close_1d[:-1]]) # previous close
     
-    # Calculate Camarilla levels (R3, S3 are stronger breakout levels)
+    # Calculate Camarilla levels (R1, S1 are the key breakout levels)
     rang = ph - pl
-    r3 = pc + 1.1 * rang * 1.2500  # R3 = Close + 1.1 * (High-Low) * 1.2500
-    s3 = pc - 1.1 * rang * 1.2500  # S3 = Close - 1.1 * (High-Low) * 1.2500
+    r1 = pc + 1.1 * rang * 1.0833  # R1 = Close + 1.1 * (High-Low) * 1.0833
+    s1 = pc - 1.1 * rang * 1.0833  # S1 = Close - 1.1 * (High-Low) * 1.0833
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[0:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (ema_50_12h[i-1] * 49 + close_12h[i]) / 50
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (ema_34_1d[i-1] * 33 + close_1d[i]) / 34
     
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume spike filter: current volume / 20-period average volume
     vol_ma = np.full_like(volume, np.nan)
@@ -71,12 +74,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    start_idx = max(20, 50)  # Ensure volume MA and EMA are ready
+    start_idx = max(20, 34)  # Ensure volume MA and EMA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,28 +89,28 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         if position == 0:
-            # Enter long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
+            # Enter long: price breaks above R1 AND uptrend (price > EMA34) AND volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_ratio[i] > 2.0):
                 signals[i] = 0.25
                 position = 1
                 bars_since_entry = 0
-            # Enter short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
+            # Enter short: price breaks below S1 AND downtrend (price < EMA34) AND volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_ratio[i] > 2.0):
                 signals[i] = -0.25
                 position = -1
                 bars_since_entry = 0
         
         elif position == 1:
-            # Minimum holding period: 4 bars
-            if bars_since_entry < 4:
+            # Minimum holding period: 5 bars
+            if bars_since_entry < 5:
                 signals[i] = 0.25
             else:
-                # Exit long: price breaks below S3 OR trend reversal (price < EMA50)
-                if close[i] < s3_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+                # Exit long: price breaks below S1 OR trend reversal (price < EMA34)
+                if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
@@ -115,12 +118,12 @@ def generate_signals(prices):
                     signals[i] = 0.25
         
         elif position == -1:
-            # Minimum holding period: 4 bars
-            if bars_since_entry < 4:
+            # Minimum holding period: 5 bars
+            if bars_since_entry < 5:
                 signals[i] = -0.25
             else:
-                # Exit short: price breaks above R3 OR trend reversal (price > EMA50)
-                if close[i] > r3_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+                # Exit short: price breaks above R1 OR trend reversal (price > EMA34)
+                if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
