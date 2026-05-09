@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_DailyBreakout_12hVolume
-Hypothesis: Weekly trend (using 20-week EMA on 1w) filters direction, daily breakout above/below 
-previous day's high/low (breakout of daily range) with volume confirmation (12h volume > 1.5x 20-period 
-average) provides edge in both bull and bear markets by capturing momentum after consolidation.
-Timeframe: 1d for fewer trades, lower fee drag. Uses 1w trend filter to avoid counter-trend trades.
-Target: 15-25 trades/year (~60-100 total over 4 years) to stay within fee limits.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slow
+Hypothesis: 12h timeframe reduces trade frequency to avoid fee drag. Uses daily Camarilla R1/S1 levels (narrower bands) for breakout signals, requiring 1d EMA trend alignment and volume confirmation. This combination should yield 15-30 trades/year with strong edge in both bull (breakouts with trend) and bear (mean reversion at S1/R1) markets while keeping trades sparse enough to overcome fee drag.
 """
 
-name = "1d_WeeklyTrend_DailyBreakout_12hVolume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Slow"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,97 +22,89 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (20-week EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 20-period EMA on weekly close
-    ema20_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[0:20])
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = (close_1w[i] * 2 + ema20_1w[i-1] * 18) / 20
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = (close_1d[i] * 2 + ema34_1d[i-1] * 32) / 34
     
-    # Align 1w EMA20 to daily timeframe
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Align 1d EMA34 to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Get 12h data for volume confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
+    # Calculate Camarilla levels for each 1d bar: R1, S1 (using 1.1 multiplier / 2)
+    camarilla_r1_1d = np.full_like(close_1d, np.nan)
+    camarilla_s1_1d = np.full_like(close_1d, np.nan)
     
-    volume_12h = df_12h['volume'].values
+    for i in range(len(df_1d)):
+        if not (np.isnan(high_1d[i]) or np.isnan(low_1d[i]) or np.isnan(close_1d[i])):
+            camarilla_r1_1d[i] = close_1d[i] + 1.1 * (high_1d[i] - low_1d[i]) / 2
+            camarilla_s1_1d[i] = close_1d[i] - 1.1 * (high_1d[i] - low_1d[i]) / 2
     
-    # Calculate 20-period average volume on 12h
-    vol_ma_12h = np.full_like(volume_12h, np.nan)
-    if len(volume_12h) >= 20:
-        vol_ma_12h[19] = np.mean(volume_12h[0:20])
-        for i in range(20, len(volume_12h)):
-            vol_ma_12h[i] = (vol_ma_12h[i-1] * 19 + volume_12h[i]) / 20
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1_1d)
+    camarilla_s1_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1_1d)
     
-    # Align 12h volume MA to daily timeframe
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Volume filter: current volume vs 20-period average
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
     
-    # Daily range breakout: today's high > yesterday's high (for long) or today's low < yesterday's low (for short)
-    # We need yesterday's high/low, so shift by 1
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    # First bar has no previous, set to nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    volume_ratio = np.full_like(volume, np.nan)
+    valid_vol = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid_vol] = volume[valid_vol] / vol_ma[valid_vol]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data: need EMA20_1w aligned, volume MA aligned, and prev high/low
-    start_idx = max(20, 20)  # EMA20 and vol MA both need 20 periods
+    start_idx = max(34, 20)  # Need 1d EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma_12h_aligned[i]) or 
-            np.isnan(prev_high[i]) or np.isnan(prev_low[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_r1_1d_aligned[i]) or 
+            np.isnan(camarilla_s1_1d_aligned[i]) or np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine conditions
-        # Weekly trend: price above/below 20-week EMA
-        trend_up = close[i] > ema20_1w_aligned[i]
-        trend_down = close[i] < ema20_1w_aligned[i]
-        
-        # Daily breakout: today breaks above yesterday's high or below yesterday's low
-        breakout_up = high[i] > prev_high[i]
-        breakout_down = low[i] < prev_low[i]
-        
-        # Volume confirmation: 12h volume > 1.5x its 20-period average
-        # Note: vol_ma_12h_aligned gives the 20-period MA of 12h volume, aligned to daily
-        volume_surge = volume[i] > (vol_ma_12h_aligned[i] * 1.5)
+        # Determine market conditions
+        trend_up = close[i] > ema34_1d_aligned[i]
+        volume_surge = volume_ratio[i] > 1.8
         
         if position == 0:
-            # Enter long: uptrend + upward breakout + volume surge
-            if trend_up and breakout_up and volume_surge:
+            # Enter long: Uptrend + price breaks above R1 + volume surge
+            if trend_up and close[i] > camarilla_r1_1d_aligned[i] and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: downtrend + downward breakout + volume surge
-            elif trend_down and breakout_down and volume_surge:
+            # Enter short: Downtrend + price breaks below S1 + volume surge
+            elif not trend_up and close[i] < camarilla_s1_1d_aligned[i] and volume_surge:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: trend turns down OR price breaks below yesterday's low (mean reversion)
-            if not trend_up or low[i] < prev_low[i]:
+            # Exit long: Trend turns down OR price breaks below S1
+            if not trend_up or close[i] < camarilla_s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: trend turns up OR price breaks above yesterday's high
-            if trend_down or high[i] > prev_high[i]:
+            # Exit short: Trend turns up OR price breaks above R1
+            if trend_up or close[i] > camarilla_r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
