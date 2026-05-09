@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_RSI_Div_With_Volume_Trend
-# Strategy: RSI divergence with volume confirmation and 1d trend filter
-# Long: Bullish RSI divergence + price > 1d EMA50 + volume spike
-# Short: Bearish RSI divergence + price < 1d EMA50 + volume spike
-# Exit: RSI crosses opposite extreme (long exit at RSI>70, short exit at RSI<30)
-# Designed for 4h timeframe with selective entries to minimize trade frequency and work in bull/bear markets
+# 1d_WVWAP_Volume_Spike_Trend
+# Strategy: Weighted VWAP deviation with volume spike confirmation and weekly trend filter
+# Long when price > VWAP(20) + volume > 1.5x avg volume and weekly close > weekly open
+# Short when price < VWAP(20) - volume > 1.5x avg volume and weekly close < weekly open
+# Exit when price crosses VWAP(20)
+# Designed for 1d timeframe to capture mean reversion with institutional volume confirmation
+# Uses weekly trend filter to avoid counter-trend trades in strong trends
 
-name = "4h_RSI_Div_With_Volume_Trend"
-timeframe = "4h"
+name = "1d_WVWAP_Volume_Spike_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,112 +17,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Calculate VWAP(20)
+    typical_price = (high + low + close) / 3.0
+    vp = typical_price * volume
+    
+    # Calculate cumulative sums for VWAP
+    cum_vp = np.zeros(n)
+    cum_vol = np.zeros(n)
+    
+    cum_vp[0] = vp[0]
+    cum_vol[0] = volume[0]
+    
+    for i in range(1, n):
+        cum_vp[i] = cum_vp[i-1] + vp[i]
+        cum_vol[i] = cum_vol[i-1] + volume[i]
+    
+    vwap = np.full(n, np.nan)
+    for i in range(20, n):  # 20-period VWAP
+        start_idx = i - 19
+        vp_sum = cum_vp[i] - (cum_vp[start_idx-1] if start_idx > 0 else 0)
+        vol_sum = cum_vol[i] - (cum_vol[start_idx-1] if start_idx > 0 else 0)
+        if vol_sum > 0:
+            vwap[i] = vp_sum / vol_sum
+    
+    # Calculate average volume (20-period)
+    avg_vol = np.full(n, np.nan)
+    for i in range(20, n):
+        start_idx = i - 19
+        vol_sum = cum_vol[i] - (cum_vol[start_idx-1] if start_idx > 0 else 0)
+        avg_vol[i] = vol_sum / 20.0
+    
+    # Volume spike condition: volume > 1.5x average volume
+    volume_spike = volume > (1.5 * avg_vol)
+    
+    # Price deviation from VWAP
+    vwap_dev = close - vwap
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Weekly trend: bullish if weekly close > weekly open
+    weekly_bullish = df_1w['close'] > df_1w['open']
+    weekly_bullish_vals = weekly_bullish.values
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_vals)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nanmean(data[1:period])
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    gain_smooth = wilders_smooth(gain, 14)
-    loss_smooth = wilders_smooth(loss, 14)
-    
-    rs = np.where(loss_smooth != 0, gain_smooth / loss_smooth, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate volume spike (volume > 1.5 * 20-period average)
-    vol_ma = np.zeros_like(volume)
-    vol_sum = 0.0
-    vol_count = 0
-    for i in range(len(volume)):
-        vol_sum += volume[i]
-        vol_count += 1
-        if vol_count > 20:
-            vol_sum -= volume[i-20]
-            vol_count -= 1
-        if vol_count >= 20:
-            vol_ma[i] = vol_sum / 20.0
-        else:
-            vol_ma[i] = 0.0
-    
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 0.0)
-    vol_spike = vol_ratio > 1.5
+    # Weekly bearish if weekly close < weekly open
+    weekly_bearish = df_1w['close'] < df_1w['open']
+    weekly_bearish_vals = weekly_bearish.values
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish_vals)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 20  # Ensure enough data for VWAP
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or i < 20):
+        if (np.isnan(vwap[i]) or np.isnan(avg_vol[i]) or 
+            np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Check for RSI divergence
-        bullish_div = False
-        bearish_div = False
-        
-        # Look back 5 periods for divergence
-        lookback = 5
-        if i >= lookback:
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            if close[i] < close[i-lookback] and rsi[i] > rsi[i-lookback]:
-                # Check if it's a meaningful low
-                if rsi[i] < 40 and rsi[i-lookback] < 40:
-                    bullish_div = True
-            
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            if close[i] > close[i-lookback] and rsi[i] < rsi[i-lookback]:
-                # Check if it's a meaningful high
-                if rsi[i] > 60 and rsi[i-lookback] > 60:
-                    bearish_div = True
-        
         if position == 0:
-            # Enter long: Bullish RSI divergence + above 1d EMA50 + volume spike
-            if bullish_div and close[i] > ema_50_aligned[i] and vol_spike[i]:
+            # Enter long: price above VWAP, volume spike, and weekly bullish
+            if (vwap_dev[i] > 0 and volume_spike[i] and 
+                weekly_bullish_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bearish RSI divergence + below 1d EMA50 + volume spike
-            elif bearish_div and close[i] < ema_50_aligned[i] and vol_spike[i]:
+            # Enter short: price below VWAP, volume spike, and weekly bearish
+            elif (vwap_dev[i] < 0 and volume_spike[i] and 
+                  weekly_bearish_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: RSI crosses above 70 (overbought)
-            if rsi[i] > 70:
+            # Exit long: price crosses below VWAP
+            if vwap_dev[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI crosses below 30 (oversold)
-            if rsi[i] < 30:
+            # Exit short: price crosses above VWAP
+            if vwap_dev[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
