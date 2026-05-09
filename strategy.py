@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_Fibonacci_Extension_Retest_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,77 +17,72 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Fibonacci levels and trend
+    # Get 1d data for Camarilla calculation and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily swing high and low for Fibonacci retracement
-    # Using 20-day lookback for swing points
-    high_series = pd.Series(df_1d['high'])
-    low_series = pd.Series(df_1d['low'])
+    # Previous day's close for Camarilla calculation (R1, S1)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Rolling window for swing high/low (20 days)
-    roll_high = high_series.rolling(window=20, min_periods=20).max().values
-    roll_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels (R1, S1)
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12  # R1 = C + 1.1*(H-L)/12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12  # S1 = C - 1.1*(H-L)/12
     
-    # Calculate Fibonacci retracement levels (38.2% and 61.8%)
-    diff = roll_high - roll_low
-    fib_382 = roll_high - diff * 0.382  # 38.2% retracement level
-    fib_618 = roll_high - diff * 0.618  # 61.8% retracement level
+    # Trend filter: 1d EMA34
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Trend filter: 1-day EMA 50
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter: current 6h volume > 1.5 * 30-period average
+    # Volume filter: current 4h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=30, min_periods=30).mean().values
+    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
-    # Align all to 6h timeframe
-    fib_382_6h = align_htf_to_ltf(prices, df_1d, fib_382)
-    fib_618_6h = align_htf_to_ltf(prices, df_1d, fib_618)
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align all to 4h (primary timeframe)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 30)  # Need enough data for EMA50 and volume MA
+    start_idx = max(34, 20)  # Need enough data for EMA34 and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(fib_382_6h[i]) or np.isnan(fib_618_6h[i]) or
-            np.isnan(ema50_1d_6h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        fib_382_val = fib_382_6h[i]
-        fib_618_val = fib_618_6h[i]
-        trend = ema50_1d_6h[i]
+        r1_val = r1_4h[i]
+        s1_val = s1_4h[i]
+        trend = ema34_1d_4h[i]
         vol_filter = volume_filter[i]
         
         if position == 0:
-            # Enter long: price retraces to 61.8% Fib level with volume and above trend
-            if low[i] <= fib_618_val and close[i] > fib_618_val and close[i] > trend and vol_filter:
+            # Enter long: break above R1 with volume and above trend
+            if close[i] > r1_val and close[i] > trend and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price retraces to 38.2% Fib level with volume and below trend
-            elif high[i] >= fib_382_val and close[i] < fib_382_val and close[i] < trend and vol_filter:
+            # Enter short: break below S1 with volume and below trend
+            elif close[i] < s1_val and close[i] < trend and vol_filter:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price reaches 38.2% Fib level or closes below 61.8%
-            if high[i] >= fib_382_val or close[i] < fib_618_val:
+            # Exit long: close below S1 (mean reversion to center)
+            if close[i] < s1_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches 61.8% Fib level or closes above 38.2%
-            if low[i] <= fib_618_val or close[i] > fib_382_val:
+            # Exit short: close above R1 (mean reversion to center)
+            if close[i] > r1_val:
                 signals[i] = 0.0
                 position = 0
             else:
