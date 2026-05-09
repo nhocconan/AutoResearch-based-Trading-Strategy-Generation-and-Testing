@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+name = "6h_Supertrend_1w_Trend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,23 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily pivot levels (from previous day's OHLC)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Supertrend parameters
+    atr_period = 10
+    atr_mult = 3.0
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
-    r4 = prev_high + 3 * (pivot - prev_low)
-    s4 = prev_low - 3 * (prev_high - pivot)
+    # Calculate ATR
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
+    
+    # Calculate upper and lower bands
+    hl2 = (high + low) / 2
+    upperband = hl2 + atr_mult * atr
+    lowerband = hl2 - atr_mult * atr
+    
+    # Initialize Supertrend
+    supertrend = np.full(n, np.nan)
+    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(atr_period, n):
+        if i == atr_period:
+            supertrend[i] = lowerband[i]
+            direction[i] = 1
+        else:
+            if supertrend[i-1] == upperband[i-1]:
+                if close[i] <= upperband[i]:
+                    supertrend[i] = upperband[i]
+                else:
+                    supertrend[i] = lowerband[i]
+                    direction[i] = -1
+            else:
+                if close[i] >= lowerband[i]:
+                    supertrend[i] = lowerband[i]
+                else:
+                    supertrend[i] = upperband[i]
+                    direction[i] = 1
     
     # Weekly trend: EMA34 on 1w
     df_1w = get_htf_data(prices, '1w')
@@ -49,12 +72,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = max(atr_period, 50)
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(pivot[i]) or np.isnan(r4[i]) or np.isnan(s4[i]) or \
-           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(supertrend[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,16 +85,16 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: breakout above R4 with weekly uptrend and volume
-            if (price > r4[i] and 
+            # Long: Supertrend uptrend, weekly uptrend, volume confirmation
+            if (direction[i] == 1 and 
                 price > ema34_1w_aligned[i] and 
                 vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: breakdown below S4 with weekly downtrend and volume
-            elif (price < s4[i] and 
+            # Short: Supertrend downtrend, weekly downtrend, volume confirmation
+            elif (direction[i] == -1 and 
                   price < ema34_1w_aligned[i] and 
                   vol_filter[i]):
                 signals[i] = -0.25
@@ -80,8 +102,8 @@ def generate_signals(prices):
                 continue
         
         elif position == 1:
-            # Exit long: price returns to pivot or weekly trend fails
-            if (price < pivot[i] or 
+            # Exit long: Supertrend turns down or weekly trend fails
+            if (direction[i] == -1 or 
                 price < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
@@ -89,8 +111,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to pivot or weekly trend fails
-            if (price > pivot[i] or 
+            # Exit short: Supertrend turns up or weekly trend fails
+            if (direction[i] == 1 or 
                 price > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
