@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 1d timeframe with weekly Bollinger Band squeeze and breakout detection.
-# Uses weekly Bollinger Bands to identify low volatility periods (squeeze) and breakouts.
-# Weekly Bollinger Band width percentile < 20% indicates squeeze, then breakout above/below bands.
-# Daily trend filter (EMA50) ensures trades align with higher timeframe trend.
-# Volume confirmation reduces false breakouts.
-# Target: 30-100 total trades over 4 years (7-25/year) with size 0.25.
+# Hypothesis: 6h timeframe with 12h Bollinger Band squeeze breakout and volume confirmation.
+# Uses Bollinger Band width (BBW) percentile to detect low volatility squeeze conditions.
+# Breakouts occur when price closes outside Bollinger Bands after a squeeze (BBW < 20th percentile).
+# Volume confirmation ensures breakout validity. Works in both bull and bear markets by capturing
+# volatility expansion phases regardless of direction. Target: 50-150 total trades over 4 years.
 
-name = "1d_Bollinger_Squeeze_Breakout_WeeklyEMA50_Trend_Volume"
-timeframe = "1d"
+name = "6h_Bollinger_Squeeze_Breakout_12hBBW_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,43 +23,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Bollinger Bands
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for Bollinger Bands
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate weekly Bollinger Bands (20, 2)
-    weekly_close = df_1w['close'].values
-    sma_20 = pd.Series(weekly_close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(weekly_close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma_20 + 2 * std_20
-    lower_band = sma_20 - 2 * std_20
-    bb_width = (upper_band - lower_band) / sma_20  # Normalized width
+    # Calculate 12h Bollinger Bands (20, 2)
+    close_12h = df_12h['close'].values
+    sma_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close_12h).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma_20 + 2 * std_20
+    lower_bb = sma_20 - 2 * std_20
     
-    # Bollinger Band squeeze: width below 20th percentile (low volatility)
-    bb_width_percentile = pd.Series(bb_width).rolling(window=50, min_periods=50).quantile(0.20).values
-    squeeze = bb_width < bb_width_percentile
+    # Bollinger Band Width
+    bbw = (upper_bb - lower_bb) / sma_20
     
-    # Breakout conditions: price breaks above upper band or below lower band
-    breakout_up = weekly_close > upper_band
-    breakout_down = weekly_close < lower_band
+    # Bollinger Band Width percentile (20-period lookback)
+    bbw_percentile = pd.Series(bbw).rolling(window=20, min_periods=20).rank(pct=True).values
     
-    # Align weekly indicators to daily timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1w, squeeze)
-    breakout_up_aligned = align_htf_to_ltf(prices, df_1w, breakout_up)
-    breakout_down_aligned = align_htf_to_ltf(prices, df_1w, breakout_down)
+    # Squeeze condition: BBW below 20th percentile
+    squeeze = bbw_percentile < 0.2
     
-    # Get daily data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Breakout conditions: price closes outside Bollinger Bands
+    breakout_up = close_12h > upper_bb
+    breakout_down = close_12h < lower_bb
     
-    # Calculate 1d EMA50 trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    trend_up = close > ema_50_1d_aligned
-    trend_down = close < ema_50_1d_aligned
+    # Align 12h indicators to 6h timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_12h, squeeze)
+    breakout_up_aligned = align_htf_to_ltf(prices, df_12h, breakout_up)
+    breakout_down_aligned = align_htf_to_ltf(prices, df_12h, breakout_down)
     
     # Volume filter: current volume > 1.5x 20-period average volume
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,41 +60,38 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
         if (np.isnan(squeeze_aligned[i]) or np.isnan(breakout_up_aligned[i]) or 
-            np.isnan(breakout_down_aligned[i]) or np.isnan(trend_up[i]) or 
-            np.isnan(trend_down[i]) or np.isnan(volume_filter[i])):
+            np.isnan(breakout_down_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: squeeze breakout up + daily uptrend + volume spike
-            if squeeze_aligned[i] and breakout_up_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: squeeze breakout up + volume filter
+            if squeeze_aligned[i] and breakout_up_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: squeeze breakout down + daily downtrend + volume spike
-            elif squeeze_aligned[i] and breakout_down_aligned[i] and trend_down[i] and volume_filter[i]:
+            # Short: squeeze breakout down + volume filter
+            elif squeeze_aligned[i] and breakout_down_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to weekly middle band or trend reversal
-            weekly_sma_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
-            if close[i] <= weekly_sma_aligned[i] or not trend_up[i]:
+            # Exit long: price returns to middle Bollinger Band (SMA20) or squeeze ends
+            if close_12h[i] <= sma_20[i] or not squeeze_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to weekly middle band or trend reversal
-            weekly_sma_aligned = align_htf_to_ltf(prices, df_1w, sma_20)
-            if close[i] >= weekly_sma_aligned[i] or not trend_down[i]:
+            # Exit short: price returns to middle Bollinger Band (SMA20) or squeeze ends
+            if close_12h[i] >= sma_20[i] or not squeeze_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
