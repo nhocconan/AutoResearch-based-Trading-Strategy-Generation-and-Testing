@@ -3,19 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Camarilla_R1S1_1dTrend_VolumeSpike_v3"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1_S1_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Get 12h data for pivot calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
+        return np.zeros(n)
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -26,11 +31,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_30_1d = pd.Series(close_1d).ewm(span=30, adjust=False, min_periods=30).mean().values
     ema_30_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_30_1d)
-    
-    # Get 12h data for pivot calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
     
     # Calculate 12h CAMARILLA pivot levels from previous 12h bar's OHLC
     prev_12h_high = df_12h['high'].shift(1).values
