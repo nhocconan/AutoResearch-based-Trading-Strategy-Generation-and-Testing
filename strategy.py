@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_KAMA_Trend_Filter_Volume_Confirm"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_ChopRegime"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     """
-    12h KAMA trend filter with volume confirmation and 1d ATR filter.
-    - Long: KAMA > previous KAMA, volume > 1.5x avg, close > 1d EMA(50)
-    - Short: KAMA < previous KAMA, volume > 1.5x avg, close < 1d EMA(50)
-    - Exit: Trend reversal or volume drops below average
-    - Uses 1d EMA(50) for trend filter
-    - Target: 20-40 trades/year on 12h timeframe
+    4h TRIX momentum with volume spike and Choppiness regime filter.
+    - Long: TRIX crosses above 0 with volume > 2x 20-bar average and CHOP > 61.8 (range)
+    - Short: TRIX crosses below 0 with volume > 2x 20-bar average and CHOP > 61.8 (range)
+    - Exit: TRIX crosses back through 0 or CHOP < 38.2 (trend regime)
+    - Uses volume confirmation to avoid false breakouts
+    - Target: 20-40 trades/year on 4h timeframe
     """
     n = len(prices)
     if n < 50:
@@ -25,73 +25,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Choppiness calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 60:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend filter
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate TRIX (15-period EMA of EMA of EMA of ROC)
+    roc = np.diff(close, prepend=close[0]) / close
+    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3.values
     
-    # Calculate KAMA on 12h data
-    close_series = pd.Series(close)
-    # Efficiency ratio
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series.diff()).rolling(window=10).sum()
-    er = change / volatility
-    er = er.fillna(0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 1d Choppiness Index
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    atr_1d = np.maximum(
+        high_1d - low_1d,
+        np.maximum(
+            np.abs(high_1d - np.roll(close_1d, 1)),
+            np.abs(low_1d - np.roll(close_1d, 1))
+        )
+    )
+    atr_1d[0] = high_1d[0] - low_1d[0]  # first value
+    
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum()
+    max_hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max()
+    min_ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(sum_atr_14 / (max_hh - min_ll)) / np.log10(14)
+    chop = chop.values
+    chop[np.isnan(chop)] = 50  # neutral when undefined
+    
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # Volume confirmation: current volume > 2x 20-period average
     vol_series = pd.Series(volume)
     vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # ensure sufficient warmup
+    start_idx = 30  # ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(kama[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(trix[i]) or np.isnan(chop_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma20[i]
-        kama_up = kama[i] > kama[i-1]
-        kama_down = kama[i] < kama[i-1]
+        vol_ok = volume[i] > 2.0 * vol_ma20[i]
+        chop_val = chop_aligned[i]
         
         if position == 0:
-            # Long: KAMA rising, volume confirmation, above 1d EMA trend
-            if kama_up and vol_ok and close[i] > ema50_1d_aligned[i]:
+            # Long: TRIX crosses above 0 with volume spike in range regime
+            if trix[i] > 0 and trix[i-1] <= 0 and vol_ok and chop_val > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling, volume confirmation, below 1d EMA trend
-            elif kama_down and vol_ok and close[i] < ema50_1d_aligned[i]:
+            # Short: TRIX crosses below 0 with volume spike in range regime
+            elif trix[i] < 0 and trix[i-1] >= 0 and vol_ok and chop_val > 61.8:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: KAMA turns down or volume drops
-            if not kama_up or not vol_ok:
+            # Exit long: TRIX crosses below 0 or trend regime (CHOP < 38.2)
+            if trix[i] < 0 and trix[i-1] >= 0:
+                signals[i] = 0.0
+                position = 0
+            elif chop_val < 38.2:  # trend regime - exit
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: KAMA turns up or volume drops
-            if not kama_down or not vol_ok:
+            # Exit short: TRIX crosses above 0 or trend regime (CHOP < 38.2)
+            if trix[i] > 0 and trix[i-1] <= 0:
+                signals[i] = 0.0
+                position = 0
+            elif chop_val < 38.2:  # trend regime - exit
                 signals[i] = 0.0
                 position = 0
             else:
