@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12h_WilliamsAlligator_ElderRay_Trend
-# Hypothesis: Williams Alligator identifies trend direction (jaw-teeth-lips alignment),
-# Elder Ray (Bull/Bear Power) measures trend strength, combined with 1-week trend filter.
-# Works in bull/bear: Alligator filters sideways markets, Elder Ray confirms momentum,
-# weekly trend ensures alignment with higher timeframe direction.
-# Uses Williams Alligator (SMAs: 13,8,5) and Elder Ray (EMA13) from 1d timeframe.
+# 4h_TRIX_ZeroCross_1dTrend_VolumeSpike
+# Hypothesis: TRIX zero-cross signals on 4h timeframe filtered by 1d EMA trend and volume spikes.
+# TRIX captures momentum shifts, EMA trend ensures directional bias, volume confirms institutional participation.
+# Works in bull/bear markets by avoiding counter-trend trades and requiring volume confirmation for entries.
 
-name = "12h_WilliamsAlligator_ElderRay_Trend"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,104 +20,106 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate Williams Alligator and Elder Ray from 1d timeframe
+    # Calculate TRIX on 4h close (12-period EMA of EMA of EMA, then ROC)
+    if len(close) < 12:
+        return np.zeros(n)
+    
+    # First EMA
+    ema1 = np.full_like(close, np.nan)
+    ema1[0] = close[0]
+    for i in range(1, len(close)):
+        ema1[i] = (close[i] * 2 + ema1[i-1] * 10) / 12  # 12-period EMA
+    
+    # Second EMA
+    ema2 = np.full_like(close, np.nan)
+    ema2[0] = ema1[0]
+    for i in range(1, len(close)):
+        ema2[i] = (ema1[i] * 2 + ema2[i-1] * 10) / 12
+    
+    # Third EMA
+    ema3 = np.full_like(close, np.nan)
+    ema3[0] = ema2[0]
+    for i in range(1, len(close)):
+        ema3[i] = (ema2[i] * 2 + ema3[i-1] * 10) / 12
+    
+    # TRIX = 100 * (EMA3 today - EMA3 yesterday) / EMA3 yesterday
+    trix = np.full_like(close, np.nan)
+    for i in range(1, len(close)):
+        if ema3[i-1] != 0:
+            trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
+    
+    # Calculate 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_34_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[0:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = (close_1d[i] * 2 + ema_34_1d[i-1] * 32) / 34
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) - all SMAs
-    def sma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            for i in range(period-1, len(arr)):
-                result[i] = np.mean(arr[i-period+1:i+1])
-        return result
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    jaw = sma(close_1d, 13)   # Blue line
-    teeth = sma(close_1d, 8)  # Red line
-    lips = sma(close_1d, 5)   # Green line
+    # Volume spike filter: current volume / 20-period average volume
+    vol_ma = np.full_like(volume, np.nan)
+    if len(volume) >= 20:
+        vol_ma[19] = np.mean(volume[0:20])
+        for i in range(20, len(volume)):
+            vol_ma[i] = (volume[i] * 2 + vol_ma[i-1] * 18) / 20
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            multiplier = 2 / (period + 1)
-            result[period-1] = np.mean(arr[0:period])
-            for i in range(period, len(arr)):
-                result[i] = (arr[i] * multiplier) + (result[i-1] * (1 - multiplier))
-        return result
-    
-    ema13 = ema(close_1d, 13)
-    bull_power = high_1d - ema13
-    bear_power = low_1d - ema13
-    
-    # Align all indicators to 12h timeframe
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate 1-week EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema_50_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
-        multiplier = 2 / (50 + 1)
-        ema_50_1w[49] = np.mean(close_1w[0:50])
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = (close_1w[i] * multiplier) + (ema_50_1w[i-1] * (1 - multiplier))
-    
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    volume_ratio = np.full_like(volume, np.nan)
+    valid = (~np.isnan(vol_ma)) & (vol_ma != 0)
+    volume_ratio[valid] = volume[valid] / vol_ma[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure 1d indicators are ready
+    start_idx = max(1, 20)  # Ensure TRIX and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Alligator aligned (Lips > Teeth > Jaw) AND Bull Power > 0 AND price > weekly EMA50
-            if (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and
-                bull_power_aligned[i] > 0 and
-                close[i] > ema_50_1w_aligned[i]):
+            # Enter long: TRIX crosses above zero AND uptrend (price > EMA34) AND volume spike
+            if (trix[i-1] <= 0 and trix[i] > 0 and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Alligator aligned (Lips < Teeth < Jaw) AND Bear Power < 0 AND price < weekly EMA50
-            elif (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and
-                  bear_power_aligned[i] < 0 and
-                  close[i] < ema_50_1w_aligned[i]):
+            # Enter short: TRIX crosses below zero AND downtrend (price < EMA34) AND volume spike
+            elif (trix[i-1] >= 0 and trix[i] < 0 and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator misaligned OR Bull Power <= 0
-            if not (lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i] and bull_power_aligned[i] > 0):
+            # Exit long: TRIX crosses below zero OR trend reversal (price < EMA34)
+            if trix[i-1] >= 0 and trix[i] < 0:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator misaligned OR Bear Power >= 0
-            if not (lips_aligned[i] < teeth_aligned[i] < jaw_aligned[i] and bear_power_aligned[i] < 0):
+            # Exit short: TRIX crosses above zero OR trend reversal (price > EMA34)
+            if trix[i-1] <= 0 and trix[i] > 0:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
