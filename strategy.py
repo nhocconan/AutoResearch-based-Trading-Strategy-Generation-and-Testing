@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_DailyPivot_Breakout_TrendFilter_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,15 +34,15 @@ def generate_signals(prices):
     # Support 1 = (2 * PP) - High
     s1 = (2 * pp) - daily_high
     
-    # Align daily pivot to 12h timeframe (with 1-bar delay for completed daily bar)
-    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align daily pivot to 4h timeframe (with 1-bar delay for completed daily bar)
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: spike above 2.0x 12-period average (1 day of 12h bars)
+    # Volume filter: spike above 2.0x 12-period average (1 day of 4h bars)
     vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
@@ -52,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema_34_12h[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(r1_12h[i]) or np.isnan(s1_12h[i])):
+        if (np.isnan(ema_34_4h[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(r1_4h[i]) or np.isnan(s1_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,15 +68,15 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price above daily S1, daily uptrend (price > EMA34), volume breakout
-            if (close[i] > s1_12h[i] and 
-                close[i] > ema_34_12h[i] and 
+            if (close[i] > s1_4h[i] and 
+                close[i] > ema_34_4h[i] and 
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
             # Short: price below daily R1, daily downtrend (price < EMA34), volume breakdown
-            elif (close[i] < r1_12h[i] and 
-                  close[i] < ema_34_12h[i] and 
+            elif (close[i] < r1_4h[i] and 
+                  close[i] < ema_34_4h[i] and 
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
@@ -84,7 +84,7 @@ def generate_signals(prices):
         
         elif position == 1:
             # Exit long: price below daily S1 or trend reversal
-            if close[i] < s1_12h[i] or close[i] < ema_34_12h[i]:
+            if close[i] < s1_4h[i] or close[i] < ema_34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -92,7 +92,7 @@ def generate_signals(prices):
         
         elif position == -1:
             # Exit short: price above daily R1 or trend reversal
-            if close[i] > r1_12h[i] or close[i] > ema_34_12h[i]:
+            if close[i] > r1_4h[i] or close[i] > ema_34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
