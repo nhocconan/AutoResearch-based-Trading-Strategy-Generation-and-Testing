@@ -1,13 +1,15 @@
-#!/usr/bin/env python3
-# Hypothesis: 4h Williams Alligator with 1d trend filter and volume confirmation
-# Long when price above Alligator jaws/teeth/lips (aligned) with 1d EMA50 uptrend and volume spike
-# Short when price below Alligator jaws/teeth/lips (aligned) with 1d EMA50 downtrend and volume spike
-# Exit when price crosses back through Alligator teeth or reverses to opposite lip
-# Uses Alligator for trend identification, EMA for higher timeframe trend, volume for conviction
-# Designed to capture trends with controlled frequency in both bull and bear markets
-# Target: 80-140 total trades over 4 years (20-35/year) with size 0.25
+# 1/10/2025
+# Hypothesis: 4h Williams %R reversal with 1d ATR filter and volume confirmation
+# Williams %R identifies overbought/oversold conditions. In ranging markets, it
+# provides mean-reversion signals. During trends, extreme readings can signal
+# continuation when combined with ATR-based volatility filter and volume spike.
+# Long when %R < -80 (oversold), ATR expanding, and volume > 1.5x average
+# Short when %R > -20 (overbought), ATR contracting, and volume > 1.5x average
+# Exit when %R crosses -50 (centerline) or reverses direction
+# Designed to work in both trending and ranging markets with controlled frequency
+# Target: 60-120 total trades over 4 years (15-30/year) with size 0.25
 
-name = "4h_WilliamsAlligator_1dEMA50_VolumeConfirmation"
+name = "4h_WilliamsR_Reversal_ATR_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,79 +27,71 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1h data for Alligator (SMAs of median price)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 13:
-        return np.zeros(n)
-    
-    # Calculate median price
-    median_price = (df_1h['high'] + df_1h['low']) / 2
-    
-    # Williams Alligator lines (13, 8, 5 period SMAs with future shifts)
-    jaws = median_price.rolling(window=13, min_periods=13).mean().shift(8)   # Blue line
-    teeth = median_price.rolling(window=8, min_periods=8).mean().shift(5)    # Red line
-    lips = median_price.rolling(window=5, min_periods=5).mean().shift(3)     # Green line
-    
-    # Align Alligator lines to 4h timeframe
-    jaws_aligned = align_htf_to_ltf(prices, df_1h, jaws.values)
-    teeth_aligned = align_htf_to_ltf(prices, df_1h, teeth.values)
-    lips_aligned = align_htf_to_ltf(prices, df_1h, lips.values)
-    
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d ATR for volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate True Range and ATR(14)
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.DataFrame({'tr1': tr1, 'tr2': tr2, 'tr3': tr3}).max(axis=1)
+    atr_1d = tr.rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Calculate Williams %R on 1d: (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = df_1d['high'].rolling(window=14, min_periods=14).max()
+    lowest_low = df_1d['low'].rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - df_1d['close']) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).fillna(50).values  # neutral when range=0
+    
+    # Align 1d indicators to 4h timeframe
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_confirm = volume > (1.8 * vol_ma.values)
+    vol_confirm = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for Alligator calculation
+    start_idx = 50  # Need enough data for indicator calculation
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaws_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_confirm[i])):
+        if (np.isnan(atr_1d_aligned[i]) or np.isnan(williams_r_aligned[i]) or 
+            np.isnan(vol_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price above all Alligator lines, EMA50 uptrend, volume spike
-            if (close[i] > jaws_aligned[i] and 
-                close[i] > teeth_aligned[i] and 
-                close[i] > lips_aligned[i] and
-                ema50_1d_aligned[i] > ema50_1d_aligned[i-1] and  # EMA rising
+            # Enter long: oversold (%R < -80), ATR expanding (current > previous), volume spike
+            if (williams_r_aligned[i] < -80 and 
+                atr_1d_aligned[i] > atr_1d_aligned[i-1] and 
                 vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below all Alligator lines, EMA50 downtrend, volume spike
-            elif (close[i] < jaws_aligned[i] and 
-                  close[i] < teeth_aligned[i] and 
-                  close[i] < lips_aligned[i] and
-                  ema50_1d_aligned[i] < ema50_1d_aligned[i-1] and  # EMA falling
+            # Enter short: overbought (%R > -20), ATR contracting (current < previous), volume spike
+            elif (williams_r_aligned[i] > -20 and 
+                  atr_1d_aligned[i] < atr_1d_aligned[i-1] and 
                   vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses below teeth or reverses to lips
-            if (close[i] < teeth_aligned[i]) or (close[i] < lips_aligned[i]):
+            # Exit long: %R crosses above -50 (centerline) or becomes overbought
+            if williams_r_aligned[i] > -50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses above teeth or reverses to lips
-            if (close[i] > teeth_aligned[i]) or (close[i] > lips_aligned[i]):
+            # Exit short: %R crosses below -50 (centerline) or becomes oversold
+            if williams_r_aligned[i] < -50:
                 signals[i] = 0.0
                 position = 0
             else:
