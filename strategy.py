@@ -3,13 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_PivotZone_1wTrend_1dVol"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close):
+    # Camarilla pivot levels: H3, L3, H4, L4
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    h3 = close + range_val * 1.1 / 2
+    l3 = close - range_val * 1.1 / 2
+    h4 = close + range_val * 1.1
+    l4 = close - range_val * 1.1
+    return h3, l3, h4, l4
+
+def calculate_atr(high, low, close, period):
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,102 +36,92 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Get daily data for pivot levels and volume
+    # Get 1d data for Camarilla, trend, and volatility
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly trend: EMA50
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Daily pivot points (using prior day's OHLC)
+    # Calculate 1d Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    h3_1d, l3_1d, h4_1d, l4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Calculate 1d ATR for volatility filter
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 10)
     
-    # Align pivot levels to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate 1d EMA34 trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume filter: current 6h volume > 1.5 * 20-period average
+    # Align 1d indicators to 12h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: current 12h volume > 1.5 * 20-period average
     vol_series = pd.Series(volume)
     vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 1.5)
     
+    # Volatility filter: current 12h ATR > 0.8 * 1d ATR (ensures sufficient volatility)
+    tr_12h = np.maximum(np.abs(high - low), np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr_12h[0] = 0
+    atr_12h = pd.Series(tr_12h).ewm(span=10, adjust=False, min_periods=10).mean().values
+    vol_filter = atr_12h > (atr_1d_aligned * 0.8)
+    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(100, 50)  # Ensure enough data for indicators
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(h3_1d_aligned[i]) or
+            np.isnan(l3_1d_aligned[i]) or
+            np.isnan(h4_1d_aligned[i]) or
+            np.isnan(l4_1d_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(volume_filter[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        ema50_val = ema50_1w_aligned[i]
-        pivot_val = pivot_aligned[i]
-        r3_val = r3_aligned[i]
-        s3_val = s3_aligned[i]
-        vol_filter = volume_filter[i]
+        h3_val = h3_1d_aligned[i]
+        l3_val = l3_1d_aligned[i]
+        h4_val = h4_1d_aligned[i]
+        l4_val = l4_1d_aligned[i]
+        ema34_val = ema34_1d_aligned[i]
+        vol_filt = volume_filter[i]
+        vol_filt2 = vol_filter[i]
         
         if position == 0:
-            # Enter long: price above S3 + above weekly EMA50 + volume filter
-            if close[i] > s3_val and close[i] > ema50_val and vol_filter:
+            # Enter long: price > H3 + above EMA34 + volume filter + volatility filter
+            if close[i] > h3_val and close[i] > ema34_val and vol_filt and vol_filt2:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below R3 + below weekly EMA50 + volume filter
-            elif close[i] < r3_val and close[i] < ema50_val and vol_filter:
+            # Enter short: price < L3 + below EMA34 + volume filter + volatility filter
+            elif close[i] < l3_val and close[i] < ema34_val and vol_filt and vol_filt2:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price below pivot
-            if close[i] < pivot_val:
+            # Exit long: price < L3 or below EMA34
+            if close[i] < l3_val or close[i] < ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price above pivot
-            if close[i] > pivot_val:
+            # Exit short: price > H3 or above EMA34
+            if close[i] > h3_val or close[i] > ema34_val:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-if __name__ == "__main__":
-    # Quick self-test
-    import yfinance as yf
-    data = yf.download("BTC-USD", start="2021-01-01", end="2024-12-31", interval="60m")
-    data.reset_index(inplace=True)
-    data.rename(columns={'Datetime': 'open_time'}, inplace=True)
-    data['open_time'] = pd.to_datetime(data['open_time'])
-    sig = generate_signals(data)
-    print(f"Signals generated: {len(sig)}")
-    print(f"Non-zero signals: {np.sum(sig != 0)}")
