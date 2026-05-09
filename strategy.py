@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h timeframe with 1-day ATR-based volatility regime and 1-week volume-weighted average price (VWAP) trend filter.
-# Uses 1-day ATR(14) normalized by 50-period mean to detect low-volatility regimes (mean-reversion favorable).
-# Enters long when price crosses above VWAP(5) in low-volatility regime, short when below.
-# Exits when volatility regime shifts to high volatility or price reverts to VWAP.
-# Weekly VWAP provides stable trend reference that adapts to both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
+# Weekly Donchian Breakout + Daily Volume Spike + 4H EMA Trend Filter
+# Enters long when price breaks above weekly Donchian high with volume spike and 4H EMA uptrend
+# Enters short when price breaks below weekly Donchian low with volume spike and 4H EMA downtrend
+# Uses 1d timeframe with weekly HTF for structure, filters out low-volume breakouts
+# Target: 20-50 total trades over 4 years (5-12/year) with size 0.25
 
-name = "12h_ATR_VolRegime_VWAP5_Trend"
-timeframe = "12h"
+name = "1d_WeeklyDonchianBreakout_VolumeSpike_4HEMA"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,75 +23,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day ATR(14) for volatility regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for Donchian channels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # True Range components
-    prev_close = np.roll(df_1d['close'], 1)
-    prev_close[0] = np.nan
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - prev_close)
-    tr3 = np.abs(df_1d['low'] - prev_close)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Weekly Donchian channels
+    donch_high = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
+    donch_high_aligned = align_htf_to_ltf(prices, df_1w, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1w, donch_low)
     
-    # ATR(14)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Get daily data for volume average (20-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # 50-period mean of ATR for normalization
-    atr_mean_50 = pd.Series(atr_14).rolling(window=50, min_periods=50).mean().values
+    # Daily volume average
+    vol_ma = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma)
     
-    # Volatility regime: low volatility when ATR < 0.8 * mean ATR
-    vol_regime_low = atr_14 < (0.8 * atr_mean_50)
-    vol_regime_low_aligned = align_htf_to_ltf(prices, df_1d, vol_regime_low)
+    # Get 4H data for EMA trend filter (50-period)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Calculate 1-week VWAP (5-period VWAP on 6d data approximates 1-week)
-    # For 12h timeframe, 1 week = 14 bars (7 days * 2 bars/day)
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).rolling(window=14, min_periods=14).sum().values
-    vwap_den = pd.Series(volume).rolling(window=14, min_periods=14).sum().values
-    vwap = vwap_num / vwap_den
-    
-    # Price position relative to VWAP
-    price_above_vwap = close > vwap
-    price_below_vwap = close < vwap
+    # 4H EMA50
+    ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_regime_low_aligned[i]) or
-            np.isnan(price_above_vwap[i]) or np.isnan(price_below_vwap[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
+            np.isnan(vol_ma_aligned[i]) or np.isnan(ema_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: low volatility regime + price above VWAP
-            if vol_regime_low_aligned[i] and price_above_vwap[i]:
+            # Volume spike condition (volume > 1.5x average)
+            volume_spike = volume[i] > (1.5 * vol_ma_aligned[i])
+            
+            # Enter long: price breaks above weekly Donchian high + volume spike + 4H EMA uptrend
+            if (close[i] > donch_high_aligned[i]) and volume_spike and (close[i] > ema_4h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: low volatility regime + price below VWAP
-            elif vol_regime_low_aligned[i] and price_below_vwap[i]:
+            # Enter short: price breaks below weekly Donchian low + volume spike + 4H EMA downtrend
+            elif (close[i] < donch_low_aligned[i]) and volume_spike and (close[i] < ema_4h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: volatility regime shifts to high OR price crosses below VWAP
-            if (not vol_regime_low_aligned[i]) or (not price_above_vwap[i]):
+            # Exit long: price breaks below weekly Donchian low OR loses 4H EMA uptrend
+            if (close[i] < donch_low_aligned[i]) or (close[i] < ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: volatility regime shifts to high OR price crosses above VWAP
-            if (not vol_regime_low_aligned[i]) or (not price_below_vwap[i]):
+            # Exit short: price breaks above weekly Donchian high OR loses 4H EMA downtrend
+            if (close[i] > donch_high_aligned[i]) or (close[i] > ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
