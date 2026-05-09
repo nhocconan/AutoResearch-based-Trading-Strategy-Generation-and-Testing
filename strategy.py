@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h breakout above 12h EMA50 with volume confirmation and 1d ATR-based volatility filter.
-# In bull markets, price breaks above rising EMA50; in bear markets, breaks below falling EMA50.
-# Volume confirms conviction; 1d ATR filter avoids trading in excessively volatile or quiet conditions.
-# Uses EMA for trend, volume for confirmation, ATR for regime filter - proven combo from DB.
-name = "4h_EMA50_Breakout_Volume_ATR"
-timeframe = "4h"
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Long when price breaks above Donchian high + price above weekly pivot + volume spike.
+# Short when price breaks below Donchian low + price below weekly pivot + volume spike.
+# Weekly pivot provides market structure bias; volume confirms breakout strength.
+# Works in bull (breakouts above weekly pivot) and bear (breakdowns below weekly pivot).
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
+name = "6h_Donchian20_WeeklyPivot_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -21,47 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Weekly pivot levels (from weekly OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly pivot: (H + L + C) / 3
+    weekly_pivot = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # Volume confirmation: volume > 1.5x 20-period EMA
+    # Donchian channel (20-period) on 6h data
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: volume > 2.0x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ema20)
-    
-    # 1d ATR(14) for volatility filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
-    tr2 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high_1d[0] - low_1d[0]  # first bar
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # ATR ratio: current ATR / 50-period average ATR (volatility regime)
-    atr_ma50 = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_1d_aligned / atr_ma50
-    vol_filter = (atr_ratio > 0.5) & (atr_ratio < 2.0)  # avoid extreme volatility
+    vol_confirm = volume > (2.0 * vol_ema20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 20  # Ensure enough data for Donchian
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ema20[i]) or 
-            np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma50[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,26 +57,26 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price > 12h EMA50 + volume confirmation + volatility filter
-            if (price > ema_12h_aligned[i] and vol_confirm[i] and vol_filter[i]):
+            # Long: price breaks above Donchian high + above weekly pivot + volume confirmation
+            if (price > donchian_high[i] and price > weekly_pivot_aligned[i] and vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < 12h EMA50 + volume confirmation + volatility filter
-            elif (price < ema_12h_aligned[i] and vol_confirm[i] and vol_filter[i]):
+            # Short: price breaks below Donchian low + below weekly pivot + volume confirmation
+            elif (price < donchian_low[i] and price < weekly_pivot_aligned[i] and vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price crosses back below 12h EMA50
-            if price < ema_12h_aligned[i]:
+            # Exit long: price crosses back below Donchian low or weekly pivot
+            if price < donchian_low[i] or price < weekly_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price crosses back above 12h EMA50
-            if price > ema_12h_aligned[i]:
+            # Exit short: price crosses back above Donchian high or weekly pivot
+            if price > donchian_high[i] or price > weekly_pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
