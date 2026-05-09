@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_Donchian20_TailRisk_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,30 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 12h timeframe
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels from previous day
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Tail risk: price near extreme of range (top/bottom 10%)
-    range_size = highest_high - lowest_low
-    upper_zone = lowest_low + 0.9 * range_size  # top 10%
-    lower_zone = lowest_low + 0.1 * range_size  # bottom 10%
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
     
-    # Daily volatility filter: ATR(14) > 20-period SMA of ATR
-    tr1 = high[1:] - low[:-1]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[:-1] - close[:-1])
-    tr = np.concatenate([[np.max([tr1[0], tr2[0], tr3[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma20 = pd.Series(atr14).rolling(window=20, min_periods=20).mean().values
-    vol_filter = atr14 > 1.5 * atr_ma20  # elevated volatility regime
+    # Resistance and Support levels
+    R1 = pivot + (range_ * 1.0 / 6)
+    R2 = pivot + (range_ * 2.0 / 6)
+    R3 = pivot + (range_ * 3.0 / 6)
+    R4 = pivot + (range_ * 4.0 / 6)
+    S1 = pivot - (range_ * 1.0 / 6)
+    S2 = pivot - (range_ * 2.0 / 6)
+    S3 = pivot - (range_ * 3.0 / 6)
+    S4 = pivot - (range_ * 4.0 / 6)
     
-    # Weekly trend filter: EMA50 on 1w timeframe
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily trend filter: EMA34 on 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: volume > 1.5 * 20-period SMA of volume
+    vol_sma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_sma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -49,8 +56,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if required data unavailable
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(atr14[i]) or np.isnan(atr_ma20[i]) or np.isnan(ema50_1w_aligned[i]):
+        if np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,37 +65,37 @@ def generate_signals(prices):
         price = close[i]
         
         if position == 0:
-            # Long: price breaks above upper Donchian band + in upper zone + elevated vol + weekly uptrend
-            if (price > highest_high[i] and  # Donchian breakout
-                price > upper_zone[i] and    # in top 10% of range
-                vol_filter[i] and            # volatility expansion
-                price > ema50_1w_aligned[i]): # weekly uptrend
+            # Long: price breaks above R1 + in upper half + volume confirmation + daily uptrend
+            if (price > R1[i] and  # Breakout above R1
+                price > (R1[i] + S1[i]) / 2 and  # In upper half of R1-S1 range
+                volume_filter[i] and  # Volume confirmation
+                price > ema34_1d_aligned[i]):  # Daily uptrend
                 signals[i] = 0.25
                 position = 1
                 continue
             
-            # Short: price breaks below lower Donchian band + in lower zone + elevated vol + weekly downtrend
-            elif (price < lowest_low[i] and   # Donchian breakdown
-                  price < lower_zone[i] and   # in bottom 10% of range
-                  vol_filter[i] and           # volatility expansion
-                  price < ema50_1w_aligned[i]): # weekly downtrend
+            # Short: price breaks below S1 + in lower half + volume confirmation + daily downtrend
+            elif (price < S1[i] and  # Breakdown below S1
+                  price < (R1[i] + S1[i]) / 2 and  # In lower half of R1-S1 range
+                  volume_filter[i] and  # Volume confirmation
+                  price < ema34_1d_aligned[i]):  # Daily downtrend
                 signals[i] = -0.25
                 position = -1
                 continue
         
         elif position == 1:
-            # Exit long: price retreats to middle of range or weekly trend fails
-            if (price < (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
-                price < ema50_1w_aligned[i]):                     # weekly trend fail
+            # Exit long: price returns to pivot or daily trend fails
+            if (price <= pivot[i] or  # Return to pivot
+                price < ema34_1d_aligned[i]):  # Daily trend fail
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises to middle of range or weekly trend fails
-            if (price > (highest_high[i] + lowest_low[i]) / 2 or  # retreat to mid-range
-                price > ema50_1w_aligned[i]):                     # weekly trend fail
+            # Exit short: price returns to pivot or daily trend fails
+            if (price >= pivot[i] or  # Return to pivot
+                price > ema34_1d_aligned[i]):  # Daily trend fail
                 signals[i] = 0.0
                 position = 0
             else:
