@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_WeeklyPivot_DailyBreakout_TrendFilter_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,38 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for weekly pivot and trend
+    # Get daily data for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Weekly pivot from previous week (Monday open)
-    # Use previous week's OHLC (Monday to Friday)
-    weekly_open = df_1d['open'].iloc[-5] if len(df_1d) >= 5 else df_1d['open'].iloc[0]
-    weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1).values
-    weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1).values
-    weekly_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1).values
+    # Previous day's high, low, close for Camarilla pivot
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate weekly pivot points
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    # Calculate Camarilla levels (R3, S3 are key levels)
+    # Camarilla: R3 = close + (high - low) * 1.1/2
+    #          S3 = close - (high - low) * 1.1/2
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align weekly pivots to 6h
-    weekly_pivot_6h = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_6h = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_6h = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    weekly_r2_6h = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    weekly_s2_6h = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    # Align Camarilla levels to 12h
+    camarilla_r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Daily EMA20 for trend filter
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_6h = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: above 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: above 2.0x 50-period average (strict to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,47 +51,48 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_r1_6h[i]) or np.isnan(weekly_s1_6h[i]) or 
-            np.isnan(weekly_r2_6h[i]) or np.isnan(weekly_s2_6h[i]) or 
-            np.isnan(ema_20_6h[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r3_12h[i]) or np.isnan(camarilla_s3_12h[i]) or 
+            np.isnan(ema_34_12h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ok = volume[i] > 1.5 * vol_ma[i]  # Volume confirmation
+        vol_ok = volume[i] > 2.0 * vol_ma[i]  # Strict volume confirmation
         
         # Session filter: 08-20 UTC (reduce noise trades)
         hour = pd.DatetimeIndex(prices['open_time']).hour[i]
         in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long breakout: price breaks above weekly R1 with daily uptrend
-            if (close[i] > weekly_r1_6h[i] and 
-                close[i] > ema_20_6h[i] and  # daily uptrend
+            # Long breakout: price breaks above Camarilla R3 with daily uptrend
+            if (close[i] > camarilla_r3_12h[i] and 
+                close[i] > ema_34_12h[i] and  # daily uptrend
                 vol_ok and 
                 in_session):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below weekly S1 with daily downtrend
-            elif (close[i] < weekly_s1_6h[i] and 
-                  close[i] < ema_20_6h[i] and  # daily downtrend
+            # Short breakdown: price breaks below Camarilla S3 with daily downtrend
+            elif (close[i] < camarilla_s3_12h[i] and 
+                  close[i] < ema_34_12h[i] and  # daily downtrend
                   vol_ok and 
                   in_session):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls back below weekly pivot (mean reversion)
-            if close[i] < weekly_pivot_6h[i]:
+            # Exit long: price falls back below Camarilla pivot (mean reversion)
+            camarilla_pivot = (camarilla_r3_12h[i] + camarilla_s3_12h[i]) / 2
+            if close[i] < camarilla_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises back above weekly pivot (mean reversion)
-            if close[i] > weekly_pivot_6h[i]:
+            # Exit short: price rises back above Camarilla pivot (mean reversion)
+            camarilla_pivot = (camarilla_r3_12h[i] + camarilla_s3_12h[i]) / 2
+            if close[i] > camarilla_pivot:
                 signals[i] = 0.0
                 position = 0
             else:
