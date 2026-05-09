@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 
-# Hypothesis: 4h timeframe with daily pivot structure (from 1d) and daily trend filter.
-# Uses daily Camarilla levels (R1/S1) for breakout entries and daily EMA34 for trend filter.
-# Daily pivot provides structural support/resistance that works in both bull and bear markets.
-# Daily trend filter reduces whipsaw by only allowing trades in direction of higher timeframe trend.
+# Hypothesis: 12h timeframe with 1d Donchian channel breakout and 1d ATR filter.
+# Uses 1-day Donchian channels (20-period) for breakout entries and 1-day ATR for volatility filtering.
+# The Donchian channel provides clear breakout levels that work in trending markets,
+# while the ATR filter ensures we only trade during sufficient volatility, avoiding choppy periods.
 # Target: 50-150 total trades over 4 years (12-37/year) with size 0.25.
 
-name = "4h_Camarilla_R1_S1_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_Donchian20_1dATR_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,72 +24,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (R1, S1) from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First value invalid
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + 1.1 * camarilla_range / 4
-    s1 = prev_close - 1.1 * camarilla_range / 4
-    
-    # Breakout conditions: price must close beyond the level (not just touch)
-    breakout_up = close > r1
-    breakout_down = close < s1
-    
-    # Get daily data for EMA34 trend filter
+    # Get daily data for Donchian channel and ATR
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1-day Donchian channel (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    trend_up = close > ema_34_1d_aligned
-    trend_down = close < ema_34_1d_aligned
+    # Upper band: highest high over past 20 days
+    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over past 20 days
+    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current volume > 2.0x 20-period average volume (balanced to avoid overtrading)
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * avg_volume)
+    # Align Donchian levels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    
+    # Calculate 1-day ATR (14-period) for volatility filter
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close, 1)[len(df_1d):] if len(df_1d) > len(high_1d) else np.abs(high_1d - np.roll(df_1d['close'].values, 1)))
+    tr3 = np.abs(low_1d - np.roll(close, 1)[len(df_1d):] if len(df_1d) > len(low_1d) else np.abs(low_1d - np.roll(df_1d['close'].values, 1)))
+    # Handle the first element for TR calculation
+    tr_temp = np.maximum(tr1, tr2)
+    tr_temp = np.maximum(tr_temp, tr3)
+    tr_temp[0] = tr1[0]  # First TR is just high-low
+    atr_14 = pd.Series(tr_temp).rolling(window=14, min_periods=14).mean().values
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    
+    # Calculate average ATR for filtering (50-period average)
+    avg_atr = pd.Series(atr_14_aligned).rolling(window=50, min_periods=50).mean().values
+    
+    # Volatility filter: current ATR > 0.5 x average ATR (ensures sufficient volatility)
+    vol_filter = atr_14_aligned > (0.5 * avg_atr)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for indicators
+    start_idx = 60  # Need enough data for indicators (20+14+50 for Donchian, ATR, and average ATR)
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(trend_up[i]) or np.isnan(trend_down[i]) or
-            np.isnan(volume_filter[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+            np.isnan(atr_14_aligned[i]) or np.isnan(avg_atr[i]) or
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R1 + 1d uptrend + volume spike
-            if breakout_up[i] and trend_up[i] and volume_filter[i]:
+            # Long: price breaks above Donchian high + volatility filter
+            if close[i] > donchian_high_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below S1 + 1d downtrend + volume spike
-            elif breakout_down[i] and trend_down[i] and volume_filter[i]:
+            # Short: price breaks below Donchian low + volatility filter
+            elif close[i] < donchian_low_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to previous day's close or trend reversal
-            if close[i] <= prev_close[i] or not trend_up[i]:
+            # Exit long: price returns to Donchian low or volatility drops
+            if close[i] < donchian_low_aligned[i] or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to previous day's close or trend reversal
-            if close[i] >= prev_close[i] or not trend_down[i]:
+            # Exit short: price returns to Donchian high or volatility drops
+            if close[i] > donchian_high_aligned[i] or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
