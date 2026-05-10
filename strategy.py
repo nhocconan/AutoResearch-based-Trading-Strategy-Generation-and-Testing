@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
 Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
-Camarilla levels act as daily support/resistance; breakouts with volume and trend alignment capture directional moves.
+Camarilla levels act as intraday support/resistance; breakouts with volume and trend alignment capture directional moves.
 Works in bull/bear by filtering trades in direction of daily trend.
-Target: 15-25 trades/year (60-100 total) to minimize fee drag on 12h timeframe.
+Target: 25-40 trades/year (100-160 total) to minimize fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -51,7 +51,7 @@ def generate_signals(prices):
         for i in range(20, len(volume_1d)):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
@@ -69,9 +69,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled)
-        # 2x 12h bars in 1d
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
         volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
         # Trend and price relative to Camarilla levels
