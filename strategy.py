@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_RSI20_Trend_1d_Engulfing
-# Hypothesis: RSI(20) < 40 with bullish daily trend for longs, RSI(20) > 60 with bearish daily trend for shorts.
-# Uses engulfing candle patterns for entry timing and volume confirmation.
-# Designed to work in both bull and bear markets by aligning with daily trend.
-# Targets 20-40 trades/year to minimize fee drag.
+# 1d_MultiTimeframe_Structure_Trend
+# Hypothesis: Combines 1-week structure (higher highs/lows) with 1-day trend and volume to capture multi-week moves.
+# In bull markets: buy when price makes higher high (weekly structure) + price above daily EMA + volume spike.
+# In bear markets: sell when price makes lower low (weekly structure) + price below daily EMA + volume spike.
+# Uses structure to filter noise and trend/volume for confirmation. Targets 10-25 trades/year for low friction.
 
-name = "4h_RSI20_Trend_1d_Engulfing"
-timeframe = "4h"
+name = "1d_MultiTimeframe_Structure_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,94 +15,82 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_price = prices['open'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for structure
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # RSI(20) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
-    avg_loss = loss.ewm(alpha=1/20, adjust=False, min_periods=20).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Weekly structure: higher highs and higher lows (uptrend), lower lows and lower highs (downtrend)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly swing points
+    whh = np.maximum.accumulate(weekly_high)  # weekly higher high
+    wll = np.minimum.accumulate(weekly_low)   # weekly lower low
+    
+    # Align weekly structure to daily
+    whh_aligned = align_htf_to_ltf(prices, df_1w, whh)
+    wll_aligned = align_htf_to_ltf(prices, df_1w, wll)
+    
+    # Get daily EMA for trend filter
+    ema_50_1d = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Bullish engulfing: current green candle engulfs previous red candle
-    bullish_engulfing = (close > open_price) & (open_price < close) & \
-                        (close > high[1:]) & (open_price < low[1:])  # Will be adjusted in loop
-    # Bearish engulfing: current red candle engulfs previous green candle
-    bearish_engulfing = (close < open_price) & (open_price > close) & \
-                        (open_price > high[1:]) & (close < low[1:])  # Will be adjusted in loop
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 20) + 1  # RSI warmup + daily EMA + volume MA + engulfing lookback
+    start_idx = max(50, 20)  # Warmup for daily EMA and volume MA
     
     for i in range(start_idx, n):
-        # Shift arrays for engulfing calculation (previous bar)
-        if i < 1:
-            continue
-            
         # Skip if any critical values are NaN
-        if (np.isnan(rsi_values[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(whh_aligned[i]) or np.isnan(wll_aligned[i]) or 
+            np.isnan(ema_50_1d[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        uptrend = close[i] > ema_50_1d[i]
+        downtrend = close[i] < ema_50_1d[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Engulfing patterns (using previous bar)
-        bullish_engulf = (close[i] > open_price[i]) and (open_price[i-1] > close[i-1]) and \
-                         (close[i] >= open_price[i-1]) and (open_price[i] <= close[i-1])
-        bearish_engulf = (close[i] < open_price[i]) and (open_price[i-1] < close[i-1]) and \
-                         (open_price[i] >= close[i-1]) and (close[i] <= open_price[i-1])
+        # Weekly structure: price above weekly higher high = bullish structure
+        bullish_structure = close[i] > whh_aligned[i]
+        # Weekly structure: price below weekly lower low = bearish structure
+        bearish_structure = close[i] < wll_aligned[i]
         
         if position == 0:
-            # Long entry: RSI < 40 (oversold) + bullish engulfing + uptrend + volume spike
-            if rsi_values[i] < 40 and bullish_engulf and uptrend and volume_confirm:
+            # Long entry: bullish weekly structure + uptrend + volume spike
+            if bullish_structure and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI > 60 (overbought) + bearish engulfing + downtrend + volume spike
-            elif rsi_values[i] > 60 and bearish_engulf and downtrend and volume_confirm:
+            # Short entry: bearish weekly structure + downtrend + volume spike
+            elif bearish_structure and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 60 (overbought) or trend reversal
-            if rsi_values[i] > 60 or not uptrend:
+            # Long exit: price breaks below weekly lower low or trend reversal
+            if close[i] < wll_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 40 (oversold) or trend reversal
-            if rsi_values[i] < 40 or not downtrend:
+            # Short exit: price breaks above weekly higher high or trend reversal
+            if close[i] > whh_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
