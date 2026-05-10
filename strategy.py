@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: 4h breakout of daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
+# 12h_1d_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: 12h breakout of daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
 # Long when price breaks above R3 in daily uptrend with volume surge, short when breaks below S3 in daily downtrend.
-# Uses daily timeframe for trend and levels, 4h for execution. Designed to avoid overtrading with strict conditions.
+# Uses daily timeframe for trend and levels, 12h for execution. Designed to avoid overtrading with strict conditions.
 
-name = "4h_1d_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -49,7 +49,7 @@ def generate_signals(prices):
     # R3 = close + 1.1 * range / 6
     r3 = prev_close + 1.1 * range_prev / 6
     
-    # Align daily levels to 4h timeframe
+    # Align daily levels to 12h timeframe
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
@@ -57,7 +57,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation (20-period for 4h)
+    # Volume confirmation (20-period for 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
