@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakout at Camarilla R1 (long) or S1 (short) with daily trend and volume confirmation.
-# Uses 1d Camarilla levels from previous day, 4h price breakout, and volume > 1.5x average.
-# Works in bull/bear by following daily trend and using volume to confirm institutional interest.
-# Target: 20-40 trades/year per symbol.
+# 4H_Camarilla_R1S1_Breakout_1dTrend_Filter
+# Hypothesis: Buy breaks above Camarilla R1 and sell breaks below S1 only when aligned with daily trend.
+# Uses 1d EMA50 for trend filter to avoid counter-trend trades. Volume confirmation ensures institutional participation.
+# Works in bull/bear by following higher timeframe trend. Target: 20-40 trades/year per symbol.
 
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4H_Camarilla_R1S1_Breakout_1dTrend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,45 +22,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume average (20-period)
+    # 4h indicators
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     volume_s = pd.Series(volume)
+    
+    # Camarilla levels for 4h (based on previous bar's range)
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    # Calculate for previous bar to avoid look-ahead
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    prev_range = prev_high - prev_low
+    R1 = prev_close + prev_range * 1.1 / 12
+    S1 = prev_close - prev_range * 1.1 / 12
+    
+    # Volume average (20-period)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Daily Camarilla levels from previous day
+    # Daily trend filter: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    R1 = np.zeros_like(close_1d)
-    S1 = np.zeros_like(close_1d)
-    
-    for i in range(len(close_1d)):
-        if i == 0:
-            R1[i] = np.nan
-            S1[i] = np.nan
-        else:
-            # Previous day's range
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            prev_close = close_1d[i-1]
-            range_val = prev_high - prev_low
-            if range_val <= 0:
-                R1[i] = np.nan
-                S1[i] = np.nan
-            else:
-                R1[i] = prev_close + range_val * 1.1 / 12
-                S1[i] = prev_close - range_val * 1.1 / 12
-    
-    # Align daily Camarilla levels to 4h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Daily trend filter (EMA50)
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     daily_uptrend = close_1d > ema50_1d
     daily_downtrend = close_1d < ema50_1d
@@ -74,11 +60,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i]) or
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(vol_ma[i]) or
             np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -92,28 +78,28 @@ def generate_signals(prices):
         daily_down = daily_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: daily uptrend + price breaks above R1 + volume
+            # Enter long: daily uptrend + price breaks above R1 + volume confirmation
             if daily_up and volume_confirm:
-                if close[i] > R1_aligned[i]:
+                if close[i] > R1[i]:
                     signals[i] = 0.25
                     position = 1
-            # Enter short: daily downtrend + price breaks below S1 + volume
+            # Enter short: daily downtrend + price breaks below S1 + volume confirmation
             elif daily_down and volume_confirm:
-                if close[i] < S1_aligned[i]:
+                if close[i] < S1[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price drops below S1 or trend changes
-            if close[i] < S1_aligned[i] or not daily_up:
+            # Exit: price breaks below S1 or trend changes
+            if close[i] < S1[i] or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price rises above R1 or trend changes
-            if close[i] > R1_aligned[i] or not daily_down:
+            # Exit: price breaks above R1 or trend changes
+            if close[i] > R1[i] or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
