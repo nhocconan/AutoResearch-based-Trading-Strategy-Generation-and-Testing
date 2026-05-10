@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_Pivot_Reversal_Scalp
-# Hypothesis: Trade reversals at Camarilla pivot levels (S1/S3 for longs, R1/R3 for shorts) with volume confirmation and intraday trend filter.
-# Works in both bull and bear markets by fading intraday extremes at statistically significant levels.
-# Uses 1d trend filter to align with higher timeframe bias.
-# Target: 25-40 trades/year per symbol.
+# 1D_TRIX_VolumeSpike_Trend
+# Hypothesis: Use TRIX crossover for trend direction on 1d, with volume spike confirmation to enter on pullbacks.
+# Long when: TRIX crosses above zero, volume > 2x average, and price pulls back to EMA20.
+# Short when: TRIX crosses below zero, volume > 2x average, and price rallies to EMA20.
+# Works in bull/bear by following the 1d trend and using volume to confirm institutional interest.
+# Target: 15-25 trades/year per symbol.
 
-name = "4H_Camarilla_Pivot_Reversal_Scalp"
-timeframe = "4h"
+name = "1D_TRIX_VolumeSpike_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,90 +24,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1-day Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # TRIX calculation (15-period EMA of EMA of EMA of close, then ROC)
+    close_s = pd.Series(close)
+    ema1 = close_s.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    # Rate of change of triple EMA
+    trix = 100 * (ema3 / ema3.shift(1) - 1)
+    trix = trix.fillna(0).values
     
-    # Use previous day's OHLC for today's Camarilla levels
-    # Shift by 1 to avoid look-ahead
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # EMA20 for dynamic support/resistance
+    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    S1 = prev_close - (range_ * 1.0 / 12)
-    S2 = prev_close - (range_ * 2.0 / 12)
-    S3 = prev_close - (range_ * 3.0 / 12)
-    R1 = prev_close + (range_ * 1.0 / 12)
-    R2 = prev_close + (range_ * 2.0 / 12)
-    R3 = prev_close + (range_ * 3.0 / 12)
-    
-    # Align levels to 4h timeframe
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    
-    # Volume confirmation (20-period average)
+    # Volume average (20-period)
     volume_s = pd.Series(volume)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Intraday trend filter: 9-period EMA vs 21-period EMA
-    close_s = pd.Series(close)
-    ema9 = close_s.ewm(span=9, adjust=False, min_periods=9).mean().values
-    ema21 = close_s.ewm(span=21, adjust=False, min_periods=21).mean().values
-    intraday_uptrend = ema9 > ema21
-    intraday_downtrend = ema9 < ema21
+    # Weekly trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = close_1w > ema50_1w
+    weekly_downtrend = close_1w < ema50_1w
+    
+    # Align weekly trend to daily
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure sufficient warmup
+    # Start after we have enough data
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(S1_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(R3_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(intraday_uptrend[i]) or 
-            np.isnan(intraday_downtrend[i])):
+        # Skip if data not ready
+        if (np.isnan(trix[i]) or np.isnan(ema20[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
+        volume_confirm = vol_ratio > 2.0
+        
+        weekly_up = weekly_uptrend_aligned[i] > 0.5
+        weekly_down = weekly_downtrend_aligned[i] > 0.5
+        
+        # TRIX crossover signals
+        trix_cross_up = trix[i] > 0 and trix[i-1] <= 0
+        trix_cross_down = trix[i] < 0 and trix[i-1] >= 0
         
         if position == 0:
-            # Long setup: price at S1 or S3, intraday uptrend, volume confirmation
-            near_s1 = abs(close[i] - S1_aligned[i]) < (close[i] * 0.002)  # Within 0.2%
-            near_s3 = abs(close[i] - S3_aligned[i]) < (close[i] * 0.002)
-            if (near_s1 or near_s3) and intraday_uptrend[i] and volume_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short setup: price at R1 or R3, intraday downtrend, volume confirmation
-            near_r1 = abs(close[i] - R1_aligned[i]) < (close[i] * 0.002)
-            near_r3 = abs(close[i] - R3_aligned[i]) < (close[i] * 0.002)
-            if (near_r1 or near_r3) and intraday_downtrend[i] and volume_confirm:
-                signals[i] = -0.25
-                position = -1
+            # Enter long: weekly uptrend + TRIX cross up + volume + price near EMA20
+            if weekly_up and trix_cross_up and volume_confirm:
+                if close[i] <= ema20[i] * 1.01 and close[i] >= ema20[i] * 0.99:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: weekly downtrend + TRIX cross down + volume + price near EMA20
+            elif weekly_down and trix_cross_down and volume_confirm:
+                if close[i] >= ema20[i] * 0.99 and close[i] <= ema20[i] * 1.01:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: price reaches S2 or intraday trend turns down
-            near_s2 = abs(close[i] - S2_aligned[i]) < (close[i] * 0.002)
-            if near_s2 or not intraday_uptrend[i]:
+            # Exit conditions: TRIX turns negative or price moves away from EMA20
+            if trix[i] < 0 or close[i] > ema20[i] * 1.02:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price reaches R2 or intraday trend turns up
-            near_r2 = abs(close[i] - R2_aligned[i]) < (close[i] * 0.002)
-            if near_r2 or not intraday_downtrend[i]:
+            # Exit conditions: TRIX turns positive or price moves away from EMA20
+            if trix[i] > 0 or close[i] < ema20[i] * 0.98:
                 signals[i] = 0.0
                 position = 0
             else:
