@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 4h_RSI_Trend_Filter_Volume_Confirm
-# Hypothesis: RSI(14) with EMA(50) trend filter and volume confirmation provides high-probability entries in both bull and bear markets.
-# Long when RSI < 40 and price > EMA(50) with volume > 1.5x average.
-# Short when RSI > 60 and price < EMA(50) with volume > 1.5x average.
-# Exit when RSI returns to neutral range (40-60).
-# Uses 4h timeframe for lower trade frequency (target: 20-40 trades/year) to minimize fee drag.
-# Includes ATR-based stoploss via signal=0 when adverse move exceeds 2x ATR.
+# 1D_WeeklyDonchian_Breakout_Volume
+# Hypothesis: Weekly Donchian channel breakouts capture long-term trends. Volume confirmation ensures participation, and a 1-day EMA filter reduces whipsaws. This strategy targets 20-30 trades/year on daily timeframe to minimize fee drag while capturing major moves in both bull and bear markets.
 
-name = "4h_RSI_Trend_Filter_Volume_Confirm"
-timeframe = "4h"
+name = "1D_WeeklyDonchian_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,65 +20,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14)
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    loss_ma = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
+        return np.zeros(n)
     
-    # EMA(50) for trend filter
-    ema_period = 50
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean()
+    # Weekly Donchian channels (20-period)
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    donchian_high = pd.Series(high_weekly).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low_weekly).rolling(window=20, min_periods=20).min().values
     
-    # ATR(14) for stoploss
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
+    # Align weekly Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_weekly, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_weekly, donchian_low)
+    
+    # 1-day EMA filter (50-period) for trend direction
+    close_series = pd.Series(close)
+    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).values
     
     # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(rsi_period, ema_period, atr_period, 20)
+    start_idx = 50  # Wait for EMA and volume MA to stabilize
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(ema[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(ema_50[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long entry: RSI oversold, price above EMA, volume confirmation
-            if rsi[i] < 40 and close[i] > ema[i] and vol_confirm:
+            # Long: price breaks above weekly Donchian high, above EMA50, with volume
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_50[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought, price below EMA, volume confirmation
-            elif rsi[i] > 60 and close[i] < ema[i] and vol_confirm:
+            # Short: price breaks below weekly Donchian low, below EMA50, with volume
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_50[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral or stoploss hit
-            if rsi[i] >= 40 or close[i] < ema[i] - 2.0 * atr[i]:
+            # Exit long: price breaks below weekly Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral or stoploss hit
-            if rsi[i] <= 60 or close[i] > ema[i] + 2.0 * atr[i]:
+            # Exit short: price breaks above weekly Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
