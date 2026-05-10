@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v3
 # Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with 12h EMA50 trend filter and volume spike confirmation.
 # Uses 12h trend for bias to avoid whipsaws in sideways markets, 4h for entry timing.
 # Targets 20-40 trades/year to minimize fee drag. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
+# Added tighter volume filter (2.0x avg) and reduced position size to 0.20 to lower trade frequency and manage risk.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v2"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeSpike_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -58,7 +59,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 2.0 * 20-period average (tighter filter)
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -77,20 +78,20 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 1.5
+        volume_filter = vol_ratio > 2.0  # Tighter volume filter
         
         if position == 0:
             # Long: price breaks above Camarilla R1 with uptrend and volume spike
             if (close[i] > camarilla_r1_aligned[i] and
                 trend_12h_up_aligned[i] > 0.5 and
                 volume_filter):
-                signals[i] = 0.25
+                signals[i] = 0.20  # Reduced position size
                 position = 1
             # Short: price breaks below Camarilla S1 with downtrend and volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   trend_12h_down_aligned[i] > 0.5 and
                   volume_filter):
-                signals[i] = -0.25
+                signals[i] = -0.20  # Reduced position size
                 position = -1
         
         elif position == 1:
@@ -103,7 +104,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
             # Exit: price returns to Camarilla pivot or trend fails
@@ -115,6 +116,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
