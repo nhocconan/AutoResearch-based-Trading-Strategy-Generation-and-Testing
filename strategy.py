@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Breakout_Trend_Filter
-Hypothesis: Price breaking above/below weekly pivot R1/S1 with volume confirmation in the direction of weekly EMA50 trend captures institutional breakouts. Works in bull/bear via trend filter. Target: 15-25 trades/year.
+1d_WeeklyPivot_Breakout_With_Volume
+Hypothesis: Use weekly pivot levels (R1, S1) for breakout entries in the direction of the weekly EMA50 trend,
+filtered by volume spikes. Exits on close crossing the weekly pivot point (P).
+Designed for 10-20 trades/year with clear trend-following logic that works in bull and bear markets.
 """
 
-name = "1d_WeeklyPivot_Breakout_Trend_Filter"
+name = "1d_WeeklyPivot_Breakout_With_Volume"
 timeframe = "1d"
 leverage = 1.0
 
@@ -79,15 +81,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below weekly pivot P OR trend turns bearish
-            if low[i] < pivot_p_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Long exit: price closes below weekly pivot P
+            if close[i] < pivot_p_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above weekly pivot P OR trend turns bullish
-            if high[i] > pivot_p_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Short exit: price closes above weekly pivot P
+            if close[i] > pivot_p_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
