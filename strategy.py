@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Top_Bottom_Reversal_With_Volume
-# Hypothesis: Price tends to reverse at key daily support/resistance levels (prior day's high/low) 
-# when accompanied by volume exhaustion and momentum divergence. Uses daily RSI for 
-# overbought/oversold conditions and volume spike for confirmation. Designed for 
-# low trade frequency (<30/year) to work in both bull and bear markets by fading 
-# overextended moves.
+# 4h_Camarilla_Pullback_Reversal_12hTrend
+# Hypothesis: In both bull and bear markets, price reverses at key Camarilla pivot levels (H3/L3)
+# when aligned with 12h trend. Entries occur on pullbacks to H3 (short) or L3 (long) with
+# volume confirmation and 12h EMA50 trend filter. Designed for low trade frequency (20-30/year)
+# to minimize fee drag and improve generalization across market regimes.
 
-name = "4h_Top_Bottom_Reversal_With_Volume"
+name = "4h_Camarilla_Pullback_Reversal_12hTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,28 +23,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for key levels and RSI
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend (smooth, lag-appropriate)
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    # Prior day's high and low (key support/resistance)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
-    # Daily RSI for overbought/oversold conditions
-    rsi_period = 14
-    delta = pd.Series(df_1d['close']).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    prev_range = prev_high - prev_low
     
-    # Align daily data to 4h timeframe
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
+    # Camarilla levels: H3/L3 (most significant for reversals)
+    # H3 = close + 1.1 * range / 6
+    # L3 = close - 1.1 * range / 6
+    camarilla_h3 = prev_close + 1.1 * prev_range / 6
+    camarilla_l3 = prev_close - 1.1 * prev_range / 6
     
-    # Volume confirmation (20-period average on 4h = ~3.3 days)
+    # Align daily levels to 4h timeframe
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # Volume confirmation (20-period average on 4h = ~10 days)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -60,35 +63,35 @@ def generate_signals(prices):
     start_idx = max(50, 20) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or \
-           np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or \
+           np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.8x average (signifies exhaustion)
-        volume_confirm = volume[i] > 1.8 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Short: price at/prior day's high with RSI > 70 (overbought) and volume exhaustion
-            if close[i] >= 0.99 * prev_high_aligned[i] and rsi_aligned[i] > 70 and volume_confirm:
-                signals[i] = -0.25
-                position = -1
-            # Long: price at/prior day's low with RSI < 30 (oversold) and volume exhaustion
-            elif close[i] <= 1.01 * prev_low_aligned[i] and rsi_aligned[i] < 30 and volume_confirm:
+            # Long: price pulls back to L3 with volume, above 12h EMA50 (uptrend)
+            if close[i] <= camarilla_l3_aligned[i] and volume_confirm and close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
+            # Short: price pulls back to H3 with volume, below 12h EMA50 (downtrend)
+            elif close[i] >= camarilla_h3_aligned[i] and volume_confirm and close[i] < ema_12h_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: price moves back above prior day's low or RSI exceeds 50
-            if close[i] > prev_low_aligned[i] or rsi_aligned[i] > 50:
+            # Long exit: price closes below L3 or breaks below 12h EMA50
+            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price moves back below prior day's high or RSI falls below 50
-            if close[i] < prev_high_aligned[i] or rsi_aligned[i] < 50:
+            # Short exit: price closes above H3 or breaks above 12h EMA50
+            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
