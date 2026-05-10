@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
 # Hypothesis: Uses Camarilla pivot levels from daily timeframe. Enters long when price breaks above R1 with volume confirmation and 1-day uptrend (close > EMA34).
 # Enters short when price breaks below S1 with volume confirmation and 1-day downtrend (close < EMA34).
 # Exits when price returns to the pivot point (CP) or reverses direction.
 # Uses 1-day EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 12-37 trades per year on 12h timeframe with position size 0.25.
+# Targets 20-50 trades per year on 4h timeframe with position size 0.25.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -57,7 +57,7 @@ def generate_signals(prices):
     S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
     CP = (prev_high + prev_low + prev_close) / 3
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     CP_aligned = align_htf_to_ltf(prices, df_1d, CP)
