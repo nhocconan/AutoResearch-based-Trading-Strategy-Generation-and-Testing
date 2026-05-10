@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Breakouts above/below daily Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
-Trades only in direction of 1d trend to avoid counter-trend whipsaws. Uses discrete position sizing (0.25) to minimize churn.
-Target: 12-37 trades/year (50-150 total) to stay within optimal range.
+4H_Vortex_1dTrend_Confirmation
+Hypothesis: Uses Vortex indicator on 1d timeframe to detect strong trend direction, 
+enters on 4h pullbacks to VWAP in direction of daily trend with volume confirmation.
+Designed for low trade frequency (target: 20-40/year) to avoid fee drag.
+Works in both bull and bear markets by following established daily trends.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Vortex_1dTrend_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,80 +25,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels (R3/S3) and trend filter
+    # Daily data for Vortex trend direction
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla R3 and S3 levels
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * range_1d
-    s3_1d = close_1d - 1.1 * range_1d
+    # Calculate Vortex Indicator (VI) on daily timeframe
+    # VI+ and VI- to determine trend direction
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr1 = np.insert(tr1, 0, high_1d[0] - low_1d[0])  # First TR
     
-    # 1d EMA50 for trend filter
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    vm_plus = np.abs(high_1d[1:] - low_1d[:-1])
+    vm_minus = np.abs(low_1d[1:] - high_1d[:-1])
+    vm_plus = np.insert(vm_plus, 0, np.abs(high_1d[0] - low_1d[0]))
+    vm_minus = np.insert(vm_minus, 0, np.abs(high_1d[0] - low_1d[0]))
     
-    # Daily volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    # Sum over 14 periods (standard Vortex period)
+    period = 14
+    def sum_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p-1, len(arr)):
+                res[i] = np.sum(arr[i-p+1:i+1])
+        return res
     
-    # Align all indicators to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    tr14 = sum_arr(tr1, period)
+    vm_plus_14 = sum_arr(vm_plus, period)
+    vm_minus_14 = sum_arr(vm_minus, period)
+    
+    # Avoid division by zero
+    vi_plus = np.where(tr14 != 0, vm_plus_14 / tr14, 0)
+    vi_minus = np.where(tr14 != 0, vm_minus_14 / tr14, 0)
+    
+    # Trend direction: VI+ > VI- = uptrend, VI- > VI+ = downtrend
+    vi_plus_minus_diff = vi_plus - vi_minus
+    
+    # Daily VWAP for 4h entry timing
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    vwap_1d = np.full_like(close_1d, np.nan)
+    cum_vol = np.zeros_like(volume)
+    cum_price_vol = np.zeros_like(volume)
+    
+    for i in range(len(close_1d)):
+        cum_vol[i] = (cum_vol[i-1] if i > 0 else 0) + volume[i] if hasattr(volume, '__len__') else volume[i]  # This needs fixing
+    
+    # Simpler approach: use typical price * volume for VWAP calculation
+    tp_vol = typical_price_1d * df_1d['volume'].values
+    cum_tp_vol = np.nancumsum(tp_vol)
+    cum_vol = np.nancumsum(df_1d['volume'].values)
+    vwap_1d = np.where(cum_vol != 0, cum_tp_vol / cum_vol, typical_price_1d)
+    
+    # 4h VWAP for entry signals
+    tp_4h = (high + low + close) / 3.0
+    tp_vol_4h = tp_4h * volume
+    cum_tp_vol_4h = np.nancumsum(tp_vol_4h)
+    cum_vol_4h = np.nancumsum(volume)
+    vwap_4h = np.where(cum_vol_4h != 0, cum_tp_vol_4h / cum_vol_4h, tp_4h)
+    
+    # Align daily indicators to 4h timeframe
+    vi_plus_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus_minus_diff)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = max(30, period)  # Ensure sufficient data
     
     for i in range(start_idx, n):
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(vi_plus_minus_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or np.isnan(vwap_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average daily volume (scaled to 12h equivalent)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 1 day = 2 x 12h bars
-        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        # Trend strength and direction from Vortex
+        trend_strength = abs(vi_plus_minus_aligned[i])
+        is_uptrend = vi_plus_minus_aligned[i] > 0.1  # Threshold to avoid choppy signals
+        is_downtrend = vi_plus_minus_aligned[i] < -0.1
         
-        # Trend and price relative to Camarilla levels
-        is_uptrend = close[i] > ema50_1d_aligned[i]
-        is_downtrend = close[i] < ema50_1d_aligned[i]
-        price_above_r3 = close[i] > r3_1d_aligned[i]
-        price_below_s3 = close[i] < s3_1d_aligned[i]
+        # Price relative to VWAP for entry timing
+        price_above_vwap = close[i] > vwap_4h[i] * 1.002  # Small buffer to avoid whipsaw
+        price_below_vwap = close[i] < vwap_4h[i] * 0.998
+        
+        # Volume confirmation: current volume > 1.3x average volume
+        vol_ma = np.mean(volume[max(0, i-24):i+1]) if i >= 24 else np.mean(volume[:i+1])
+        volume_confirm = volume[i] > 1.3 * vol_ma if not np.isnan(vol_ma) else False
         
         if position == 0:
-            # Long: price breaks above R3, in uptrend, with volume
-            if price_above_r3 and is_uptrend and volume_confirm:
+            # Long: daily uptrend, price pulls back to/below VWAP, then closes above with volume
+            if is_uptrend and price_below_vwap and close[i] > vwap_4h[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, in downtrend, with volume
-            elif price_below_s3 and is_downtrend and volume_confirm:
+            # Short: daily downtrend, price bounces up to/above VWAP, then closes below with volume
+            elif is_downtrend and price_above_vwap and close[i] < vwap_4h[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R3 or trend turns down
-            if not price_above_r3 or not is_uptrend:
+            # Long exit: trend weakens or price breaks below VWAP significantly
+            if not is_uptrend or close[i] < vwap_4h[i] * 0.995:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S3 or trend turns up
-            if not price_below_s3 or not is_downtrend:
+            # Short exit: trend weakens or price breaks above VWAP significantly
+            if not is_downtrend or close[i] > vwap_4h[i] * 1.005:
                 signals[i] = 0.0
                 position = 0
             else:
