@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_VolumeWeighted_SqueezeBreakout
-Hypothesis: On 6h timeframe, enter long when price breaks above the upper Bollinger Band with volume > 1.5x 12h average volume and 1d EMA50 uptrend; enter short when price breaks below lower Bollinger Band with volume > 1.5x 12h average volume and 1d EMA50 downtrend. Bollinger Band squeeze (low volatility) precedes breakouts, increasing win rate. Works in bull/bear via 1d trend filter. Target: 20-50 trades/year.
+4h_Camarilla_R1_S1_Breakout_1D_Trend_Volume
+Hypothesis: On 4h timeframe, go long when price breaks above Camarilla R1 with 1d uptrend and volume surge; go short when price breaks below S1 with 1d downtrend and volume surge. Camarilla levels provide precise reversal points, 1d trend filters ensure directional alignment, and volume confirms breakout strength. Targets 20-40 trades/year to minimize fee drag while capturing strong moves in both bull and bear markets.
 """
 
-name = "6h_VolumeWeighted_SqueezeBreakout"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1D_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,82 +17,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for volume filter (more responsive than 1d)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    volume_12h = df_12h['volume'].values
-    vol_ma20_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma20_12h)
-    
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels, trend, and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    volume_1d = df_1d['volume'].values
     
-    # 6h data for Bollinger Bands and price
+    # Calculate previous day's Camarilla levels
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]  # first day uses same day
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    hl_range = prev_high - prev_low
+    camarilla_r1 = prev_close + hl_range * 1.1 / 12
+    camarilla_s1 = prev_close - hl_range * 1.1 / 12
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # 1d volume MA20 for volume filter
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    
+    # 4h data for price
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20, 2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Bollinger Bands (20), volume MA (20), EMA50
-    start_idx = 50
+    # Warmup: need Camarilla (1 day), EMA34 (34), volume MA (20)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(sma20[i]) or np.isnan(std20[i]) or 
-            np.isnan(vol_ma20_12h_aligned[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > upper_band[i]
-        breakout_down = close[i] < lower_band[i]
+        # Trend filter: 4h close vs 1d EMA34
+        uptrend_1d = close[i] > ema34_1d_aligned[i]
+        downtrend_1d = close[i] < ema34_1d_aligned[i]
         
-        # Volume filter: current 6h volume > 1.5x 12h 20-period MA
-        volume_filter = volume[i] > vol_ma20_12h_aligned[i] * 1.5
+        # Volume filter: current 4h volume > 1.5x 1d 20-period MA
+        volume_filter = volume[i] > vol_ma20_1d_aligned[i] * 1.5
         
-        # Trend filter: 1d EMA50 direction
-        uptrend_1d = close[i] > ema50_1d_aligned[i]
-        downtrend_1d = close[i] < ema50_1d_aligned[i]
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        in_session = 8 <= hour <= 20
         
         if position == 0:
-            # Long: breakout above upper band with volume and uptrend
-            if breakout_up and volume_filter and uptrend_1d:
+            # Long: price breaks above Camarilla R1 in uptrend with volume
+            if high[i] > camarilla_r1_aligned[i] and uptrend_1d and volume_filter and in_session:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower band with volume and downtrend
-            elif breakout_down and volume_filter and downtrend_1d:
+            # Short: price breaks below Camarilla S1 in downtrend with volume
+            elif low[i] < camarilla_s1_aligned[i] and downtrend_1d and volume_filter and in_session:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to middle (SMA20) or breakout fails
-            if close[i] <= sma20[i]:
+            # Long exit: price breaks below Camarilla S1 or trend fails
+            if low[i] < camarilla_s1_aligned[i] or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle (SMA20) or breakout fails
-            if close[i] >= sma20[i]:
+            # Short exit: price breaks above Camarilla R1 or trend fails
+            if high[i] > camarilla_r1_aligned[i] or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
