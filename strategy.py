@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-Hypothesis: 4h Camarilla R3/S3 level breakout in direction of weekly EMA10 trend with volume confirmation.
-Uses weekly trend for multi-timeframe alignment, works in bull/bear by following higher timeframe trend.
-Target: 20-40 trades/year to stay under fee drag limits.
+1d_KAMA_Trend_RSI_Signal
+Hypothesis: Daily KAMA trend filter with RSI momentum for entries.
+Uses weekly trend as higher timeframe filter to avoid counter-trend trades.
+KAMA adapts to market noise, reducing false signals in ranging markets.
+RSI provides momentum confirmation for entries.
+Target: 15-25 trades/year (60-100 total over 4 years).
+Works in bull/bear by following weekly trend direction.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -19,84 +22,96 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA10 for trend filter
+    # Weekly trend filter (higher timeframe)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_10_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 10:
-        ema_10_1w[9] = np.mean(close_1w[:10])
-        alpha = 2 / (10 + 1)
-        for i in range(10, len(close_1w)):
-            ema_10_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_10_1w[i-1]
-    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
+    if len(close_1w) >= 50:
+        sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    else:
+        sma_50_1w = np.full(len(close_1w), np.nan)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily KAMA trend (adaptive moving average)
+    # Efficiency Ratio calculation
+    price_change = np.abs(np.diff(close, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    er = np.zeros_like(close)
+    er[10:] = price_change[10:] / np.maximum(volatility[10:], 1e-10)
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    r3 = np.full(len(close_1d), np.nan)
-    s3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        # Previous day's range
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        if range_val > 0:
-            r3[i] = prev_close + range_val * 1.1 / 4
-            s3[i] = prev_close - range_val * 1.1 / 4
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Volume confirmation: current volume > 1.5x average volume (20-period)
-    vol_sma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_sma[i] = np.mean(volume[i-20:i])
+    # Daily RSI for momentum
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    # Wilder's smoothing
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[1:14])
+        avg_loss[13] = np.mean(loss[1:14])
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)  # Volume + weekly EMA warmup
+    start_idx = max(30, 14)  # KAMA needs some history, RSI needs 14
     
     for i in range(start_idx, n):
-        if np.isnan(ema_10_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(sma_50_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        volume_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Trend alignment: price relative to weekly SMA50
+        weekly_bullish = close[i] > sma_50_1w_aligned[i]
+        weekly_bearish = close[i] < sma_50_1w_aligned[i]
+        
+        # KAMA trend direction
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
         
         if position == 0:
-            # Long: Break above R3 and above weekly EMA10
-            if close[i] > r3_aligned[i] and close[i] > ema_10_1w_aligned[i] and volume_confirm:
+            # Long: Weekly bullish, KAMA rising, RSI > 50 (momentum)
+            if weekly_bullish and kama_rising and rsi[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 and below weekly EMA10
-            elif close[i] < s3_aligned[i] and close[i] < ema_10_1w_aligned[i] and volume_confirm:
+            # Short: Weekly bearish, KAMA falling, RSI < 50 (momentum)
+            elif weekly_bearish and kama_falling and rsi[i] < 50:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below weekly EMA10
-            if close[i] < ema_10_1w_aligned[i]:
+            # Exit: Weekly bearish OR KAMA falling
+            if not weekly_bullish or not kama_rising:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above weekly EMA10
-            if close[i] > ema_10_1w_aligned[i]:
+            # Exit: Weekly bullish OR KAMA rising
+            if not weekly_bearish or not kama_falling:
                 signals[i] = 0.0
                 position = 0
             else:
