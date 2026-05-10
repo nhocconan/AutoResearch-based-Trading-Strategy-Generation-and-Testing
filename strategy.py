@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Williams_VIX_Fix_Reversal
-# Hypothesis: Williams VIX Fix identifies volatility spikes that precede mean-reverting moves in crypto.
-# High VIX Fix values indicate panic selling (long opportunity) or euphoric buying (short opportunity).
-# Combined with RSI extremes and volume confirmation to filter false signals.
-# Designed for 6h to capture multi-day reversals with low trade frequency.
+# 1d_KAMA_Direction_RSI_Trend_Filter
+# Hypothesis: Use KAMA to detect trend direction on daily timeframe, combined with RSI for momentum and trend filter (EMA200) for higher probability trades.
+# KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI avoids overbought/oversold extremes.
+# Designed for 1d to capture multi-day trends with low trade frequency, suitable for both bull and bear markets.
 
-name = "6h_Williams_VIX_Fix_Reversal"
-timeframe = "6h"
+name = "1d_KAMA_Direction_RSI_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,85 +22,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams VIX Fix: measures synthetic VIX from price action
-    # VIX Fix = (Highest Close in period - Low) / Highest Close in period * 100
-    def williams_vix_fix(high_arr, low_arr, close_arr, period=22):
-        highest_close = np.full_like(close_arr, np.nan)
-        for i in range(len(close_arr)):
-            if i < period - 1:
-                highest_close[i] = np.nan
+    # Calculate KAMA (Kaufman Adaptive Moving Average)
+    def kama(close, er_len=10, fast_len=2, slow_len=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        vol = np.sum(np.abs(np.diff(close, prepend=close[0]))[:len(close)])
+        er = np.zeros_like(close)
+        for i in range(len(close)):
+            if vol[i] != 0:
+                er[i] = change[i] / vol[i]
             else:
-                highest_close[i] = np.max(close_arr[i-period+1:i+1])
-        vix_fix = (highest_close - low_arr) / highest_close * 100
-        return vix_fix
+                er[i] = 0
+        sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
+        kama_out = np.zeros_like(close)
+        kama_out[0] = close[0]
+        for i in range(1, len(close)):
+            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
+        return kama_out
     
-    # Calculate Williams VIX Fix
-    vix_fix = williams_vix_fix(high, low, close, period=22)
-    
-    # RSI for confirmation
-    def rsi(close_arr, period=14):
-        delta = np.diff(close_arr, prepend=close_arr[0])
+    # Calculate RSI
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
         gain = np.where(delta > 0, delta, 0)
         loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(close_arr, np.nan)
-        avg_loss = np.full_like(close_arr, np.nan)
-        
-        # Initialize first average
-        if len(close_arr) >= period:
-            avg_gain[period-1] = np.mean(gain[0:period])
-            avg_loss[period-1] = np.mean(loss[0:period])
-            
-            # Wilder smoothing
-            for i in range(period, len(close_arr)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[0] = np.mean(gain[:length]) if len(gain) >= length else 0
+        avg_loss[0] = np.mean(loss[:length]) if len(loss) >= length else 0
+        for i in range(1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
         rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_val = 100 - (100 / (1 + rs))
-        return rsi_val
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
     
-    rsi_val = rsi(close, period=14)
+    # EMA200 for trend filter
+    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Volume moving average
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
-        return res
-    vol_ma = mean_arr(volume, 20)
+    # Calculate indicators
+    kama_val = kama(close, er_len=10, fast_len=2, slow_len=30)
+    rsi_val = rsi(close, length=14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough history for indicators
+    start_idx = 200  # Need enough history for EMA200
     
     for i in range(start_idx, n):
-        if np.isnan(vix_fix[i]) or np.isnan(rsi_val[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama_val[i]) or np.isnan(rsi_val[i]) or np.isnan(ema_200[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: High VIX Fix (panic selling) + RSI oversold + volume confirmation
-            if vix_fix[i] > 80 and rsi_val[i] < 30 and volume[i] > 1.5 * vol_ma[i]:
+            # Long: price above KAMA, RSI not overbought, and above EMA200
+            if close[i] > kama_val[i] and rsi_val[i] < 70 and close[i] > ema_200[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Extremely low VIX Fix (complacency) + RSI overbought + volume confirmation
-            elif vix_fix[i] < 20 and rsi_val[i] > 70 and volume[i] > 1.5 * vol_ma[i]:
+            # Short: price below KAMA, RSI not oversold, and below EMA200
+            elif close[i] < kama_val[i] and rsi_val[i] > 30 and close[i] < ema_200[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: VIX Fix normalizes or RSI overbought
-            if vix_fix[i] < 40 or rsi_val[i] > 70:
+            # Long exit: price crosses below KAMA or RSI overbought
+            if close[i] < kama_val[i] or rsi_val[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: VIX Fix normalizes or RSI oversold
-            if vix_fix[i] > 60 or rsi_val[i] < 30:
+            # Short exit: price crosses above KAMA or RSI oversold
+            if close[i] > kama_val[i] or rsi_val[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
