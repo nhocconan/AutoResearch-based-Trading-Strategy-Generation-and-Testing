@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_1dTrend_Volume_Spike
-# Hypothesis: Combines Elder Ray (Bull/Bear power) with 1d EMA trend filter and volume confirmation.
-# Long when Bull Power > 0, price above 1d EMA50, and volume > 1.5x average.
-# Short when Bear Power < 0, price below 1d EMA50, and volume > 1.5x average.
-# Exits when Elder Power reverses sign.
-# Designed for 15-30 trades/year to avoid overtrading and work in both bull and bear markets.
-# Uses 6h timeframe with 1d trend filter.
+# 4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume
+# Hypothesis: Combines Camarilla pivot breakout at R3/S3 with 1-day EMA34 trend filter and volume confirmation.
+# Long when price breaks above R3 with volume > 1.5x average and price > 1-day EMA34.
+# Short when price breaks below S3 with volume > 1.5x average and price < 1-day EMA34.
+# Exits when price crosses EMA34 in opposite direction.
+# Designed for 30-50 trades/year to avoid overtrading and work in both bull and bear markets.
 
-name = "6h_ElderRay_1dTrend_Volume_Spike"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,58 +24,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components (13-period EMA for power calculation)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # Bull Power = High - EMA13
-    bear_power = low - ema13   # Bear Power = Low - EMA13
+    # Camarilla Pivot Levels (based on previous day)
+    # Calculate once per day using previous day's OHLC
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
     
-    # Volume average (20-period)
+    # Get unique dates from open_time
+    dates = pd.to_datetime(prices['open_time']).date
+    unique_dates = np.unique(dates)
+    
+    # Pre-calculate daily OHLC
+    daily_open = np.full(n, np.nan)
+    daily_high = np.full(n, np.nan)
+    daily_low = np.full(n, np.nan)
+    daily_close = np.full(n, np.nan)
+    
+    for date in unique_dates:
+        mask = (dates == date)
+        if np.any(mask):
+            idx = np.where(mask)[0]
+            daily_open[idx] = open_prices[mask][0]
+            daily_high[idx] = np.max(high[mask])
+            daily_low[idx] = np.min(low[mask])
+            daily_close[idx] = close_prices[mask][-1]
+    
+    # Calculate Camarilla levels for each bar using previous day's data
+    for i in range(1, n):
+        if not np.isnan(daily_close[i-1]) and not np.isnan(daily_high[i-1]) and not np.isnan(daily_low[i-1]):
+            prev_close = daily_close[i-1]
+            prev_high = daily_high[i-1]
+            prev_low = daily_low[i-1]
+            camarilla_r3[i] = prev_close + 1.1 * (prev_high - prev_low) / 12
+            camarilla_s3[i] = prev_close - 1.1 * (prev_high - prev_low) / 12
+    
+    # Volume average (20)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # 1d EMA(50) for trend filter
+    # 1-day EMA(34) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure sufficient warmup for EMA13 and 1d EMA50
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power > 0, price above 1d EMA50, volume confirmation
-            if bull_power[i] > 0 and close[i] > ema_50_1d_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Long: Breakout above R3 with volume confirmation and uptrend
+            if close[i] > camarilla_r3[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0, price below 1d EMA50, volume confirmation
-            elif bear_power[i] < 0 and close[i] < ema_50_1d_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Short: Breakout below S3 with volume confirmation and downtrend
+            elif close[i] < camarilla_s3[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Bull Power turns negative (trend weakness)
-            if bull_power[i] <= 0:
+            # Exit: Price crosses below EMA34
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Bear Power turns positive (trend weakness)
-            if bear_power[i] >= 0:
+            # Exit: Price crosses above EMA34
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
