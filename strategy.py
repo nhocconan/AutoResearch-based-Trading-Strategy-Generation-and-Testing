@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation.
-# Weekly EMA34 filters trend direction to avoid counter-trend trades; daily Camarilla levels provide precise entry/exit;
-# Volume confirmation ensures breakout strength. Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Daily breakouts from weekly Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation.
+# Weekly EMA34 filters trend direction to avoid counter-trend trades; weekly Camarilla levels provide precise entry/exit;
+# Volume confirmation ensures breakout strength. Designed for 1d to achieve 7-25 trades/year.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA34 trend filter
+    # Weekly data for EMA34 trend filter and Camarilla levels
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
@@ -32,14 +32,7 @@ def generate_signals(prices):
     # Weekly EMA34 for trend filter
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Camarilla levels (based on previous day)
+    # Camarilla levels (based on previous week)
     def calculate_camarilla(h, l, c):
         typical = (h + l + c) / 3.0
         range_ = h - l
@@ -47,27 +40,25 @@ def generate_signals(prices):
         S1 = c - (range_ * 1.1000 / 12)
         return R1, S1
     
-    R1 = np.full_like(close_1d, np.nan)
-    S1 = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+    R1 = np.full_like(close_1w, np.nan)
+    S1 = np.full_like(close_1w, np.nan)
+    for i in range(1, len(close_1w)):
+        R1[i], S1[i] = calculate_camarilla(high_1w[i-1], low_1w[i-1], close_1w[i-1])
     
-    # Daily volume confirmation: 20-period average
+    # Weekly volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    vol_ma_20 = mean_arr(volume_1w, 20)
     
-    # Align weekly indicators to 12h timeframe (wait for 1w bar to close)
+    # Align weekly indicators to 1d timeframe (wait for weekly bar to close)
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
