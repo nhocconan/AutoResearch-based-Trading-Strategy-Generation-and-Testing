@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-6h_Advanced_Bollinger_Bands_1dTrend_Volume
-Hypothesis: 6h Bollinger Bands (20,2) breakout in direction of 1d EMA34 trend, with volume confirmation and Bollinger width regime filter to avoid chop. Works in both bull and bear by following higher timeframe trend and using volatility-based entries. Target: 50-150 total trades over 4 years (12-37/year).
+1h_4H_1D_RSI_Trend_Volume
+Hypothesis: 1-hour RSI mean reversion in direction of 4-hour trend and 1-day volume filter.
+Uses 4-hour EMA50 for trend direction and 1-day volume spike for confirmation.
+RSI(14) < 30 for long in uptrend, RSI(14) > 70 for short in downtrend.
+Volume filter: current volume > 2.0 x 20-day average volume.
+Target: 60-150 total trades over 4 years (15-37/year) with low frequency due to multiple filters.
+Works in bull/bear by following 4h trend and avoiding counter-trend trades.
 """
 
-name = "6h_Advanced_Bollinger_Bands_1dTrend_Volume"
-timeframe = "6h"
+name = "1h_4H_1D_RSI_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,80 +22,82 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 1:
+        return np.zeros(n)
     
+    # 4h EMA50 for trend direction
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # 1-day volume average (20-period)
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Align to 1h timeframe
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Get price, volume
+    # Get price, volume, high, low
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Bollinger Bands (20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma20 + 2 * std20
-    bb_lower = sma20 - 2 * std20
-    
-    # Bollinger Width for regime filter (avoid chop)
-    bb_width = (bb_upper - bb_lower) / sma20
-    # Use 50-period EMA of BB width to smooth
-    bb_width_ema50 = pd.Series(bb_width).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter: current volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # Use Wilder's smoothing (alpha = 1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA34 (34), BBands (20), BB width EMA (50), volume EMA (20)
+    # Warmup: need RSI (14), 4h EMA50 (50), 1d vol avg (20)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(bb_upper[i]) or
-            np.isnan(bb_lower[i]) or
-            np.isnan(bb_width_ema50[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade in low volatility regime (avoid chop)
-        # BB width below its 50 EMA indicates low volatility/squeeze
-        low_volatility = bb_width[i] < bb_width_ema50[i]
+        # Volume filter: current volume > 2.0 x 20-day average volume
+        volume_filter = volume[i] > vol_avg_1d_aligned[i] * 2.0
         
         if position == 0:
-            # Long: above EMA34 (uptrend) AND price breaks above BB Upper with volume squeeze
-            if close[i] > ema_34_aligned[i] and high[i] > bb_upper[i] and volume_filter[i] and low_volatility:
-                signals[i] = 0.25
+            # Long: uptrend (price > 4h EMA50) AND RSI oversold (<30) AND volume spike
+            if close[i] > ema_50_4h_aligned[i] and rsi[i] < 30 and volume_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short: below EMA34 (downtrend) AND price breaks below BB Lower with volume squeeze
-            elif close[i] < ema_34_aligned[i] and low[i] < bb_lower[i] and volume_filter[i] and low_volatility:
-                signals[i] = -0.25
+            # Short: downtrend (price < 4h EMA50) AND RSI overbought (>70) AND volume spike
+            elif close[i] < ema_50_4h_aligned[i] and rsi[i] > 70 and volume_filter:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below BB Middle OR trend turns bearish
-            if low[i] < sma20[i] or close[i] < ema_34_aligned[i]:
+            # Long exit: RSI returns to neutral (>50) OR trend turns bearish
+            if rsi[i] > 50 or close[i] < ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above BB Middle OR trend turns bullish
-            if high[i] > sma20[i] or close[i] > ema_34_aligned[i]:
+            # Short exit: RSI returns to neutral (<50) OR trend turns bullish
+            if rsi[i] < 50 or close[i] > ema_50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
