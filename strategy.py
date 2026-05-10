@@ -1,55 +1,64 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: Price breaking Camarilla R3/S3 levels with 12h trend and volume confirmation provides high-probability breakouts. Camarilla levels act as natural support/resistance, while 12h trend ensures alignment with higher timeframe momentum. Volume filters false breakouts. Designed for low frequency (20-40 trades/year) to minimize fee drag in both bull and bear markets.
+# 1h_Hull_Moving_Average_Crossover_Trend
+# Hypothesis: Hull Moving Average (HMA) reduces lag and improves crossover signals. 
+# Use 4h HMA(21) for trend direction and 1h HMA(9)/HMA(21) crossover for entry timing. 
+# Adds volume confirmation (>1.5x average) and session filter (08-20 UTC) to reduce false signals. 
+# Designed for low frequency (~15-35 trades/year) to minimize fee decay in 1h timeframe.
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Hull_Moving_Average_Crossover_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def WMA(values, window):
+    """Weighted Moving Average."""
+    if len(values) < window:
+        return np.full_like(values, np.nan)
+    weights = np.arange(1, window + 1)
+    return np.convolve(values, weights, 'valid') / weights.sum()
+
+def HMA(values, window):
+    """Hull Moving Average."""
+    half = window // 2
+    sqrt = int(np.sqrt(window))
+    wma_half = WMA(values, half)
+    wma_full = WMA(values, window)
+    raw = 2 * wma_half - wma_full
+    return WMA(raw, sqrt)
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for trend and Camarilla calculation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Load 4h data for trend filter ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 12h bar
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h HMA(21) for trend
+    close_4h = df_4h['close'].values
+    hma_4h = HMA(close_4h, 21)
+    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
     
-    # Camarilla R3 and S3 levels
-    R3 = close_12h + (high_12h - low_12h) * 1.1 / 4
-    S3 = close_12h - (high_12h - low_12h) * 1.1 / 4
+    # Calculate 1h HMA(9) and HMA(21) for entry signals
+    hma_9 = HMA(close, 9)
+    hma_21 = HMA(close, 21)
     
-    # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
-    
-    # 12h trend: EMA50 on close
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema50_12h
-    trend_12h_down = close_12h < ema50_12h
-    
-    # Align 12h trend to 4h
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
-    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
-    
-    # Volume confirmation: 20-period average on 4h
+    # Volume confirmation: 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,9 +68,15 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(hma_9[i]) or np.isnan(hma_21[i]) or 
+            np.isnan(hma_4h_aligned[i]) or np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,33 +86,31 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above R3 with 12h uptrend and volume
-            if (close[i] > R3_aligned[i] and 
-                trend_12h_up_aligned[i] > 0.5 and volume_confirm):
-                signals[i] = 0.25
+            # Enter long: HMA(9) crosses above HMA(21) with uptrend on 4h and volume
+            if (hma_9[i] > hma_21[i] and hma_9[i-1] <= hma_21[i-1] and
+                hma_4h_aligned[i] > close[i] and volume_confirm):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S3 with 12h downtrend and volume
-            elif (close[i] < S3_aligned[i] and 
-                  trend_12h_down_aligned[i] > 0.5 and volume_confirm):
-                signals[i] = -0.25
+            # Enter short: HMA(9) crosses below HMA(21) with downtrend on 4h and volume
+            elif (hma_9[i] < hma_21[i] and hma_9[i-1] >= hma_21[i-1] and
+                  hma_4h_aligned[i] < close[i] and volume_confirm):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to S3 level or trend fails
-            if (close[i] < S3_aligned[i] or 
-                trend_12h_up_aligned[i] < 0.5):
+            # Exit when HMA(9) crosses below HMA(21) or trend fails
+            if (hma_9[i] < hma_21[i] and hma_9[i-1] >= hma_21[i-1]) or hma_4h_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit when price returns to R3 level or trend fails
-            if (close[i] > R3_aligned[i] or 
-                trend_12h_down_aligned[i] < 0.5):
+            # Exit when HMA(9) crosses above HMA(21) or trend fails
+            if (hma_9[i] > hma_21[i] and hma_9[i-1] <= hma_21[i-1]) or hma_4h_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
