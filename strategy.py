@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-# Hypothesis: Fade at R3/S3 levels from daily Camarilla (strong reversal zones) with
-# weekly trend filter and volume confirmation. Works in bull (fade from resistance) and
-# bear (fade from support) with tight entries to avoid overtrading.
+# 12h_Weekly_Pullback_1dTrend_Volume
+# Hypothesis: Weekly trend filters 12h pullbacks to 1d EMA34 with volume confirmation.
+# Works in bull (pullbacks in uptrend) and bear (pullbacks in downtrend) with tight entries.
+# Uses 1w EMA50 for trend, 1d EMA34 for pullback target, and volume spike for confirmation.
+# Designed for low trade frequency (12-37/year) to avoid fee drag.
 
-name = "6h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "6h"
+name = "12h_Weekly_Pullback_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,34 +28,29 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d data for Camarilla pivots
+    # 1d data for pullback target and volume
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1w EMA34 trend
+    # 1w EMA50 trend
     close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema50_1w
+    trend_1w_down = close_1w < ema50_1w
     
-    # Align 1w trend to 6h
+    # Align 1w trend to 12h
     trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
     trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    # Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d EMA34 for pullback target
     close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    R3 = close_1d + 1.1 * range_1d / 4
-    S3 = close_1d - 1.1 * range_1d / 4
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Camarilla levels to 6h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align 1d EMA34 to 12h
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume spike: current > 2.0 * 20-period average
+    # Volume spike: current > 2.0 * 20-period average (12h)
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -65,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,20 +71,20 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: fade from S3 (support) with weekly uptrend and volume spike
-            if (close[i] < S3_aligned[i] and 
+            # Long: pullback to 1d EMA34 in 1w uptrend with volume spike
+            if (low[i] <= ema34_1d_aligned[i] and 
                 trend_1w_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: fade from R3 (resistance) with weekly downtrend and volume spike
-            elif (close[i] > R3_aligned[i] and 
+            # Short: pullback to 1d EMA34 in 1w downtrend with volume spike
+            elif (high[i] >= ema34_1d_aligned[i] and 
                   trend_1w_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close above R3 or trend fails
-            if (close[i] > R3_aligned[i] or 
+            # Exit: price crosses above 1d EMA34 or trend fails
+            if (close[i] > ema34_1d_aligned[i] or 
                 trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -96,8 +92,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close below S3 or trend fails
-            if (close[i] < S3_aligned[i] or 
+            # Exit: price crosses below 1d EMA34 or trend fails
+            if (close[i] < ema34_1d_aligned[i] or 
                 trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
