@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
-# 6h_Weekly_Pivot_Reversal_1dTrend_Volume
-# Hypothesis: 6-hour reversals from weekly pivot points with daily trend filter (EMA34) and volume confirmation.
-# Weekly pivot points act as strong support/resistance levels that hold across market regimes.
-# Daily EMA34 filters trend direction to avoid counter-trend trades; volume confirmation ensures reversal strength.
-# Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 4h_KAMA_Trend_1dTrend_Volume
+# Hypothesis: 4h Kaufman Adaptive Moving Average (KAMA) with 1-day trend filter and volume confirmation.
+# KAMA adapts to market noise, reducing whipsaws in sideways markets. Daily trend filter ensures
+# alignment with higher timeframe momentum. Volume confirms breakout strength. Designed for
+# 4h to achieve 20-50 trades/year, suitable for both bull and bear markets.
 
-name = "6h_Weekly_Pivot_Reversal_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Trend_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mplfinance._typing import Alias
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,35 +23,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Daily data for EMA34 trend filter and volume
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Weekly pivot points (based on prior week)
-    def calculate_pivot(h, l, c):
-        pivot = (h + l + c) / 3.0
-        r1 = 2 * pivot - l
-        s1 = 2 * pivot - h
-        r2 = pivot + (h - l)
-        s2 = pivot - (h - l)
-        return pivot, r1, s1, r2, s2
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    pivot = np.full_like(close_1w, np.nan)
-    r1 = np.full_like(close_1w, np.nan)
-    s1 = np.full_like(close_1w, np.nan)
-    r2 = np.full_like(close_1w, np.nan)
-    s2 = np.full_like(close_1w, np.nan)
-    for i in range(1, len(close_1w)):
-        pivot[i], r1[i], s1[i], r2[i], s2[i] = calculate_pivot(high_1w[i-1], low_1w[i-1], close_1w[i-1])
+    # Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_length))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[er_length] = close[er_length]
+    for i in range(er_length + 1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -66,49 +59,41 @@ def generate_signals(prices):
         return res
     vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align weekly indicators to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Align daily indicators to 6h timeframe (wait for daily bar to close)
+    # Align daily indicators to 4h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough history for indicators
+    start_idx = max(50, er_length)  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches S1 and reverses up, above daily EMA34, strong volume
-            if low[i] <= s1_aligned[i] and close[i] > s1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: price above KAMA, above daily EMA34, strong volume
+            if close[i] > kama[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches R1 and reverses down, below daily EMA34, strong volume
-            elif high[i] >= r1_aligned[i] and close[i] < r1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: price below KAMA, below daily EMA34, strong volume
+            elif close[i] < kama[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches pivot or goes below S1
-            if close[i] >= pivot_aligned[i] or close[i] < s1_aligned[i]:
+            # Long exit: price drops below KAMA or below daily EMA34
+            if close[i] < kama[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches pivot or goes above R1
-            if close[i] <= pivot_aligned[i] or close[i] > r1_aligned[i]:
+            # Short exit: price rises above KAMA or above daily EMA34
+            if close[i] > kama[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
