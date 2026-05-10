@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_1dTrend_Volume
-Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
-Combined with daily trend filter (EMA34) and volume spike confirmation, this strategy captures
-breakouts with institutional interest. Designed for 4h timeframe to target 25-50 trades/year,
-balancing edge and trade frequency. Uses discrete position sizing (0.25) to minimize fee churn.
+1d_Vortex_EMA34_Volume
+Hypothesis: The Vortex Indicator identifies trend direction, and when combined with EMA34 trend filter and volume spike on the daily timeframe, it captures strong trend moves with institutional interest. Designed for daily timeframe to limit trades to 10-25/year, reducing fee drain while performing in both bull and bear markets via trend alignment and volume confirmation.
 """
 
-name = "4h_Camarilla_R1_S1_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Vortex_EMA34_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +17,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla levels, trend, and volume
+    # Get daily data for Vortex, EMA34, and volume average
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -30,40 +27,55 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for R1 and S1
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Vortex Indicator (14-period)
+    # VM+ = |High - Prev Low|
+    # VM- = |Low - Prev High|
+    # TR = True Range
+    # VI+ = Sum(VM+ over n) / Sum(TR over n)
+    # VI- = Sum(VM- over n) / Sum(TR over n)
+    vm_plus = np.abs(high_1d - np.roll(low_1d, 1))
+    vm_minus = np.abs(low_1d - np.roll(high_1d, 1))
+    tr1 = np.abs(high_1d - np.roll(low_1d, 1))
+    tr2 = np.abs(low_1d - np.roll(high_1d, 1))
+    tr3 = np.abs(np.roll(high_1d, 1) - np.roll(low_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align Camarilla levels to 4h (no extra delay needed as they're based on prior day)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Handle first element
+    vm_plus[0] = np.abs(high_1d[0] - low_1d[0])
+    vm_minus[0] = np.abs(low_1d[0] - high_1d[0])
+    tr[0] = np.abs(high_1d[0] - low_1d[0])
     
-    # Daily trend filter: EMA34
+    # Sum over 14 periods
+    n_vortex = 14
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=n_vortex, min_periods=n_vortex).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=n_vortex, min_periods=n_vortex).sum().values
+    tr_sum = pd.Series(tr).rolling(window=n_vortex, min_periods=n_vortex).sum().values
+    
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # EMA34 trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily volume average for spike detection (20-day average)
+    # 20-day average volume for spike detection
     vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # 4h price data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Align all indicators to daily (no additional alignment needed as we're on 1d timeframe)
+    vi_plus_aligned = vi_plus
+    vi_minus_aligned = vi_minus
+    ema34_1d_aligned = ema34_1d
+    vol_avg_1d_aligned = vol_avg_1d
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA34 (34) and volume average (20)
+    # Warmup: need Vortex (14), EMA34 (34), volume average (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
+        if (np.isnan(vi_plus_aligned[i]) or 
+            np.isnan(vi_minus_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
@@ -71,34 +83,32 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend_1d = close[i] > ema34_1d_aligned[i]
-        downtrend_1d = close[i] < ema34_1d_aligned[i]
+        # Trend filter: EMA34
+        uptrend_1d = close_1d[i] > ema34_1d_aligned[i]
+        downtrend_1d = close_1d[i] < ema34_1d_aligned[i]
         
-        # Volume filter: current 4h volume > 2.0x average daily volume (scaled)
-        # 1 day = 6 x 4h bars, so scale daily volume to 4h equivalent
-        vol_4h_equiv = vol_avg_1d_aligned[i] / 6.0
-        volume_spike = volume[i] > vol_4h_equiv * 2.0
+        # Volume filter: current day volume > 2.0x average volume
+        volume_spike = volume_1d[i] > vol_avg_1d_aligned[i] * 2.0
         
         if position == 0:
-            # Long entry: price breaks above R1 + uptrend + volume spike
-            if high[i] > camarilla_r1_aligned[i] and uptrend_1d and volume_spike:
+            # Long entry: VI+ > VI- (bullish vortex) + uptrend + volume spike
+            if vi_plus_aligned[i] > vi_minus_aligned[i] and uptrend_1d and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 + downtrend + volume spike
-            elif low[i] < camarilla_s1_aligned[i] and downtrend_1d and volume_spike:
+            # Short entry: VI- > VI+ (bearish vortex) + downtrend + volume spike
+            elif vi_minus_aligned[i] > vi_plus_aligned[i] and downtrend_1d and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S1 or trend fails
-            if low[i] < camarilla_s1_aligned[i] or not uptrend_1d:
+            # Long exit: vortex turns bearish OR trend fails
+            if vi_minus_aligned[i] > vi_plus_aligned[i] or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R1 or trend fails
-            if high[i] > camarilla_r1_aligned[i] or not downtrend_1d:
+            # Short exit: vortex turns bullish OR trend fails
+            if vi_plus_aligned[i] > vi_minus_aligned[i] or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
