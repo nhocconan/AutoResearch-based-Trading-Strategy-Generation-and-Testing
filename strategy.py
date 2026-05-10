@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6H_Ichimoku_Cloud_Trend_Follow
-# Hypothesis: Ichimoku cloud from daily timeframe acts as dynamic support/resistance.
-# In bull markets: price above cloud = bullish, enter long on TK cross up.
-# In bear markets: price below cloud = bearish, enter short on TK cross down.
-# Cloud filters out false signals during sideways markets.
-# Target: 15-25 trades/year per symbol.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Buy/sell at Camarilla R3/S3 levels on 12h timeframe with daily trend and volume confirmation.
+# Works in bull/bear by following daily trend and using volume to confirm institutional interest.
+# Target: 20-40 trades/year per symbol.
 
-name = "6H_Ichimoku_Cloud_Trend_Follow"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,126 +14,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 6h indicators
-    close_s = pd.Series(close)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    tenkan_sen = ((high_s.rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
-                   low_s.rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2).values
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    kijun_sen = ((high_s.rolling(window=period_kijun, min_periods=period_kijun).max() + 
-                  low_s.rolling(window=period_kijun, min_periods=period_kijun).min()) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    # We'll handle the shift in alignment
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    senkou_span_b = ((high_s.rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
-                      low_s.rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    # Not used for entry but can be used for confirmation
-    
-    # Daily Ichimoku cloud (for trend filtering)
+    # Daily Camarilla levels (R3, S3)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    high_1d_s = pd.Series(high_1d)
-    low_1d_s = pd.Series(low_1d)
-    close_1d_s = pd.Series(close_1d)
+    # Calculate pivot and Camarilla levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
-    # Daily Tenkan-sen (9-period)
-    tenkan_1d = ((high_1d_s.rolling(window=9, min_periods=9).max() + 
-                  low_1d_s.rolling(window=9, min_periods=9).min()) / 2).values
+    # Align Camarilla levels to 12h
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Daily Kijun-sen (26-period)
-    kijun_1d = ((high_1d_s.rolling(window=26, min_periods=26).max() + 
-                 low_1d_s.rolling(window=26, min_periods=26).min()) / 2).values
+    # Daily trend filter (EMA50)
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_uptrend = close_1d > ema50_1d
+    daily_downtrend = close_1d < ema50_1d
     
-    # Daily Senkou Span A
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    # Align daily trend to 12h
+    daily_uptrend_12h = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_12h = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
-    # Daily Senkou Span B (52-period)
-    senkou_b_1d = ((high_1d_s.rolling(window=52, min_periods=52).max() + 
-                    low_1d_s.rolling(window=52, min_periods=52).min()) / 2)
-    
-    # Align daily Ichimoku components to 6h
-    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Align 6h Ichimoku components (no shift needed as we use current values)
-    # Note: For actual Ichimoku, Senkou spans are shifted, but we use current values
-    # for cloud calculation and rely on alignment for proper timing
+    # Volume spike detection (20-period average)
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 60
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(daily_uptrend_12h[i]) or np.isnan(daily_downtrend_12h[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate current cloud boundaries (using aligned daily values)
-        top_cloud = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
-        bottom_cloud = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_spike = vol_ratio > 2.0
         
-        # TK cross signals
-        tk_cross_up = tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]
-        tk_cross_down = tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]
-        
-        # Price position relative to cloud
-        price_above_cloud = close[i] > top_cloud
-        price_below_cloud = close[i] < bottom_cloud
+        daily_up = daily_uptrend_12h[i] > 0.5
+        daily_down = daily_downtrend_12h[i] > 0.5
         
         if position == 0:
-            # Enter long: price above cloud + TK cross up
-            if price_above_cloud and tk_cross_up:
+            # Enter long: daily uptrend + price breaks above R3 + volume spike
+            if daily_up and close[i] > r3_12h[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below cloud + TK cross down
-            elif price_below_cloud and tk_cross_down:
+            # Enter short: daily downtrend + price breaks below S3 + volume spike
+            elif daily_down and close[i] < s3_12h[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price falls below cloud or TK cross down
-            if price_below_cloud or tk_cross_down:
+            # Exit: price returns below R3 or trend changes
+            if close[i] < r3_12h[i] or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above cloud or TK cross up
-            if price_above_cloud or tk_cross_up:
+            # Exit: price returns above S3 or trend changes
+            if close[i] > s3_12h[i] or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
