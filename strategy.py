@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h Camarilla R1/S1 breakout with 1d EMA34 trend filter and volume spike.
-# Camarilla levels from 1d provide institutional-grade support/resistance.
-# Breakouts at R1/S1 with 1d trend alignment and volume capture institutional moves.
-# Uses 12h timeframe to reduce trade frequency (target: 50-150 total over 4 years).
-# Works in bull/bear by requiring trend alignment, avoiding counter-trend traps.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+# Hypothesis: 4h breakout at 1d Camarilla R1/S1 with 1d trend filter and volume spike.
+# Uses 1d trend (close > EMA50) for bias, reducing counter-trend trades.
+# Volume surge (2x 24-period MA) confirms institutional participation.
+# Designed for 4h timeframe to target 20-50 trades/year per symbol.
+# Works in bull/bear by requiring trend alignment, avoiding chop whipsaws.
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,16 +19,19 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and trend filter
+    # Get 1d data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate 1d Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
@@ -47,41 +50,35 @@ def generate_signals(prices):
         camarilla_r1[i] = prev_close + diff * 1.1 / 12
         camarilla_s1[i] = prev_close - diff * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align 1d indicators to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # 1d close for trend alignment
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-    
-    # Volume average (24-period for 12h = 12 days)
+    # Volume average (24-period for 4h = 6 hours)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for 1d EMA34 and vol MA
+    # Warmup: need enough history for 1d EMA50 + vol MA
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(close_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend: 1d close > EMA34
-        uptrend = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        # Determine trend: 1d close > EMA50
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation (2x average for significance)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
