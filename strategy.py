@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Buy breakouts above Camarilla R1 and sell breakdowns below S1 on 4h, filtered by 1d trend and volume spikes.
-# Works in bull/bear markets by using 1d EMA34 for trend and volume > 1.5x 20-period average for confirmation.
-# Targets ~25 trades/year to minimize fee drag.
+# 6h_Aroon_Trend_Filter_With_Volume_Spike
+# Hypothesis: Use Aroon oscillator (25-period) to detect strong trends, enter on pullbacks confirmed by volume spikes.
+# AroonUp > 70 and AroonDown < 30 indicates strong uptrend; reverse for downtrend.
+# Enter long when price pulls back to EMA(20) during strong uptrend with volume > 1.5x average volume.
+# Enter short when price pulls back to EMA(20) during strong downtrend with volume > 1.5x average volume.
+# Exit when Aroon trend weakens (AroonUp < 50 or AroonDown < 50) or price crosses EMA(20) in opposite direction.
+# Designed to work in both bull and bear markets by following strong trends with volume confirmation.
+# Targets ~20-30 trades/year to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Aroon_Trend_Filter_With_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,86 +21,70 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Aroon oscillator (25-period) for trend strength
+    period = 25
+    aroon_up = np.zeros(n)
+    aroon_down = np.zeros(n)
     
-    # 1d EMA34 trend
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    for i in range(period, n):
+        highest_high = np.argmax(high[i-period+1:i+1])  # 0 to period-1
+        lowest_low = np.argmin(low[i-period+1:i+1])    # 0 to period-1
+        aroon_up[i] = ((period - 1 - highest_high) / (period - 1)) * 100
+        aroon_down[i] = ((period - 1 - lowest_low) / (period - 1)) * 100
     
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # EMA(20) for dynamic support/resistance
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # Use previous 1d bar's OHLC to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_shift = np.roll(close_1d, 1)
-    close_1d_shift[0] = close_1d[0]  # first bar uses its own close
-    
-    # Camarilla R1 and S1 from previous 1d bar
-    camarilla_R1 = close_1d_shift + (high_1d - low_1d) * 1.1 / 12
-    camarilla_S1 = close_1d_shift - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (vol_avg * 1.5)
+    # Volume spike detector: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # enough for EMA and volume average
+    start_idx = max(20, period)
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(aroon_up[i]) or np.isnan(aroon_down[i]) or 
+            np.isnan(ema20[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above R1 with uptrend and volume
-            if (high[i] > camarilla_R1_aligned[i] and
-                trend_1d_up_aligned[i] > 0.5 and
-                volume_ok[i]):
+            # Long: strong uptrend (AroonUp > 70, AroonDown < 30) + pullback to EMA20 + volume spike
+            if (aroon_up[i] > 70 and aroon_down[i] < 30 and
+                low[i] <= ema20[i] * 1.005 and  # within 0.5% of EMA (pullback)
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S1 with downtrend and volume
-            elif (low[i] < camarilla_S1_aligned[i] and
-                  trend_1d_down_aligned[i] > 0.5 and
-                  volume_ok[i]):
+            # Short: strong downtrend (AroonDown > 70, AroonUp < 30) + pullback to EMA20 + volume spike
+            elif (aroon_down[i] > 70 and aroonUp[i] < 30 and
+                  high[i] >= ema20[i] * 0.995 and  # within 0.5% of EMA (pullback)
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below S1 or trend flips
-            if (low[i] < camarilla_S1_aligned[i] or
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: trend weakens or price crosses below EMA20
+            if (aroon_up[i] < 50 or aroon_down[i] > 50 or
+                close[i] < ema20[i] * 0.995):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above R1 or trend flips
-            if (high[i] > camarilla_R1_aligned[i] or
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: trend weakens or price crosses above EMA20
+            if (aroon_down[i] < 50 or aroon_up[i] > 50 or
+                close[i] > ema20[i] * 1.005):
                 signals[i] = 0.0
                 position = 0
             else:
