@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6h_VolumeBreakout_WeeklyTrend_1dConfluence
-# Hypothesis: On 6h timeframe, combine weekly trend filter (EMA34) with 1d volume spike confirmation
-# and 6h price breaking above/below prior 6h high/low. This captures momentum bursts aligned with
-# higher timeframe trend while avoiding chop. Volume spike ensures institutional participation.
-# Works in bull markets via trend-following breaks and in bear via short breakdowns with volume.
-# Target: 20-40 trades/year to minimize fee drag on 6h timeframe.
+# 12h_1w1d_PriceChannel_Squeeze_Breakout
+# Hypothesis: Combines weekly Donchian channel breakouts with daily volatility squeeze and volume confirmation
+# to capture explosive moves in both bull and bear markets. Uses weekly trend filter to avoid counter-trend trades.
+# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
 
-name = "6h_VolumeBreakout_WeeklyTrend_1dConfluence"
-timeframe = "6h"
+name = "12h_1w1d_PriceChannel_Squeeze_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,89 +22,122 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter (EMA34)
+    # Weekly Donchian channel (20-period) for breakout signals
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
     
-    # Align weekly trend to 6h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Calculate 20-period Donchian channels
+    upper_20 = np.full_like(high_1w, np.nan)
+    lower_20 = np.full_like(low_1w, np.nan)
     
-    # 1d volume spike confirmation (volume > 2.0 x 20-period average)
+    for i in range(19, len(high_1w)):
+        upper_20[i] = np.max(high_1w[i-19:i+1])
+        lower_20[i] = np.min(low_1w[i-19:i+1])
+    
+    # Align weekly Donchian levels to 12h timeframe
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
+    
+    # Daily volatility squeeze (Bollinger Band Width < 20th percentile)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.zeros_like(volume_1d)
-    vol_sum = 0
-    for i in range(len(volume_1d)):
-        vol_sum += volume_1d[i]
-        if i >= 20:
-            vol_sum -= volume_1d[i-20]
-        if i >= 19:
-            vol_ma_1d[i] = vol_sum / 20
+    close_1d = df_1d['close'].values
+    
+    # Calculate Bollinger Bands (20, 2.0)
+    ma_20 = np.full_like(close_1d, np.nan)
+    std_20 = np.full_like(close_1d, np.nan)
+    
+    for i in range(19, len(close_1d)):
+        ma_20[i] = np.mean(close_1d[i-19:i+1])
+        std_20[i] = np.std(close_1d[i-19:i+1])
+    
+    upper_bb = ma_20 + (2.0 * std_20)
+    lower_bb = ma_20 - (2.0 * std_20)
+    bb_width = (upper_bb - lower_bb) / ma_20
+    
+    # Calculate 50-period percentile of BB width (20th percentile threshold)
+    bb_width_pct = np.full_like(bb_width, np.nan)
+    for i in range(49, len(bb_width)):
+        if not np.isnan(bb_width[i]):
+            bb_width_pct[i] = np.percentile(bb_width[max(0, i-49):i+1], 20)
+    
+    squeeze = bb_width < bb_width_pct
+    
+    # Align daily squeeze to 12h timeframe
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
+    
+    # Daily volume confirmation (1.5x 20-period average)
+    vol_20 = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):
+        vol_20[i] = np.mean(volume[i-19:i+1])
+    
+    volume_confirm = volume > (1.5 * vol_20)
+    
+    # Weekly trend filter (price above/below 50-period EMA)
+    ema50_1w = np.full_like(close_1w, np.nan)
+    for i in range(49, len(close_1w)):
+        if i == 49:
+            ema50_1w[i] = np.mean(close_1w[:50])
         else:
-            vol_ma_1d[i] = np.nan
-    volume_spike_1d = volume_1d > (2.0 * vol_ma_1d)
+            ema50_1w[i] = (close_1w[i] * 2/51) + (ema50_1w[i-1] * 49/51)
     
-    # Align 1d volume spike to 6h
-    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
-    
-    # Prior 6h high/low for breakout levels
-    # Use rolling window of 2 periods to get previous bar high/low
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # Align weekly EMA to 12h timeframe
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    weekly_uptrend = close_1w > ema50_1w
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend = close_1w < ema50_1w
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(volume_spike_1d_aligned[i]) or
-            np.isnan(prev_high[i]) or np.isnan(prev_low[i])):
+        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
+            np.isnan(squeeze_aligned[i]) or np.isnan(volume_confirm[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above prior 6h high with volume spike and weekly uptrend
-            if (high[i] > prev_high[i] and
-                volume_spike_1d_aligned[i] > 0.5 and
-                trend_1w_up_aligned[i] > 0.5):
+            # Long: price breaks above weekly upper Donchian during volatility squeeze with volume confirmation and weekly uptrend
+            if (high[i] > upper_20_aligned[i] and
+                squeeze_aligned[i] > 0.5 and
+                volume_confirm[i] and
+                weekly_uptrend_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below prior 6h low with volume spike and weekly downtrend
-            elif (low[i] < prev_low[i] and
-                  volume_spike_1d_aligned[i] > 0.5 and
-                  trend_1w_down_aligned[i] > 0.5):
+            # Short: price breaks below weekly lower Donchian during volatility squeeze with volume confirmation and weekly downtrend
+            elif (low[i] < lower_20_aligned[i] and
+                  squeeze_aligned[i] > 0.5 and
+                  volume_confirm[i] and
+                  weekly_downtrend_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below prior 6h low or weekly trend turns down
-            if (low[i] < prev_low[i] or
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit: price breaks below weekly lower Donchian or weekly trend turns down
+            if (low[i] < lower_20_aligned[i] or
+                weekly_uptrend_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above prior 6h high or weekly trend turns up
-            if (high[i] > prev_high[i] or
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit: price breaks above weekly upper Donchian or weekly trend turns up
+            if (high[i] > upper_20_aligned[i] or
+                weekly_downtrend_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
