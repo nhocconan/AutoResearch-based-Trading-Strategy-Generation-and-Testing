@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels from prior day's range, with 1d EMA50 trend filter and volume spike confirmation (volume > 2x 20-period average). Works in bull/bear by trading only in direction of daily trend. Volume spike filters low-momentum breakouts, reducing false signals and trade frequency. Target: 20-30 trades/year (80-120 total) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation. Uses tighter volume threshold and discrete position sizing to reduce trade frequency and improve robustness in both bull and bear markets.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,11 +41,11 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # 1d volume SMA20 for volume spike confirmation
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
         vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
+        for i in range(20, len(df_1d)):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
     # Align 1d indicators to 4h
@@ -66,9 +66,9 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current 4h volume > 2x average 1d volume (scaled to 4h)
+        # Volume confirmation: current 4h volume > 2.0x average 1d volume (scaled) - tighter threshold
         vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
-        volume_spike = volume[i] > 2.0 * vol_1d_scaled
+        volume_confirm = volume[i] > 2.0 * vol_1d_scaled
         
         # Trend and price relative to Camarilla levels
         is_uptrend = close[i] > ema50_1d_aligned[i]
@@ -77,12 +77,12 @@ def generate_signals(prices):
         price_below_s1 = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume spike
-            if price_above_r1 and is_uptrend and volume_spike:
+            # Long: price breaks above R1, in uptrend, with volume
+            if price_above_r1 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, in downtrend, with volume spike
-            elif price_below_s1 and is_downtrend and volume_spike:
+            # Short: price breaks below S1, in downtrend, with volume
+            elif price_below_s1 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
