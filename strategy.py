@@ -1,11 +1,11 @@
-#!/usr/bin/env python3
-# 6h_1w_1d_Camarilla_R4_S4_Breakout_TrendFilter
-# Hypothesis: 6h breakout above weekly/monthly Camarilla R4/S4 levels with trend filter and volume confirmation.
-# Uses 1w trend (EMA50) for bias and 1d volume confirmation to avoid false breakouts.
-# Designed for low trade frequency (~20-40/year) to minimize fee drag in bear markets.
+#/usr/bin/env python3
+# 4h_1d_1w_Camarilla_R3_S3_Breakout_TrendFilter
+# Hypothesis: 4h breakout above daily Camarilla R3/S3 levels with 1w trend filter and volume confirmation.
+# Uses 1w EMA50 for trend bias, 1d volume confirmation, and ATR trailing stop to reduce false signals.
+# Designed for low trade frequency (~20-40/year) to minimize fee drag in bull/bear markets.
 
-name = "6h_1w_1d_Camarilla_R4_S4_Breakout_TrendFilter"
-timeframe = "6h"
+name = "4h_1d_1w_Camarilla_R3_S3_Breakout_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -39,14 +39,14 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R4 = close + 1.1*(high-low)/2
-    # Camarilla S4 = close - 1.1*(high-low)/2
-    r4 = close_1d + 1.1 * (high_1d - low_1d) / 2
-    s4 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    # Camarilla R3 = close + 1.1*(high-low)/4
+    # Camarilla S3 = close - 1.1*(high-low)/4
+    r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Align R4 and S4 to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align R3 and S3 to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # ATR for volatility and trailing stop
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -69,8 +69,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -88,13 +88,13 @@ def generate_signals(prices):
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above R4 in bullish trend with volume surge
-            if close[i] > r4_aligned[i] and bullish_trend and volume_surge:
+            # Long: breakout above R3 in bullish trend with volume surge
+            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: breakdown below S4 in bearish trend with volume surge
-            elif close[i] < s4_aligned[i] and bearish_trend and volume_surge:
+            # Short: breakdown below S3 in bearish trend with volume surge
+            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
