@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_VWAP_RSI_Pullback_Trend
-Hypothesis: Combines VWAP mean reversion with RSI pullbacks in the direction of the 1d trend.
-In bull markets, buys RSI pullbacks above VWAP in uptrend. In bear markets, sells RSI bounces below VWAP in downtrend.
-Uses volume confirmation to filter false signals. Targets 15-30 trades/year per symbol.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Uses 1-day Camarilla resistance R1 and support S1 levels as breakout levels,
+filtered by 1-day EMA trend and volume spikes. Long when price breaks above R1 in uptrend,
+short when price breaks below S1 in downtrend. Designed for low trade frequency and high win rate
+in both bull and bear markets by trading with the higher timeframe trend.
 """
 
-name = "6h_VWAP_RSI_Pullback_Trend"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,50 +31,46 @@ def generate_signals(prices):
     low_s = pd.Series(low)
     volume_s = pd.Series(volume)
     
-    # VWAP calculation
-    typical_price = (high + low + close) / 3
-    tpv = typical_price * volume
-    cum_tpv = np.nancumsum(tpv)
-    cum_vol = np.nancumsum(volume)
-    vwap = np.where(cum_vol > 0, cum_tpv / cum_vol, typical_price)
-    
-    # RSI(14)
-    delta = close_s.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
-    
-    # 1d trend filter: EMA50
+    # Daily data for Camarilla calculation and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    # Previous day's OHLC for Camarilla levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Align 1d trend to 6h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Calculate Camarilla levels: R1, S1
+    range_ = prev_high - prev_low
+    camarilla_r1 = prev_close + range_ * 1.1 / 12
+    camarilla_s1 = prev_close - range_ * 1.1 / 12
     
-    # Volume average (20-period)
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = prev_close > ema34_1d
+    trend_1d_down = prev_close < ema34_1d
+    
+    # Align daily levels and trend to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # Volume confirmation: 20-period average
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
+    # Start after we have enough data for all indicators
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(vwap[i]) or np.isnan(ema50_1d[i-1]) or
-            np.isnan(vol_ma[i]) or np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,33 +79,27 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         volume_confirm = vol_ratio > 1.5
         
-        # Price relative to VWAP
-        price_above_vwap = close[i] > vwap[i]
-        price_below_vwap = close[i] < vwap[i]
-        
         if position == 0:
-            # Enter long: RSI pullback to oversold + price above VWAP + uptrend + volume
-            if (rsi[i] < 40 and rsi[i] > rsi[i-1] and price_above_vwap and
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Long: price breaks above R1, uptrend, volume confirmation
+            if (close[i] > r1_aligned[i] and trend_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI bounce from overbought + price below VWAP + downtrend + volume
-            elif (rsi[i] > 60 and rsi[i] < rsi[i-1] and price_below_vwap and
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Short: price breaks below S1, downtrend, volume confirmation
+            elif (close[i] < s1_aligned[i] and trend_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when RSI overbought or price falls below VWAP or trend changes
-            if (rsi[i] > 70 or close[i] < vwap[i] or trend_1d_up_aligned[i] < 0.5):
+            # Exit: price breaks below S1 or trend changes
+            if (close[i] < s1_aligned[i] or trend_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when RSI oversold or price rises above VWAP or trend changes
-            if (rsi[i] < 30 or close[i] > vwap[i] or trend_1d_down_aligned[i] < 0.5):
+            # Exit: price breaks above R1 or trend changes
+            if (close[i] > r1_aligned[i] or trend_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
