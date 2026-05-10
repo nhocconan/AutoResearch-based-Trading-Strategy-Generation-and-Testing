@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Contrarian_Trend_Reversal
-Hypothesis: Counter-trend reversals at 1d Bollinger Bands with 4h momentum confirmation.
-Works in bull/bear: Fades extremes in ranging markets, follows momentum in trends.
-Targets 25-40 trades/year by requiring Bollinger touch + momentum divergence + volume.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Price reversal at Camarilla R1/S1 levels on 12h chart confirmed by 1d trend and volume spike.
+Works in bull/bear via trend filter + avoids false signals in low volume.
+Targets 12-37 trades/year by requiring confluence of price level, trend, and volume.
 """
 
-name = "4h_Contrarian_Trend_Reversal"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,85 +24,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and trend
+    # Get 1d data for trend and volume filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 1d Bollinger Bands (20, 2)
-    close_1d = pd.Series(df_1d['close'])
-    bb_middle = close_1d.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_1d.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
+    # Calculate 1d average volume for volume filter
+    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Calculate 1d trend filter (EMA50)
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Camarilla levels from previous 1d OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We use previous day's OHLC, so shift by 1
+    prev_close = np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].values[:-1]])
+    prev_high = np.concatenate([[df_1d['high'].iloc[0]], df_1d['high'].values[:-1]])
+    prev_low = np.concatenate([[df_1d['low'].iloc[0]], df_1d['low'].values[:-1]])
     
-    # Calculate 4h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
     
-    # Calculate 4h volume average (20-period)
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d BB (20), 1d EMA50 (50), 4h RSI (14), 4h vol avg (20)
-    start_idx = max(50, 20, 14, 20)
+    # Warmup: need 1d EMA34 (34) and 1d vol avg (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(vol_avg[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 1d trend filter
-        uptrend_1d = close[i] > ema_50_1d_aligned[i]
-        downtrend_1d = close[i] < ema_50_1d_aligned[i]
+        # Higher timeframe trend filter (1d)
+        uptrend_1d = close[i] > ema_34_1d_aligned[i]
+        downtrend_1d = close[i] < ema_34_1d_aligned[i]
         
-        # Volume filter: current volume > 1.3x average
-        volume_filter = volume[i] > vol_avg[i] * 1.3
+        # Volume filter: current 12h volume > 1.5x average 1d volume (scaled)
+        vol_12h = volume[i]
+        # Scale 1d volume to 12h equivalent (1d = 2x 12h)
+        vol_12h_equiv = vol_avg_1d_aligned[i] / 2.0
+        volume_filter = vol_12h > vol_12h_equiv * 1.5
         
         if position == 0:
-            # Long setup: price touches/below lower BB + oversold RSI + volume
-            if close[i] <= bb_lower_aligned[i] and rsi[i] < 30 and volume_filter:
-                # In uptrend, wait for pullback; in downtrend, fade the extreme
-                if uptrend_1d or (downtrend_1d and rsi[i] < 25):
-                    signals[i] = 0.25
-                    position = 1
-            # Short setup: price touches/above upper BB + overbought RSI + volume
-            elif close[i] >= bb_upper_aligned[i] and rsi[i] > 70 and volume_filter:
-                # In downtrend, wait for bounce; in uptrend, fade the extreme
-                if downtrend_1d or (uptrend_1d and rsi[i] > 75):
-                    signals[i] = -0.25
-                    position = -1
+            # Long entry: price at S1 support + uptrend + volume participation
+            if close[i] <= s1_aligned[i] and uptrend_1d and volume_filter:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: price at R1 resistance + downtrend + volume participation
+            elif close[i] >= r1_aligned[i] and downtrend_1d and volume_filter:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: RSI reaches midline or price hits upper BB
-            if rsi[i] > 50 or close[i] >= bb_upper_aligned[i]:
+            # Long exit: price reaches R1 or trend breaks
+            if close[i] >= r1_aligned[i] or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI reaches midline or price hits lower BB
-            if rsi[i] < 50 or close[i] <= bb_lower_aligned[i]:
+            # Short exit: price reaches S1 or trend breaks
+            if close[i] <= s1_aligned[i] or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
