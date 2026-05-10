@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Donchian_Breakout_20_1wTrend_Volume
-# Hypothesis: On daily timeframe, Donchian channel breakouts with weekly trend filter and volume confirmation capture strong trends while avoiding false signals. Weekly trend ensures alignment with higher timeframe momentum, volume confirms breakout strength. Designed for low frequency (10-30 trades/year) to minimize fee drift and work in both bull and bear markets.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, Camarilla pivot levels (R3/S3) from daily chart act as strong support/resistance. 
+# Breakouts above R3 or below S3 with daily trend alignment and volume confirmation capture momentum moves. 
+# Works in bull markets (breakouts continue up) and bear markets (breakdowns continue down). 
+# Daily trend filter prevents counter-trend trades, volume reduces false signals. 
+# Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
 
-name = "1d_Donchian_Breakout_20_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,28 +24,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for Camarilla pivot and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Donchian Channel (20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Weekly trend: EMA34 on weekly close
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
+    # Camarilla levels: R3, S3
+    # R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low)
+    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low)
+    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low)
     
-    # Align weekly trend to daily
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Daily trend: EMA34 on daily close
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Volume confirmation: 20-period average
+    # Align daily data to 12h (each 12h bar = 2x 6h bars, but we use direct alignment)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # Volume confirmation: 20-period average on 12h
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -49,12 +60,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,30 +76,30 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above Donchian high with weekly uptrend and volume
-            if (close[i] > donchian_high[i] and 
-                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: price breaks above R3 with daily uptrend and volume
+            if (close[i] > camarilla_r3_aligned[i] and 
+                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Donchian low with weekly downtrend and volume
-            elif (close[i] < donchian_low[i] and 
-                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: price breaks below S3 with daily downtrend and volume
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to Donchian low or trend fails
-            if (close[i] <= donchian_low[i] or 
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit when price returns to S3 level or trend fails
+            if (close[i] < camarilla_s3_aligned[i] or 
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to Donchian high or trend fails
-            if (close[i] >= donchian_high[i] or 
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit when price returns to R3 level or trend fails
+            if (close[i] > camarilla_r3_aligned[i] or 
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
