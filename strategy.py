@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_ZeroLine_12hTrend_Volume
-Hypothesis: TRIX (Triple Exponential Average) zero line cross indicates momentum shifts.
-In trending markets, TRIX stays above/below zero; in ranging markets, it oscillates near zero.
-We use 12h EMA50 as trend filter to ensure we trade only in the direction of higher timeframe trend.
-Volume confirmation filters weak breakouts. Works in bull (TRIX>0 + uptrend) and bear (TRIX<0 + downtrend).
-Target: 75-200 total trades over 4 years (19-50/year).
+1h_Trend_Reversal_with_Volume_Confirmation
+Hypothesis: Mean-reversion strategy that buys when price closes below Bollinger Lower Band with volume confirmation,
+and sells when price closes above Bollinger Upper Band with volume confirmation. Uses 4h trend filter to avoid
+trading against the higher timeframe trend. Works in both bull and bear markets by capitalizing on short-term
+reversions within larger trends. Low trade frequency due to strict entry conditions.
 """
 
-name = "4h_TRIX_ZeroLine_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Trend_Reversal_with_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mpt_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,92 +25,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema50_12h[49] = np.mean(close_12h[:50])
+    # 4h close for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    
+    # 4h EMA50 for trend direction
+    ema50_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 50:
+        ema50_4h[49] = np.mean(close_4h[:50])
         alpha = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema50_12h[i-1]
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+        for i in range(50, len(close_4h)):
+            ema50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema50_4h[i-1]
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 12h volume SMA20 for volume confirmation
-    volume_12h = df_12h['volume'].values
-    vol_sma20_12h = np.full(len(volume_12h), np.nan)
-    if len(volume_12h) >= 20:
-        vol_sma20_12h[19] = np.mean(volume_12h[:20])
-        for i in range(20, len(volume_12h)):
-            vol_sma20_12h[i] = (vol_sma20_12h[i-1] * 19 + volume_12h[i]) / 20
-    vol_sma20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_sma20_12h)
+    # Bollinger Bands (20, 2) on 1h close
+    bb_length = 20
+    bb_mult = 2.0
+    basis = np.full(n, np.nan)
+    dev = np.full(n, np.nan)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # TRIX calculation (15-period as standard)
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - then percentage change
-    period = 15
-    ema1 = np.full(n, np.nan)
-    ema2 = np.full(n, np.nan)
-    ema3 = np.full(n, np.nan)
-    if n >= period:
-        # First EMA
-        ema1[period-1] = np.mean(close[:period])
-        alpha = 2 / (period + 1)
-        for i in range(period, n):
-            ema1[i] = alpha * close[i] + (1 - alpha) * ema1[i-1]
-        # Second EMA
-        ema2[period-1] = np.mean(ema1[:period])
-        for i in range(period, n):
-            ema2[i] = alpha * ema1[i] + (1 - alpha) * ema2[i-1]
-        # Third EMA
-        ema3[period-1] = np.mean(ema2[:period])
-        for i in range(period, n):
-            ema3[i] = alpha * ema2[i] + (1 - alpha) * ema3[i-1]
+    if n >= bb_length:
+        # Calculate SMA20
+        sma = np.full(n, np.nan)
+        sma[bb_length-1] = np.mean(close[:bb_length])
+        for i in range(bb_length, n):
+            sma[i] = np.mean(close[i-bb_length+1:i+1])
+        
+        # Calculate standard deviation
+        variance = np.full(n, np.nan)
+        for i in range(bb_length-1, n):
+            variance[i] = np.mean((close[i-bb_length+1:i+1] - sma[i]) ** 2)
+        
+        basis = sma
+        dev = bb_mult * np.sqrt(variance)
+        upper = basis + dev
+        lower = basis - dev
     
-    # TRIX = percentage change of triple EMA
-    trix = np.full(n, np.nan)
-    if n >= period + 1:
-        for i in range(period, n):
-            if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
-                trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+    # Volume confirmation: current volume > 1.5x average volume (20-period)
+    vol_sma20 = np.full(n, np.nan)
+    if n >= 20:
+        vol_sma20[19] = np.mean(volume[:20])
+        for i in range(20, n):
+            vol_sma20[i] = (vol_sma20[i-1] * 19 + volume[i]) / 20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period + 1, 50)  # warmup
+    start_idx = max(50, bb_length, 20)  # warmup
     
     for i in range(start_idx, n):
-        if np.isnan(trix[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_sma20_12h_aligned[i]):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(basis[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_sma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 12h volume (scaled)
-        vol_4h_approx = vol_sma20_12h_aligned[i] / 3.0  # 12h/4h = 3
-        volume_confirm = volume[i] > 1.5 * vol_4h_approx
+        # Volume confirmation
+        volume_confirm = volume[i] > 1.5 * vol_sma20[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero with uptrend and volume
-            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema50_12h_aligned[i] and volume_confirm:
-                signals[i] = 0.25
+            # Long: price closes below lower band AND 4h trend is up (avoid fighting downtrend)
+            if close[i] < lower[i] and close[i] > ema50_4h_aligned[i] and volume_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX crosses below zero with downtrend and volume
-            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema50_12h_aligned[i] and volume_confirm:
-                signals[i] = -0.25
+            # Short: price closes above upper band AND 4h trend is down (avoid fighting uptrend)
+            elif close[i] > upper[i] and close[i] < ema50_4h_aligned[i] and volume_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below zero or trend reversal
-            if trix[i] < 0 or close[i] < ema50_12h_aligned[i]:
+            # Exit: price crosses back above basis (mean reversion complete) or trend changes
+            if close[i] > basis[i] or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: TRIX crosses above zero or trend reversal
-            if trix[i] > 0 or close[i] > ema50_12h_aligned[i]:
+            # Exit: price crosses back below basis or trend changes
+            if close[i] < basis[i] or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
