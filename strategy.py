@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses daily Camarilla R1/S1 levels with 1d EMA(34) trend filter and volume confirmation.
-# Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear markets by aligning with 1d trend. Uses volume > 1.8x 20-period average.
-# Position size 0.25 to manage drawdown. Focus on BTC/ETH robustness.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v2
+# Hypothesis: Uses tighter breakout at Camarilla R1/S1 with 1d EMA trend filter and volume confirmation.
+# Designed to reduce trade frequency vs previous version by increasing volume threshold to 2.0x and adding ATR filter.
+# Targets 15-30 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
+# Position size 0.25 for balanced risk.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -28,10 +28,17 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # Calculate Camarilla levels from previous day's OHLC
-    # R1 = Close + (High - Low) * 1.1/6
-    # S1 = Close - (High - Low) * 1.1/6
-    # Using previous day's data to avoid look-ahead
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -40,12 +47,11 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Get 1d data for trend filter
-    # Calculate 1d EMA(34) for trend direction
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -55,10 +61,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Warmup for volume MA and 1d EMA
+    start_idx = max(20, 34, 14)  # Warmup for volume MA, 1d EMA, and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,16 +74,17 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Stronger volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.8
+        # Stronger volume confirmation and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation and 1d uptrend
-            if close[i] > r1_aligned[i] and volume_confirm and uptrend:
+            # Long entry: price breaks above R1 with volume confirmation, 1d uptrend, and volatility
+            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation and 1d downtrend
-            elif close[i] < s1_aligned[i] and volume_confirm and downtrend:
+            # Short entry: price breaks below S1 with volume confirmation, 1d downtrend, and volatility
+            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
