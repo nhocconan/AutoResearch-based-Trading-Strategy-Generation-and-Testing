@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Camarilla pivot levels provide institutional support/resistance levels.
-# In trending markets, price breaking above R1 in uptrend or below S1 in downtrend
-# continues with momentum. We use 12h EMA50 for trend filter and volume confirmation
-# to avoid false breakouts. Works in bull markets (follows uptrends) and bear
-# markets (follows downtrends) by only trading in direction of 12h trend.
+# 4H_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
+# Hypothesis: Price breaks of Camarilla R1/S1 levels in the direction of 12h trend with volume confirmation capture institutional breakout moves.
+# Works in bull markets (follows uptrends breaking R1) and bear markets (follows downtrends breaking S1).
+# Uses 12h EMA50 for trend filter and volume spike confirmation to avoid false breakouts.
 # Target: 20-50 trades/year to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+name = "4H_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
