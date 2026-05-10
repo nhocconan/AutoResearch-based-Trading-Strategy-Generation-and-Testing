@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume confirmation.
-# Daily EMA34 filters trend direction to avoid counter-trend trades; daily Camarilla levels provide precise entry/exit;
-# Volume confirmation ensures breakout strength. Designed for 4h to achieve 20-50 trades/year, suitable for both bull and bear markets.
+# 1d_KAMA_RSI_ChopFilter
+# Hypothesis: Daily KAMA trend direction + RSI extremes + Choppiness regime filter.
+# KAMA adapts to market noise, reducing whipsaws in sideways markets. RSI >70 or <30 triggers mean-reversion entries only when market is choppy (CHOP > 61.8), avoiding strong trends.
+# Designed for 1d to achieve 7-25 trades/year with low frequency, suitable for both bull and bear markets by avoiding trend-following in chop and fading extremes in range.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,87 +14,120 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Daily data for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Weekly data for trend filter (optional, can be removed if not needed)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # KAMA (Kaufman Adaptive Moving Average) - trend component
+    def kama(close, er_len=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=er_len))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.zeros_like(close)
+        er[er_len:] = change[er_len-1:] / np.maximum(volatility[er_len-1:], 1e-10)
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # Camarilla levels (based on previous day)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
-        return R1, S1
+    kama_vals = kama(close, 10, 2, 30)
     
-    R1 = np.full_like(close_1d, np.nan)
-    S1 = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+    # RSI (14)
+    def rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Daily volume confirmation: 20-period average
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
-        return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    rsi_vals = rsi(close, 14)
     
-    # Align daily indicators to 4h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Choppiness Index (14)
+    def choppiness_index(high, low, close, period=14):
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        # Sum of True Range over period
+        sum_atr = np.zeros_like(close)
+        for i in range(period, len(close)):
+            sum_atr[i] = np.sum(atr[i-period+1:i+1])
+        # Highest high and lowest low over period
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        # Chop calculation
+        chop = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            if max_high[i] != min_low[i]:
+                chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(period)
+            else:
+                chop[i] = 50  # avoid division by zero
+        return chop
+    
+    chop_vals = choppiness_index(high, low, close, 14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 50  # enough for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(chop_vals[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long: price breaks above R1, above daily EMA34, strong volume
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S1, below daily EMA34, strong volume
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Long exit: price drops below S1 or below daily EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+        # Only trade in choppy market (CHOP > 61.8 = ranging)
+        if chop_vals[i] > 61.8:
+            if position == 0:
+                # Long: RSI < 30 (oversold) and price > KAMA (weak uptrend bias)
+                if rsi_vals[i] < 30 and close[i] > kama_vals[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: RSI > 70 (overbought) and price < KAMA (weak downtrend bias)
+                elif rsi_vals[i] > 70 and close[i] < kama_vals[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif position == 1:
+                # Long exit: RSI > 50 or price < KAMA
+                if rsi_vals[i] > 50 or close[i] < kama_vals[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short exit: RSI < 50 or price > KAMA
+                if rsi_vals[i] < 50 or close[i] > kama_vals[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # In trending market, stay flat or follow KAMA trend (optional)
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price rises above R1 or above daily EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
