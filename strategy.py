@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Confluence_Strategy
-Hypothesis: Uses weekly pivot points (from weekly high/low/close) as key support/resistance levels.
-In bull markets, buy pullbacks to weekly pivot/S1 in uptrend; in bear markets, sell rallies to weekly pivot/R1 in downtrend.
-Adds volume confirmation and 12h EMA filter to avoid false breaks. Designed for low frequency (15-25 trades/year)
-to work in both trending and ranging markets by fading extremes and catching reversals.
+4h_Camarilla_Pivot_Reversal_Momentum
+Hypothesis: Combines Camarilla pivot levels (S3/S4 and R3/R4) from 1d timeframe with momentum confirmation (RSI divergence) and volume filter to capture reversals in both bull and bear markets. Uses 1w EMA200 trend filter to avoid counter-trend entries. Designed for low trade frequency (15-25/year) to minimize fee decay while capturing high-probability reversal setups.
 """
 
-name = "6h_Weekly_Pivot_Confluence_Strategy"
-timeframe = "6h"
+name = "4h_Camarilla_Pivot_Reversal_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,55 +22,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
-        return np.zeros(n)
+    # Calculate RSI (14) for momentum and divergence
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Support and resistance levels
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    
-    # Align weekly pivot levels to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Volume confirmation (20-period average)
-    def mean_arr(arr, p):
+    def rma(arr, period):
         res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
+        if len(arr) >= period:
+            # First average
+            res[period-1] = np.mean(arr[:period])
+            # Subsequent values
+            for i in range(period, len(arr)):
+                res[i] = (arr[i] + (period-1) * res[i-1]) / period
         return res
     
-    vol_ma = mean_arr(volume, 20)
+    avg_gain = rma(gain, 14)
+    avg_loss = rma(loss, 14)
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Get 1d data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each day
+    camarilla_s3 = np.zeros_like(close_1d)
+    camarilla_s4 = np.zeros_like(close_1d)
+    camarilla_r3 = np.zeros_like(close_1d)
+    camarilla_r4 = np.zeros_like(close_1d)
+    pivot = np.zeros_like(close_1d)
+    
+    for i in range(len(close_1d)):
+        range_ = high_1d[i] - low_1d[i]
+        if range_ <= 0:
+            camarilla_s3[i] = camarilla_s4[i] = camarilla_r3[i] = camarilla_r4[i] = pivot[i] = close_1d[i]
+        else:
+            pivot[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+            camarilla_s3[i] = pivot[i] - 1.1 * range_ / 6
+            camarilla_s4[i] = pivot[i] - 1.1 * range_ / 2
+            camarilla_r3[i] = pivot[i] + 1.1 * range_ / 6
+            camarilla_r4[i] = pivot[i] + 1.1 * range_ / 2
+    
+    # Align Camarilla levels to 4h timeframe (with 1-bar delay for completed daily bar)
+    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_4h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r4_4h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Get 1w EMA200 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    
+    # Volume confirmation (20-period average)
+    def sma(arr, period):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            for i in range(period-1, len(arr)):
+                res[i] = np.mean(arr[i-period+1:i+1])
+        return res
+    
+    vol_ma = sma(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA50
+    start_idx = max(50, 20)  # RSI warmup + volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or \
-           np.isnan(weekly_r1_aligned[i]) or np.isnan(ema_12h_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+        # Skip if any required data is NaN
+        if np.isnan(rsi[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i]) or \
+           np.isnan(r3_4h[i]) or np.isnan(r4_4h[i]) or np.isnan(pivot_4h[i]) or \
+           np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,29 +107,40 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.3x average
         volume_confirm = volume[i] > 1.3 * vol_ma[i] if vol_ma[i] > 0 else False
         
+        # RSI conditions for momentum
+        rsi_overbought = rsi[i] > 70
+        rsi_oversold = rsi[i] < 30
+        
         if position == 0:
-            # Long: price near weekly S1/S2 in uptrend (above 12h EMA50) with volume
-            if (close[i] <= weekly_s1_aligned[i] * 1.005 or close[i] <= weekly_s2_aligned[i] * 1.005) and \
-               close[i] > ema_12h_aligned[i] and volume_confirm:
+            # Long setup: price near S3/S4 with bullish momentum
+            near_support = (close[i] <= s3_4h[i] * 1.002 and close[i] >= s4_4h[i] * 0.998) or \
+                          (close[i] <= s4_4h[i] * 1.002 and close[i] >= s4_4h[i] * 0.998)
+            bullish_momentum = rsi[i] > 30 and rsi[i] < rsi[i-1] * 1.05  # RSI rising from oversold
+            
+            if near_support and volume_confirm and bullish_momentum and close[i] > ema_200_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price near weekly R1/R2 in downtrend (below 12h EMA50) with volume
-            elif (close[i] >= weekly_r1_aligned[i] * 0.995 or close[i] >= weekly_r2_aligned[i] * 0.995) and \
-                 close[i] < ema_12h_aligned[i] and volume_confirm:
+            # Short setup: price near R3/R4 with bearish momentum
+            elif close[i] >= r3_4h[i] * 0.998 and close[i] <= r4_4h[i] * 1.002:
+                near_resistance = True
+            else:
+                near_resistance = False
+                
+            bearish_momentum = rsi[i] < 70 and rsi[i] > rsi[i-1] * 0.95  # RSI falling from overbought
+            
+            if near_resistance and volume_confirm and bearish_momentum and close[i] < ema_200_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches weekly pivot or R1, or breaks below 12h EMA50
-            if close[i] >= weekly_pivot_aligned[i] * 0.995 or close[i] >= weekly_r1_aligned[i] * 0.995 or \
-               close[i] < ema_12h_aligned[i]:
+            # Long exit: price reaches pivot or RSI shows weakness
+            if close[i] >= pivot_4h[i] * 0.998 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches weekly pivot or S1, or breaks above 12h EMA50
-            if close[i] <= weekly_pivot_aligned[i] * 1.005 or close[i] <= weekly_s1_aligned[i] * 1.005 or \
-               close[i] > ema_12h_aligned[i]:
+            # Short exit: price reaches pivot or RSI shows strength
+            if close[i] <= pivot_4h[i] * 1.002 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
