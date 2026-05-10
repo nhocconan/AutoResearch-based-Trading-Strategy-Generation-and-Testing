@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses 12h timeframe with tighter breakout at Camarilla R1/S1 levels derived from previous day's OHLC.
-# Combines 1d EMA trend filter and volume confirmation to reduce false signals. Targets 12-37 trades/year to avoid
-# fee drag while maintaining edge in both bull and bear markets by aligning with higher timeframe trend.
-# Position size 0.25 for balanced risk management.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4
+# Hypothesis: Uses Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
+# Designed to reduce trade frequency vs previous version by increasing volume threshold to 3.0x and adding ATR filter.
+# Targets 15-30 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
+# Position size 0.25 for balanced risk.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # Get 1d data for Camarilla pivot levels (using previous day's data)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -47,7 +47,7 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -75,7 +75,7 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Stronger volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 2.5
+        volume_confirm = volume[i] > volume_ma[i] * 3.0
         volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
