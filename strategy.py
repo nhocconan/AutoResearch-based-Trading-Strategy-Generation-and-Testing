@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels from daily data provide institutional support/resistance.
-# In trending markets, price breaking above R1 in uptrend or below S1 in downtrend continues with momentum.
-# We use 1d EMA50 for trend filter and volume confirmation to avoid false breakouts.
-# Trades only in direction of 1d trend to work in both bull and bear markets.
-# Target: 15-35 trades/year to minimize fee drag on 12h timeframe.
+# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
+# Price breaking above R1 in uptrend (1w EMA50) or below S1 in downtrend continues with momentum.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# Volume confirmation avoids false breakouts.
+# Target: 15-25 trades/year to minimize fee drag on 1d timeframe.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,14 +24,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Calculate Camarilla levels from previous day
     # R1 = close + (high - low) * 1.12 / 12
@@ -41,18 +46,18 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation (20-period MA on 1d = 20 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA50 (50), Camarilla (needs 1d), volume MA (20)
+    # Warmup: need weekly EMA50 (50), Camarilla (needs 1d), volume MA (20)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
@@ -61,9 +66,9 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # 1d trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
