@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-Hypothesis: Camarilla pivot R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-Works in bull markets by buying breakouts above R1 in uptrend, in bear markets by selling breakdowns below S1 in downtrend.
-Uses 4h for entry timing and 12h for trend filtering. Target: 20-50 trades/year per symbol.
+1h_Camarilla_R1_S1_Breakout_4hTrend
+Hypothesis: Camarilla pivot breakouts in the direction of the 4h trend during active market hours.
+Uses 4h for trend direction and 1h for entry timing. Designed for 15-37 trades/year per symbol.
+Works in bull markets by buying breakouts above R1 in uptrends, and in bear markets by selling
+breakdowns below S1 in downtrends. Volume confirmation reduces false breakouts.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,54 +25,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Convert to Series for indicator calculations
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    volume_s = pd.Series(volume)
+    # Calculate Camarilla levels from previous day's range
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's high, low, close
-    prev_high = high_s.shift(1)
-    prev_low = low_s.shift(1)
-    prev_close = close_s.shift(1)
-    
-    # Pivot point
-    pivot = (prev_high + prev_low + prev_close) / 3
     # Camarilla levels
-    r1 = close + (1.1/12) * (high - low)
-    s1 = close - (1.1/12) * (high - low)
-    r1 = r1.values
-    s1 = s1.values
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # 12h trend filter: EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h trend: EMA34
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema50_12h
-    trend_12h_down = close_12h < ema50_12h
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_4h_up = close_4h > ema34_4h
+    trend_4h_down = close_4h < ema34_4h
     
-    # Align 12h trend to 4h
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
-    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    # Volume average (20-period)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Volume filter: 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 50
+    start_idx = 20  # Wait for volume MA
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or
-            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(trend_4h_up_aligned[i]) or
+            np.isnan(trend_4h_down_aligned[i]) or np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,29 +83,29 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above R1 + 12h uptrend + volume
-            if close[i] > r1[i] and trend_12h_up_aligned[i] > 0.5 and volume_confirm:
-                signals[i] = 0.25
+            # Long: price breaks above R1 in 4h uptrend with volume
+            if (close[i] > R1[i] and trend_4h_up_aligned[i] > 0.5 and volume_confirm):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S1 + 12h downtrend + volume
-            elif close[i] < s1[i] and trend_12h_down_aligned[i] > 0.5 and volume_confirm:
-                signals[i] = -0.25
+            # Short: price breaks below S1 in 4h downtrend with volume
+            elif (close[i] < S1[i] and trend_4h_down_aligned[i] > 0.5 and volume_confirm):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to pivot or trend changes
-            if close[i] < pivot[i] or trend_12h_up_aligned[i] < 0.5:
+            # Exit long: price returns to mean (prev close) or trend changes
+            if (close[i] <= prev_close[i] or trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit when price returns to pivot or trend changes
-            if close[i] > pivot[i] or trend_12h_down_aligned[i] < 0.5:
+            # Exit short: price returns to mean or trend changes
+            if (close[i] >= prev_close[i] or trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
