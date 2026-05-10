@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4h_TRIX_VolumeSpike_ChoppyRegime_1wTrend
-# Hypothesis: Uses TRIX momentum with volume spikes in choppy markets (CHOP>61.8) for mean reversion, filtered by weekly trend to avoid counter-trend trades. Designed for 4h to target 20-50 trades/year with high win rate. Works in bull/bear by aligning with weekly trend and regime filter.
+# 1d_RSI_1wTrend_VolumeSpike
+# Hypothesis: Uses RSI(14) overbought/oversold on daily timeframe with weekly EMA(34) trend filter and volume spike confirmation.
+# Weekly trend (1w EMA34) filters direction to avoid counter-trend trades. Volume > 2.0x 20-period MA confirms momentum.
+# RSI < 30 for long, RSI > 70 for short in trending markets. Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
+# Works in bull/bear by aligning with weekly trend. Position size 0.25 for balanced risk management.
 
-name = "4h_TRIX_VolumeSpike_ChoppyRegime_1wTrend"
-timeframe = "4h"
+name = "1d_RSI_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,36 +28,14 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get daily data for chop regime
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate TRIX (12-period EMA of EMA of EMA of close, then ROC)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
-    trix[0] = 0  # first value undefined
-    
-    # Calculate Choppiness Index (CHOP) on daily timeframe
-    atr1 = np.abs(high - low)
-    atr2 = np.abs(high - np.roll(close, 1))
-    atr3 = np.abs(low - np.roll(close, 1))
-    atr1[0] = 0
-    atr2[0] = 0
-    atr3[0] = 0
-    tr = np.maximum(atr1, np.maximum(atr2, atr3))
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr14 = pd.Series(atr_14).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(sum_atr14 / (highest_high_14 - lowest_low_14)) / np.log10(14)
-    chop[0:13] = np.nan  # first 13 values undefined
-    chop = np.nan_to_num(chop, nan=50.0)  # fill neutral
-    
-    # Align chop to 4h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Get weekly EMA for trend filter
     ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -66,12 +47,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(36, 14, 20)  # Warmup for TRIX (36), chop (14), volume MA (20)
+    start_idx = max(14, 34, 20)  # Warmup for RSI, weekly EMA, and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(trix[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,29 +61,28 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1w_aligned[i]
         downtrend = close[i] < ema_34_1w_aligned[i]
         
-        # Volume confirmation and chop regime filter (choppy = mean reversion)
+        # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 2.0
-        choppy_market = chop_aligned[i] > 61.8  # choppy/range bound
         
         if position == 0:
-            # Long entry: TRIX turns up from oversold with volume in choppy market, weekly uptrend
-            if trix[i] > trix[i-1] and trix[i-1] < -0.5 and volume_confirm and choppy_market and uptrend:
+            # Long entry: RSI oversold (<30) with volume confirmation, weekly uptrend
+            if rsi[i] < 30 and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TRIX turns down from overbought with volume in choppy market, weekly downtrend
-            elif trix[i] < trix[i-1] and trix[i-1] > 0.5 and volume_confirm and choppy_market and downtrend:
+            # Short entry: RSI overbought (>70) with volume confirmation, weekly downtrend
+            elif rsi[i] > 70 and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX turns down or weekly trend turns down or market stops being choppy
-            if trix[i] < trix[i-1] or not uptrend or chop_aligned[i] <= 61.8:
+            # Long exit: RSI returns above 50 or weekly trend turns down
+            if rsi[i] > 50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX turns up or weekly trend turns up or market stops being choppy
-            if trix[i] > trix[i-1] or not downtrend or chop_aligned[i] <= 61.8:
+            # Short exit: RSI returns below 50 or weekly trend turns up
+            if rsi[i] < 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
