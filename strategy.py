@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1h_MidTrend_Momentum_Filter
-# Hypothesis: On 1h timeframe, use 4h EMA trend for direction and 1h RSI momentum for entry timing.
-# Enter long when price > 4h EMA50 and RSI(14) crosses above 50; enter short when price < 4h EMA50 and RSI crosses below 50.
-# Exit on opposite RSI cross or trend reversal. Uses session filter (08-20 UTC) to avoid low-volume hours.
-# Target: 20-40 trades/year to minimize fee drag on 1h timeframe.
+# 6h_WeeklyPivot_D1Trend_Reversal
+# Hypothesis: Fade at weekly pivot R4/S4 levels during strong 1-day trends with volume confirmation.
+# Works in bull/bear markets by fading extreme moves against the higher timeframe trend.
+# Target: 12-30 trades/year on 6h timeframe to minimize fee drag.
 
-name = "1h_MidTrend_Momentum_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_D1Trend_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,42 +20,59 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 4h trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1-day trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Align 4h trend to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # Align 1-day trend to 6h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Weekly pivot points (R4, S4) from previous week
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # RSI cross signals
-    rsi_above_50 = rsi > 50
-    rsi_below_50 = rsi < 50
-    rsi_cross_up = np.zeros(n, dtype=bool)
-    rsi_cross_down = np.zeros(n, dtype=bool)
-    rsi_cross_up[1:] = (rsi_above_50[1:] & ~rsi_above_50[:-1])
-    rsi_cross_down[1:] = (rsi_below_50[1:] & ~rsi_below_50[:-1])
+    # Shift to get previous week values
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
+    # Calculate weekly pivot points
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
+    R4 = pivot + (range_ * 1.1 / 2)  # R4
+    S4 = pivot - (range_ * 1.1 / 2)  # S4
+    
+    # Align weekly pivot points to 6h
+    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
+    
+    # Volume confirmation (1.5x 20-period average)
+    vol_ma = np.full(n, np.nan)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma[i] = vol_sum / 20
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,43 +80,44 @@ def generate_signals(prices):
     start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price > 4h EMA50, RSI crosses above 50, in session
-            if (close[i] > ema50_4h[i] and
-                rsi_cross_up[i] and
-                session_mask[i]):
-                signals[i] = 0.20
+            # Long fade: price touches S4 with volume confirmation during 1-day uptrend
+            if (low[i] <= S4_aligned[i] and
+                trend_1d_up_aligned[i] > 0.5 and
+                volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price < 4h EMA50, RSI crosses below 50, in session
-            elif (close[i] < ema50_4h[i] and
-                  rsi_cross_down[i] and
-                  session_mask[i]):
-                signals[i] = -0.20
+            # Short fade: price touches R4 with volume confirmation during 1-day downtrend
+            elif (high[i] >= R4_aligned[i] and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI crosses below 50 or trend turns down
-            if (rsi_cross_down[i] or
-                trend_4h_up_aligned[i] < 0.5):
+            # Exit: price moves back to pivot or 1-day trend turns down
+            if (close[i] >= pivot[i] or
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI crosses above 50 or trend turns up
-            if (rsi_cross_up[i] or
-                trend_4h_down_aligned[i] < 0.5):
+            # Exit: price moves back to pivot or 1-day trend turns up
+            if (close[i] <= pivot[i] or
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
