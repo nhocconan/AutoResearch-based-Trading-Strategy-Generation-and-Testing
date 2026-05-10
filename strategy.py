@@ -1,72 +1,63 @@
 #!/usr/bin/env python3
-# 1H_4H_1D_HMA_Trend_Follow
-# Hypothesis: Use 4h HMA(21) for trend direction, 1d EMA(50) for long-term filter, and 1h HMA(9) for entry timing.
-# Long when 4h HMA>1d EMA50 and price crosses above 1h HMA(9); short when 4h HMA<1d EMA50 and price crosses below 1h HMA(9).
-# Works in bull/bear by following 4h trend with 1d filter to avoid counter-trend trades. Target: 15-30 trades/year per symbol.
+# 6H_1W_PivotReversal_TrendFilter
+# Hypothesis: Fade at weekly pivot levels in the direction of the weekly trend.
+# Long when price crosses above weekly S1 in a weekly uptrend (close > weekly EMA50).
+# Short when price crosses below weekly R1 in a weekly downtrend (close < weekly EMA50).
+# Uses weekly structure to capture mean-reversion within the weekly trend.
+# Works in bull/bear by following weekly trend direction. Target: 20-40 trades/year per symbol.
 
-name = "1H_4H_1D_HMA_Trend_Follow"
-timeframe = "1h"
+name = "6H_1W_PivotReversal_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_hma(arr, period):
-    """Calculate Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
-    
-    wma_half = np.array([wma(arr[i:i+half], half) if i+half <= len(arr) else np.nan for i in range(len(arr))])
-    wma_full = np.array([wma(arr[i:i+period], period) if i+period <= len(arr) else np.nan for i in range(len(arr))])
-    
-    raw = 2 * wma_half - wma_full
-    hma = np.array([wma(raw[i:i+sqrt], sqrt) if i+sqrt <= len(raw) else np.nan for i in range(len(raw))])
-    
-    # Pad to original length
-    hma_padded = np.full_like(arr, np.nan)
-    start_idx = period - 1
-    if len(hma) > 0 and start_idx < len(hma_padded):
-        end_idx = start_idx + len(hma)
-        if end_idx <= len(hma_padded):
-            hma_padded[start_idx:end_idx] = hma
-    return hma_padded
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get 4h and 1d data
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_4h) < 30 or len(df_1d) < 50:
+    # Get weekly data
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h HMA(21) for trend
-    hma_4h = calculate_hma(close_4h, 21)
-    hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Weekly EMA50 for trend
+    close_1w_series = pd.Series(close_1w)
+    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 1d EMA(50) for long-term filter
-    close_1d_series = pd.Series(close_1d)
-    ema_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly pivot points (using prior week's OHLC)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_1w = (high_1w[:-1] + low_1w[:-1] + close_1w[:-1]) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w[:-1]
+    s1_1w = 2 * pivot_1w - high_1w[:-1]
     
-    # 1h HMA(9) for entry timing
-    hma_1h = calculate_hma(close, 9)
+    # Prepend NaN for alignment (current week's pivot uses prior week's data)
+    pivot_1w = np.concatenate([[np.nan], pivot_1w])
+    r1_1w = np.concatenate([[np.nan], r1_1w])
+    s1_1w = np.concatenate([[np.nan], s1_1w])
+    
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_trend = close_1w > ema50_1w
+    bearish_trend = close_1w < ema50_1w
+    
+    # Align to 6h
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,41 +67,42 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
-            np.isnan(hma_1h[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend conditions
-        bullish_4h = hma_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_4h = hma_4h_aligned[i] < ema_1d_aligned[i]
+        bullish = bullish_aligned[i] > 0.5
+        bearish = bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: bullish 4h trend + price crosses above 1h HMA
-            if bullish_4h and close[i] > hma_1h[i] and (i == 0 or close[i-1] <= hma_1h[i-1]):
-                signals[i] = 0.20
+            # Enter long: bullish trend + price crosses above weekly S1
+            if bullish and close[i] > s1_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: bearish 4h trend + price crosses below 1h HMA
-            elif bearish_4h and close[i] < hma_1h[i] and (i == 0 or close[i-1] >= hma_1h[i-1]):
-                signals[i] = -0.20
+            # Enter short: bearish trend + price crosses below weekly R1
+            elif bearish and close[i] < r1_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish 4h trend or price crosses below 1h HMA
-            if bearish_4h or (close[i] < hma_1h[i] and close[i-1] >= hma_1h[i-1]):
+            # Exit long: bearish trend or price crosses below weekly pivot
+            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+            if bearish or close[i] < pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish 4h trend or price crosses above 1h HMA
-            if bullish_4h or (close[i] > hma_1h[i] and close[i-1] <= hma_1h[i-1]):
+            # Exit short: bullish trend or price crosses above weekly pivot
+            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+            if bullish or close[i] > pivot_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
