@@ -1,117 +1,99 @@
 #/usr/bin/env python3
-# 1D_Williams_Alligator_1wTrend_Filter
-# Hypothesis: Uses Williams Alligator (SMMA with offsets) on daily chart filtered by weekly trend (close > weekly EMA50).
-# Enters long when green line (lips) crosses above red line (jaw) in uptrend.
-# Enters short when red line (jaw) crosses above green line (lips) in downtrend.
-# Uses weekly EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 15-30 trades per year on 1d timeframe with position size 0.25.
+# 6H_Aroon_Oscillator_1dTrend_Filter
+# Hypothesis: Uses Aroon Oscillator (25) on 6h to detect trend strength and direction,
+# filtered by 1-day trend (close > EMA50 for long, close < EMA50 for short).
+# Aroon Oscillator > 40 indicates strong uptrend, < -40 strong downtrend.
+# This filters out weak trends and whipsaws, working in both bull and bear markets.
+# Targets 12-30 trades per year on 6h timeframe with position size 0.25.
 
-name = "1D_Williams_Alligator_1wTrend_Filter"
-timeframe = "1d"
+name = "6H_Aroon_Oscillator_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(values, period):
-    """Smoothed Moving Average (SMMA) - same as Wilder's smoothing"""
-    smoothed = np.full_like(values, np.nan, dtype=float)
-    if len(values) < period:
-        return smoothed
-    # First value is simple average
-    smoothed[period-1] = np.mean(values[:period])
-    # Subsequent values: (prev_smoothed * (period-1) + current_value) / period
-    for i in range(period, len(values)):
-        smoothed[i] = (smoothed[i-1] * (period-1) + values[i]) / period
-    return smoothed
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Get weekly data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA(50) for trend direction
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Williams Alligator on daily chart
-    # Jaw (blue line): 13-period SMMA, shifted 8 bars forward
-    # Teeth (red line): 8-period SMMA, shifted 5 bars forward
-    # Lips (green line): 5-period SMMA, shifted 3 bars forward
+    # Calculate Aroon Oscillator (25) on 6h
+    period = 25
     
-    # Median price = (high + low) / 2
-    median_price = (high + low) / 2
+    def aroon_up(high, lookback):
+        n = len(high)
+        aroon_up = np.full(n, np.nan)
+        for i in range(lookback-1, n):
+            window_start = i - lookback + 1
+            highest_idx = np.argmax(high[window_start:i+1]) + window_start
+            periods_since_high = i - highest_idx
+            aroon_up[i] = ((lookback - periods_since_high) / lookback) * 100
+        return aroon_up
     
-    jaw = smma(median_price, 13)
-    teeth = smma(median_price, 8)
-    lips = smma(median_price, 5)
+    def aroon_down(low, lookback):
+        n = len(low)
+        aroon_down = np.full(n, np.nan)
+        for i in range(lookback-1, n):
+            window_start = i - lookback + 1
+            lowest_idx = np.argmin(low[window_start:i+1]) + window_start
+            periods_since_low = i - lowest_idx
+            aroon_down[i] = ((lookback - periods_since_low) / lookback) * 100
+        return aroon_down
     
-    # Apply shifts (forward shift means we need to look at past values)
-    # Jaw shifted 8 bars: use jaw[i-8] for current bar i
-    # Teeth shifted 5 bars: use teeth[i-5] for current bar i
-    # Lips shifted 3 bars: use lips[i-3] for current bar i
-    
-    jaw_shifted = np.roll(jaw, 8)  # shift right by 8
-    teeth_shifted = np.roll(teeth, 5)  # shift right by 5
-    lips_shifted = np.roll(lips, 3)  # shift right by 3
-    
-    # Set NaN for invalid shifted values
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    aroon_up_val = aroon_up(high, period)
+    aroon_down_val = aroon_down(low, period)
+    aroon_osc = aroon_up_val - aroon_down_val  # -100 to +100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after all indicators are valid
-    start_idx = max(13, 8, 5) + 8  # jaw period + jaw shift
+    start_idx = max(50, period)  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(aroon_osc[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below weekly EMA50
-        price_above_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_ema = close[i] < ema_50_1w_aligned[i]
-        
-        # Alligator crossover signals
-        lips_above_jaw = lips_shifted[i] > jaw_shifted[i]
-        lips_below_jaw = lips_shifted[i] < jaw_shifted[i]
-        lips_crossed_above_jaw = lips_above_jaw and (lips_shifted[i-1] <= jaw_shifted[i-1])
-        jaw_crossed_above_lips = jaw_shifted[i] > lips_shifted[i] and (jaw_shifted[i-1] <= lips_shifted[i-1])
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: lips crosses above jaw with price above weekly EMA50 (uptrend)
-            if lips_crossed_above_jaw and price_above_ema:
+            # Long entry: Aroon Oscillator > 40 (strong uptrend) in uptrend regime
+            if (aroon_osc[i] > 40 and price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: jaw crosses above lips with price below weekly EMA50 (downtrend)
-            elif jaw_crossed_above_lips and price_below_ema:
+            # Short entry: Aroon Oscillator < -40 (strong downtrend) in downtrend regime
+            elif (aroon_osc[i] < -40 and price_below_ema):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: jaw crosses above lips (trend weakness)
-            if jaw_crossed_above_lips:
+            # Long exit: Aroon Oscillator < 0 (trend weakening) or trend filter fails
+            if (aroon_osc[i] < 0 or not price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: lips crosses above jaw (trend reversal)
-            if lips_crossed_above_jaw:
+            # Short exit: Aroon Oscillator > 0 (trend weakening) or trend filter fails
+            if (aroon_osc[i] > 0 or not price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
