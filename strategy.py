@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Chaikin_Money_Flow_1dTrend_Volume
-# Hypothesis: Use Chaikin Money Flow (CMF) on 12h for momentum, filtered by 1d EMA50 trend and volume confirmation.
-# CMF > 0 indicates buying pressure, < 0 selling pressure. Trades only when CMF crosses zero with trend and volume alignment.
-# Designed for low trade frequency (~20-40/year) to minimize fee drift and work in both bull/bear markets via trend filter.
+# 1d_Weekly_Pivot_Breakout_Momentum
+# Hypothesis: Weekly Pivot Point breakout with 1-day momentum confirmation and volume filter.
+# Uses weekly pivot levels (calculated from prior week) for breakout signals,
+# confirmed by daily RSI momentum and volume surge. Designed to capture strong
+# trending moves while avoiding false breakouts in ranging markets.
+# Weekly timeframe provides fewer, higher-quality signals to minimize fee drag.
+# Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
 
-name = "12h_Chaikin_Money_Flow_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_Breakout_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,47 +25,57 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # 1d EMA50 trend
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    # Calculate Weekly Pivot Points from previous week's OHLC
+    # Using standard formula: P = (H + L + C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Align 1d trend to 12h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Shift to get previous week's values (avoid look-ahead)
+    prev_weekly_high = np.concatenate([[weekly_high[0]], weekly_high[:-1]])
+    prev_weekly_low = np.concatenate([[weekly_low[0]], weekly_low[:-1]])
+    prev_weekly_close = np.concatenate([[weekly_close[0]], weekly_close[:-1]])
     
-    # 12h Chaikin Money Flow (20-period)
-    # CMF = sum((Close - Low - (High - Close)) / (High - Low) * Volume) / sum(Volume) over period
-    # Avoid division by zero: where high == low, use 0
-    hl_range = high - low
-    # Where hl_range == 0, set money flow multiplier to 0 (no range)
-    mf_multiplier = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range, 0.0)
-    mf_volume = mf_multiplier * volume
+    # Calculate pivot levels
+    pivot_point = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3
+    resistance_1 = 2 * pivot_point - prev_weekly_low
+    support_1 = 2 * pivot_point - prev_weekly_high
     
-    # Sum over 20 periods
-    mf_volume_sum = pd.Series(mf_volume).rolling(window=20, min_periods=20).sum().values
-    volume_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    # Avoid division by zero
-    cmf = np.where(volume_sum != 0, mf_volume_sum / volume_sum, 0.0)
+    # Align weekly pivot levels to daily timeframe
+    pivot_point_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    resistance_1_aligned = align_htf_to_ltf(prices, df_1w, resistance_1)
+    support_1_aligned = align_htf_to_ltf(prices, df_1w, support_1)
     
-    # 12h volume filter: current volume > 1.5 * 20-period average
+    # Daily RSI for momentum confirmation
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # Fill NaN with neutral 50
+    
+    # Volume filter: current volume > 1.5 * 20-day average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure enough data for indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(cmf[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(pivot_point_aligned[i]) or np.isnan(resistance_1_aligned[i]) or
+            np.isnan(support_1_aligned[i]) or np.isnan(rsi_values[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +85,32 @@ def generate_signals(prices):
         volume_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: CMF crosses above zero with uptrend and volume
-            if cmf[i] > 0 and cmf[i-1] <= 0 and trend_1d_up_aligned[i] > 0.5 and volume_filter:
+            # Long: price breaks above Weekly R1 with bullish momentum and volume
+            if (close[i] > resistance_1_aligned[i] and
+                rsi_values[i] > 55 and  # Bullish momentum
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF crosses below zero with downtrend and volume
-            elif cmf[i] < 0 and cmf[i-1] >= 0 and trend_1d_down_aligned[i] > 0.5 and volume_filter:
+            # Short: price breaks below Weekly S1 with bearish momentum and volume
+            elif (close[i] < support_1_aligned[i] and
+                  rsi_values[i] < 45 and  # Bearish momentum
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: CMF crosses below zero or trend fails
-            if cmf[i] < 0 or trend_1d_up_aligned[i] < 0.5:
+            # Exit: price returns to weekly pivot or momentum fails
+            if (close[i] < pivot_point_aligned[i] or
+                rsi_values[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: CMF crosses above zero or trend fails
-            if cmf[i] > 0 or trend_1d_down_aligned[i] < 0.5:
+            # Exit: price returns to weekly pivot or momentum fails
+            if (close[i] > pivot_point_aligned[i] or
+                rsi_values[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
