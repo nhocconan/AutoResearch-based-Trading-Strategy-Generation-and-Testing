@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_ElderRay_BullBearPower_1dTrend_Filter
-Hypothesis: Uses Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) from 1d timeframe 
-to identify bull/bear regime, then enters long when Bull Power > 0 and price > 6h EMA20, short when 
-Bear Power < 0 and price < 6h EMA20. Avoids counter-trend trades by aligning with 1d trend. 
-Designed for 6h timeframe with low trade frequency (target: 15-30 trades/year) to minimize fee drag.
-Works in both bull and bear markets by following 1d trend direction.
+4H_RSI_Divergence_With_Volume_Confirmation
+Hypothesis: Uses RSI divergence (price vs RSI) combined with volume confirmation to capture trend reversals.
+Works in both bull and bear markets by detecting exhaustion points. Uses 4h timeframe with 1h RSI for
+divergence detection and volume spike confirmation. Target: 20-40 trades/year to minimize fee drag.
 """
 
-name = "6H_ElderRay_BullBearPower_1dTrend_Filter"
-timeframe = "6h"
+name = "4H_RSI_Divergence_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,68 +24,70 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation (EMA13 and Bull/Bear Power)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 1h data for RSI calculation (more responsive than 4h RSI)
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 14:
         return np.zeros(n)
     
-    # Calculate EMA13 on 1d close
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate RSI(14) on 1h closes
+    delta = pd.Series(df_1h['close']).diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_1h_aligned = align_htf_to_ltf(prices, df_1h, rsi_values)
     
-    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
-    bull_power_1d = df_1d['high'].values - ema13_1d
-    bear_power_1d = df_1d['low'].values - ema13_1d
-    
-    # Align 1d indicators to 6h timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    
-    # Calculate 6h EMA20 for trend filter
-    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume filter: volume > 1.8x 20-period average on 4h chart
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # Warmup for EMA20 and EMA13
+    start_idx = max(50, 20)  # Warmup for RSI and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema20_6h[i]):
+        if np.isnan(rsi_1h_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filters from 1d Elder Ray
-        bull_regime = bull_power_aligned[i] > 0  # Bullish when Bull Power > 0
-        bear_regime = bear_power_aligned[i] < 0  # Bearish when Bear Power < 0
-        
-        # 6h price relative to EMA20
-        price_above_ema = close[i] > ema20_6h[i]
-        price_below_ema = close[i] < ema20_6h[i]
-        
-        if position == 0:
-            # Long entry: bull regime + price above 6h EMA20
-            if bull_regime and price_above_ema:
-                signals[i] = 0.25
-                position = 1
-            # Short entry: bear regime + price below 6h EMA20
-            elif bear_regime and price_below_ema:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Long exit: bear regime or price below 6h EMA20
-            if bear_regime or price_below_ema:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: bull regime or price above 6h EMA20
-            if bull_regime or price_above_ema:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        # Check for RSI divergence (need at least 3 bars back)
+        if i >= 3:
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            bull_div = (low[i] < low[i-2] and 
+                       rsi_1h_aligned[i] > rsi_1h_aligned[i-2] and
+                       rsi_1h_aligned[i] < 40)  # RSI not overbought
+            
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            bear_div = (high[i] > high[i-2] and 
+                       rsi_1h_aligned[i] < rsi_1h_aligned[i-2] and
+                       rsi_1h_aligned[i] > 60)  # RSI not oversold
+            
+            if position == 0:
+                # Long entry: bullish divergence + volume spike
+                if bull_div and volume[i] > vol_threshold[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short entry: bearish divergence + volume spike
+                elif bear_div and volume[i] > vol_threshold[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif position == 1:
+                # Long exit: bearish divergence or RSI overbought
+                if bear_div or rsi_1h_aligned[i] > 70:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short exit: bullish divergence or RSI oversold
+                if bull_div or rsi_1h_aligned[i] < 30:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
