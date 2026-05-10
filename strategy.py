@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
-"""
-6h_MultiTimeframe_CashFlow_Momentum
-Hypothesis: Combine 60-minute volume-weighted price momentum with 1-day liquidity flow
-to capture institutional accumulation/distribution patterns. Works in bull/bear markets
-by focusing on volume-price divergence and liquidity imbalances that precede major moves.
-Target: 20-30 trades/year on 6H timeframe.
-"""
+# 12h_Williams_Alligator_Strategy
+# Hypothesis: Williams Alligator (Jaw, Teeth, Lips) on 1w and 1d timeframes to detect trend direction.
+# Long when price > Alligator Teeth (1d) and Alligator aligned bullish on 1w (Jaw < Teeth < Lips).
+# Short when price < Alligator Teeth (1d) and Alligator aligned bearish on 1w (Jaw > Teeth > Lips).
+# Uses Williams Alligator's smoothed SMAs (5,8,13) to filter whipsaws. Target: 15-25 trades/year.
 
-name = "6h_MultiTimeframe_CashFlow_Momentum"
-timeframe = "6h"
+name = "12h_Williams_Alligator_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,123 +22,105 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1. Price momentum: 6-period ROC (rate of change) - measures acceleration
-    roc_period = 6
-    price_change = close - np.roll(close, roc_period)
-    price_change[:roc_period] = 0
-    price_prev = np.roll(close, roc_period)
-    price_prev[:roc_period] = close[0]  # avoid division by zero
-    roc = np.divide(price_change, price_prev, out=np.zeros_like(price_change), where=price_prev!=0)
-    
-    # 2. Volume-weighted price trend: VWAP deviation normalized
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    vwap_deviation = (close - vwap) / vwap  # % deviation from VWAP
-    
-    # 3. Money Flow Index (MFI) - volume-weighted RSI
-    money_flow = typical_price * volume
-    positive_flow = np.where(typical_price > np.roll(typical_price, 1), money_flow, 0)
-    negative_flow = np.where(typical_price < np.roll(typical_price, 1), money_flow, 0)
-    
-    # Handle first element
-    positive_flow[0] = 0
-    negative_flow[0] = 0
-    
-    # Sum over 14 periods
-    pos_sum = pd.Series(positive_flow).rolling(window=14, min_periods=14).sum().values
-    neg_sum = pd.Series(negative_flow).rolling(window=14, min_periods=14).sum().values
-    
-    # Avoid division by zero
-    mfi = np.where(
-        (pos_sum + neg_sum) != 0,
-        100 - (100 / (1 + pos_sum / neg_sum)),
-        50  # neutral when no flow
-    )
-    
-    # 4. 1-day institutional flow: OBV (On-Balance Volume) trend
+    # Williams Alligator on 1d (Jaw=13, Teeth=8, Lips=5) - smoothed SMAs
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate OBV on daily data
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Daily price change
-    price_change_1d = np.diff(close_1d, prepend=close_1d[0])
-    obv_direction = np.where(price_change_1d > 0, 1, np.where(price_change_1d < 0, -1, 0))
-    obv_raw = obv_direction * volume_1d
-    obv = np.cumsum(obv_raw)
+    # Jaw (13-period smoothed SMA)
+    jaw_1d = pd.Series(close_1d).rolling(window=13, min_periods=13).mean()
+    jaw_1d = jaw_1d.rolling(window=8, min_periods=8).mean().values  # smoothed
     
-    # OBV momentum: 10-period rate of change
-    obv_change = obv - np.roll(obv, 10)
-    obv_change[:10] = 0
-    obv_prev = np.roll(obv, 10)
-    obv_prev[:10] = obv[0]  # avoid division by zero
-    obv_roc = np.divide(obv_change, obv_prev, out=np.zeros_like(obv_change), where=obv_prev!=0)
+    # Teeth (8-period smoothed SMA)
+    teeth_1d = pd.Series(close_1d).rolling(window=8, min_periods=8).mean()
+    teeth_1d = teeth_1d.rolling(window=5, min_periods=5).mean().values  # smoothed
     
-    # Align 1-day OBV momentum to 6H
-    obv_roc_aligned = align_htf_to_ltf(prices, df_1d, obv_roc)
+    # Lips (5-period smoothed SMA)
+    lips_1d = pd.Series(close_1d).rolling(window=5, min_periods=5).mean()
+    lips_1d = lips_1d.rolling(window=3, min_periods=3).mean().values  # smoothed
+    
+    # Williams Alligator on 1w for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Jaw (13-period smoothed SMA) on 1w
+    jaw_1w = pd.Series(close_1w).rolling(window=13, min_periods=13).mean()
+    jaw_1w = jaw_1w.rolling(window=8, min_periods=8).mean().values  # smoothed
+    
+    # Teeth (8-period smoothed SMA) on 1w
+    teeth_1w = pd.Series(close_1w).rolling(window=8, min_periods=8).mean()
+    teeth_1w = teeth_1w.rolling(window=5, min_periods=5).mean().values  # smoothed
+    
+    # Lips (5-period smoothed SMA) on 1w
+    lips_1w = pd.Series(close_1w).rolling(window=5, min_periods=5).mean()
+    lips_1w = lips_1w.rolling(window=3, min_periods=3).mean().values  # smoothed
+    
+    # Align 1d Alligator to 12h
+    jaw_1d_aligned = align_htf_to_ltf(prices, df_1d, jaw_1d)
+    teeth_1d_aligned = align_htf_to_ltf(prices, df_1d, teeth_1d)
+    lips_1d_aligned = align_htf_to_ltf(prices, df_1d, lips_1d)
+    
+    # Align 1w Alligator to 12h (with extra delay for trend confirmation)
+    jaw_1w_aligned = align_htf_to_ltf(prices, df_1w, jaw_1w, additional_delay_bars=1)
+    teeth_1w_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w, additional_delay_bars=1)
+    lips_1w_aligned = align_htf_to_ltf(prices, df_1w, lips_1w, additional_delay_bars=1)
+    
+    # Volume confirmation: current volume > 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient data for all indicators
+    start_idx = 100  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
-        if (np.isnan(vwap[i]) or np.isnan(vwap_deviation[i]) or 
-            np.isnan(mfi[i]) or np.isnan(roc[i]) or 
-            np.isnan(obv_roc_aligned[i])):
+        if (np.isnan(jaw_1d_aligned[i]) or np.isnan(teeth_1d_aligned[i]) or np.isnan(lips_1d_aligned[i]) or
+            np.isnan(jaw_1w_aligned[i]) or np.isnan(teeth_1w_aligned[i]) or np.isnan(lips_1w_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Williams Alligator alignment signals
+        # Bullish alignment: Jaw < Teeth < Lips (alligator sleeping with mouth open up)
+        bullish_align_1w = (jaw_1w_aligned[i] < teeth_1w_aligned[i]) and (teeth_1w_aligned[i] < lips_1w_aligned[i])
+        # Bearish alignment: Jaw > Teeth > Lips (alligator sleeping with mouth open down)
+        bearish_align_1w = (jaw_1w_aligned[i] > teeth_1w_aligned[i]) and (teeth_1w_aligned[i] > lips_1w_aligned[i])
+        
         if position == 0:
-            # Long entry: 
-            # 1. Price above VWAP (bullish bias)
-            # 2. Positive money flow (accumulation)
-            # 3. Rising price momentum (acceleration)
-            # 4. Strong institutional buying (OBV rising)
-            if (vwap_deviation[i] > 0.005 and      # modest premium to VWAP
-                mfi[i] > 55 and                    # money flowing in
-                roc[i] > 0.01 and                  # price accelerating up
-                obv_roc_aligned[i] > 0.002):       # institutional buying
+            # Long: price > Teeth (1d), bullish 1w alignment, volume confirmation
+            if (close[i] > teeth_1d_aligned[i] and
+                bullish_align_1w and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            
-            # Short entry:
-            # 1. Price below VWAP (bearish bias)
-            # 2. Negative money flow (distribution)
-            # 3. Falling price momentum (deceleration)
-            # 4. Strong institutional selling (OBV falling)
-            elif (vwap_deviation[i] < -0.005 and   # modest discount to VWAP
-                  mfi[i] < 45 and                  # money flowing out
-                  roc[i] < -0.01 and               # price accelerating down
-                  obv_roc_aligned[i] < -0.002):    # institutional selling
+            # Short: price < Teeth (1d), bearish 1w alignment, volume confirmation
+            elif (close[i] < teeth_1d_aligned[i] and
+                  bearish_align_1w and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: deterioration of bullish conditions
-            if (vwap_deviation[i] < -0.002 or    # price falls below VWAP
-                mfi[i] < 40 or                   # money flow turns negative
-                roc[i] < -0.005 or               # momentum breaks
-                obv_roc_aligned[i] < -0.001):    # institutional selling emerges
+            # Exit: price crosses below Teeth (1d) or 1w alignment turns bearish
+            if (close[i] < teeth_1d_aligned[i] or
+                not bullish_align_1w):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: deterioration of bearish conditions
-            if (vwap_deviation[i] > 0.002 or     # price rises above VWAP
-                mfi[i] > 60 or                   # money flow turns positive
-                roc[i] > 0.005 or                # momentum breaks
-                obv_roc_aligned[i] > 0.001):     # institutional buying emerges
+            # Exit: price crosses above Teeth (1d) or 1w alignment turns bullish
+            if (close[i] > teeth_1d_aligned[i] or
+                not bearish_align_1w):
                 signals[i] = 0.0
                 position = 0
             else:
