@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
-# Hypothesis: Uses Camarilla R3/S3 breakouts with weekly trend filter and volume spikes for high-probability entries.
-# Weekly trend (1w EMA34) filters direction to avoid counter-trend trades. Volume > 2.0x 20-period MA confirms momentum.
-# Designed for 6h timeframe to target 50-150 total trades over 4 years (12-37/year). Works in bull/bear by aligning with weekly trend.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Uses daily Camarilla R3/S3 breakouts with daily trend filter and volume spikes for high-probability entries.
+# Daily trend (1d EMA34) filters direction to avoid counter-trend trades. Volume > 2.0x 20-period MA confirms momentum.
+# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year). Works in bull/bear by aligning with daily trend.
 # Position size 0.25 for balanced risk management.
 
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,17 +23,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Get daily data for Camarilla pivot levels (using previous day's data)
+    # Get daily data for trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR for volatility filter (optional but good practice)
+    # Calculate ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -52,13 +47,13 @@ def generate_signals(prices):
     r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Get weekly EMA for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Get daily EMA for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume average for confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,43 +61,43 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Warmup for volume MA, weekly EMA, and ATR
+    start_idx = max(20, 34, 14)  # Warmup for volume MA, daily EMA, and ATR
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation and volatility filter
         volume_confirm = volume[i] > volume_ma[i] * 2.0
         volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
-            # Long entry: price breaks above R3 with volume confirmation, weekly uptrend
+            # Long entry: price breaks above R3 with volume confirmation, daily uptrend
             if close[i] > r3_aligned[i] and volume_confirm and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 with volume confirmation, weekly downtrend
+            # Short entry: price breaks below S3 with volume confirmation, daily downtrend
             elif close[i] < s3_aligned[i] and volume_confirm and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls back below R3 or weekly trend turns down
+            # Long exit: price falls back below R3 or daily trend turns down
             if close[i] < r3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises back above S3 or weekly trend turns up
+            # Short exit: price rises back above S3 or daily trend turns up
             if close[i] > s3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
