@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend
-# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d trend direction for signal bias, 12h for entry. Volume filter ensures breakouts have conviction.
-# Targets 15-25 trades/year to minimize fee drag. Works in bull/bear by trading breakouts with trend alignment.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+# Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+# Uses daily trend for bias, 4h for entry timing. Targets 20-40 trades/year to minimize fee drag.
+# Works in bull/bear by trading breakouts aligned with higher timeframe trend.
 
-name = "12h_Camarilla_Pivot_Breakout_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # 1d data for trend filter and pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -33,7 +33,7 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 12h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
@@ -50,11 +50,11 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -73,16 +73,16 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 1.3
+        volume_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with uptrend and volume
+            # Long: price breaks above Camarilla R1 with uptrend and volume spike
             if (close[i] > camarilla_r1_aligned[i] and
                 trend_1d_up_aligned[i] > 0.5 and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with downtrend and volume
+            # Short: price breaks below Camarilla S1 with downtrend and volume spike
             elif (close[i] < camarilla_s1_aligned[i] and
                   trend_1d_down_aligned[i] > 0.5 and
                   volume_filter):
