@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Breakout_1wTrend
-Hypothesis: Price breaks weekly pivot R1 (long) or S1 (short) levels calculated from prior week's range, with 1w EMA50 trend filter and volume confirmation.
-Weekly pivots act as weekly support/resistance; breakouts with volume and trend alignment capture directional moves.
-Works in bull/bear by filtering trades in direction of weekly trend.
-Target: 10-20 trades/year (40-80 total) to minimize fee drag.
+1h_4h1d_Trend_Reversal_Confirmation
+Hypothesis: In 1h timeframe, look for reversals aligned with 4h and 1d trends using EMA crossovers and RSI extremes.
+Use 4h EMA20/50 crossover for trend direction and 1d EMA50 for higher timeframe bias.
+Enter on 1h RSI(14) < 30 in uptrend or > 70 in downtrend with volume confirmation.
+Exit when RSI crosses back to neutral (50) or trend reversals occur.
+Session filter (08-20 UTC) to avoid low-liquidity hours.
+Target: 20-30 trades/year (80-120 total) to minimize fee drag on 1h timeframe.
+Works in bull/bear by using multi-timeframe trend filters to avoid counter-trend trades.
 """
 
-name = "1d_WeeklyPivot_Breakout_1wTrend"
-timeframe = "1d"
+name = "1h_4h1d_Trend_Reversal_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +20,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,84 +28,123 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Pre-compute session hours for filtering (08-20 UTC)
+    hours = prices.index.hour  # index is already DatetimeIndex
     
-    # Weekly pivot points from prior week: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    pivot_high = (high_1w + low_1w + close_1w) / 3
-    pivot_range = high_1w - low_1w
-    weekly_r1 = pivot_high + 1.1 * pivot_range / 12
-    weekly_s1 = pivot_high - 1.1 * pivot_range / 12
+    # 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # 1w EMA50 for trend filter
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
+    # 4h EMA20 and EMA50 for trend
+    ema20_4h = np.full(len(close_4h), np.nan)
+    ema50_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 50:
+        # Initialize EMA20
+        ema20_4h[19] = np.mean(close_4h[:20])
+        alpha20 = 2 / (20 + 1)
+        for i in range(20, len(close_4h)):
+            ema20_4h[i] = alpha20 * close_4h[i] + (1 - alpha20) * ema20_4h[i-1]
+        # Initialize EMA50
+        ema50_4h[49] = np.mean(close_4h[:50])
+        alpha50 = 2 / (50 + 1)
+        for i in range(50, len(close_4h)):
+            ema50_4h[i] = alpha50 * close_4h[i] + (1 - alpha50) * ema50_4h[i-1]
+    
+    # 1d data for higher timeframe bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # 1d EMA50 for trend bias
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
         alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # 1w volume SMA20 for volume confirmation
-    vol_sma20_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 20:
-        vol_sma20_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(volume_1w)):
-            vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + volume_1w[i]) / 20
+    # 1h RSI(14) for entry signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align 1w indicators to 1d
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
+    # Wilder's smoothing for RSI
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    if n >= 14:
+        avg_gain[13] = np.mean(gain[1:14])  # first average of gains
+        avg_loss[13] = np.mean(loss[1:14])  # first average of losses
+        for i in range(14, n):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Align HTF indicators to 1h timeframe
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = max(50, 14)  # Wait for EMA50 and RSI
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_1w_aligned[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.5x average 1w volume (scaled)
-        vol_1w_scaled = vol_sma20_1w_aligned[i] / 5.0  # 5x 1d bars in 1w
-        volume_confirm = volume[i] > 1.5 * vol_1w_scaled
+        # Session filter: only trade between 08:00-20:00 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
-        # Trend and price relative to weekly pivot levels
-        is_uptrend = close[i] > ema50_1w_aligned[i]
-        is_downtrend = close[i] < ema50_1w_aligned[i]
-        price_above_r1 = close[i] > r1_aligned[i]
-        price_below_s1 = close[i] < s1_aligned[i]
+        # Trend conditions
+        is_4h_uptrend = ema20_4h_aligned[i] > ema50_4h_aligned[i]
+        is_4h_downtrend = ema20_4h_aligned[i] < ema50_4h_aligned[i]
+        is_1d_uptrend = close[i] > ema50_1d_aligned[i]
+        is_1d_downtrend = close[i] < ema50_1d_aligned[i]
         
-        if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
-                signals[i] = 0.25
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        rsi_neutral_cross = 40 < rsi[i] < 60  # exit zone
+        
+        # Volume confirmation: current volume > 1.5x 20-period average
+        if i >= 20:
+            vol_ma20 = np.mean(volume[i-20:i])
+            volume_confirm = volume[i] > 1.5 * vol_ma20
+        else:
+            volume_confirm = False
+        
+        if position == 0 and in_session:
+            # Long: 4h uptrend, 1d uptrend bias, RSI oversold, volume confirmation
+            if (is_4h_uptrend and is_1d_uptrend and rsi_oversold and volume_confirm):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
-                signals[i] = -0.25
+            # Short: 4h downtrend, 1d downtrend bias, RSI overbought, volume confirmation
+            elif (is_4h_downtrend and is_1d_downtrend and rsi_overbought and volume_confirm):
+                signals[i] = -0.20
                 position = -1
+        
         elif position == 1:
-            # Exit: price falls back below R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+            # Exit long: 4h trend turns down, 1d trend turns down, or RSI returns to neutral
+            if (not is_4h_uptrend or not is_1d_uptrend or rsi_neutral_cross):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
+        
         elif position == -1:
-            # Exit: price rises back above S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+            # Exit short: 4h trend turns up, 1d trend turns up, or RSI returns to neutral
+            if (not is_4h_downtrend or not is_1d_downtrend or rsi_neutral_cross):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
