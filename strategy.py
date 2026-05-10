@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_4hMA50_Trend_Filter_Camarilla_R3S3_Breakout
-Hypothesis: Breakouts of daily Camarilla R3/S3 levels in direction of 4h EMA50 trend with volume confirmation.
-Works in bull/bear by following 4h trend. Target: 15-25 trades/year.
+1d_Keltner_Breakout_WeeklyTrend_Volume
+Hypothesis: Keltner Channel breakout on daily timeframe in direction of weekly EMA34 trend with volume confirmation. Keltner adapts to volatility, making it robust in both bull and bear markets. Weekly trend filter ensures we trade with higher timeframe momentum, reducing whipsaws. Volume confirmation filters out low conviction breakouts. Target: 15-25 trades/year.
 """
 
-name = "12h_4hMA50_Trend_Filter_Camarilla_R3S3_Breakout"
-timeframe = "12h"
+name = "1d_Keltner_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,75 +22,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 50:
-        ema_50_4h[49] = np.mean(close_4h[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_4h)):
-            ema_50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_50_4h[i-1]
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Weekly EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily ATR(10) for Keltner Channel
+    atr = np.full(n, np.nan)
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[np.nan], tr])
+    if len(tr) >= 10:
+        atr[9] = np.nanmean(tr[:10])
+        for i in range(10, n):
+            atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    camarilla_R3 = np.full(len(close_1d), np.nan)
-    camarilla_S3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        # Previous day's range
-        range_1d = high_1d[i-1] - low_1d[i-1]
-        camarilla_R3[i] = close_1d[i-1] + range_1d * 1.1 / 4
-        camarilla_S3[i] = close_1d[i-1] - range_1d * 1.1 / 4
+    # Keltner Channel: EMA20 ± 2*ATR
+    ema20 = np.full(n, np.nan)
+    if len(close) >= 20:
+        ema20[19] = np.mean(close[:20])
+        alpha_ema = 2 / (20 + 1)
+        for i in range(20, n):
+            ema20[i] = alpha_ema * close[i] + (1 - alpha_ema) * ema20[i-1]
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    kc_upper = ema20 + 2 * atr
+    kc_lower = ema20 - 2 * atr
     
-    # Volume spike: current volume > 2.0x average volume (30-period)
+    # Volume spike: current volume > 1.5x average volume (20-period)
     vol_sma = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_sma[i] = np.mean(volume[i-30:i])
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 50)  # volume SMA + EMA warmup
+    start_idx = max(20, 34)  # Keltner + weekly EMA warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        volume_confirm = volume[i] > 2.0 * vol_sma[i]
+        volume_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 0:
-            # Long: Close above R3 and above 4h EMA50
-            if close[i] > camarilla_R3_aligned[i] and close[i] > ema_50_4h_aligned[i] and volume_confirm:
+            # Long: Close above Keltner upper band and above weekly EMA34
+            if close[i] > kc_upper[i] and close[i] > ema_34_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S3 and below 4h EMA50
-            elif close[i] < camarilla_S3_aligned[i] and close[i] < ema_50_4h_aligned[i] and volume_confirm:
+            # Short: Close below Keltner lower band and below weekly EMA34
+            elif close[i] < kc_lower[i] and close[i] < ema_34_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below 4h EMA50
-            if close[i] < ema_50_4h_aligned[i]:
+            # Exit: Close below EMA20 (middle of Keltner)
+            if close[i] < ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above 4h EMA50
-            if close[i] > ema_50_4h_aligned[i]:
+            # Exit: Close above EMA20
+            if close[i] > ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
