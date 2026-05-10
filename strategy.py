@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_4hTrend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) act as support/resistance; breakouts with
-# 4h trend and volume filter capture strong moves. Uses 4h EMA50 for trend to avoid lag from higher timeframes,
-# enabling faster adaptation to trend changes while maintaining fewer trades via volume confirmation.
-# Works in bull (breakouts) and bear (mean reversion at extremes) with tight entries to avoid overtrading.
+# 1d_KAMA_Trend_RSI_Chop
+# Hypothesis: KAMA direction determines trend bias on daily, RSI provides entry timing
+# within trend, and Choppiness Index filters for trending regimes. Works in bull
+# (trend following) and bear (avoids chop, takes strong trend reversals).
 
-name = "4h_Camarilla_R1_S1_4hTrend_Volume"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_Chop"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,90 +14,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 1d KAMA trend
+    close_s = pd.Series(close)
+    # Efficiency Ratio
+    change = abs(close_s.diff(10))
+    volatility = close_s.diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_dir = kama > np.roll(kama, 1)  # Today's KAMA > yesterday's
+    
+    # 1d RSI(14)
+    delta = close_s.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # 1d Choppiness Index(14)
+    atr = np.abs(high - low)
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum()
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop = chop.fillna(50).values  # neutral when undefined
+    
+    # 1w trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    
-    # 1d data for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # 4h EMA50 trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
-    
-    # Align 4h trend to 4h (no delay needed as it's same timeframe)
-    trend_4h_up_aligned = trend_4h_up.astype(float)
-    trend_4h_down_aligned = trend_4h_down.astype(float)
-    
-    # Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    R1 = close_1d + 1.1 * range_1d / 12
-    S1 = close_1d - 1.1 * range_1d / 12
-    
-    # Align Camarilla levels to 4h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume spike: current > 2.0 * 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema50_1w
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 50  # ensure indicators warm up
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
+            np.isnan(trend_1w_up_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_spike = vol_ratio > 2.0
-        
         if position == 0:
-            # Long: break above R1 with 4h uptrend and volume spike
-            if (close[i] > R1_aligned[i] and 
-                trend_4h_up_aligned[i] > 0.5 and volume_spike):
+            # Long: KAMA up, RSI > 50 (bullish momentum), chop < 61.8 (trending)
+            if (kama_dir[i] and rsi[i] > 50 and chop[i] < 61.8):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with 4h downtrend and volume spike
-            elif (close[i] < S1_aligned[i] and 
-                  trend_4h_down_aligned[i] > 0.5 and volume_spike):
+            # Short: KAMA down, RSI < 50 (bearish momentum), chop < 61.8 (trending)
+            elif (not kama_dir[i] and rsi[i] < 50 and chop[i] < 61.8):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below S1 or trend fails
-            if (close[i] < S1_aligned[i] or 
-                trend_4h_up_aligned[i] < 0.5):
+            # Exit: KAMA down or chop > 61.8 (choppy) or RSI < 40
+            if (not kama_dir[i] or chop[i] > 61.8 or rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above R1 or trend fails
-            if (close[i] > R1_aligned[i] or 
-                trend_4h_down_aligned[i] < 0.5):
+            # Exit: KAMA up or chop > 61.8 (choppy) or RSI > 60
+            if (kama_dir[i] or chop[i] > 61.8 or rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
