@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Use 1d Camarilla R1/S1 levels for breakout entries, filtered by 1d EMA50 trend direction and volume confirmation.
-Camarilla levels provide precise intraday support/resistance; EMA50 filters for trend alignment; volume avoids false breakouts.
-Designed for 20-40 trades/year per symbol, works in bull/bear via trend filter.
+12h_Trix_ZeroCross_Trend_Volume
+Hypothesis: TRIX (triple exponential moving average) zero-cross signals combined with 1w trend filter and 12h volume confirmation. 
+TRIX captures momentum changes; 1w trend ensures alignment with long-term direction; volume filter avoids false signals. 
+Designed for 15-30 trades/year per symbol with effective performance in both bull and bear markets.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Trix_ZeroCross_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,79 +19,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels (using prior day)
-    high_d = df_1d['high'].shift(1).values
-    low_d = df_1d['low'].shift(1).values
-    close_d = df_1d['close'].shift(1).values
+    # Calculate weekly EMA for trend (using close)
+    close_1w = df_1w['close'].values
+    ema1_1w = pd.Series(close_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2_1w = pd.Series(ema1_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3_1w = pd.Series(ema2_1w).ewm(span=12, adjust=False, min_periods=12).mean().values
+    # Trend: price above/below weekly triple EMA
+    trend_1w = ema3_1w  # Represents the smoothed trend
     
-    # Camarilla levels
-    range_d = high_d - low_d
-    pivot_d = (high_d + low_d + close_d) / 3.0
-    r1_d = close_d + range_d * 1.1 / 12
-    s1_d = close_d - range_d * 1.1 / 12
+    # Align weekly trend to 12h timeframe
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Align daily Camarilla levels to 4h timeframe
-    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
-    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
+    # Get 12h data for TRIX calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 15:
+        return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_d_aligned = align_htf_to_ltf(prices, df_1d, ema50_d)
+    close_12h = df_12h['close'].values
     
-    # Get 4h price and volume
+    # Calculate TRIX (15-period)
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - then % change
+    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    # TRIX as percentage change
+    trix = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
+    # Handle first value
+    trix[0] = 0
+    
+    # Align TRIX to 12h timeframe (already in 12h, but using align for consistency)
+    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    
+    # Get 12h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period EMA
+    # Volume filter: current volume > 1.3x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
+    volume_filter = volume > vol_ema20 * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA50 (50) and volume EMA (20)
-    start_idx = 50
+    # Warmup: need weekly trend (12), TRIX (15*3=45), volume EMA (20)
+    start_idx = 45
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_d_aligned[i]) or 
-            np.isnan(s1_d_aligned[i]) or
-            np.isnan(ema50_d_aligned[i])):
+        if (np.isnan(trend_1w_aligned[i]) or 
+            np.isnan(trix_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine daily trend: price vs EMA50
-        bullish_trend = close[i] > ema50_d_aligned[i]
-        bearish_trend = close[i] < ema50_d_aligned[i]
+        # Determine weekly trend: price vs weekly trend EMA
+        bullish_trend = close[i] > trend_1w_aligned[i]
+        bearish_trend = close[i] < trend_1w_aligned[i]
         
         if position == 0:
-            # Long: bullish daily trend AND price breaks above Camarilla R1 with volume
-            if bullish_trend and high[i] > r1_d_aligned[i] and volume_filter[i]:
+            # Long: bullish weekly trend AND TRIX crosses above zero with volume
+            if bullish_trend and trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish daily trend AND price breaks below Camarilla S1 with volume
-            elif bearish_trend and low[i] < s1_d_aligned[i] and volume_filter[i]:
+            # Short: bearish weekly trend AND TRIX crosses below zero with volume
+            elif bearish_trend and trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Camarilla S1 OR daily trend turns bearish
-            if low[i] < s1_d_aligned[i] or not bullish_trend:
+            # Long exit: TRIX crosses below zero OR weekly trend turns bearish
+            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Camarilla R1 OR daily trend turns bullish
-            if high[i] > r1_d_aligned[i] or not bearish_trend:
+            # Short exit: TRIX crosses above zero OR weekly trend turns bullish
+            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
