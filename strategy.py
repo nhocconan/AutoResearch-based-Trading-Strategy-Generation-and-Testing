@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1D_WilliamsAlligator_ElderRay_Trend_Filter
-# Hypothesis: Williams Alligator (13,8,5 SMAs) identifies trend direction and strength.
-# Elder Ray (bull/bear power) confirms momentum behind the trend.
-# Combined with volume confirmation (volume > 1.5x 20-period average) to filter false signals.
-# Works in bull markets (Alligator aligned up, Elder Ray bullish) and bear markets (aligned down, bearish).
-# Designed for low trade frequency (~10-20/year) with discrete sizing (0.25) to minimize fee drag.
-# Uses 1w trend filter to avoid counter-trend trades in strong trends.
+# 6H_Ichimoku_Cloud_Twist_With_Volume
+# Hypothesis: Combines Ichimoku cloud twist (Tenkan/Kijun cross) with cloud color from 1d timeframe
+# and volume confirmation to capture trend changes with low frequency.
+# Cloud twist signals momentum shift; cloud color from higher timeframe filters counter-trend trades.
+# Works in bull markets (green cloud + bullish twist) and bear markets (red cloud + bearish twist).
+# Targets 15-35 trades/year to avoid fee drag.
 
-name = "1D_WilliamsAlligator_ElderRay_Trend_Filter"
-timeframe = "1d"
+name = "6H_Ichimoku_Cloud_Twist_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,62 +24,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: SMAs of median price (HL/2)
-    median_price = (high + low) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # Blue line (13)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # Red line (8)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # Green line (5)
+    # Ichimoku components (9, 26, 52)
+    tenkan = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+              pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    kijun = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+             pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    senkou_a = ((tenkan + kijun) / 2)
+    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2)
     
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Shift Senkou spans forward by 26 periods (cloud ahead)
+    senkou_a = np.roll(senkou_a, 26)
+    senkou_b = np.roll(senkou_b, 26)
+    senkou_a[:26] = np.nan
+    senkou_b[:26] = np.nan
+    
+    # Cloud color: green if Senkou A > Senkou B, red otherwise
+    cloud_green = senkou_a > senkou_b
+    
+    # Twist: Tenkan/Kijun cross
+    twist_up = tenkan > kijun
+    twist_down = tenkan < kijun
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 1.5
     
-    # Weekly trend filter: EMA 50
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily trend filter: cloud color from 1d timeframe
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    senkou_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                    pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
+    senkou_a_1d = np.roll(senkou_a_1d, 26)
+    senkou_b_1d = np.roll(senkou_b_1d, 26)
+    senkou_a_1d[:26] = np.nan
+    senkou_b_1d[:26] = np.nan
+    
+    cloud_green_1d = senkou_a_1d > senkou_b_1d
+    cloud_green_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_green_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 52  # Need enough history for Ichimoku
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or \
+           np.isnan(vol_threshold[i]) or np.isnan(cloud_green_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator aligned: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        is_green_cloud = cloud_green_1d_aligned[i] > 0.5  # True if 1d cloud is green
+        is_red_cloud = cloud_green_1d_aligned[i] <= 0.5   # True if 1d cloud is red
         
         if position == 0:
-            # Long entry: Alligator aligned up + Bull Power positive + volume confirmation + weekly uptrend
-            if alligator_long and bull_power[i] > 0 and volume[i] > vol_threshold[i] and close[i] > ema_50_1w_aligned[i]:
+            # Long entry: Green cloud from 1d + bullish twist + volume confirmation
+            if is_green_cloud and twist_up[i] and volume[i] > vol_threshold[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Alligator aligned down + Bear Power negative + volume confirmation + weekly downtrend
-            elif alligator_short and bear_power[i] < 0 and volume[i] > vol_threshold[i] and close[i] < ema_50_1w_aligned[i]:
+            # Short entry: Red cloud from 1d + bearish twist + volume confirmation
+            elif is_red_cloud and twist_down[i] and volume[i] > vol_threshold[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator alignment breaks or Bull Power turns negative
-            if not alligator_long or bull_power[i] <= 0:
+            # Long exit: Red cloud or bearish twist
+            if is_red_cloud or twist_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator alignment breaks or Bear Power turns positive
-            if not alligator_short or bear_power[i] >= 0:
+            # Short exit: Green cloud or bullish twist
+            if is_green_cloud or twist_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
