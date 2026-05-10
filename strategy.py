@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Breakout_1dTrend
-# Hypothesis: 12h Camarilla Pivot (R1/S1) breakout with 1d EMA34 trend filter and volume confirmation.
-# Uses 1d trend direction for signal bias, 12h for entry. Volume filter ensures breakouts have conviction.
-# Targets 15-25 trades/year to minimize fee drag. Works in bull/bear by trading breakouts with trend alignment.
+# 12h_Camarilla_Pivot_Breakout_1dTrend_VolumeFilter
+# Hypothesis: 12h breakouts of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume confirmation.
+# Uses daily trend for bias, 12h for entry timing. Targets 15-25 trades/year to minimize fee drag.
+# Works in bull/bear by trading breakouts aligned with higher-timeframe trend.
 
-name = "12h_Camarilla_Pivot_Breakout_1dTrend"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_VolumeFilter"
 timeframe = "12h"
 leverage = 1.0
 
