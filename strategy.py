@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Breakout of Camarilla R3/S3 levels on 4h with daily trend and volume confirmation.
-# Works in bull/bear by following daily trend and using volume to filter false breakouts.
+# 4H_Camarilla_Pullback_Trend
+# Hypothesis: Buy pullbacks to Camarilla pivot levels during strong trends with volume confirmation.
+# Uses 4h Camarilla levels calculated from previous day's OHLC.
+# Long when: price pulls back to Camarilla L3/S3 level during uptrend (ADX>25) with volume > 1.5x average.
+# Short when: price pulls back to Camarilla H3/H4 level during downtrend (ADX>25) with volume > 1.5x average.
+# Uses 1d trend filter: only trade in direction of daily EMA50 trend.
+# Works in bull/bear by following trend and using volume to confirm institutional interest.
 # Target: 20-40 trades/year per symbol.
 
-name = "4H_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+name = "4H_Camarilla_Pullback_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,37 +26,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # For each 4h bar, use previous day's high, low, close
-    # We'll calculate daily HLC first, then shift to get previous day
+    # 4h indicators
+    close_s = pd.Series(close)
+    volume_s = pd.Series(volume)
     
-    # Get daily data
+    # ADX for trend strength (14-period)
+    # +DM and -DM
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Wilder's smoothing
+    atr = np.zeros_like(tr)
+    if len(tr) > 0:
+        atr[0] = tr[0]
+        for i in range(1, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # +DI and -DI
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / 
+                     pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / 
+                      pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # Prepend NaN for alignment (since we lost first bar in calculations)
+    adx = np.concatenate([np.full(1, np.nan), adx])
+    
+    # Volume average (20-period)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate Camarilla levels from previous day's OHLC
+    # Need daily OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Previous day's OHLC for Camarilla
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla formula: 
+    # H4 = close + 1.5 * (high - low)
+    # H3 = close + 1.1 * (high - low)
+    # L3 = close - 1.1 * (high - low)
+    # L4 = close - 1.5 * (high - low)
+    high_low = prev_high - prev_low
+    H3 = prev_close + 1.1 * high_low
+    L3 = prev_close - 1.1 * high_low
+    
+    # Align Camarilla levels to 4h (use previous day's levels)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Daily trend filter
     close_1d = df_1d['close'].values
-    
-    # Previous day's values (shift by 1)
-    prev_high_1d = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low_1d = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close_1d = np.concatenate([[np.nan], close_1d[:-1]])
-    
-    # Calculate Camarilla levels for previous day
-    # R3 = C + (H-L)*1.1/2
-    # S3 = C - (H-L)*1.1/2
-    rng = prev_high_1d - prev_low_1d
-    camarilla_r3 = prev_close_1d + rng * 1.1 / 2
-    camarilla_s3 = prev_close_1d - rng * 1.1 / 2
-    
-    # Align Camarilla levels to 4h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Daily trend filter: EMA50
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     daily_uptrend = close_1d > ema50_1d
     daily_downtrend = close_1d < ema50_1d
@@ -61,53 +95,52 @@ def generate_signals(prices):
     daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
     daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
-    # Volume filter: 20-period average
-    volume_s = pd.Series(volume)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(H3_aligned[i]) or np.isnan(L3_aligned[i]) or
+            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        strong_trend = adx[i] > 25
         volume_confirm = vol_ratio > 1.5
         
         daily_up = daily_uptrend_aligned[i] > 0.5
         daily_down = daily_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: price breaks above R3 with daily uptrend and volume
-            if daily_up and volume_confirm and close[i] > camarilla_r3_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: price breaks below S3 with daily downtrend and volume
-            elif daily_down and volume_confirm and close[i] < camarilla_s3_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Enter long: daily uptrend + strong 4h trend + price near L3 + volume
+            if daily_up and strong_trend and volume_confirm:
+                if close[i] >= L3_aligned[i] * 0.995 and close[i] <= L3_aligned[i] * 1.005:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: daily downtrend + strong 4h trend + price near H3 + volume
+            elif daily_down and strong_trend and volume_confirm:
+                if close[i] >= H3_aligned[i] * 0.995 and close[i] <= H3_aligned[i] * 1.005:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit: price moves back below R3 or trend changes
-            if close[i] < camarilla_r3_aligned[i] or not daily_up:
+            # Exit conditions: trend weakens or price moves away from L3
+            if not daily_up or not strong_trend or close[i] < L3_aligned[i] * 0.98:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price moves back above S3 or trend changes
-            if close[i] > camarilla_s3_aligned[i] or not daily_down:
+            # Exit conditions: trend weakens or price moves away from H3
+            if not daily_down or not strong_trend or close[i] > H3_aligned[i] * 1.02:
                 signals[i] = 0.0
                 position = 0
             else:
