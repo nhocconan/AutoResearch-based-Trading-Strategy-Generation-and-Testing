@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-# 4H_BollingerBand_Breakout_Volume_Trend_Filter
-# Hypothesis: Bollinger Band breakouts above the upper band indicate strong upward momentum, while breaks below the lower band indicate strong downward momentum.
-# Combined with volume confirmation (volume > 2x 20-period average) to filter false breakouts and a 1-day EMA50 trend filter to ensure alignment with the higher timeframe trend.
-# Designed for low trade frequency (~15-30/year) with discrete sizing (0.25) to minimize fee drag. Works in both bull and bear markets by following the trend.
+# 4H_Donchian_Breakout_Volume_Trend_12h
+# Hypothesis: Donchian channel (20-period high/low) breakouts signal strong momentum.
+# Entry requires breakout above upper band (long) or below lower band (short) with volume > 1.5x 20-period average.
+# Trend filter uses 12h EMA50 to align with higher timeframe trend, reducing false signals in chop.
+# Exit occurs when price reverts to the 20-period EMA, capturing mean reversion within the trend.
+# Designed for low trade frequency (~20-40/year) with discrete sizing (0.25) to minimize fee drag.
+# Works in bull/bear markets by following the higher timeframe trend.
 
-name = "4H_BollingerBand_Breakout_Volume_Trend_Filter"
+name = "4H_Donchian_Breakout_Volume_Trend_12h"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,21 +25,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands: 20-period SMA with 2 standard deviations
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
+    # Donchian Channel: 20-period high/low
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.5
     
-    # Daily trend filter: EMA 50
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 12h trend filter: EMA 50
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Exit EMA: 20-period EMA for mean reversion exit
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,38 +48,31 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(ema_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get daily close for trend determination
-        close_1d_series = pd.Series(close_1d)
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_series.values)
-        
-        is_uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        is_downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
-        
         if position == 0:
-            # Long entry: Price breaks above upper Bollinger Band + volume confirmation + daily uptrend
-            if close[i] > upper_band[i] and volume[i] > vol_threshold[i] and is_uptrend:
+            # Long entry: Price breaks above Donchian upper band + volume confirmation + 12h uptrend
+            if close[i] > high_20[i] and volume[i] > vol_threshold[i] and close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below lower Bollinger Band + volume confirmation + daily downtrend
-            elif close[i] < lower_band[i] and volume[i] > vol_threshold[i] and is_downtrend:
+            # Short entry: Price breaks below Donchian lower band + volume confirmation + 12h downtrend
+            elif close[i] < low_20[i] and volume[i] > vol_threshold[i] and close[i] < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below the 20-period SMA (mean reversion signal)
-            if close[i] < sma20[i]:
+            # Long exit: Price crosses below 20-period EMA (mean reversion)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above the 20-period SMA (mean reversion signal)
-            if close[i] > sma20[i]:
+            # Short exit: Price crosses above 20-period EMA (mean reversion)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
