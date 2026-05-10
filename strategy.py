@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1_S1_Breakout_TrailingStop_v2
-# Hypothesis: 4h breakout above/below daily Camarilla R1/S1 with volume confirmation and ATR-based trailing stop.
-# Uses daily trend filter (price > daily EMA50) for bias. Designed for low trade frequency (<25/year) to avoid fee drag.
-# Works in bull/bear via daily trend filter and volatility-adjusted exits.
+# 4h_1d_Donchian20_Trend_Volume
+# Hypothesis: 4h breakout above/below 20-period Donchian channel with daily EMA50 trend filter and volume confirmation.
+# Uses ATR-based trailing stop to capture trends while limiting drawdown. Designed for low trade frequency (<30/year)
+# to avoid fee drag. Works in bull/bear via daily trend filter and volatility-adjusted exits.
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_TrailingStop_v2"
+name = "4h_1d_Donchian20_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for trend filter and Camarilla levels
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -33,19 +33,9 @@ def generate_signals(prices):
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Daily high, low, close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1 = close + 1.1*(high-low)/12
-    # Camarilla S1 = close - 1.1*(high-low)/12
-    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align R1 and S1 to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # 4h Donchian channel (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # ATR for volatility and trailing stop
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -54,7 +44,7 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]  # first bar
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume confirmation (2.5x 20-period average)
+    # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -68,8 +58,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -83,17 +73,17 @@ def generate_signals(prices):
         bullish_trend = close[i] > ema_50_aligned[i]
         bearish_trend = close[i] < ema_50_aligned[i]
         
-        # Volume confirmation (2.5x average)
-        volume_surge = volume[i] > 2.5 * vol_ma[i]
+        # Volume confirmation (2.0x average)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above R1 in bullish trend with volume surge
-            if close[i] > r1_aligned[i] and bullish_trend and volume_surge:
+            # Long: breakout above 20-period high in bullish trend with volume surge
+            if close[i] > high_20[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: breakdown below S1 in bearish trend with volume surge
-            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge:
+            # Short: breakdown below 20-period low in bearish trend with volume surge
+            elif close[i] < low_20[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
