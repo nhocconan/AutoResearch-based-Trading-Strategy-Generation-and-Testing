@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6H_Ichimoku_Cloud_1dTrend_PriceAction
-Hypothesis: Ichimoku cloud (TK cross + cloud color) from 1d timeframe combined with 6h price action (close > open for long, close < open for short) captures trend continuation with low trade frequency. Uses only price action and 1d Ichimoku components to avoid overfitting. Designed for 6-12 trades/year per symbol to minimize fee drag while capturing major trend moves in both bull and bear markets.
+4H_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter
+Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d trend (ADX > 25) capture directional moves in trending markets. Avoids choppy markets using ADX filter to reduce false signals and lower trade frequency. Designed for low trade frequency (<30/year) to minimize fee drift while maintaining edge in both bull and bear markets by following strong trends.
 """
 
-name = "6H_Ichimoku_Cloud_1dTrend_PriceAction"
-timeframe = "6h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,92 +20,110 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # 1d data for Ichimoku calculation
+    # 1d data for Camarilla and ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:  # Need at least 52 periods for Ichimoku
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    # Previous 1d bar for Camarilla calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Ichimoku components (standard settings: 9, 26, 52)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Calculate Camarilla levels from previous 1d bar
+    range_1d = high_1d - low_1d
+    s1 = close_1d - (range_1d * 1.08333)
+    r1 = close_1d + (range_1d * 1.08333)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
+    # Align to 4h timeframe (wait for 1d bar to close)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # 1d ADX filter for trend strength (avoid choppy markets)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smooth using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+        def wilders_smoothing(arr, period):
+            result = np.full_like(arr, np.nan)
+            if len(arr) < period:
+                return result
+            # First value is simple average
+            result[period-1] = np.nansum(arr[1:period]) / period
+            # Subsequent values: Wilder's smoothing
+            for i in range(period, len(arr)):
+                result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        plus_di = 100 * wilders_smoothing(plus_dm, period) / wilders_smoothing(tr, period)
+        minus_di = 100 * wilders_smoothing(minus_dm, period) / wilders_smoothing(tr, period)
+        dx = np.zeros_like(high)
+        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = wilders_smoothing(dx, period)
+        return adx
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    # Volume filter: volume > 2.0x 20-period average (tight to reduce trades)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Warmup for Ichimoku (52 periods)
+    start_idx = max(34, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        # Skip if any Ichimoku component is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i])):
+        if np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud color and TK cross
-        # Green cloud: Senkou A > Senkou B (bullish)
-        # Red cloud: Senkou A < Senkou B (bearish)
-        # TK cross: Tenkan > Kijun (bullish), Tenkan < Kijun (bearish)
-        bullish_cloud = senkou_a_aligned[i] > senkou_b_aligned[i]
-        bearish_cloud = senkou_a_aligned[i] < senkou_b_aligned[i]
-        tk_bullish = tenkan_aligned[i] > kijun_aligned[i]
-        tk_bearish = tenkan_aligned[i] < kijun_aligned[i]
-        
-        # Price action: bullish/bearish candle
-        bullish_candle = close[i] > open_price[i]
-        bearish_candle = close[i] < open_price[i]
+        # Check for trending market (ADX > 25)
+        is_trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long entry: Price above cloud + TK bullish cross + bullish candle
-            if (close[i] > senkou_a_aligned[i] and close[i] > senkou_b_aligned[i] and
-                tk_bullish and bullish_candle):
+            # Long entry: Price breaks above R1 + volume confirmation + trending market
+            if (close[i] > r1_aligned[i] and 
+                volume[i] > vol_threshold[i] and 
+                is_trending):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price below cloud + TK bearish cross + bearish candle
-            elif (close[i] < senkou_a_aligned[i] and close[i] < senkou_b_aligned[i] and
-                  tk_bearish and bearish_candle):
+            # Short entry: Price breaks below S1 + volume confirmation + trending market
+            elif (close[i] < s1_aligned[i] and 
+                  volume[i] > vol_threshold[i] and 
+                  is_trending):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below cloud OR TK bearish cross
-            if (close[i] < senkou_a_aligned[i] or close[i] < senkou_b_aligned[i] or
-                tk_bearish):
+            # Long exit: Price crosses below S1 (opposite side)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above cloud OR TK bullish cross
-            if (close[i] > senkou_a_aligned[i] or close[i] > senkou_b_aligned[i] or
-                tk_bullish):
+            # Short exit: Price crosses above R1 (opposite side)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
