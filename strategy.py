@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1D_1W_KAMA_Trend_Filter_With_Volume_Spike
-# Hypothesis: On 1d timeframe, enter long when KAMA turns bullish (price > KAMA) with weekly uptrend and volume spike (>2x 20-day average).
-# Enter short when KAMA turns bearish (price < KAMA) with weekly downtrend and volume spike.
-# Uses weekly trend filter to avoid counter-trend trades and volume spike for confirmation.
-# Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+# 6H_1D_WilliamsVIX_Fix_Breakout_Trend
+# Hypothesis: In both bull and bear markets, extreme price movements often reverse after reaching exhaustion.
+# Williams VIX Fix identifies market bottoms/tops by measuring how close the low is to the highest high
+# over a lookback period. We use this on daily timeframe to detect potential reversals, then enter on
+# 6H breakouts in the direction of the reversal with trend confirmation. This captures mean reversion
+# after panic selling or euphoric buying, which occurs in both bull and bear markets.
 
-name = "1D_1W_KAMA_Trend_Filter_With_Volume_Spike"
-timeframe = "1d"
+name = "6H_1D_WilliamsVIX_Fix_Breakout_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,91 +16,82 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Williams VIX Fix and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 22:  # Need enough for 22-period calculation
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    # Handle first 10 values
-    er = np.full_like(change, np.nan, dtype=float)
-    er[10:] = change[10:] / np.maximum(volatility[10:], 1e-10)
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan, dtype=float)
-    kama[9] = close[9]  # start at index 9
-    for i in range(10, len(close)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Williams VIX Fix: measures how close the low is to the highest high
+    # Higher values indicate potential market bottoms
+    # wvf = ((highest_high - low) / (highest_high - lowest_low)) * 100
+    # We invert it so high values = potential bottom
+    highest_high = pd.Series(high_1d).rolling(window=22, min_periods=22).max().values
+    lowest_low = pd.Series(low_1d).rolling(window=22, min_periods=22).min().values
+    # Avoid division by zero
+    rr = highest_high - lowest_low
+    rr[rr == 0] = 1e-10
+    wvf = ((highest_high - low_1d) / rr) * 100
     
-    # KAMA trend: price above/below KAMA
-    kama_bullish = close > kama
-    kama_bearish = close < kama
+    # Signal when WVF is high (indicating potential bottom) or low (indicating potential top)
+    # We'll use extreme values: above 80 for potential bottom, below 20 for potential top
+    wvf_high_signal = wvf > 80   # Potential bottom - look for longs
+    wvf_low_signal = wvf < 20    # Potential top - look for shorts
     
-    # Weekly trend: EMA(21) on weekly close
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    weekly_uptrend = close_1w > ema_21_1w
-    weekly_downtrend = close_1w < ema_21_1w
+    # 1d trend filter: EMA(50) to avoid counter-trend trades in strong trends
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = close_1d > ema_50
     
-    # Volume spike: current volume > 2x 20-day average
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (volume_avg * 2.0)
-    
-    # Align weekly indicators to daily
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
+    # Align 1d indicators to 6h
+    wvf_high_aligned = align_htf_to_ltf(prices, df_1d, wvf_high_signal)
+    wvf_low_aligned = align_htf_to_ltf(prices, df_1d, wvf_low_signal)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(kama[i]) or np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]):
+        if np.isnan(wvf_high_aligned[i]) or np.isnan(wvf_low_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: price > KAMA (bullish) + weekly uptrend + volume spike
-            if kama_bullish[i] and weekly_uptrend_aligned[i] and volume_spike[i]:
+            # Enter long: potential bottom signal + uptrend (buy the dip in uptrend)
+            if wvf_high_aligned[i] and trend_up_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price < KAMA (bearish) + weekly downtrend + volume spike
-            elif kama_bearish[i] and weekly_downtrend_aligned[i] and volume_spike[i]:
+            # Enter short: potential top signal + downtrend (sell the rally in downtrend)
+            elif wvf_low_aligned[i] and not trend_up_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price < KAMA (turn bearish) or weekly trend changes
-            if kama_bearish[i] or not weekly_uptrend_aligned[i]:
+            # Exit long: potential top signal or trend turns down
+            if wvf_low_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price > KAMA (turn bullish) or weekly trend changes
-            if kama_bullish[i] or not weekly_downtrend_aligned[i]:
+            # Exit short: potential bottom signal or trend turns up
+            if wvf_high_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
