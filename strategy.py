@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12H_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend alignment capture directional moves. Designed for 12h timeframe to reduce trade frequency (<25/year) while maintaining edge in both bull and bear markets by following 1d trend.
+4H_Camarilla_R1_S1_Breakout_1dTrend_PriceAction
+Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend alignment capture directional moves. Uses price action (close > open) to avoid false breakouts in sideways markets. Designed for low trade frequency (<30/year) to minimize fee drag while maintaining edge in both bull and bear markets by following 1d trend.
 """
 
-name = "12H_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_PriceAction"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -37,7 +37,7 @@ def generate_signals(prices):
     s1 = close_1d - (range_1d * 1.08333)
     r1 = close_1d + (range_1d * 1.08333)
     
-    # Align to 12h timeframe (wait for 1d bar to close)
+    # Align to 4h timeframe (wait for 1d bar to close)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
@@ -45,9 +45,13 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 2.0x 20-period average (tight to reduce trades)
+    # Volume filter: volume > 1.8x 20-period average (tight to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.8
+    
+    # Price action filter: close > open (bullish candle) or close < open (bearish candle)
+    bullish_candle = close > prices['open'].values
+    bearish_candle = close < prices['open'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,16 +70,18 @@ def generate_signals(prices):
         is_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Price breaks above R1 + volume confirmation + 1d uptrend
+            # Long entry: Price breaks above R1 + volume confirmation + 1d uptrend + bullish candle
             if (close[i] > r1_aligned[i] and 
                 volume[i] > vol_threshold[i] and 
-                is_uptrend):
+                is_uptrend and 
+                bullish_candle[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 + volume confirmation + 1d downtrend
+            # Short entry: Price breaks below S1 + volume confirmation + 1d downtrend + bearish candle
             elif (close[i] < s1_aligned[i] and 
                   volume[i] > vol_threshold[i] and 
-                  is_downtrend):
+                  is_downtrend and 
+                  bearish_candle[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
