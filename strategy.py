@@ -1,7 +1,8 @@
-# 4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter_v3
-# Hypothesis: Use 1d trend filter (EMA200) to avoid counter-trend trades and reduce false breakouts, combined with volume spike confirmation. Should work in both bull and bear markets by following 1d trend direction, with low trade frequency (<30 trades/year) to minimize fee drag.
+#!/usr/bin/env python3
+# 4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
+# Hypothesis: This strategy uses daily trend direction (EMA 50) to filter Camarilla breakout entries, ensuring trades align with the higher timeframe trend. By using 1d EMA instead of 12h, we reduce noise and increase signal reliability. Volume confirmation (>2x average) ensures momentum behind breakouts. Designed for low trade frequency (target: 20-40/year) to minimize fee drag, with discrete position sizing (0.25) to avoid churn. Works in both bull and bear markets by following the 1d trend, avoiding counter-trend trades.
 
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter_v3"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -11,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -19,14 +20,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA200) and Camarilla pivot calculation
+    # Get 1d data for EMA trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(200) for trend direction
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
+    # We reuse df_1d for pivots
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
     # Calculate Camarilla levels from prior day's OHLC
     # R1 = C + ((H-L) * 1.1 / 12)
@@ -38,14 +44,14 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Volume filter: volume > 2.0x 24-period average on 4h chart
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: volume > 2x 20-period average on 4h chart
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 24)  # Warmup for EMA and volume MA
+    start_idx = max(50, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         if np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
@@ -54,18 +60,18 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA200
+        # Trend filter: price above/below 1d EMA50
         price_above_ema = close[i] > ema_1d_aligned[i]
         price_below_ema = close[i] < ema_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above R1 + above 1d EMA200 + volume spike
+            # Long entry: price breaks above R1 + above 1d EMA + volume spike
             if (close[i] > r1_aligned[i] and 
                 price_above_ema and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 + below 1d EMA200 + volume spike
+            # Short entry: price breaks below S1 + below 1d EMA + volume spike
             elif (close[i] < s1_aligned[i] and 
                   price_below_ema and 
                   volume[i] > vol_threshold[i]):
