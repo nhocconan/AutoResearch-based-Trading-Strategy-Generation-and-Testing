@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Choppy_Market_Mean_Reversion
-# Hypothesis: In choppy markets (high chop index), price tends to revert to the mean.
-# Use daily chop index to filter for ranging conditions, then trade mean reversion at
-# Bollinger Band extremes (2 std dev) with volume confirmation.
-# Works in both bull and bear markets because chop index identifies ranging regimes
-# that occur regardless of trend direction. Targets 20-40 trades/year to minimize fee drag.
+# 4h_RSI_Trend_Filter_with_Volume_Confirmation
+# Hypothesis: RSI(14) oversold/overbought combined with daily EMA trend filter and volume spike.
+# In uptrend (price > daily EMA34), go long when RSI < 30 and volume > 1.5x MA.
+# In downtrend (price < daily EMA34), go short when RSI > 70 and volume > 1.5x MA.
+# Exits when RSI returns to neutral zone (40-60) or trend reverses.
+# Works in bull/bear by aligning with daily trend. Targets 20-40 trades/year to minimize fee drag.
 
-name = "6h_Choppy_Market_Mean_Reversion"
-timeframe = "6h"
+name = "4h_RSI_Trend_Filter_with_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,85 +16,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for chop index and Bollinger Bands
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Chop Index (14-period)
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    # RSI(14) calculation
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    tr = true_range(df_1d['high'], df_1d['low'], np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].iloc[:-1]]))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Chop Index: 100 * log10(sum(TR14) / (ATR14 * 14)) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(tr_sum / (atr14 * 14)) / np.log10(14)
-    
-    # Bollinger Bands (20, 2)
-    bb_middle = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(df_1d['close']).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    
-    # Align daily indicators to 6h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
-    bb_upper_aligned = align_htf_to_ltf(prices, df_1d, bb_upper)
-    bb_lower_aligned = align_htf_to_ltf(prices, df_1d, bb_lower)
-    bb_middle_aligned = align_htf_to_ltf(prices, df_1d, bb_middle)
-    
-    # Volume confirmation (20-period MA on 6x)
+    # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for chop (34) and BB (20)
+    start_idx = max(14, 34, 20)  # Warmup for RSI, daily EMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(chop_aligned[i]) or np.isnan(bb_upper_aligned[i]) or 
-            np.isnan(bb_lower_aligned[i]) or np.isnan(bb_middle_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Chop index > 61.8 indicates ranging/choppy market
-        chopping = chop_aligned[i] > 61.8
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
+        # RSI conditions
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
+        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
+        
         if position == 0:
-            # Long entry: price at lower BB + chopping market + volume confirmation
-            if close[i] <= bb_lower_aligned[i] and chopping and volume_confirm:
+            # Long entry: RSI oversold + uptrend + volume spike
+            if rsi_oversold and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price at upper BB + chopping market + volume confirmation
-            elif close[i] >= bb_upper_aligned[i] and chopping and volume_confirm:
+            # Short entry: RSI overbought + downtrend + volume spike
+            elif rsi_overbought and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches middle BB or chop ends
-            if close[i] >= bb_middle_aligned[i] or not chopping:
+            # Long exit: RSI returns to neutral or trend reversal
+            if rsi_neutral[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches middle BB or chop ends
-            if close[i] <= bb_middle_aligned[i] or not chopping:
+            # Short exit: RSI returns to neutral or trend reversal
+            if rsi_neutral[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
