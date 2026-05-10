@@ -84,8 +84,6 @@ def generate_signals(prices):
             continue
         
         # Determine trend from weekly EMA
-        uptrend = close_1w[-1] > ema_34_1w_aligned[i] if len(close_1w) > 0 else False  # Simplified: use current price vs EMA
-        # More robust: use aligned weekly close price
         close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
         uptrend = close_1w_aligned[i] > ema_34_1w_aligned[i]
         downtrend = close_1w_aligned[i] < ema_34_1w_aligned[i]
