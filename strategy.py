@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Chaikin_Oscillator_Trend_Confirmation
-# Hypothesis: Chaikin Oscillator (3,10) crossing zero with daily trend confirmation and volume spike filters captures momentum shifts in both bull and bear markets. Daily trend avoids counter-trend trades, volume reduces false signals. Designed for low frequency (~20-50 trades/year) to minimize fee drift.
+# 1d_KAMA_Trend_With_1wTrend_Filter
+# Hypothesis: On 1d timeframe, Kaufman Adaptive Moving Average (KAMA) adapts to market noise, reducing whipsaws in choppy markets. Combined with 1w trend filter, it avoids counter-trend trades during strong trends. Volume confirmation filters low-conviction moves. Designed for low frequency (~15-25 trades/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "4h_Chaikin_Oscillator_Trend_Confirmation"
-timeframe = "4h"
+name = "1d_KAMA_Trend_With_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,34 +15,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Money Flow Multiplier and Volume
-    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
-    mfv = mfm * volume
-    
-    # Chaikin Oscillator: (3-period EMA of MFV) - (10-period EMA of MFV)
-    mfv_series = pd.Series(mfv)
-    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean().values
-    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean().values
-    chaikin = ema3 - ema10
-    
-    # Daily trend filter: EMA50 on daily close
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    # KAMA (10, 2, 30) - adaptive moving average
+    close_series = pd.Series(close)
+    # Efficiency Ratio
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series.diff()).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Handle NaN/inf
+    sc = sc.fillna(0).replace([np.inf, -np.inf], 0)
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align daily trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Weekly trend: EMA34 on weekly close
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = close_1w > ema34_1w
+    trend_1w_down = close_1w < ema34_1w
+    
+    # Align weekly trend to daily
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
     # Volume confirmation: 20-period average
     volume_series = pd.Series(volume)
@@ -51,14 +61,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    # Start after we have enough data
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(chaikin[i]) or 
-            np.isnan(trend_1d_up_aligned[i]) or 
-            np.isnan(trend_1d_down_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(trend_1w_up_aligned[i]) or 
+            np.isnan(trend_1w_down_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +77,30 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: Chaikin crosses above zero with daily uptrend and volume
-            if chaikin[i] > 0 and chaikin[i-1] <= 0 and trend_1d_up_aligned[i] > 0.5 and volume_confirm:
+            # Enter long: price above KAMA with weekly uptrend and volume
+            if (close[i] > kama[i] and 
+                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Chaikin crosses below zero with daily downtrend and volume
-            elif chaikin[i] < 0 and chaikin[i-1] >= 0 and trend_1d_down_aligned[i] > 0.5 and volume_confirm:
+            # Enter short: price below KAMA with weekly downtrend and volume
+            elif (close[i] < kama[i] and 
+                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when Chaikin crosses below zero or trend fails
-            if chaikin[i] < 0 and chaikin[i-1] >= 0 or trend_1d_up_aligned[i] < 0.5:
+            # Exit when price crosses below KAMA or trend fails
+            if (close[i] < kama[i] or 
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when Chaikin crosses above zero or trend fails
-            if chaikin[i] > 0 and chaikin[i-1] <= 0 or trend_1d_down_aligned[i] < 0.5:
+            # Exit when price crosses above KAMA or trend fails
+            if (close[i] > kama[i] or 
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
