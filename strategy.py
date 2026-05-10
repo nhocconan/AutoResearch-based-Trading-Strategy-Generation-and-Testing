@@ -1,12 +1,12 @@
-#/usr/bin/env python3
-# 6h_1d_AngleBasedBreakout_TrendFilter
-# Hypothesis: 6h breakout from daily Donchian(20) channels with angle-based momentum filter (price slope > 0 for longs, < 0 for shorts) and volume confirmation.
-# Uses daily trend via EMA50 slope for bias and volume spike to avoid false breakouts.
-# Designed for low trade frequency (~15-30/year) to minimize fee bear in bear markets.
-# Angle filter ensures breakouts have momentum, not just random spikes.
+#!/usr/bin/env python3
+# 12h_1d_Camarilla_R1_S1_Breakout_TrendFilter
+# Hypothesis: 12h breakout from daily Camarilla pivot R1/S1 levels with trend filter using daily EMA34 slope and volume confirmation.
+# Uses daily trend via EMA34 slope for bias and volume spike to avoid false breakouts.
+# Designed for low trade frequency (~15-30/year) to minimize fee drag in bear markets.
+# Camarilla levels provide precise support/resistance; EMA34 slope filters trend direction; volume surge confirms breakout validity.
 
-name = "6h_1d_AngleBasedBreakout_TrendFilter"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_TrendFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,31 +18,41 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for Donchian channels and trend filter
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
+    # Daily OHLC for Camarilla calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Align Donchian levels to 6h timeframe
-    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-    
-    # Daily EMA50 for trend filter (using slope)
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_slope = np.diff(ema_50_1d, prepend=ema_50_1d[0])  # slope = today - yesterday
+    
+    # Calculate daily Camarilla levels (based on previous day)
+    # Camarilla formulas: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + range_1d * 1.1 / 12
+    camarilla_s1 = close_1d - range_1d * 1.1 / 12
+    
+    # Shift by 1 to use previous day's levels (avoid look-ahead)
+    camarilla_r1 = np.roll(camarilla_r1, 1)
+    camarilla_s1 = np.roll(camarilla_s1, 1)
+    camarilla_r1[0] = np.nan  # First value invalid
+    camarilla_s1[0] = np.nan
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Daily EMA34 for trend filter (using slope)
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_slope = np.diff(ema_34_1d, prepend=ema_34_1d[0])  # slope = today - yesterday
     ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
     
     # ATR for volatility and trailing stop
@@ -65,8 +75,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donch_high_aligned[i]) or
-            np.isnan(donch_low_aligned[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(ema_slope_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
@@ -77,7 +87,7 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from daily EMA50 slope
+        # Trend filter from daily EMA34 slope
         bullish_trend = ema_slope_aligned[i] > 0
         bearish_trend = ema_slope_aligned[i] < 0
         
@@ -85,13 +95,13 @@ def generate_signals(prices):
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above Donchian high in bullish trend with volume surge
-            if close[i] > donch_high_aligned[i] and bullish_trend and volume_surge:
+            # Long: breakout above Camarilla R1 in bullish trend with volume surge
+            if close[i] > camarilla_r1_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: breakdown below Donchian low in bearish trend with volume surge
-            elif close[i] < donch_low_aligned[i] and bearish_trend and volume_surge:
+            # Short: breakdown below Camarilla S1 in bearish trend with volume surge
+            elif close[i] < camarilla_s1_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
