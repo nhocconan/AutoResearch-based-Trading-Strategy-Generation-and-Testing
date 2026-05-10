@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_1dTrend_Filter
-# Hypothesis: Elder Ray (Bull/Bear Power) identifies bullish/bearish momentum via EMA13 deviation.
-# Combined with 1-day EMA50 trend filter to avoid counter-trend trades.
-# Long when: 1-day trend up (close > EMA50_1d) AND Bull Power > 0 AND rising.
-# Short when: 1-day trend down (close < EMA50_1d) AND Bear Power < 0 AND falling.
-# Works in bull markets (follows uptrends) and bear markets (follows downtrends).
-# Uses volume confirmation to avoid low-conviction signals.
+# 1d_WeeklyTrend_Follow_With_DailyPullback
+# Hypothesis: In multi-year crypto markets, strong weekly trends provide reliable directional bias.
+# We use weekly EMA20 as the primary trend filter and enter on daily pullbacks to daily EMA20.
+# Long when: weekly trend up (weekly close > weekly EMA20) AND daily price pulls back to touch daily EMA20 from below.
+# Short when: weekly trend down (weekly close < weekly EMA20) AND daily price pulls back to touch daily EMA20 from above.
+# This captures continuation moves in trending markets while avoiding counter-trend trades.
+# Works in both bull (follows strong uptrends) and bear (follows strong downtrends).
+# Uses volume confirmation to avoid low-conviction breakouts.
 
-name = "6h_ElderRay_1dTrend_Filter"
-timeframe = "6h"
+name = "1d_WeeklyTrend_Follow_With_DailyPullback"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,75 +26,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate EMA13 for Elder Ray (6h chart)
+    # Calculate daily EMA20 for pullback entries
     close_s = pd.Series(close)
-    ema_13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation (20-period MA on 6h chart)
+    # Volume confirmation (20-day MA on daily chart)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA13 (13), EMA50_1d (50), volume MA (20)
-    start_idx = max(13, 50, 20)
+    # Warmup: need EMA20 (20), weekly EMA20 (20), volume MA (20)
+    start_idx = max(20, 20, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_20_1w_aligned[i]
+        downtrend = close[i] < ema_20_1w_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Elder Ray signals with slope (rising/falling)
-        if i > 1:
-            bull_rising = bull_power[i] > bull_power[i-1]
-            bear_falling = bear_power[i] < bear_power[i-1]
+        # Price relative to daily EMA20 for pullback detection
+        if i > 0:
+            cross_above_ema20 = (close[i] > ema_20[i]) and (close[i-1] <= ema_20[i-1])
+            cross_below_ema20 = (close[i] < ema_20[i]) and (close[i-1] >= ema_20[i-1])
         else:
-            bull_rising = False
-            bear_falling = False
+            cross_above_ema20 = False
+            cross_below_ema20 = False
         
         if position == 0:
-            # Long entry: uptrend + Bull Power positive AND rising + volume
-            if uptrend and bull_power[i] > 0 and bull_rising and volume_confirm:
+            # Long entry: weekly uptrend + pullback to daily EMA20 from below + volume
+            if uptrend and cross_above_ema20 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + Bear Power negative AND falling + volume
-            elif downtrend and bear_power[i] < 0 and bear_falling and volume_confirm:
+            # Short entry: weekly downtrend + pullback to daily EMA20 from above + volume
+            elif downtrend and cross_below_ema20 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or Bull Power turns negative
-            if not uptrend or bull_power[i] <= 0:
+            # Long exit: weekly trend breaks or reversal signal
+            if not uptrend or cross_below_ema20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or Bear Power turns positive
-            if not downtrend or bear_power[i] >= 0:
+            # Short exit: weekly trend breaks or reversal signal
+            if not downtrend or cross_above_ema20:
                 signals[i] = 0.0
                 position = 0
             else:
