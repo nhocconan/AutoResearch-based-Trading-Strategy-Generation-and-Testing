@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-# 6h_PairsTrading_ETF_Spread_ZScore
-# Hypothesis: BTC and ETH often move together but exhibit mean-reverting spreads. 
-# We trade the ETH-BTC spread on 6h timeframe using Z-score of the ratio (ETH/BTC).
-# Long when spread is deeply undervalued (Z < -2.0) and short when overvalued (Z > 2.0).
-# Exit when spread reverts to mean (Z between -0.5 and 0.5).
-# This market-neutral strategy works in both bull and bear markets by capturing relative value extremes.
-# Uses 1-day EMA200 as trend filter to avoid trading against strong crypto trends.
+# 6h_WeeklyTrend_Follow_With_DailyPullback
+# Hypothesis: Weekly trend provides robust directional bias, while daily pullbacks offer high-probability entry points in trending markets. This strategy combines weekly trend direction with daily EMA pullbacks on the 6h chart, using volume confirmation to filter low-conviction moves. Works in both bull and bear markets by following the weekly trend.
 
-name = "6h_PairsTrading_ETF_Spread_ZScore"
+name = "6h_WeeklyTrend_Follow_With_DailyPullback"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,77 +12,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
-    # Note: This strategy assumes we're trading ETHUSDT or BTCUSDT.
-    # For true pairs trading we would need both symbols, but we approximate
-    # by using the ETH/BTC ratio concept via close price alone when trading ETH.
-    # In practice, this becomes a momentum-reversion hybrid on single asset.
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # For demonstration, we'll implement a simplified version:
-    # Use ETH price as proxy for ETH/BTC ratio when BTC is relatively stable
-    # Or treat as mean reversion on ETH itself with trend filter
-    
-    # Since we can't access paired symbol in single-symbol backtest,
-    # we'll use a different approach: Bollinger Band mean reversion with trend filter
-    
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Bollinger Bands on 6h
-    close_s = pd.Series(close)
-    length = 20
-    ma = close_s.ewm(span=length, adjust=False, min_periods=length).mean().values
-    std = close_s.rolling(window=length, min_periods=length).std().values
-    upper = ma + 2 * std
-    lower = ma - 2 * std
+    # Get daily data for EMA pullback
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Daily EMA200 for trend filter (avoid trading against strong trends)
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily EMA20 for pullback entries
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    
+    # Volume confirmation (24-period MA on 6h chart = 4 days)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need BB (20) and EMA200_1d (200)
-    start_idx = max(20, 200)
+    # Warmup: need weekly EMA50 (50), daily EMA20 (20), volume MA (24)
+    start_idx = max(50, 20, 24)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ma[i]) or np.isnan(std[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: only trade in direction of higher timeframe trend
-        uptrend = close[i] > ema_200_1d_aligned[i]
-        downtrend = close[i] < ema_200_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
+        
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        
+        # Price relative to daily EMA20 for pullback detection
+        if i > 0:
+            cross_above_ema20 = (close[i] > ema_20_1d_aligned[i]) and (close[i-1] <= ema_20_1d_aligned[i-1])
+            cross_below_ema20 = (close[i] < ema_20_1d_aligned[i]) and (close[i-1] >= ema_20_1d_aligned[i-1])
+        else:
+            cross_above_ema20 = False
+            cross_below_ema20 = False
         
         if position == 0:
-            # Long: price touches lower BB in uptrend (mean reversion up)
-            if uptrend and close[i] <= lower[i]:
+            # Long entry: weekly uptrend + pullback to daily EMA20 from below + volume
+            if weekly_uptrend and cross_above_ema20 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches upper BB in downtrend (mean reversion down)
-            elif downtrend and close[i] >= upper[i]:
+            # Short entry: weekly downtrend + pullback to daily EMA20 from above + volume
+            elif weekly_downtrend and cross_below_ema20 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to mean or trend breaks
-            if close[i] >= ma[i] or not uptrend:
+            # Long exit: weekly trend breaks or reversal signal
+            if not weekly_uptrend or cross_below_ema20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to mean or trend breaks
-            if close[i] <= ma[i] or not downtrend:
+            # Short exit: weekly trend breaks or reversal signal
+            if not weekly_downtrend or cross_above_ema20:
                 signals[i] = 0.0
                 position = 0
             else:
