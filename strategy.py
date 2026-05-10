@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-6h_LongTermTrend_PullbackWithVolume
-Hypothesis: Price respects long-term trend (1d EMA89) and tends to pull back to the 20-period EMA on 6h before continuing.
-Enter long when price pulls back to EMA20 in uptrend (EMA89 rising) with volume confirmation.
-Enter short when price rallies to EMA20 in downtrend (EMA89 falling) with volume confirmation.
-Uses volume spike (>1.5x 20-period volume average) to confirm momentum resumption.
-Targets 80-160 trades over 4 years (20-40/year) to balance opportunity and cost.
-Works in bull (buy dips) and bear (sell rallies) by following the higher timeframe trend.
+4h_Bollinger_Bands_Mean_Reversion_With_Trend_Filter
+Hypothesis: In ranging markets, price tends to revert from Bollinger Bands extremes.
+In trending markets, price tends to stay within the upper/lower band.
+Use Bollinger Bands (20,2) on 4h with trend filter from 1d EMA34 and volume confirmation.
+Long when price touches lower band in uptrend with volume spike.
+Short when price touches upper band in downtrend with volume spike.
+Exit when price returns to middle band or trend reverses.
+Targets 80-150 trades over 4 years (20-38/year) to balance opportunity and fee cost.
+Works in both bull (buy dips to lower band) and bear (sell rallies to upper band).
 """
 
-name = "6h_LongTermTrend_PullbackWithVolume"
-timeframe = "6h"
+name = "4h_Bollinger_Bands_Mean_Reversion_With_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +21,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,73 +29,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA89 for long-term trend filter
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema89_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 89:
-        ema89_1d[88] = np.mean(close_1d[:89])
-        alpha = 2 / (89 + 1)
-        for i in range(89, len(close_1d)):
-            ema89_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema89_1d[i-1]
-    ema89_1d_prev = np.roll(ema89_1d, 1)
-    ema89_1d_prev[0] = np.nan
-    ema89_rising = ema89_1d > ema89_1d_prev
-    ema89_falling = ema89_1d < ema89_1d_prev
-    ema89_1d_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
-    ema89_rising_aligned = align_htf_to_ltf(prices, df_1d, ema89_rising)
-    ema89_falling_aligned = align_htf_to_ltf(prices, df_1d, ema89_falling)
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 6h EMA20 for pullback target
-    ema20 = np.full(n, np.nan)
-    if n >= 20:
-        ema20[19] = np.mean(close[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, n):
-            ema20[i] = alpha * close[i] + (1 - alpha) * ema20[i-1]
+    # 1d volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # 6h volume SMA20 for volume confirmation
-    vol_sma20 = np.full(n, np.nan)
-    if n >= 20:
-        vol_sma20[19] = np.mean(volume[:20])
-        for i in range(20, n):
-            vol_sma20[i] = (vol_sma20[i-1] * 19 + volume[i]) / 20
+    # Bollinger Bands (20,2) on 4h
+    bb_period = 20
+    bb_std = 2
+    sma_bb = np.full(n, np.nan)
+    std_bb = np.full(n, np.nan)
+    upper_bb = np.full(n, np.nan)
+    lower_bb = np.full(n, np.nan)
+    middle_bb = np.full(n, np.nan)
+    
+    if n >= bb_period:
+        for i in range(bb_period - 1, n):
+            sma_bb[i] = np.mean(close[i - bb_period + 1:i + 1])
+            std_bb[i] = np.std(close[i - bb_period + 1:i + 1])
+            upper_bb[i] = sma_bb[i] + bb_std * std_bb[i]
+            lower_bb[i] = sma_bb[i] - bb_std * std_bb[i]
+            middle_bb[i] = sma_bb[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(90, 20)  # Need EMA89 and EMA20
+    start_idx = max(bb_period, 34, 1)  # Need Bollinger Bands, EMA34, and volume
     
     for i in range(start_idx, n):
-        if np.isnan(ema89_1d_aligned[i]) or np.isnan(ema89_rising_aligned[i]) or \
-           np.isnan(ema89_falling_aligned[i]) or np.isnan(ema20[i]) or np.isnan(vol_sma20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or \
+           np.isnan(upper_bb[i]) or np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        volume_confirm = volume[i] > 1.5 * vol_sma20[i]
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
+        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h periods in 1d
+        volume_confirm = volume[i] > 1.5 * vol_4h_approx
         
         if position == 0:
-            # Long: Pullback to EMA20 in uptrend with volume confirmation
-            if ema89_rising_aligned[i] and close[i] <= ema20[i] * 1.001 and volume_confirm:
+            # Long: Price touches lower Bollinger Band in uptrend with volume confirmation
+            if close[i] <= lower_bb[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Rally to EMA20 in downtrend with volume confirmation
-            elif ema89_falling_aligned[i] and close[i] >= ema20[i] * 0.999 and volume_confirm:
+            # Short: Price touches upper Bollinger Band in downtrend with volume confirmation
+            elif close[i] >= upper_bb[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Trend reversal or extended move beyond 1.5x EMA20 deviation
-            if not ema89_rising_aligned[i] or close[i] >= ema20[i] * 1.03:
+            # Exit: Price returns to middle band or trend reverses to downtrend
+            if close[i] >= middle_bb[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Trend reversal or extended move beyond 1.5x EMA20 deviation
-            if not ema89_falling_aligned[i] or close[i] <= ema20[i] * 0.97:
+            # Exit: Price returns to middle band or trend reverses to uptrend
+            if close[i] <= middle_bb[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
