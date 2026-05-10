@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Daily Camarilla pivot levels R1/S1 act as key support/resistance. A break above R1 in a daily uptrend (close > EMA34) or below S1 in a daily downtrend signals momentum. Volume spike (>2x 20-period MA) confirms breakout strength. Tight entry conditions limit trades to avoid overtrading. Works in bull markets by riding uptrends and in bear by following downtrends.
+# 1d_WeeklyPivot_Breakout_Trend_Volume_v3
+# Hypothesis: Weekly pivot points (R1/S1) provide key support/resistance. Price breaking above R1 in a weekly uptrend (EMA34) or below S1 in a weekly downtrend indicates momentum. Volume confirmation filters false breakouts. Reduced trade frequency by requiring weekly pivot breaks and stricter volume confirmation (>2.5x MA). Works in bull markets by riding uptrends and in bear markets by following downtrends. Target: 30-100 trades over 4 years.
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_Trend_Volume_v3"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,74 +20,73 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for pivot levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA34 for trend filter
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate daily Camarilla levels (standard formula)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate weekly pivot levels (standard formula)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Camarilla equations: R1 = close + (high - low) * 1.1 / 12, S1 = close - (high - low) * 1.1 / 12
-    daily_range = daily_high - daily_low
-    daily_r1 = daily_close + daily_range * 1.1 / 12
-    daily_s1 = daily_close - daily_range * 1.1 / 12
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * pivot_point - weekly_low
+    weekly_s1 = 2 * pivot_point - weekly_high
     
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # Volume confirmation (20-period MA on 4h = ~3.3 days)
+    # Volume confirmation (20-period MA on 1d)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and volume MA (20)
+    # Warmup: need weekly EMA34 (34) and volume MA (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(daily_r1_aligned[i]) or 
-            np.isnan(daily_s1_aligned[i]) or 
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
-        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation (stricter: >2.5x MA to reduce false signals)
+        volume_confirm = volume[i] > volume_ma[i] * 2.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above daily R1 + volume
-            if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above weekly R1 + volume
+            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below daily S1 + volume
-            elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below weekly S1 + volume
+            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < daily_r1_aligned[i]:
+            if not uptrend or close[i] < weekly_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > daily_s1_aligned[i]:
+            if not downtrend or close[i] > weekly_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
