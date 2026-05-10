@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4H_1D_4H_EMA_Cross_With_1D_Trend
-# Hypothesis: Use 4h EMA cross for entry timing, filtered by 1d EMA trend and volume confirmation.
-# Only trade in direction of 1d trend to avoid counter-trend whipsaws. 4h EMA cross provides
-# timely entries while 1d trend filter improves win rate. Volume confirmation ensures
-# momentum behind moves. Designed for fewer trades (<50/year) to minimize fee drag.
+# 4H_1D_Camarilla_R2_S2_Breakout_1dTrend_Volume
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R2 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S2 level with 1d downtrend and volume confirmation.
+# Uses tighter R2/S2 levels (vs R1/S1) to reduce trade frequency and avoid false breakouts.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years) to minimize fee drag.
+# Works in bull markets via breakouts and in bear via mean-reversion at strong S2/R2 levels.
 
-name = "4H_1D_4H_EMA_Cross_With_1D_Trend"
+name = "4H_1D_Camarilla_R2_S2_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,35 +24,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d trend: EMA(50) - slower for stronger trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1d = close_1d > ema_50_1d
+    # Calculate Camarilla levels for 1d: R2, S2 based on previous day
+    # Typical price = (high + low + close) / 3
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    # Camarilla R2 = close + (range * 1.1/6)
+    # Camarilla S2 = close - (range * 1.1/6)
+    camarilla_r2 = close_1d + (range_1d * 1.1 / 6)
+    camarilla_s2 = close_1d - (range_1d * 1.1 / 6)
     
-    # Volume confirmation: current volume > 1.8x 30-period average (stricter)
-    volume_avg = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_confirm = volume > (volume_avg * 1.8)
+    # 1d trend: EMA(34) on close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema_34
     
-    # 4h EMA cross: fast EMA(12) and slow EMA(26)
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
-    
-    # Bullish cross: fast crosses above slow
-    bullish_cross = (ema_12 > ema_26) & (np.roll(ema_12, 1) <= np.roll(ema_26, 1))
-    # Bearish cross: fast crosses below slow
-    bearish_cross = (ema_12 < ema_26) & (np.roll(ema_12, 1) >= np.roll(ema_26, 1))
-    # Handle first element
-    bullish_cross[0] = False
-    bearish_cross[0] = False
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_avg * 1.5)
     
     # Align 1d indicators to 4h
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,33 +63,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if np.isnan(trend_up_1d_aligned[i]):
+        if np.isnan(camarilla_r2_aligned[i]) or np.isnan(camarilla_s2_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: bullish EMA cross + 1d uptrend + volume confirmation
-            if bullish_cross[i] and trend_up_1d_aligned[i] and volume_confirm[i]:
+            # Enter long: price breaks above Camarilla R2 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_r2_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish EMA cross + 1d downtrend + volume confirmation
-            elif bearish_cross[i] and not trend_up_1d_aligned[i] and volume_confirm[i]:
+            # Enter short: price breaks below Camarilla S2 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_s2_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish EMA cross or 1d trend turns down
-            if bearish_cross[i] or not trend_up_1d_aligned[i]:
+            # Exit long: price breaks below Camarilla S2 (reversal) or trend changes
+            if close[i] < camarilla_s2_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish EMA cross or 1d trend turns up
-            if bullish_cross[i] or trend_up_1d_aligned[i]:
+            # Exit short: price breaks above Camarilla R2 (reversal) or trend changes
+            if close[i] > camarilla_r2_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
