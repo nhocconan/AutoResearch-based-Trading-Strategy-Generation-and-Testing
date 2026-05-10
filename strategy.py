@@ -1,14 +1,11 @@
-#!/usr/bin/env python3
-"""
-4H_Camarilla_R1_S1_Breakout_12hTrend_Volume
-Hypothesis: Uses Camarilla pivot levels (R1/S1) from prior day for breakout entries, 
-confirmed by 12h EMA trend and volume spike. Designed for 4h timeframe to capture 
-trend continuation moves with low trade frequency (target: 20-40 trades/year). 
-Works in both bull and bear markets by following 12h trend direction, avoiding 
-counter-trend trades. Uses discrete position sizing (0.25) to minimize fee churn.
-"""
+# 4H_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2
+# Hypothesis: Refinement of proven strategy with stricter volume filter and dual timeframe confirmation.
+# Uses Camarilla R1/S1 from prior day for breakout entries, confirmed by 12h EMA trend and volume spike >2.5x average.
+# Designed for 4h timeframe to capture trend continuation moves with low trade frequency (target: 20-40 trades/year).
+# Works in both bull and bear markets by following 12h trend direction, avoiding counter-trend trades.
+# Uses discrete position sizing (0.25) to minimize fee churn.
 
-name = "4H_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+name = "4H_Camarilla_R1_S1_Breakout_12hTrend_Volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -50,9 +47,9 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Volume filter: volume > 2.0x 20-period average on 4h chart
+    # Volume filter: volume > 2.5x 20-period average on 4h chart (stricter than before)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 2.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,14 +81,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or volume drops
+            # Long exit: price breaks below S1 or volume drops below average
             if (close[i] < s1_aligned[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 or volume drops
+            # Short exit: price breaks above R1 or volume drops below average
             if (close[i] > r1_aligned[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
