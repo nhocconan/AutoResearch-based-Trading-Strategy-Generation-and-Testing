@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Turtle_Channel_1dTrend_Volume
-# Hypothesis: Donchian(20) breakout with 1d trend filter and volume spike captures
-# strong momentum moves. Uses Turtle Trading principles adapted to crypto.
-# Works in bull (breakouts) and bear (mean reversion at extremes) with tight entries.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Uses daily trend filter for directional bias and breaks of Camarilla R1/S1
+# with volume confirmation to capture strong moves. Daily trend avoids whipsaws in
+# ranging markets while still capturing trends. Works in bull (breakouts with trend)
+# and bear (mean reversion at extremes with trend filter). Tight entries target
+# 20-40 trades/year to minimize fee drag.
 
-name = "6h_Turtle_Channel_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,15 +35,21 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema50_1d
     trend_1d_down = close_1d < ema50_1d
     
-    # Align 1d trend to 6h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Donchian channel (20-period) from 6h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    R1 = close_1d + 1.1 * range_1d / 12
+    S1 = close_1d - 1.1 * range_1d / 12
+    
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
@@ -54,7 +62,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,20 +72,20 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: break above Donchian high with 1d uptrend and volume spike
-            if (close[i] > donchian_high[i] and 
+            # Long: break above R1 with 1d uptrend and volume spike
+            if (close[i] > R1_aligned[i] and 
                 trend_1d_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low with 1d downtrend and volume spike
-            elif (close[i] < donchian_low[i] and 
+            # Short: break below S1 with 1d downtrend and volume spike
+            elif (close[i] < S1_aligned[i] and 
                   trend_1d_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below Donchian low or trend fails
-            if (close[i] < donchian_low[i] or 
+            # Exit: close below S1 or trend fails
+            if (close[i] < S1_aligned[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -85,8 +93,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above Donchian high or trend fails
-            if (close[i] > donchian_high[i] or 
+            # Exit: close above R1 or trend fails
+            if (close[i] > R1_aligned[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
