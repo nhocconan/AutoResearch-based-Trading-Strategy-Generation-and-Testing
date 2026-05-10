@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 1h_4H1D_Trend_Filter_with_1H_RSI_Entry
-# Hypothesis: Use 4h and 1d trend alignment (same direction) as directional filter.
-# Enter long only when both 4h and 1d are in uptrend, short when both in downtrend.
-# Use 1h RSI for entry timing (oversold for long, overbought for short) to catch pullbacks.
-# Exit when trend alignment breaks or RSI reaches opposite extreme.
-# Designed for 1h timeframe with low trade frequency (<30/year) to avoid fee drag.
-# Works in bull/bear markets by requiring multi-timeframe trend consensus.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Trade breakouts of Camarilla R3/S3 levels from daily candles on 12h timeframe.
+# Uses daily trend filter (1d EMA34) and volume confirmation (volume > 1.5x 20-period SMA).
+# Designed to capture strong momentum moves in both bull and bear markets by trading
+# institutional levels with trend alignment. Targets ~20 trades/year to minimize fee drag.
 
-name = "1h_4H1D_Trend_Filter_with_1H_RSI_Entry"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,92 +15,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # 1d data for trend filter
+    # Daily data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h EMA50 trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
-    
-    # 1d EMA50 trend
+    # Daily EMA34 trend filter
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Align 4h and 1d trends to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # Calculate Camarilla levels from previous daily candle
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
+    
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 6
+    camarilla_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 6
+    
+    # Align daily data to 12h timeframe
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # 1h RSI for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume confirmation: volume > 1.5x 20-period SMA
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_sma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 34
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine if 4h and 1d trends are aligned
-        trend_aligned_up = trend_4h_up_aligned[i] > 0.5 and trend_1d_up_aligned[i] > 0.5
-        trend_aligned_down = trend_4h_down_aligned[i] > 0.5 and trend_1d_down_aligned[i] > 0.5
-        
         if position == 0:
-            # Long: both 4h and 1d uptrend + 1h RSI oversold
-            if trend_aligned_up and rsi[i] < 30:
-                signals[i] = 0.20
+            # Long: break above Camarilla R3 with uptrend and volume confirmation
+            if (high[i] > camarilla_r3_aligned[i] and
+                trend_1d_up_aligned[i] > 0.5 and
+                volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: both 4h and 1d downtrend + 1h RSI overbought
-            elif trend_aligned_down and rsi[i] > 70:
-                signals[i] = -0.20
+            # Short: break below Camarilla S3 with downtrend and volume confirmation
+            elif (low[i] < camarilla_s3_aligned[i] and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: trend alignment breaks or RSI overbought
-            if not trend_aligned_up or rsi[i] > 70:
+            # Exit: price re-enters Camarilla range (between R3 and S3) or trend reversal
+            if (close[i] < camarilla_r3_aligned[i] and close[i] > camarilla_s3_aligned[i]) or \
+               (trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: trend alignment breaks or RSI oversold
-            if not trend_aligned_down or rsi[i] < 30:
+            # Exit: price re-enters Camarilla range or trend reversal
+            if (close[i] < camarilla_r3_aligned[i] and close[i] > camarilla_s3_aligned[i]) or \
+               (trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
