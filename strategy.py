@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R4_S4_Breakout_1dTrend_Volume
+# 12h_1d_Camarilla_R4_S4_Breakout_1dTrend_Volume_v2
 # Hypothesis: 12h breakout of daily Camarilla R4/S4 levels with daily trend filter and volume confirmation.
 # R4/S4 are stronger reversal zones than R3/S3, offering fewer but higher-quality breakouts.
 # Long when price breaks above R4 in daily uptrend with volume surge (>2x avg), short when breaks below S4 in daily downtrend.
 # Designed to reduce trade frequency while maintaining edge in both bull and bear markets via trend alignment.
 
-name = "12h_1d_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+name = "12h_1d_Camarilla_R4_S4_Breakout_1dTrend_Volume_v2"
 timeframe = "12h"
 leverage = 1.0
 
