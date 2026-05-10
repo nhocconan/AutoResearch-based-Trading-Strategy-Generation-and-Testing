@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Camarilla pivot breakout (R3/S3) with 1d EMA trend filter and volume spike confirmation.
-# Camarilla levels act as dynamic support/resistance; breakouts indicate strong momentum.
-# Combines with 1d trend to avoid counter-trend trades and volume spike to confirm breakout strength.
-# Designed for 12h timeframe to target 12-37 trades/year, avoiding overtrading.
-# Works in bull/bear markets by aligning with higher timeframe trend.
+# 4h_Chaikin_Oscillator_Trend_Filter
+# Hypothesis: Chaikin Oscillator (3,10) crossing zero with EMA50 trend filter and volume confirmation.
+# Long when Chaikin > 0 and price > EMA50; Short when Chaikin < 0 and price < EMA50.
+# Volume confirmation ensures breakout strength. Works in bull/bear by following price trend.
+# Targets 20-50 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Chaikin_Oscillator_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,75 +23,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Accumulation/Distribution Line
+    clv = ((close - low) - (high - close)) / (high - low)
+    clv = np.where((high - low) == 0, 0, clv)
+    adl = np.cumsum(clv * volume)
     
-    # Calculate Camarilla levels from previous day
-    # R3 = Close + 1.1*(High - Low)*1.1/2
-    # S3 = Close - 1.1*(High - Low)*1.1/2
-    # Using previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Chaikin Oscillator: (3-day EMA of ADL) - (10-day EMA of ADL)
+    adl_series = pd.Series(adl)
+    ema3 = adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin = ema3 - ema10
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 2
+    # EMA50 trend filter
+    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Camarilla levels to 12h timeframe (wait for daily close)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Daily EMA trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup periods
-    start_idx = max(20, 34)  # volume MA and EMA warmup
+    start_idx = max(3, 10, 50, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(chaikin[i]) or np.isnan(ema50[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter
+        uptrend = close[i] > ema50[i]
+        downtrend = close[i] < ema50[i]
         
-        # Volume confirmation (volume > 1.5x MA)
+        # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: price breaks above R3 + uptrend + volume spike
-            if close[i] > camarilla_r3_aligned[i] and uptrend and volume_confirm:
+            # Long entry: Chaikin > 0 + uptrend + volume spike
+            if chaikin[i] > 0 and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + downtrend + volume spike
-            elif close[i] < camarilla_s3_aligned[i] and downtrend and volume_confirm:
+            # Short entry: Chaikin < 0 + downtrend + volume spike
+            elif chaikin[i] < 0 and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price re-enters below R3 or trend reversal
-            if close[i] < camarilla_r3_aligned[i] or not uptrend:
+            # Long exit: Chaikin crosses below zero or trend reversal
+            if chaikin[i] <= 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price re-enters above S3 or trend reversal
-            if close[i] > camarilla_s3_aligned[i] or not downtrend:
+            # Short exit: Chaikin crosses above zero or trend reversal
+            if chaikin[i] >= 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
