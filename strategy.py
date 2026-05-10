@@ -1,103 +1,118 @@
 #!/usr/bin/env python3
-# 4h_VolumeSpike_Reversal_1dTrend
-# Hypothesis: Combines volume spikes on 4h with 1-day trend reversal signals to capture mean reversion in both bull and bear markets.
-# Long when: volume spike (>2x 20-period avg) + price closes below 1-day Bollinger Lower Band (20,2) + 1-day RSI < 30.
-# Short when: volume spike + price closes above 1-day Bollinger Upper Band + 1-day RSI > 70.
-# Exit when price returns to 1-day Bollinger Middle Band (20-day SMA) or RSI crosses 50.
-# Uses volume spike to filter low-activity periods and Bollinger Bands + RSI for overextended conditions.
-# Targets 20-40 trades per year on 4h timeframe with position size 0.25.
+# 6h_Donchian_WeeklyPivot_Filter_Volume
+# Hypothesis: Uses 6-hour Donchian channel breakouts filtered by weekly pivot direction and volume confirmation.
+# Enters long when price breaks above Donchian(20) high with weekly pivot above prior week close and volume spike.
+# Enters short when price breaks below Donchian(20) low with weekly pivot below prior week close and volume spike.
+# Exits when price returns to Donchian midpoint or weekly pivot flips direction.
+# Weekly pivot acts as regime filter to avoid counter-trend trades in both bull and bear markets.
+# Targets 12-37 trades per year on 6h timeframe with position size 0.25.
 
-name = "4h_VolumeSpike_Reversal_1dTrend"
-timeframe = "4h"
+name = "6h_Donchian_WeeklyPivot_Filter_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_hlf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Bollinger Bands and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for pivot and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1-day Bollinger Bands (20,2)
-    close_1d = pd.Series(df_1d['close'])
-    sma_20 = close_1d.rolling(window=20, min_periods=20).mean()
-    std_20 = close_1d.rolling(window=20, min_periods=20).std()
-    upper_band = (sma_20 + 2 * std_20).values
-    lower_band = (sma_20 - 2 * std_20).values
-    middle_band = sma_20.values  # 20-day SMA
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # PP = (H + L + C) / 3
+    # R1 = 2*PP - L
+    # S1 = 2*PP - H
+    prev_week_high = np.roll(df_1w['high'].values, 1)
+    prev_week_low = np.roll(df_1w['low'].values, 1)
+    prev_week_close = np.roll(df_1w['close'].values, 1)
+    prev_week_high[0] = 0
+    prev_week_low[0] = 0
+    prev_week_close[0] = 0
     
-    # Calculate 1-day RSI (14)
-    delta = close_1d.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = (100 - (100 / (1 + rs))).values
+    weekly_pp = (prev_week_high + prev_week_low + prev_week_close) / 3
+    weekly_r1 = 2 * weekly_pp - prev_week_low
+    weekly_s1 = 2 * weekly_pp - prev_week_high
     
-    # Align 1-day indicators to 4h timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
-    middle_band_aligned = align_htf_to_ltf(prices, df_1d, middle_band)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align weekly pivot levels to 6h
+    weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_spike = volume > (vol_ma.values * 2.0)
+    # Determine weekly trend: above PP = uptrend, below PP = downtrend
+    weekly_uptrend = weekly_pp_aligned > np.roll(weekly_pp_aligned, 1)
+    weekly_downtrend = weekly_pp_aligned < np.roll(weekly_pp_aligned, 1)
+    
+    # Get daily data for volume confirmation (more responsive than weekly)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Align daily OHLC to 6h for Donchian calculation
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, df_1d['high'].values)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, df_1d['low'].values)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+    
+    # Calculate Donchian channel (20-period) using daily data aligned to 6h
+    donchian_high = pd.Series(daily_high_aligned).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(daily_low_aligned).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Volume confirmation: current volume > 2.0 * 20-period average (using 6h volume)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Warmup for Bollinger Bands and volume MA
+    start_idx = max(20, 20)  # Warmup for Donchian and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(middle_band_aligned[i]) or np.isnan(rsi_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(weekly_pp_aligned[i]) or
+            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition
-        vol_spike = volume_spike[i]
-        
         if position == 0:
-            # Long entry: volume spike + price below lower band + RSI oversold
-            if (vol_spike and 
-                close[i] < lower_band_aligned[i] and 
-                rsi_aligned[i] < 30):
+            # Long entry: price breaks above Donchian high with weekly uptrend and volume spike
+            if (close[i] > donchian_high[i] and 
+                weekly_pp_aligned[i] > np.roll(weekly_pp_aligned, 1)[i] and  # weekly PP rising
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: volume spike + price above upper band + RSI overbought
-            elif (vol_spike and 
-                  close[i] > upper_band_aligned[i] and 
-                  rsi_aligned[i] > 70):
+            # Short entry: price breaks below Donchian low with weekly downtrend and volume spike
+            elif (close[i] < donchian_low[i] and 
+                  weekly_pp_aligned[i] < np.roll(weekly_pp_aligned, 1)[i] and  # weekly PP falling
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to middle band or RSI crosses above 50
-            if (close[i] >= middle_band_aligned[i] or 
-                rsi_aligned[i] > 50):
+            # Long exit: price returns to Donchian midpoint or weekly trend turns down
+            if (close[i] <= donchian_mid[i] or 
+                weekly_pp_aligned[i] < np.roll(weekly_pp_aligned, 1)[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to middle band or RSI crosses below 50
-            if (close[i] <= middle_band_aligned[i] or 
-                rsi_aligned[i] < 50):
+            # Short exit: price returns to Donchian midpoint or weekly trend turns up
+            if (close[i] >= donchian_mid[i] or 
+                weekly_pp_aligned[i] > np.roll(weekly_pp_aligned, 1)[i]):
                 signals[i] = 0.0
                 position = 0
             else:
