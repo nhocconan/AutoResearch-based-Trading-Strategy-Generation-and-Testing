@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_TripleBottom_Top_Reversal
-Hypothesis: On 4h timeframe, identify triple bottom (support) and triple top (resistance) patterns using 3 consecutive similar lows/highs. Enter long at break above triple bottom resistance with volume confirmation, short at break below triple top support. Uses 1d trend filter (price vs 200 EMA) to align with higher timeframe bias. Designed to work in both bull (buy dips) and bear (sell rallies) markets by waiting for clear reversal patterns with volume confirmation, reducing false signals in chop. Target: 20-35 trades/year.
+4h_RSI_Stochastic_BullBear_Trap
+Hypothesis: In strong trends, price often pulls back to key momentum zones (RSI 40-60) before continuing. Combine with Stochastic to identify overextended pullbacks. Enter long when RSI>50 and Stochastic crosses up from oversold in uptrend; short when RSI<50 and Stochastic crosses down from overbought in downtrend. Use 1-day ADX trend filter to avoid chop. Works in bull/bear via trend filter. Target: 20-30 trades/year.
 """
 
-name = "4h_TripleBottom_Top_Reversal"
+name = "4h_RSI_Stochastic_BullBear_Trap"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,139 +14,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend filter
+    # Get 1d data for ADX trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Get 4h price data
+    # Calculate ADX(14) on daily
+    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(high_1d[1:] - low_1d[1:], 
+                    np.maximum(np.abs(high_1d[1:] - high_1d[:-1]), 
+                               np.abs(low_1d[1:] - low_1d[:-1])))
+    atr_1d = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values / np.concatenate([[np.nan], atr_1d[:-1]])
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values / np.concatenate([[np.nan], atr_1d[:-1]])
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
+    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # Get 4h data for RSI and Stochastic
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Volume filter: volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Detect triple bottom: 3 similar lows within 2% range
-    triple_bottom = np.zeros(n, dtype=bool)
-    triple_top = np.zeros(n, dtype=bool)
-    
-    lookback = 50  # Look for pattern within last 50 bars (~8 days)
-    
-    for i in range(50, n):
-        # Skip if insufficient data for pattern detection
-        if i < lookback:
-            continue
-            
-        # Check for triple bottom in last 50 bars
-        window_low = low[i-lookback:i]
-        # Find local minima
-        mins = []
-        for j in range(1, len(window_low)-1):
-            if window_low[j] <= window_low[j-1] and window_low[j] <= window_low[j+1]:
-                mins.append((i-lookback+j, window_low[j]))
-        
-        # Check if we have 3 similar lows
-        if len(mins) >= 3:
-            # Take last 3 minima
-            last_three = mins[-3:]
-            low_vals = [x[1] for x in last_three]
-            low_range = max(low_vals) - min(low_vals)
-            avg_low = sum(low_vals) / 3
-            if avg_low > 0 and (low_range / avg_low) < 0.02:  # Within 2%
-                # Resistance level is the high between the lows
-                # Find highest point between first and third low
-                idx1, idx3 = last_three[0][0], last_three[2][0]
-                if idx3 > idx1:
-                    resistance = np.max(high[idx1:idx3+1])
-                    triple_bottom[i] = True
-                    # Store resistance level for breakout check
-                    if not hasattr(generate_signals, 'resistance_level'):
-                        generate_signals.resistance_level = np.full(n, np.nan)
-                    generate_signals.resistance_level[i] = resistance
-        
-        # Check for triple top in last 50 bars
-        window_high = high[i-lookback:i]
-        # Find local maxima
-        maxs = []
-        for j in range(1, len(window_high)-1):
-            if window_high[j] >= window_high[j-1] and window_high[j] >= window_high[j+1]:
-                maxs.append((i-lookback+j, window_high[j]))
-        
-        # Check if we have 3 similar highs
-        if len(maxs) >= 3:
-            # Take last 3 maxima
-            last_three = maxs[-3:]
-            high_vals = [x[1] for x in last_three]
-            high_range = max(high_vals) - min(high_vals)
-            avg_high = sum(high_vals) / 3
-            if avg_high > 0 and (high_range / avg_high) < 0.02:  # Within 2%
-                # Support level is the low between the highs
-                idx1, idx3 = last_three[0][0], last_three[2][0]
-                if idx3 > idx1:
-                    support = np.min(low[idx1:idx3+1])
-                    triple_top[i] = True
-                    if not hasattr(generate_signals, 'support_level'):
-                        generate_signals.support_level = np.full(n, np.nan)
-                    generate_signals.support_level[i] = support
+    # Stochastic(14,3,3)
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    # Warmup: need 14 periods for RSI/Stoch, plus 1 for DM calculation
+    start_idx = 15
+    
+    for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if np.isnan(ema200_1d_aligned[i]):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(k_percent[i]) or
+            np.isnan(d_percent[i]) or
+            np.isnan(adx_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs 1d EMA200
-        uptrend_1d = close[i] > ema200_1d_aligned[i]
-        downtrend_1d = close[i] < ema200_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Long: break above triple bottom resistance with volume filter in uptrend
-            if triple_bottom[i] and hasattr(generate_signals, 'resistance_level'):
-                resistance = getattr(generate_signals, 'resistance_level')[i]
-                if not np.isnan(resistance) and high[i] > resistance and uptrend_1d and volume_filter[i]:
+            if trending:
+                # Long: RSI > 50 (bullish momentum) and Stochastic crosses up from oversold
+                if rsi[i] > 50 and k_percent[i-1] <= 20 and k_percent[i] > 20 and k_percent[i] > d_percent[i]:
                     signals[i] = 0.25
                     position = 1
-            # Short: break below triple top support with volume filter in downtrend
-            elif triple_top[i] and hasattr(generate_signals, 'support_level'):
-                support = getattr(generate_signals, 'support_level')[i]
-                if not np.isnan(support) and low[i] < support and downtrend_1d and volume_filter[i]:
+                # Short: RSI < 50 (bearish momentum) and Stochastic crosses down from overbought
+                elif rsi[i] < 50 and k_percent[i-1] >= 80 and k_percent[i] < 80 and k_percent[i] < d_percent[i]:
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Long exit: price drops below triple bottom support or trend fails
-            if triple_top[i] and hasattr(generate_signals, 'support_level'):
-                support = getattr(generate_signals, 'support_level')[i]
-                if not np.isnan(support) and low[i] < support:
-                    signals[i] = 0.0
-                    position = 0
-            elif not uptrend_1d:
+            # Long exit: RSI < 40 (loss of momentum) or Stochastic overbought
+            if rsi[i] < 40 or (k_percent[i] > 80 and d_percent[i] > 80):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above triple top resistance or trend fails
-            if triple_bottom[i] and hasattr(generate_signals, 'resistance_level'):
-                resistance = getattr(generate_signals, 'resistance_level')[i]
-                if not np.isnan(resistance) and high[i] > resistance:
-                    signals[i] = 0.0
-                    position = 0
-            elif not downtrend_1d:
+            # Short exit: RSI > 60 (loss of bearish momentum) or Stochastic oversold
+            if rsi[i] > 60 or (k_percent[i] < 20 and d_percent[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
