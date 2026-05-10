@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Confluence_TrendFilter
-Hypothesis: RSI(14) with 4h trend filter (1d EMA34) and volume confirmation.
-Long when RSI < 30 (oversold) in uptrend, short when RSI > 70 (overbought) in downtrend.
-Volume filter avoids false signals. Target: 20-40 trades/year to minimize fee drag.
-Works in bull by buying dips, in bear by selling rallies.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 12h chart trading with daily Camarilla R1/S1 breakouts in direction of 1d EMA34 trend, confirmed by volume spikes.
+Uses institutional support/resistance levels (Camarilla) from daily timeframe, filtered by daily trend and volume confirmation.
+Designed for lower trade frequency (target: 12-37 trades/year) to minimize fee drag on 12h timeframe.
+Works in both bull and bear markets by following higher timeframe trend and using institutional levels as entry/exit points.
 """
 
-name = "4h_RSI_Confluence_TrendFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 1:
@@ -30,57 +30,63 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # RSI(14) calculation
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Get price, volume
     close = prices['close'].values
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: current volume > 1.3x 20-period EMA
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.3
+    
+    # Volume filter: current volume > 1.8x 30-period EMA (stricter for lower frequency)
+    vol_ema30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    volume_filter = volume > vol_ema30 * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need RSI (14) and EMA34 (34)
-    start_idx = 34
+    # Warmup: need EMA34 (34) and enough history for volume EMA
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(rsi[i])):
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: oversold RSI in uptrend with volume
-            if rsi[i] < 30 and close[i] > ema_34_aligned[i] and volume_filter[i]:
+            # Long: above EMA34 (uptrend) AND price breaks above R1 with volume
+            if close[i] > ema_34_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought RSI in downtrend with volume
-            elif rsi[i] > 70 and close[i] < ema_34_aligned[i] and volume_filter[i]:
+            # Short: below EMA34 (downtrend) AND price breaks below S1 with volume
+            elif close[i] < ema_34_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral OR trend turns bearish
-            if rsi[i] > 50 or close[i] < ema_34_aligned[i]:
+            # Long exit: price breaks below S1 OR trend turns bearish
+            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral OR trend turns bullish
-            if rsi[i] < 50 or close[i] > ema_34_aligned[i]:
+            # Short exit: price breaks above R1 OR trend turns bullish
+            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
