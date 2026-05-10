@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_R3_S3_Breakout_1wTrend_Volume
-Hypothesis: Price breaks Camarilla R3 or S3 levels calculated from prior weekly close, with confirmation from weekly EMA50 trend and volume spike. Camarilla levels provide high-probability reversal/breakout points in ranging markets, while weekly EMA50 ensures alignment with higher timeframe direction. Volume confirmation reduces false breakouts. Target: 7-25 trades/year (30-100 total over 4 years).
+6h_ElderRay_Signal_1dTrend_Volume
+Hypothesis: Elder Ray (Bull/Bear Power) combined with 1d EMA13 trend filter and volume confirmation.
+Elder Ray measures bull/bear power relative to EMA13, providing early trend strength signals.
+In trending markets, strong bull/bear power persists; in ranging markets, it fades.
+Volume confirmation filters weak breakouts. Works in both bull (strong bull power) and bear (strong bear power).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "1d_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_Signal_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,85 +26,76 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla levels and EMA50 trend
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 1d EMA13 for trend filter (Elder Ray uses EMA13)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema13_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 13:
+        # Calculate EMA13 with proper initialization
+        ema13_1d[12] = np.mean(close_1d[:13])
+        alpha = 2 / (13 + 1)
+        for i in range(13, len(close_1d)):
+            ema13_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema13_1d[i-1]
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Calculate Camarilla levels for each weekly bar
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    camarilla_r3_1w = np.full(len(close_1w), np.nan)
-    camarilla_s3_1w = np.full(len(close_1w), np.nan)
+    # 1d volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    if len(high_1w) >= 1:
-        for i in range(len(high_1w)):
-            high_low_diff = high_1w[i] - low_1w[i]
-            camarilla_r3_1w[i] = close_1w[i] + 1.1 * high_low_diff
-            camarilla_s3_1w[i] = close_1w[i] - 1.1 * high_low_diff
+    # Calculate 6-period EMA for Elder Ray (on 6h data)
+    ema6 = np.full(n, np.nan)
+    if n >= 6:
+        ema6[5] = np.mean(close[:6])
+        alpha6 = 2 / (6 + 1)
+        for i in range(6, n):
+            ema6[i] = alpha6 * close[i] + (1 - alpha6) * ema6[i-1]
     
-    # Align Camarilla levels to daily timeframe (wait for weekly bar to close)
-    camarilla_r3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3_1w)
-    camarilla_s3_1w_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3_1w)
-    
-    # Weekly EMA50 for trend filter
-    ema_50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_50_1w[49] = np.mean(close_1w[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Weekly volume SMA20 for volume confirmation
-    vol_sma_20_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 20:
-        vol_sma_20_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(volume_1w)):
-            vol_sma_20_1w[i] = (vol_sma_20_1w[i-1] * 19 + volume_1w[i]) / 20
-    vol_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma_20_1w)
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Using 1d EMA13 aligned to 6h timeframe
+    bull_power = high - ema13_1d_aligned
+    bear_power = low - ema13_1d_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # warmup for EMA50
+    start_idx = max(20, 13)  # warmup for EMA calculations
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_sma_20_1w_aligned[i]) or \
-           np.isnan(camarilla_r3_1w_aligned[i]) or np.isnan(camarilla_s3_1w_aligned[i]):
+        if np.isnan(ema13_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(ema6[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x average weekly volume (scaled to daily)
-        # Approximate daily volume from weekly: weekly volume / 5 (since 5 trading days per week)
-        vol_daily_approx = vol_sma_20_1w_aligned[i] / 5.0
-        volume_confirm = volume[i] > 1.5 * vol_daily_approx
+        # Volume confirmation: current 6h volume > 1.3x average 1d volume (scaled to 6h)
+        # Approximate 6h volume from 1d: 1d volume / 4 (since 24h/6h = 4)
+        vol_6h_approx = vol_sma20_1d_aligned[i] / 4.0
+        volume_confirm = volume[i] > 1.3 * vol_6h_approx
         
         if position == 0:
-            # Long: Break above Camarilla R3 with uptrend and volume
-            if close[i] > camarilla_r3_1w_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm:
+            # Long: Strong bull power (> 0) with uptrend and volume confirmation
+            if bull_power[i] > 0 and close[i] > ema13_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Camarilla S3 with downtrend and volume
-            elif close[i] < camarilla_s3_1w_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm:
+            # Short: Strong bear power (< 0) with downtrend and volume confirmation
+            elif bear_power[i] < 0 and close[i] < ema13_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below EMA50 (trend reversal)
-            if close[i] < ema_50_1w_aligned[i]:
+            # Exit: Bear power becomes negative (bull power fading) or trend reversal
+            if bear_power[i] < 0 or close[i] < ema13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above EMA50 (trend reversal)
-            if close[i] > ema_50_1w_aligned[i]:
+            # Exit: Bull power becomes positive (bear power fading) or trend reversal
+            if bull_power[i] > 0 or close[i] > ema13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
