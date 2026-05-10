@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-# Hypothesis: Uses weekly trend filter with daily Camarilla R3/S3 breakouts on 4h timeframe.
-# Weekly trend reduces false breakouts in choppy markets, while daily pivot levels provide
-# precise entry/exit points. Volume confirmation ensures breakout strength. Designed for
-# low trade frequency (20-30/year) to minimize fee drag in both bull and bear markets.
-
-name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "4h"
+#/usr/bin/env python3
+"""
+1D_Weekly_Camarilla_R3_S3_Breakout_Trend
+Hypothesis: Daily timeframe strategy using weekly EMA trend filter with daily Camarilla R3/S3 breakouts.
+Weekly trend reduces false breakouts in choppy markets, while daily pivot levels provide precise entry/exit.
+Volume confirmation ensures breakout strength. Designed for low trade frequency (7-25/year) to minimize
+fee drag in both bull and bear markets.
+"""
+name = "1D_Weekly_Camarilla_R3_S3_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,14 +24,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (long-term bias)
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     # Weekly EMA20 for trend
     ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Get daily data for Camarilla pivot levels
+    # Get daily data for Camarilla pivot levels (based on previous day)
     df_1d = get_htf_data(prices, '1d')
     # Calculate typical price and range from previous day
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
@@ -38,12 +39,12 @@ def generate_signals(prices):
     # Camarilla R3 and S3 levels
     R3 = typical_price + (range_hl * 1.2500)
     S3 = typical_price - (range_hl * 1.2500)
-    # Align daily levels to 4h timeframe
+    # Align daily levels to daily timeframe (same timeframe, but ensures proper alignment)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
-    # Volume confirmation (6-period average on 4h = ~1 day)
-    vol_ma_period = 6
+    # Volume confirmation (20-day average)
+    vol_ma_period = 20
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -55,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(6, 20) + 5  # need enough history for calculations
+    start_idx = max(20, 20) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
         if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
