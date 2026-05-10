@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 1h_DailyPivot_Breakout_Trend_VolumeFilter
-# Hypothesis: Daily pivot points (R1/S1) act as key support/resistance levels. 
-# Price breaking above R1 in a daily uptrend (price > EMA34) or below S1 in a daily downtrend (price < EMA34) 
-# indicates momentum continuation. Volume > 2x 20-period MA confirms institutional interest. 
-# Using 1h timeframe for precise entry timing while relying on 1d for signal direction reduces noise. 
-# Position size fixed at 0.20 to limit drawdown. Session filter (08-20 UTC) avoids low-liquidity hours.
+# 4h_S1R1_Breakout_TrendVolume
+# Hypothesis: Daily S1/R1 levels act as strong support/resistance. Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend signals momentum. Volume confirmation (>2x 20-period MA) filters false breakouts. Uses tight entry criteria to limit trades and reduce fee drag, targeting 20-40 trades/year. Works in bull markets by riding uptrends and in bear markets by following downtrends.
 
-name = "1h_DailyPivot_Breakout_Trend_VolumeFilter"
-timeframe = "1h"
+name = "4h_S1R1_Breakout_TrendVolume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,7 +22,7 @@ def generate_signals(prices):
     
     # Get daily data for pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate daily EMA34 for trend filter
@@ -45,11 +41,8 @@ def generate_signals(prices):
     daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
     daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
     
-    # Volume confirmation (20-period MA on 1h)
+    # Volume confirmation (20-period MA on 4h = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,28 +61,21 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if hours[i] < 8 or hours[i] > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Daily trend filter
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (>2.0x MA to reduce false signals)
+        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
         volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above daily R1 + volume + session
+            # Long entry: uptrend + price breaks above daily R1 + volume
             if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below daily S1 + volume + session
+            # Short entry: downtrend + price breaks below daily S1 + volume
             elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: trend breaks or price re-enters below R1
@@ -97,13 +83,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: trend breaks or price re-enters above S1
             if not downtrend or close[i] > daily_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
