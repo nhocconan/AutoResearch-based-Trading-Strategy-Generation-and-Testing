@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_With_1wTrend_Filter
-# Hypothesis: On daily timeframe, Kaufman Adaptive Moving Average (KAMA) captures trend direction with low lag.
-# Combined with 1-week trend filter to avoid counter-trend trades and volume confirmation to reduce false signals.
-# KAMA adapts to market noise, making it effective in both trending and ranging markets.
-# Designed for very low frequency (<10 trades/year) to minimize fee drag on higher timeframes.
+# 12h_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, breakouts at Camarilla R3/S3 levels with daily trend filter and volume confirmation capture institutional breakout moves while avoiding false signals. Daily trend prevents counter-trend trades, volume confirms breakout strength. Designed for low frequency (~15-30 trades/year) to minimize fee drag and improve generalization in both bull and bear markets.
 
-name = "1d_KAMA_Trend_With_1wTrend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,32 +20,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for Camarilla pivot and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # KAMA (10, 2, 30) - ER = 10, fastest = 2, slowest = 30
-    close_series = pd.Series(close)
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series.diff()).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    sc = sc.fillna(0)
-    kama = [close[0]]  # Initialize with first price
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
+    # Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly trend: EMA34 on weekly close
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align weekly trend to daily
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Camarilla levels
+    r3 = pivot + (high_1d - low_1d) * 1.1 / 4
+    s3 = pivot - (high_1d - low_1d) * 1.1 / 4
+    
+    # Daily trend: EMA34 on daily close
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
+    
+    # Align daily data to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
     # Volume confirmation: 20-period average
     volume_series = pd.Series(volume)
@@ -62,8 +61,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(trend_1w_up_aligned[i]) or 
-            np.isnan(trend_1w_down_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +73,34 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price above KAMA with weekly uptrend and volume
-            if (close[i] > kama[i] and 
-                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: price breaks above R3 with daily uptrend and volume
+            if (close[i] > r3_aligned[i] and 
+                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA with weekly downtrend and volume
-            elif (close[i] < kama[i] and 
-                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: price breaks below S3 with daily downtrend and volume
+            elif (close[i] < s3_aligned[i] and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below KAMA or trend fails
-            if (close[i] < kama[i] or 
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit when price returns to pivot or trend fails
+            pivot_aligned = ((high_1d + low_1d + close_1d) / 3)
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_aligned)
+            if (close[i] < pivot_aligned[i] or 
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above KAMA or trend fails
-            if (close[i] > kama[i] or 
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit when price returns to pivot or trend fails
+            pivot_aligned = ((high_1d + low_1d + close_1d) / 3)
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_aligned)
+            if (close[i] > pivot_aligned[i] or 
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
