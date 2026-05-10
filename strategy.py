@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_Trend_Volume_Filter
-# Hypothesis: Price breaking above/below 12h Donchian(20) channels with 1d EMA trend filter and volume confirmation (2x MA) captures breakouts in both bull and bear markets. Low-frequency signals reduce fee drag while capturing strong trends.
+# 4h_KAMA_Trend_With_Volume_Filter_v3
+# Hypothesis: KAMA adapts to market noise, providing a reliable trend filter. 
+# Price crossing above/below KAMA with volume confirmation (2x MA) captures momentum shifts.
+# Works in bull markets by catching uptrends early and in bear markets by following downtrends.
+# Uses 4h timeframe with 1d KAMA trend filter to reduce whipsaw and trade frequency.
 
-name = "12h_Donchian_Breakout_Trend_Volume_Filter"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_Filter_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,65 +23,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for KAMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily KAMA (ER=10, fast=2, slow=30)
+    close_1d = df_1d['close'].values
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
+    # Recompute volatility correctly: sum of absolute changes over 10 periods
+    volatility = np.zeros_like(close_1d)
+    for i in range(len(close_1d)):
+        if i < 10:
+            volatility[i] = np.nan
+        else:
+            volatility[i] = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate 12h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-period MA on 4h = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and Donchian (20) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need KAMA (10) and volume MA (20)
+    start_idx = max(10, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+        if (np.isnan(kama_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # KAMA trend filter
+        above_kama = close[i] > kama_1d_aligned[i]
+        below_kama = close[i] < kama_1d_aligned[i]
         
-        # Volume confirmation (2.0x MA to reduce false signals)
+        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
         volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above Donchian high + volume
-            if uptrend and close[i] > donchian_high[i] and volume_confirm:
+            # Long entry: price above KAMA + volume confirmation
+            if above_kama and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below Donchian low + volume
-            elif downtrend and close[i] < donchian_low[i] and volume_confirm:
+            # Short entry: price below KAMA + volume confirmation
+            elif below_kama and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below Donchian low
-            if not uptrend or close[i] < donchian_low[i]:
+            # Long exit: price crosses below KAMA
+            if below_kama:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above Donchian high
-            if not downtrend or close[i] > donchian_high[i]:
+            # Short exit: price crosses above KAMA
+            if above_kama:
                 signals[i] = 0.0
                 position = 0
             else:
