@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from Camarilla R1/S1 levels (narrow support/resistance) with 1d EMA34 trend filter and volume confirmation.
-# R1/S1 are tighter levels that trigger more frequently than R4/S4 but still require volume and trend alignment.
-# Designed for 12h to target 50-150 total trades over 4 years with strong moves in both bull and bear markets.
+# Hypothesis: Breakouts from Camarilla R1/S1 levels (core support/resistance) with 1d EMA34 trend filter and volume confirmation.
+# Designed for 12h to capture multi-day trends with controlled trade frequency. Works in bull markets via breakouts above R1 with uptrend,
+# and in bear markets via breakdowns below S1 with downtrend. Volume confirmation filters false breakouts.
 
 name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
@@ -42,20 +42,18 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 1d data for trend filter
-    close_1d = df_1d['close'].values
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (24-period average for 12h timeframe)
+    # Volume confirmation (20-period average for 12h timeframe)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, 24)
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
