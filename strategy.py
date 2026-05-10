@@ -1,15 +1,14 @@
-#52
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-# Hypothesis: Uses 4h timeframe with 12h trend (EMA50) and volume confirmation to filter Camarilla R1/S1 breakouts.
-# Enters long when price breaks above daily R1 in 12h uptrend (close > EMA50) with volume > 1.5x 20-period average.
-# Enters short when price breaks below daily S1 in 12h downtrend (close < EMA50) with volume confirmation.
-# Exits when price returns to opposite level (S1 for long, R1 for short) or trend reverses.
-# Uses 12h EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 25-50 trades per year on 4h timeframe with position size 0.25.
+# 6H_ADX_DMI_Cross_1dTrend_Filter
+# Hypothesis: Uses ADX(14) and DMI crossover on 6h chart filtered by 1-day trend (close > EMA50).
+# Enters long when +DI crosses above -DI with ADX > 25 in uptrend (close > EMA50).
+# Enters short when -DI crosses above +DI with ADX > 25 in downtrend (close < EMA50).
+# Exits when DMI reverses or ADX falls below 20.
+# Uses 1-day EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
+# Targets 12-37 trades per year on 6h timeframe with position size 0.25.
 
-name = "4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "6H_ADX_DMI_Cross_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -26,77 +25,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # Calculate 12h EMA(50) for trend direction
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for trend (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    pivot_range = prev_high - prev_low
-    r1_level = prev_close + 1.1 * (pivot_range / 12)  # R1 = C + 1.1*(H-L)/12
-    s1_level = prev_close - 1.1 * (pivot_range / 12)  # S1 = C - 1.1*(H-L)/12
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align pivot levels to 4h timeframe (available after 1d bar closes)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
+    # Calculate ADX and DMI on 6h chart
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # first bar has no previous close
+    tr2[0] = tr1[0]
+    tr3[0] = tr1[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Volume filter: volume > 1.5x 20-period average on 4h chart
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    def smooth(values, period):
+        smoothed = np.zeros_like(values)
+        if len(values) < period:
+            return smoothed
+        smoothed[period-1] = np.sum(values[:period])
+        for i in range(period, len(values)):
+            smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + values[i]
+        return smoothed
+    
+    period = 14
+    atr = smooth(tr, period)
+    plus_di_smoothed = smooth(plus_dm, period)
+    minus_di_smoothed = smooth(minus_dm, period)
+    
+    # Avoid division by zero
+    plus_di = np.where(atr != 0, plus_di_smoothed / atr * 100, 0)
+    minus_di = np.where(atr != 0, minus_di_smoothed / atr * 100, 0)
+    
+    # DX and ADX
+    dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = smooth(dx, period)
+    
+    # Align 1d EMA50 to 6h
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and volume MA
+    start_idx = max(50, 2*period)  # Warmup for smoothing
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        
+        # DMI crossover signals
+        plus_cross_above = (plus_di[i] > minus_di[i]) and (plus_di[i-1] <= minus_di[i-1])
+        minus_cross_above = (minus_di[i] > plus_di[i]) and (minus_di[i-1] <= plus_di[i-1])
         
         if position == 0:
-            # Long entry: price breaks above R1 in 12h uptrend with volume spike
-            if (close[i] > r1_aligned[i] and 
-                price_above_ema and 
-                volume[i] > vol_threshold[i]):
+            # Long entry: +DI crosses above -DI with ADX > 25 in uptrend
+            if (plus_cross_above and 
+                adx[i] > 25 and 
+                price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 in 12h downtrend with volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  price_below_ema and 
-                  volume[i] > vol_threshold[i]):
+            # Short entry: -DI crosses above +DI with ADX > 25 in downtrend
+            elif (minus_cross_above and 
+                  adx[i] > 25 and 
+                  price_below_ema):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to S1 or trend reverses to downtrend
-            if (close[i] < s1_aligned[i] or 
-                price_below_ema):
+            # Long exit: -DI crosses above +DI or ADX falls below 20
+            if (minus_cross_above or 
+                adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to R1 or trend reverses to uptrend
-            if (close[i] > r1_aligned[i] or 
-                price_above_ema):
+            # Short exit: +DI crosses above -DI or ADX falls below 20
+            if (plus_cross_above or 
+                adx[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
