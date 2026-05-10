@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 6H_1W1D_Camarilla_Reversal_Trend
-# Hypothesis: Use weekly trend direction for bias, daily Camarilla R3/S3 for fade entries in mean-reversion zones, 
-# and 6H close breaks above/below R4/S4 for trend continuation. Combines mean-reversion and trend-following 
-# with clear risk control. Works in bull/bear by following weekly trend while using daily structure for entries.
+# 12H_1D_Camarilla_R1_S1_Breakout
+# Hypothesis: Price reacts strongly to Camarilla pivot levels (R1/S1) derived from daily range.
+# Long when price closes above R1 in a daily uptrend (close > EMA50).
+# Short when price closes below S1 in a daily downtrend (close < EMA50).
+# Uses daily EMA50 for trend filter and daily Camarilla R1/S1 for entry.
+# Works in bull/bear by following daily trend direction. Target: 15-25 trades/year per symbol.
 
-name = "6H_1W1D_Camarilla_Reversal_Trend"
-timeframe = "6h"
+name = "12H_1D_Camarilla_R1_S1_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,64 +16,38 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     
-    # Get weekly data for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    
-    # Weekly EMA34 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Weekly trend: bullish if close > EMA34, bearish if close < EMA34
-    bullish_trend_1w = close_1w > ema34_1w
-    bearish_trend_1w = close_1w < ema34_1w
-    
-    # Get daily data for Camarilla levels
+    # Get daily data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # S4 = C - ((H-L) * 1.1/2), S3 = C - ((H-L) * 1.1/4)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Daily EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # First day has no previous
-    prev_high[0] = prev_high[1] if len(prev_high) > 1 else high_1d[0]
-    prev_low[0] = prev_low[1] if len(prev_low) > 1 else low_1d[0]
-    prev_close[0] = prev_close[1] if len(prev_close) > 1 else close_1d[0]
+    # Daily Camarilla levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d + camarilla_range
+    s1_1d = close_1d - camarilla_range
     
-    rang = prev_high - prev_low
-    r4 = prev_close + rang * 1.1 / 2
-    r3 = prev_close + rang * 1.1 / 4
-    s3 = prev_close - rang * 1.1 / 4
-    s4 = prev_close - rang * 1.1 / 2
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_trend = close_1d > ema50_1d
+    bearish_trend = close_1d < ema50_1d
     
-    # Align weekly trend to 6h
-    bullish_1w_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend_1w.astype(float))
-    bearish_1w_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend_1w.astype(float))
-    
-    # Align daily Camarilla levels to 6h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,48 +57,39 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bullish_1w_aligned[i]) or np.isnan(bearish_1w_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish_weekly = bullish_1w_aligned[i] > 0.5
-        bearish_weekly = bearish_1w_aligned[i] > 0.5
+        bullish = bullish_aligned[i] > 0.5
+        bearish = bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Mean-reversion fade at R3/S3 in weekly trend direction
-            if bullish_weekly and close[i] <= s3_aligned[i]:
-                # Long at S3 in weekly uptrend
+            # Enter long: bullish trend + price closes above daily R1
+            if bullish and close[i] > r1_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            elif bearish_weekly and close[i] >= r3_aligned[i]:
-                # Short at R3 in weekly downtrend
-                signals[i] = -0.25
-                position = -1
-            # Trend continuation breakout at R4/S4
-            elif bullish_weekly and close[i] >= r4_aligned[i]:
-                # Long breakout above R4 in weekly uptrend
-                signals[i] = 0.25
-                position = 1
-            elif bearish_weekly and close[i] <= s4_aligned[i]:
-                # Short breakdown below S4 in weekly downtrend
+            # Enter short: bearish trend + price closes below daily S1
+            elif bearish and close[i] < s1_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly trend turns bearish OR price re-enters mean-reversion zone
-            if bearish_weekly or close[i] >= r3_aligned[i]:
+            # Exit long: bearish trend or price closes below daily EMA50
+            ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+            if bearish or close[i] < ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly trend turns bullish OR price re-enters mean-reversion zone
-            if bullish_weekly or close[i] <= s3_aligned[i]:
+            # Exit short: bullish trend or price closes above daily EMA50
+            ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+            if bullish or close[i] > ema50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
