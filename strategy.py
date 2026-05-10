@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Donchian20_WeeklyTrend_Volume
-Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation captures strong momentum moves while minimizing trades. Weekly trend ensures alignment with higher timeframe momentum, reducing false signals in ranging markets. Target: 15-25 trades/year per symbol for low fee drag and robust performance in both bull and bear markets.
+12h_HTF_S1_R1_Breakout_1dTrend_Filter
+Hypothesis: Trading breakouts at S1/R1 of daily Camarilla pivot with 1-day trend filter and volume confirmation captures momentum moves in both bull and bear markets. Uses 12h timeframe to balance trade frequency and signal quality, targeting 12-37 trades/year with low fee drain.
 """
 
-name = "1d_Donchian20_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_HTF_S1_R1_Breakout_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,75 +14,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA40 for trend filter
-    close_1w = df_1w['close'].values
-    ema40_1w = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate daily Donchian channels (20-period high/low)
+    # Calculate Camarilla levels for current day (using previous day's OHLC)
+    # Standard Camarilla formula
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # First value uses current day's high as placeholder
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Calculate Camarilla levels (focusing on R1/S1 for breakout)
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Get 1d data for EMA trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 12h data for signal generation
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian upper (20-period high) and lower (20-period low)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: current volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup periods
-    start_idx = max(20, 20)  # Donchian(20) and volume EMA(20)
+    # Warmup: need 1d EMA34 (34 periods)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or
-            np.isnan(ema40_1w_aligned[i]) or
-            np.isnan(vol_ema20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend_1w = close[i] > ema40_1w_aligned[i]
-        downtrend_1w = close[i] < ema40_1w_aligned[i]
+        # Trend filter: price vs 1d EMA34
+        uptrend_1d = close[i] > ema34_1d_aligned[i]
+        downtrend_1d = close[i] < ema34_1d_aligned[i]
         
-        # Volume filter
+        # Volume filter: current volume > 1.5x 20-period EMA
+        vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
         volume_filter = volume[i] > vol_ema20[i] * 1.5
         
         if position == 0:
-            # Long entry: price breaks above Donchian high with weekly uptrend and volume
-            if high[i] > donchian_high[i] and uptrend_1w and volume_filter:
+            # Long breakout: price breaks above R1 with volume and uptrend
+            if high[i] > R1_aligned[i] and uptrend_1d and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low with weekly downtrend and volume
-            elif low[i] < donchian_low[i] and downtrend_1w and volume_filter:
+            # Short breakout: price breaks below S1 with volume and downtrend
+            elif low[i] < S1_aligned[i] and downtrend_1d and volume_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price retouches Donchian low or weekly trend fails
-            if low[i] <= donchian_low[i] or not uptrend_1w:
+            # Long exit: price reaches midpoint between R1 and S1 or trend fails
+            midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
+            if low[i] <= midpoint or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price retouches Donchian high or weekly trend fails
-            if high[i] >= donchian_high[i] or not downtrend_1w:
+            # Short exit: price reaches midpoint between R1 and S1 or trend fails
+            midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
+            if high[i] >= midpoint or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
