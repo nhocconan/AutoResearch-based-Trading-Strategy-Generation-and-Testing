@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12h chart strategy using daily Camarilla R1/S1 breakouts with 1d EMA trend filter and volume confirmation.
-Works in bull/bear by following daily trend; volatility-based entries reduce false breakouts.
-Target: 12-30 trades/year per symbol with strict entry conditions to minimize fee drag.
+Hypothesis: Breakout at Camarilla R1/S1 levels using prior day's OHLC, filtered by 1d EMA34 trend and volume spikes. Designed for 12h timeframe to limit trade frequency (target: 25-40 trades/year). Uses 1d trend filter to work in both bull and bear markets by aligning with higher timeframe direction. Volume confirmation reduces false breakouts. Stops when price crosses back below/above EMA34.
 """
 
 name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
@@ -24,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter (using EWMA with adjust=False)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_34_1d = np.full(len(close_1d), np.nan)
@@ -43,7 +41,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
         if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma[i]):
