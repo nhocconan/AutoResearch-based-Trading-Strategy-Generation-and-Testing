@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-12H_Combined_Breakout_1dTrend_Volume
-Hypothesis: Combines Donchian(20) breakout and Camarilla pivot (R1/S1) breakout from prior day, 
-filtered by 1d EMA trend and volume spike. Designed for 12h timeframe to achieve low trade 
-frequency (target: 12-37/year) with high win rate. Uses trend-following entries in both 
-bull and bear markets by following 1d trend direction, avoiding counter-trend trades. 
-Uses discrete position sizing (0.25) to minimize fee churn.
+4H_3xRSI_MeanReversion_PivotFilter
+Hypothesis: Uses 3-period RSI for short-term mean reversion signals with
+extreme thresholds (RSI<25 long, RSI>75 short), filtered by daily
+pivot levels to avoid counter-trend trades and weekly trend for
+directional bias. Designed for 4h timeframe to capture mean reversion
+within established trends with low trade frequency (target: 20-40 trades/year).
+Works in both bull and bear markets by using pivot/resistance as dynamic
+support/resistance and weekly trend to determine bias.
 """
 
-name = "12H_Combined_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_3xRSI_MeanReversion_PivotFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,78 +28,89 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (HTF)
+    # Get 1d data for pivot calculation (prior day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Get 1d data for Donchian(20) and Camarilla pivot calculation
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Donchian(20) from 1d data
-    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
+    # Calculate pivot points from prior day's OHLC
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*Pivot - L
+    # S1 = 2*Pivot - H
+    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    r1 = 2 * pivot - df_1d['low']
+    s1 = 2 * pivot - df_1d['high']
     
-    # Camarilla levels from prior day's OHLC
-    # R1 = C + ((H-L) * 1.1 / 12)
-    # S1 = C - ((H-L) * 1.1 / 12)
-    camarilla_r1 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
-    camarilla_s1 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
+    # Align pivot levels to 4h timeframe (use prior day's levels)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Align indicators to 12h timeframe (use prior day's levels)
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
+    # Get 1w data for weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Volume filter: volume > 2.0x 20-period average on 12h chart
+    # Calculate 20-period EMA for weekly trend
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Calculate 3-period RSI for mean reversion signals
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/3, adjust=False, min_periods=3).mean()
+    avg_loss = loss.ewm(alpha=1/3, adjust=False, min_periods=3).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and Donchian
+    start_idx = max(20, 3)  # Warmup for weekly EMA and RSI
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
+           np.isnan(ema_1w_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Weekly trend bias
+        weekly_uptrend = close[i] > ema_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_1w_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above Donchian high OR Camarilla R1 + above 1d EMA + volume spike
-            if ((close[i] > donchian_high_aligned[i] or close[i] > r1_aligned[i]) and 
-                price_above_ema and 
+            # Long entry: RSI oversold + price above S1 (support) + weekly uptrend + volume
+            if (rsi_values[i] < 25 and 
+                close[i] > s1_aligned[i] and 
+                weekly_uptrend and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low OR Camarilla S1 + below 1d EMA + volume spike
-            elif ((close[i] < donchian_low_aligned[i] or close[i] < s1_aligned[i]) and 
-                  price_below_ema and 
+            # Short entry: RSI overbought + price below R1 (resistance) + weekly downtrend + volume
+            elif (rsi_values[i] > 75 and 
+                  close[i] < r1_aligned[i] and 
+                  weekly_downtrend and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low OR Camarilla S1 or volume drops
-            if (close[i] < donchian_low_aligned[i] or close[i] < s1_aligned[i] or volume[i] < vol_ma[i]):
+            # Long exit: RSI overbought or price breaks below S1
+            if (rsi_values[i] > 70 or close[i] < s1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high OR Camarilla R1 or volume drops
-            if (close[i] > donchian_high_aligned[i] or close[i] > r1_aligned[i] or volume[i] < vol_ma[i]):
+            # Short exit: RSI oversold or price breaks above R1
+            if (rsi_values[i] < 30 or close[i] > r1_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
