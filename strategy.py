@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # 4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
-# Hypothesis: Uses Camarilla R1/S1 from prior day for breakout entries, confirmed by 1d EMA(50) trend and volume spike >2.5x average.
+# Hypothesis: Uses Camarilla R1/S1 from prior day for breakout entries, confirmed by 1d EMA trend and volume spike >2.5x average.
 # Designed for 4h timeframe to capture trend continuation moves with low trade frequency (target: 20-40 trades/year).
 # Works in both bull and bear markets by following 1d trend direction, avoiding counter-trend trades.
 # Uses discrete position sizing (0.25) to minimize fee churn.
@@ -33,18 +33,19 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
-    if len(df_1d) < 2:
+    df_1d_pivot = get_htf_data(prices, '1d')
+    if len(df_1d_pivot) < 2:
         return np.zeros(n)
     
     # Calculate Camarilla levels from prior day's OHLC
     # R1 = C + ((H-L) * 1.1 / 12)
     # S1 = C - ((H-L) * 1.1 / 12)
-    camarilla_r1 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
-    camarilla_s1 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
+    camarilla_r1 = df_1d_pivot['close'] + ((df_1d_pivot['high'] - df_1d_pivot['low']) * 1.1 / 12)
+    camarilla_s1 = df_1d_pivot['close'] - ((df_1d_pivot['high'] - df_1d_pivot['low']) * 1.1 / 12)
     
     # Align Camarilla levels to 4h timeframe (use prior day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
+    r1_aligned = align_htf_to_ltf(prices, df_1d_pivot, camarilla_r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d_pivot, camarilla_s1.values)
     
     # Volume filter: volume > 2.5x 20-period average on 4h chart (stricter than before)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
