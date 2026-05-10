@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 1H_4H_1D_Triple_Momentum_Confluence
-# Hypothesis: Price momentum aligned across 1h, 4h, and 1d timeframes indicates strong trend continuation.
-# Long when: 1h RSI > 55, 4h close > 4h EMA20, 1d close > 1d EMA50.
-# Short when: 1h RSI < 45, 4h close < 4h EMA20, 1d close < 1d EMA50.
-# Uses session filter (08-20 UTC) to avoid low-liquidity periods.
-# Position size: 0.20 (20% of capital) to control drawdown.
-# Target: 20-40 trades/year per symbol to minimize fee drag while capturing major moves.
+# 6H_1W_Ichimoku_Trend_Follow
+# Hypothesis: Ichimoku on weekly timeframe provides strong trend filter; price above/below cloud indicates trend direction.
+# Entry on 6h when Tenkan-sen crosses Kijun-sen in direction of weekly trend, with price outside cloud for confirmation.
+# Works in bull/bear by following weekly trend. Target: 12-30 trades/year per symbol.
 
-name = "1H_4H_1D_Triple_Momentum_Confluence"
-timeframe = "1h"
+name = "6H_1W_Ichimoku_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,94 +17,97 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Get 4h data
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for Ichimoku
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 52:  # Need at least 52 weeks for proper calculation
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # 4h EMA20
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate Ichimoku components on weekly data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    close_1d = df_1d['close'].values
-    # 1d EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = ((period52_high + period52_low) / 2)
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    
+    # Determine weekly trend: price above/below cloud
+    # Cloud top is max of Senkou Span A and B, cloud bottom is min
+    cloud_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
+    cloud_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
+    
+    # Bullish trend: price above cloud
+    bullish_trend = close > cloud_top
+    # Bearish trend: price below cloud
+    bearish_trend = close < cloud_bottom
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
-    start_idx = 60
+    # Start after we have enough data for Ichimoku calculations
+    start_idx = 52
     
     for i in range(start_idx, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Long conditions: bullish momentum across all timeframes
-        long_condition = (rsi[i] > 55) and (close[i] > ema20_4h_aligned[i]) and (close[i] > ema50_1d_aligned[i])
-        
-        # Short conditions: bearish momentum across all timeframes
-        short_condition = (rsi[i] < 45) and (close[i] < ema20_4h_aligned[i]) and (close[i] < ema50_1d_aligned[i])
+        # Tenkan/Kijun cross signals
+        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]
+        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]
         
         if position == 0:
-            # Enter long
-            if long_condition:
-                signals[i] = 0.20
+            # Enter long: bullish trend + Tenkan crosses above Kijun + price above cloud
+            if bullish_trend[i] and tk_cross_up and close[i] > cloud_top[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short
-            elif short_condition:
-                signals[i] = -0.20
+            # Enter short: bearish trend + Tenkan crosses below Kijun + price below cloud
+            elif bearish_trend[i] and tk_cross_down and close[i] < cloud_bottom[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: any momentum breaks down
-            if not long_condition:
+            # Exit long: bearish trend or Tenkan crosses below Kijun
+            if bearish_trend[i] or tk_cross_down:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: any momentum breaks down
-            if not short_condition:
+            # Exit short: bullish trend or Tenkan crosses above Kijun
+            if bullish_trend[i] or tk_cross_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
