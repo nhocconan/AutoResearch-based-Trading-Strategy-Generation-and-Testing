@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Channel_Breakout_20_1dTrend_Volume
-# Hypothesis: On 6h timeframe, breakouts from Keltner Channel (ATR-based) with daily trend filter and volume confirmation capture momentum moves while avoiding false breakouts in chop. The daily trend filter ensures we only trade in the direction of the higher timeframe trend, reducing counter-trend losses. Volatile breakouts are confirmed by volume spikes. Designed for low frequency (~15-35 trades/year) to minimize fee drag in both bull and bear markets.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, price breaking above Camarilla R1 (resistance) with daily uptrend and volume confirmation indicates bullish momentum; breaking below S1 (support) with daily downtrend and volume indicates bearish momentum. Camarilla levels provide institutional support/resistance, daily trend filters counter-trend trades, volume reduces false signals. Designed for 15-35 trades/year to minimize fee drag.
 
-name = "6h_Keltner_Channel_Breakout_20_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,44 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for Camarilla calculation and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Keltner Channel (20, ATR=10)
-    close_series = pd.Series(close)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
+    # Calculate Camarilla levels from previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA20 for middle line
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # True Range and ATR(10)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # first bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Upper and lower bands
-    keltner_upper = ema20 + 2 * atr10
-    keltner_lower = ema20 - 2 * atr10
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + 1.1 * range_1d / 12
+    camarilla_s1 = close_1d - 1.1 * range_1d / 12
     
     # Daily trend: EMA34 on daily close
-    close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align daily trend to 6h
+    # Align daily Camarilla and trend to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volume confirmation: 20-period average
+    # Volume confirmation: 20-period average on 12h
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -65,11 +54,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema20[i]) or np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -78,23 +67,23 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 2.0  # Require strong volume spike
+        volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above Keltner Upper with daily uptrend and volume spike
-            if (close[i] > keltner_upper[i] and 
+            # Enter long: price breaks above R1 with daily uptrend and volume
+            if (close[i] > camarilla_r1_aligned[i] and 
                 trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Keltner Lower with daily downtrend and volume spike
-            elif (close[i] < keltner_lower[i] and 
+            # Enter short: price breaks below S1 with daily downtrend and volume
+            elif (close[i] < camarilla_s1_aligned[i] and 
                   trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to EMA20 or trend fails
-            if (close[i] <= ema20[i] or 
+            # Exit when price returns below S1 or trend fails
+            if (close[i] < camarilla_s1_aligned[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -102,8 +91,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to EMA20 or trend fails
-            if (close[i] >= ema20[i] or 
+            # Exit when price returns above R1 or trend fails
+            if (close[i] > camarilla_r1_aligned[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
