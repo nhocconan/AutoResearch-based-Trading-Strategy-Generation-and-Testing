@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_ElderRay_WeeklyTrend_Volume
-Hypothesis: Elder Ray (Bull/Bear Power) on 1d with 1-week EMA13 trend filter and volume confirmation.
-In trending markets, strong bull/bear power persists; in ranging markets, it fades.
-Volume filters weak breakouts. Works in bull (strong bull power) and bear (strong bear power).
-Target: 30-100 total trades over 4 years (7-25/year).
+6h_WilliamsVixFix_1dTrend_Filter
+Hypothesis: Williams Vix Fix (WVF) identifies market exhaustion and potential reversals. 
+In trending markets (determined by 1d EMA34), we take WVF signals in the direction of the trend.
+WVF > 0.8 signals extreme fear/greed and potential reversal. Combined with trend filter, 
+this captures mean-reversion in strong trends and avoids counter-trend trades in weak markets.
+Volume confirmation ensures institutional participation. Works in both bull (buy fear) and 
+bear (sell greed) markets. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "1d_ElderRay_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "6h_WilliamsVixFix_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +27,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA13 for trend filter (Elder Ray uses EMA13)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema13_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 13:
-        ema13_1w[12] = np.mean(close_1w[:13])
-        alpha = 2 / (13 + 1)
-        for i in range(13, len(close_1w)):
-            ema13_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema13_1w[i-1]
-    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Weekly volume SMA20 for volume confirmation
-    volume_1w = df_1w['volume'].values
-    vol_sma20_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 20:
-        vol_sma20_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(volume_1w)):
-            vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + volume_1w[i]) / 20
-    vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
+    # 1d volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Calculate daily EMA13 for Elder Ray (on 1d data)
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema13[12] = np.mean(close[:13])
-        alpha13 = 2 / (13 + 1)
-        for i in range(13, n):
-            ema13[i] = alpha13 * close[i] + (1 - alpha13) * ema13[i-1]
+    # Williams Vix Fix: measures market fear/greed
+    # WVF = ((Highest Close in period - Low) / (Highest Close in period)) * 100
+    # Highest Close = highest close in lookback period (22 periods default)
+    lookback = 22
+    highest_close = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        highest_close[i] = np.max(close[i - lookback + 1:i + 1])
     
-    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    wvf = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        if not np.isnan(highest_close[i]) and highest_close[i] > 0:
+            wvf[i] = ((highest_close[i] - low[i]) / highest_close[i]) * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # warmup for EMA calculations
+    start_idx = max(lookback - 1, 34)
     
     for i in range(start_idx, n):
-        if np.isnan(ema13_1w_aligned[i]) or np.isnan(vol_sma20_1w_aligned[i]) or np.isnan(ema13[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(wvf[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x average weekly volume (scaled to daily)
-        # Approximate 1d volume from 1w: 1w volume / 5 (since 5 trading days per week)
-        vol_1d_approx = vol_sma20_1w_aligned[i] / 5.0
-        volume_confirm = volume[i] > 1.3 * vol_1d_approx
+        # Volume confirmation: current 6h volume > 1.5x average 1d volume (scaled to 6h)
+        vol_6h_approx = vol_sma20_1d_aligned[i] / 4.0
+        volume_confirm = volume[i] > 1.5 * vol_6h_approx
+        
+        # WVF threshold for extreme readings
+        wvf_extreme = wvf[i] > 80  # Typically >80 indicates extreme fear/greed
         
         if position == 0:
-            # Long: Strong bull power (> 0) with uptrend and volume confirmation
-            if bull_power[i] > 0 and close[i] > ema13[i] and volume_confirm:
+            # Long: Extreme fear (high WVF) in uptrend with volume
+            if wvf_extreme and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Strong bear power (< 0) with downtrend and volume confirmation
-            elif bear_power[i] < 0 and close[i] < ema13[i] and volume_confirm:
+            # Short: Extreme greed (high WVF) in downtrend with volume
+            elif wvf_extreme and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bear power becomes negative (bull power fading) or trend reversal
-            if bear_power[i] < 0 or close[i] < ema13[i]:
+            # Exit: Trend reversal or WVF normalization
+            if close[i] < ema34_1d_aligned[i] or wvf[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bull power becomes positive (bear power fading) or trend reversal
-            if bull_power[i] > 0 or close[i] > ema13[i]:
+            # Exit: Trend reversal or WVF normalization
+            if close[i] > ema34_1d_aligned[i] or wvf[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
