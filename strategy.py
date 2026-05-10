@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1D_1W_Donchian_Breakout_Trend_Follow
-# Hypothesis: In strong weekly trends, price breaks daily Donchian channels to capture trends while avoiding whipsaws.
-# Long when price breaks above daily Donchian high (20) in a weekly uptrend (close > weekly EMA50).
-# Short when price breaks below daily Donchian low (20) in a weekly downtrend (close < weekly EMA50).
-# Weekly trend filter reduces false breaks in ranging markets. Works in bull/bear by following weekly trend.
-# Target: 15-25 trades/year per symbol.
+# 12H_1D_Adaptive_RSI_Divergence
+# Hypothesis: On 12h timeframe, RSI divergence from price at extreme levels (oversold/overbought)
+# combined with 1d trend filter captures reversals in both bull and bear markets.
+# Uses 1d EMA50 for trend direction and 12h RSI(14) with bullish/bearish divergence detection.
+# Divergence occurs when price makes new high/low but RSI does not, indicating weakening momentum.
+# Works in trending markets by catching pullbacks and in ranging markets by catching reversals.
+# Target: 20-30 trades/year per symbol with low turnover to minimize fee drag.
 
-name = "1D_1W_Donchian_Breakout_Trend_Follow"
-timeframe = "1d"
+name = "12H_1D_Adaptive_RSI_Divergence"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,52 +17,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA50 for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly trend: bullish if close > EMA50, bearish if close < EMA50
-    bullish_trend = close_1w > ema50_1w
-    bearish_trend = close_1w < ema50_1w
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_trend = close_1d > ema50_1d
+    bearish_trend = close_1d < ema50_1d
     
-    # Align weekly trend to daily
-    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend.astype(float))
+    # Align trend to 12h
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
     
-    # Daily Donchian channel (20-period)
-    lookback = 20
-    # Calculate highest high and lowest low over lookback period
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Calculate RSI on 12h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = 50  # Initialize before smoothing period
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = max(50, lookback - 1)
+    # Lookback period for divergence detection
+    lookback = 10
     
-    for i in range(start_idx, n):
-        # Skip if data not ready
+    for i in range(lookback, n):
+        # Skip if trend data not ready
         if (np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,26 +81,43 @@ def generate_signals(prices):
         bearish = bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: bullish weekly trend + price breaks above daily Donchian high
-            if bullish and close[i] > highest_high[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: bearish weekly trend + price breaks below daily Donchian low
-            elif bearish and close[i] < lowest_low[i]:
-                signals[i] = -0.25
-                position = -1
+            # Check for bullish divergence: price makes lower low, RSI makes higher low
+            if bullish:
+                # Find lowest price in lookback window
+                lookback_low_idx = np.argmin(low[i-lookback:i+1])
+                abs_low_idx = i - lookback + lookback_low_idx
+                
+                # Current price is new low compared to lookback period
+                if low[i] <= low[abs_low_idx] and abs_low_idx < i:
+                    # Check if RSI at current point is higher than RSI at lookback low
+                    if rsi[i] > rsi[abs_low_idx] and rsi[i] < 40:  # Oversold condition
+                        signals[i] = 0.25
+                        position = 1
+            
+            # Check for bearish divergence: price makes higher high, RSI makes lower high
+            elif bearish:
+                # Find highest price in lookback window
+                lookback_high_idx = np.argmax(high[i-lookback:i+1])
+                abs_high_idx = i - lookback + lookback_high_idx
+                
+                # Current price is new high compared to lookback period
+                if high[i] >= high[abs_high_idx] and abs_high_idx < i:
+                    # Check if RSI at current point is lower than RSI at lookback high
+                    if rsi[i] < rsi[abs_high_idx] and rsi[i] > 60:  # Overbought condition
+                        signals[i] = -0.25
+                        position = -1
         
         elif position == 1:
-            # Exit long: bearish weekly trend or price breaks below daily Donchian low
-            if bearish or close[i] < lowest_low[i]:
+            # Exit long: bearish trend or RSI becomes overbought
+            if bearish or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish weekly trend or price breaks above daily Donchian high
-            if bullish or close[i] > highest_high[i]:
+            # Exit short: bullish trend or RSI becomes oversold
+            if bullish or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
