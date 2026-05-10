@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1D_1W_Ichimoku_Trend_Follow
-# Hypothesis: Ichimoku Cloud on weekly timeframe defines trend, with entry on daily retracement to Kijun-sen.
-# Long when: weekly Senkou Span A > Senkou Span B (bullish cloud), price above weekly Kijun-sen, and daily close crosses above daily Kijun-sen.
-# Short when: weekly Senkou Span A < Senkou Span B (bearish cloud), price below weekly Kijun-sen, and daily close crosses below daily Kijun-sen.
-# Uses weekly cloud for trend filter and weekly/daily Kijun-sen for entries.
-# Works in bull/bear by following weekly trend direction. Target: 15-25 trades/year per symbol.
+# 6H_1D_Stochastic_Trend_Follow
+# Hypothesis: In strong daily trends, stochastic oscillator identifies pullback entries.
+# Long when daily trend is up (close > EMA50) and stochastic %K crosses above 20 (oversold bounce).
+# Short when daily trend is down (close < EMA50) and stochastic %K crosses below 80 (overbought rejection).
+# Uses 1d stochastic(14,3,3) for entry timing and 1d EMA50 for trend filter.
+# Works in bull/bear by following daily trend direction. Target: 15-25 trades/year per symbol.
 
-name = "1D_1W_Ichimoku_Trend_Follow"
-timeframe = "1d"
+name = "6H_1D_Stochastic_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,105 +21,77 @@ def generate_signals(prices):
     
     close = prices['close'].values
     
-    # Get weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    high_9 = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (high_9 + low_9) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    high_26 = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    high_52 = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Chikou Span (Lagging Span): current close shifted 26 periods back (not used for signals)
-    
-    # Bullish cloud: Senkou Span A > Senkou Span B
-    bullish_cloud = senkou_a > senkou_b
-    bearish_cloud = senkou_a < senkou_b
-    
-    # Align weekly indicators to daily
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen)
-    bullish_cloud_aligned = align_htf_to_ltf(prices, df_1w, bullish_cloud.astype(float))
-    bearish_cloud_aligned = align_htf_to_ltf(prices, df_1w, bearish_cloud.astype(float))
-    
     # Get daily data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily Kijun-sen (Base Line): (26-period high + low)/2
-    high_26d = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    low_26d = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen_1d = (high_26d + low_26d) / 2
+    # Daily EMA50 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align daily Kijun-sen to itself (no shift needed, but for consistency)
-    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d)
+    # Daily Stochastic(14,3,3)
+    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    k_raw = 100 * (close_1d - lowest_low) / (highest_high - lowest_low)
+    k_raw = np.where((highest_high - lowest_low) == 0, 50, k_raw)  # avoid division by zero
+    k = pd.Series(k_raw).ewm(span=3, adjust=False, min_periods=3).mean().values
+    d = pd.Series(k).ewm(span=3, adjust=False, min_periods=3).mean().values  # %D line
+    
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_trend = close_1d > ema50_1d
+    bearish_trend = close_1d < ema50_1d
+    
+    # Align to 6h
+    k_aligned = align_htf_to_ltf(prices, df_1d, k)
+    d_aligned = align_htf_to_ltf(prices, df_1d, d)
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 52
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kijun_sen_aligned[i]) or
-            np.isnan(bullish_cloud_aligned[i]) or np.isnan(bearish_cloud_aligned[i]) or
-            np.isnan(kijun_sen_1d_aligned[i])):
+        if (np.isnan(k_aligned[i]) or np.isnan(d_aligned[i]) or
+            np.isnan(ema50_aligned[i]) or np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish_cloud = bullish_cloud_aligned[i] > 0.5
-        bearish_cloud = bearish_cloud_aligned[i] > 0.5
+        bullish = bullish_aligned[i] > 0.5
+        bearish = bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: bullish cloud + price above weekly Kijun-sen + daily close crosses above daily Kijun-sen
-            if bullish_cloud and close[i] > kijun_sen_aligned[i] and close_1d[i] > kijun_sen_1d_aligned[i]:
-                # Check for crossover: previous close below, current close above
-                if i > 0 and close_1d[i-1] <= kijun_sen_1d_aligned[i-1]:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short: bearish cloud + price below weekly Kijun-sen + daily close crosses below daily Kijun-sen
-            elif bearish_cloud and close[i] < kijun_sen_aligned[i] and close_1d[i] < kijun_sen_1d_aligned[i]:
-                # Check for crossover: previous close above, current close below
-                if i > 0 and close_1d[i-1] >= kijun_sen_1d_aligned[i-1]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: bullish trend + stochastic crosses above 20 (oversold bounce)
+            if bullish and k_aligned[i] > 20 and k_aligned[i-1] <= 20:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: bearish trend + stochastic crosses below 80 (overbought rejection)
+            elif bearish and k_aligned[i] < 80 and k_aligned[i-1] >= 80:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: bearish cloud or price crosses below weekly Kijun-sen
-            if bearish_cloud or close[i] < kijun_sen_aligned[i]:
+            # Exit long: bearish trend or stochastic crosses below 50 (momentum loss)
+            if bearish or (k_aligned[i] < 50 and k_aligned[i-1] >= 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish cloud or price crosses above weekly Kijun-sen
-            if bullish_cloud or close[i] > kijun_sen_aligned[i]:
+            # Exit short: bullish trend or stochastic crosses above 50 (momentum loss)
+            if bullish or (k_aligned[i] > 50 and k_aligned[i-1] <= 50):
                 signals[i] = 0.0
                 position = 0
             else:
