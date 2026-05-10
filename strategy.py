@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Using weekly trend filter (1w EMA200) with daily Camarilla R1/S1 breakouts on 12h timeframe.
-Weekly trend filter provides strong directional bias, reducing false breakouts. Daily Camarilla levels provide
-intraday support/resistance. Volume confirmation (>2x average) ensures breakout strength. Target: 20-40 trades/year.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3
+Hypothesis: Tighten entry conditions further using Camarilla R3/S3 breakouts with strict volume confirmation (>3x average) and 1d EMA34 trend filter.
+Focus on high-probability breakouts in trending markets to reduce trade frequency (<25/year) and improve robustness in both bull and bear markets.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,80 +23,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous daily bar (R1/S1)
+    # Calculate Camarilla levels from previous 1d bar (avoid look-ahead)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Camarilla R1 and S1 levels
+    # Calculate Camarilla R3 and S3 levels
     rng = prev_high - prev_low
-    r1 = prev_close + (rng * 1.1 / 12)  # R1 = C + (H-L) * 1.1/12
-    s1 = prev_close - (rng * 1.1 / 12)  # S1 = C - (H-L) * 1.1/12
+    r3 = prev_close + (rng * 1.1 / 4)  # R3 = C + (H-L) * 1.1/4
+    s3 = prev_close - (rng * 1.1 / 4)  # S3 = C - (H-L) * 1.1/4
     
-    # Align daily levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align 1d levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate weekly EMA200 for trend filter
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (30-period MA on 12h)
-    volume_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation (20-period MA on 4h)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA200 (200) and volume MA (30)
-    start_idx = max(200, 30)
+    # Warmup: need 1d EMA34 (34) and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_200_1w_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend_1w = close[i] > ema_200_1w_aligned[i]
-        downtrend_1w = close[i] < ema_200_1w_aligned[i]
+        # Higher timeframe trend filter
+        uptrend_1d = close[i] > ema_34_1d_aligned[i]
+        downtrend_1d = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (>2x average volume)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation (>3x average volume - strict)
+        volume_confirm = volume[i] > volume_ma[i] * 3.0
         
         if position == 0:
-            # Long entry: weekly uptrend + price breaks above R1 + volume confirmation
-            if uptrend_1w and close[i] > r1_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above R3 + volume confirmation
+            if uptrend_1d and close[i] > r3_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: weekly downtrend + price breaks below S1 + volume confirmation
-            elif downtrend_1w and close[i] < s1_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below S3 + volume confirmation
+            elif downtrend_1d and close[i] < s3_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: weekly trend breaks or price re-enters below R1
-            if not uptrend_1w or close[i] < r1_aligned[i]:
+            # Long exit: trend breaks or price re-enters below R3
+            if not uptrend_1d or close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: weekly trend breaks or price re-enters above S1
-            if not downtrend_1w or close[i] > s1_aligned[i]:
+            # Short exit: trend breaks or price re-enters above S3
+            if not downtrend_1d or close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
