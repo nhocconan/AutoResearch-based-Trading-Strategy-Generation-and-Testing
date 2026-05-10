@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-# 6H_Aroon_Trend_With_WilliamsR_OverboughtOversold_Filter
-# Hypothesis: Aroon indicator identifies strong trends (Aroon Up > 70 or Aroon Down > 70).
-# Williams %R filters overextended entries: only go long when Williams %R < -20 (not oversold),
-# and short when Williams %R > -80 (not overbought). This avoids chasing extremes.
-# Weekly trend filter (price above/below weekly EMA20) ensures alignment with higher timeframe.
+# 12H_Camarilla_Pivot_S1R1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (S1/R1) on 12h chart act as strong support/resistance. 
+# Breakout above R1 with volume > 1.5x 20-period average and daily uptrend triggers long.
+# Breakdown below S1 with volume > 1.5x 20-period average and daily downtrend triggers short.
+# Exit when price returns to the pivot point (P) or trend reverses.
+# Uses daily trend filter and volume confirmation to avoid false breakouts.
 # Designed for low trade frequency (~15-30/year) with discrete sizing (0.25) to minimize fee drag.
-# Works in bull markets (catching strong uptrends) and bear markets (catching strong downtrends).
+# Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 
-name = "6H_Aroon_Trend_With_WilliamsR_OverboughtOversold_Filter"
-timeframe = "6h"
+name = "12H_Camarilla_Pivot_S1R1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,44 +24,42 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Aroon indicator (25-period)
-    def aroon_up(high, lookback=25):
-        h = pd.Series(high)
-        return h.rolling(window=lookback, min_periods=lookback).apply(
-            lambda x: (lookback - 1 - np.argmax(x)) / (lookback - 1) * 100, raw=True
-        ).values
+    # Calculate Camarilla pivot levels from previous day
+    # Using daily data to calculate pivots for the current 12h bar
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    def aroon_down(low, lookback=25):
-        l = pd.Series(low)
-        return l.rolling(window=lookback, min_periods=lookback).apply(
-            lambda x: (lookback - 1 - np.argmin(x)) / (lookback - 1) * 100, raw=True
-        ).values
+    # Previous day's OHLC for pivot calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    aroon_up_val = aroon_up(high, 25)
-    aroon_down_val = aroon_down(low, 25)
+    # Calculate pivot and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
+    s1 = prev_close - (range_ * 1.1 / 12)
+    r1 = prev_close + (range_ * 1.1 / 12)
+    s2 = prev_close - (range_ * 1.1 / 6)
+    r2 = prev_close + (range_ * 1.1 / 6)
     
-    # Williams %R (14-period)
-    def williams_r(high, low, close, lookback=14):
-        h = pd.Series(high)
-        l = pd.Series(low)
-        c = pd.Series(close)
-        highest_high = h.rolling(window=lookback, min_periods=lookback).max()
-        lowest_low = l.rolling(window=lookback, min_periods=lookback).min()
-        wr = -100 * (highest_high - c) / (highest_high - lowest_low)
-        return wr.values
+    # Align daily pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     
-    wr = williams_r(high, low, close, 14)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 1.5
     
-    # Weekly trend filter: EMA 20
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    
-    # Weekly close for trend
-    close_1w_series = pd.Series(close_1w)
-    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w_series.values)
+    # Daily trend filter: EMA 50
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,34 +67,37 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(aroon_up_val[i]) or np.isnan(aroon_down_val[i]) or np.isnan(wr[i]) or np.isnan(ema_20_1w_aligned[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(vol_threshold[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        is_weekly_uptrend = close_1w_aligned[i] > ema_20_1w_aligned[i]
-        is_weekly_downtrend = close_1w_aligned[i] < ema_20_1w_aligned[i]
+        # Determine daily trend
+        is_uptrend = close_1d[i-1] > ema_50_1d[i-1] if i > 0 else False
+        is_downtrend = close_1d[i-1] < ema_50_1d[i-1] if i > 0 else False
         
         if position == 0:
-            # Long entry: Aroon Up > 70 (strong uptrend) + Williams %R > -80 (not overbought) + weekly uptrend
-            if aroon_up_val[i] > 70 and wr[i] > -80 and is_weekly_uptrend:
+            # Long entry: Price breaks above R1 with volume confirmation and daily uptrend
+            if close[i] > r1_aligned[i] and volume[i] > vol_threshold[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Aroon Down > 70 (strong downtrend) + Williams %R < -20 (not oversold) + weekly downtrend
-            elif aroon_down_val[i] > 70 and wr[i] < -20 and is_weekly_downtrend:
+            # Short entry: Price breaks below S1 with volume confirmation and daily downtrend
+            elif close[i] < s1_aligned[i] and volume[i] > vol_threshold[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Aroon Down > 70 (strong downtrend emerges) or weekly trend turns down
-            if aroon_down_val[i] > 70 or not is_weekly_uptrend:
+            # Long exit: Price returns to pivot point or daily trend turns down
+            if close[i] <= pivot_aligned[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Aroon Up > 70 (strong uptrend emerges) or weekly trend turns up
-            if aroon_up_val[i] > 70 or not is_weekly_downtrend:
+            # Short exit: Price returns to pivot point or daily trend turns up
+            if close[i] >= pivot_aligned[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
