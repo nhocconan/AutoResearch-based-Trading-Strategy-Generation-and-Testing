@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_ForceIndex_Trend_Filter
-Hypothesis: Elder Ray (Bull/Bear Power) + Force Index with weekly trend filter captures momentum in both bull and bear markets. 
-Elder Ray measures bull/bear power relative to EMA13, Force Index confirms conviction. 
-Weekly EMA20 trend filter ensures we trade only in the direction of higher timeframe trend, avoiding counter-trend whipsaws.
-Targets 12-30 trades/year (48-120 total) to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Use 1d Camarilla pivot levels (R1/S1) as support/resistance on 12h chart. Long when price breaks above R1 in a 1d uptrend with volume confirmation; short when price breaks below S1 in a 1d downtrend with volume confirmation. Camarilla levels from higher timeframe provide statistically significant institutional reference points. Trend filter ensures trading with higher timeframe momentum. Volume confirmation filters false breakouts. Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull and bear markets via trend alignment.
 """
 
-name = "6h_ElderRay_ForceIndex_Trend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,76 +14,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Weekly EMA20 for trend filter
-    ema20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Calculate Camarilla levels for each 1d bar (based on previous day)
+    # R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = np.full(len(close_1d), np.nan)
+    camarilla_s1 = np.full(len(close_1d), np.nan)
     
-    # Force Index: (Close - Close_prev) * Volume
-    force_index = np.zeros_like(close)
-    force_index[1:] = (close[1:] - close[:-1]) * volume[1:]
-    # Smooth Force Index with EMA13
-    fi_smooth = pd.Series(force_index).ewm(span=13, adjust=False, min_periods=13).mean().values
+    for i in range(1, len(close_1d)):
+        high_low = high_1d[i-1] - low_1d[i-1]
+        camarilla_r1[i] = close_1d[i-1] + 1.1 * high_low / 12.0
+        camarilla_s1[i] = close_1d[i-1] - 1.1 * high_low / 12.0
     
-    # Align weekly EMA20 to 6h
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # 1d EMA34 for trend filter
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    
+    # Align 1d indicators to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # Wait for EMA13 and smoothed FI
+    start_idx = 34  # Wait for EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(ema20_1w_aligned[i]) or np.isnan(ema13[i]) or np.isnan(fi_smooth[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend: price above/below weekly EMA20
-        weekly_uptrend = close[i] > ema20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema20_1w_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled)
+        # 1d = 2 x 12h bars, so scale 1d volume down to 12h equivalent
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # Average 12h-equivalent volume from 1d data
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        
+        # Trend and price relative to Camarilla levels
+        is_uptrend = close[i] > ema34_1d_aligned[i]
+        is_downtrend = close[i] < ema34_1d_aligned[i]
+        price_above_r1 = close[i] > camarilla_r1_aligned[i]
+        price_below_s1 = close[i] < camarilla_s1_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) AND Force Index rising (conviction) AND weekly uptrend
-            if bull_power[i] > 0 and fi_smooth[i] > fi_smooth[i-1] and weekly_uptrend:
+            # Long: price breaks above R1, in uptrend, with volume
+            if price_above_r1 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) AND Force Index falling (conviction) AND weekly downtrend
-            elif bear_power[i] < 0 and fi_smooth[i] < fi_smooth[i-1] and weekly_downtrend:
+            # Short: price breaks below S1, in downtrend, with volume
+            elif price_below_s1 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power turns negative OR Force Index turns negative (loss of conviction)
-            if bull_power[i] <= 0 or fi_smooth[i] <= 0:
+            # Exit: price falls back below R1 or trend turns down
+            if not price_above_r1 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power turns positive OR Force Index turns positive (loss of conviction)
-            if bear_power[i] >= 0 or fi_smooth[i] >= 0:
+            # Exit: price rises back above S1 or trend turns up
+            if not price_below_s1 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
