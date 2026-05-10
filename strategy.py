@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1dTrend_VolumeSpike
-# Hypothesis: Use Elder Ray (Bull/Bear Power) on 6h for momentum, filtered by 1d EMA trend and 6h volume spikes.
-# Bull Power = High - EMA13; Bear Power = Low - EMA13. Enter long when Bull Power turns positive in uptrend with volume spike.
-# Enter short when Bear Power turns negative in downtrend with volume spike. Works in bull/bear via trend filter.
-# Target: 15-25 trades/year to minimize fee drag.
+# 4h_Donchian_Breakout_Volume_Trend
+# Hypothesis: Buy breakouts above 20-bar Donchian high in uptrends with volume confirmation.
+# Sell short breakdowns below 20-bar Donchian low in downtrends with volume confirmation.
+# Uses 1-day EMA34 for trend filter to work in both bull and bear markets.
+# Volume spike (>1.5x average) confirms breakout strength.
+# Targets ~25 trades/year to minimize fee drag.
 
-name = "6h_ElderRay_BullBearPower_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +26,7 @@ def generate_signals(prices):
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 1d EMA34 trend
@@ -34,60 +35,58 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 6h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # 6h EMA13 for Elder Ray
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 4h Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Elder Ray components
-    bull_power = high - ema13_6h  # High - EMA13
-    bear_power = low - ema13_6h   # Low - EMA13
-    
-    # Volume spike: volume > 1.5 * 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma20)
+    # 4h volume average (20-period)
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 13)  # volume MA20 and EMA13
+    start_idx = 40  # ensures 20-period indicators are valid
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(volume_spike[i])):
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Bull Power turns positive (>0) in uptrend with volume spike
-            if (bull_power[i] > 0 and bull_power[i-1] <= 0 and  # crossover zero
+            # Long: breakout above Donchian high in uptrend with volume spike
+            if (high[i] > highest_high[i] and
                 trend_1d_up_aligned[i] > 0.5 and
-                volume_spike[i]):
+                volume[i] > 1.5 * vol_avg[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power turns negative (<0) in downtrend with volume spike
-            elif (bear_power[i] < 0 and bear_power[i-1] >= 0 and  # crossover zero
+            # Short: breakdown below Donchian low in downtrend with volume spike
+            elif (low[i] < lowest_low[i] and
                   trend_1d_down_aligned[i] > 0.5 and
-                  volume_spike[i]):
+                  volume[i] > 1.5 * vol_avg[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Bear Power turns negative or volume dries up
-            if (bear_power[i] < 0 and bear_power[i-1] >= 0) or not volume_spike[i]:
+            # Exit: breakdown below Donchian low or trend reversal
+            if (low[i] < lowest_low[i] or
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Bull Power turns positive or volume dries up
-            if (bull_power[i] > 0 and bull_power[i-1] <= 0) or not volume_spike[i]:
+            # Exit: breakout above Donchian high or trend reversal
+            if (high[i] > highest_high[i] or
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
