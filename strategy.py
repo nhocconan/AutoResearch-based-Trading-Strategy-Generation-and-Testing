@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6H_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
+# 12H_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike
 # Hypothesis: Camarilla pivot breakouts at R3/S3 with weekly trend alignment and volume spikes capture strong momentum moves.
 # Uses 1d for Camarilla pivots, 1w for trend filter, and volume > 2x 20-period average for confirmation.
 # Designed for low trade frequency (~15-30/year) with discrete sizing (0.25) to minimize fee scrub.
 # Works in bull/bear markets by following weekly trend direction.
 
-name = "6H_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "6h"
+name = "12H_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     r3 = prev_close + range_ * 1.1 / 2
     s3 = prev_close - range_ * 1.1 / 2
     
-    # Align to 6h timeframe (using previous day's levels, available after daily close)
+    # Align to 12h timeframe (using previous day's levels, available after daily close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
