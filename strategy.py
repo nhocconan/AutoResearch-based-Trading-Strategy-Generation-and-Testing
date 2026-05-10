@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_Pivot_Breakout_1dTrend_VolumeConfirmation
-# Hypothesis: Camarilla pivot levels (S1/S3 for shorts, R1/R3 for longs) on 1d timeframe provide institutional support/resistance. 
-# Breakouts with volume > 2x average and 1d EMA50 trend alignment capture strong momentum moves. 
-# Works in bull/bear by following 1d trend direction. Targets 25-40 trades/year.
+# 12H_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla pivot levels (S3/R3) on 1d timeframe provide strong institutional support/resistance.
+# Breakouts beyond S3/R3 with volume > 2x average and 1d EMA50 trend alignment capture strong momentum moves.
+# Works in bull/bear by following 1d trend direction. Targets 12-37 trades/year on 12h timeframe.
+# Uses tight entry conditions to minimize trades and avoid fee drag.
 
-name = "4H_Camarilla_Pivot_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "4h"
+name = "12H_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -34,19 +35,13 @@ def generate_signals(prices):
     
     # Camarilla formulas: range = high - low
     range_1d = high_1d - low_1d
-    # S1 = close - (range * 1.0833)
     # S3 = close - (range * 1.2500)
-    # R1 = close + (range * 1.0833)
     # R3 = close + (range * 1.2500)
-    s1 = close_1d - (range_1d * 1.08333)
     s3 = close_1d - (range_1d * 1.25000)
-    r1 = close_1d + (range_1d * 1.08333)
     r3 = close_1d + (range_1d * 1.25000)
     
-    # Align to 4h timeframe (wait for 1d bar to close)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align to 12h timeframe (wait for 1d bar to close)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     
     # 1d trend filter: EMA 50
@@ -63,7 +58,7 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(s1_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,28 +69,28 @@ def generate_signals(prices):
         is_downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Price breaks above R1 or R3 + volume confirmation + 1d uptrend
-            if ((close[i] > r1_aligned[i] or close[i] > r3_aligned[i]) and 
+            # Long entry: Price breaks above R3 + volume confirmation + 1d uptrend
+            if (close[i] > r3_aligned[i] and 
                 volume[i] > vol_threshold[i] and 
                 is_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 or S3 + volume confirmation + 1d downtrend
-            elif ((close[i] < s1_aligned[i] or close[i] < s3_aligned[i]) and 
+            # Short entry: Price breaks below S3 + volume confirmation + 1d downtrend
+            elif (close[i] < s3_aligned[i] and 
                   volume[i] > vol_threshold[i] and 
                   is_downtrend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below S1 (opposite side)
-            if close[i] < s1_aligned[i]:
+            # Long exit: Price crosses below S3 (opposite side)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above R1 (opposite side)
-            if close[i] > r1_aligned[i]:
+            # Short exit: Price crosses above R3 (opposite side)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
