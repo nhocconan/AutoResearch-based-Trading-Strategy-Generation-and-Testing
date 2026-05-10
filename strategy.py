@@ -1,107 +1,119 @@
 #!/usr/bin/env python3
-# 1D_KAMA_Trend_Filter_RSI_MeanReversion
-# Hypothesis: KAMA trend direction + RSI mean reversion provides robust entry signals across market regimes.
-# KAMA adapts to volatility, reducing false signals in choppy markets. RSI identifies overbought/oversold conditions.
-# In uptrends, buy RSI < 40 pullbacks; in downtrends, sell RSI > 60 bounces. Works in both bull and bear markets.
-# Uses 1h timeframe for entry timing with 1d KAMA trend filter and RSI.
-# Targets 20-30 trades per year with strict entry conditions to minimize fee drag.
+# 6H_Ichimoku_TK_Cross_CloudFilter_1d
+# Hypothesis: Ichimoku TK cross (Tenkan/Kijun) on 6h with daily cloud filter provides high-probability trend entries.
+# In bull markets: price above cloud + TK cross up = long. In bear markets: price below cloud + TK cross down = short.
+# Cloud acts as dynamic support/resistance, reducing whipsaws. Targets 15-25 trades/year.
 
-name = "1D_KAMA_Trend_Filter_RSI_MeanReversion"
-timeframe = "1h"
+name = "6H_Ichimoku_TK_Cross_CloudFilter_1d"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) calculation
-    # ER (Efficiency Ratio) = |change| / sum(|changes|)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    direction = np.abs(np.subtract(close, np.roll(close, 1)))
-    direction[0] = 0  # First element has no previous
+    # Ichimoku components on 6h (Tenkan: 9, Kijun: 26, Senkou B: 52)
+    period_tenkan = 9
+    period_kijun = 26
+    period_senkou_b = 52
     
-    # Avoid division by zero
-    er = np.where(change > 0, direction / change, 0)
+    # Tenkan-sen: (highest high + lowest low) / 2 over period
+    tenkan_high = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    tenkan_low = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (tenkan_high + tenkan_low) / 2
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Kijun-sen: (highest high + lowest low) / 2 over period
+    kijun_high = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    kijun_low = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (kijun_high + kijun_low) / 2
     
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Senkou Span A: (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Senkou Span B: (highest high + lowest low) / 2 over period_senkou_b
+    senkou_b_high = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    senkou_b_low = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (senkou_b_high + senkou_b_low) / 2
     
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    # TK Cross signals
+    tk_cross_up = (tenkan > kijun) & (tenkan_shift := np.roll(tenkan, 1)) <= (kijun_shift := np.roll(kijun, 1))
+    tk_cross_down = (tenkan < kijun) & (tenkan_shift := np.roll(tenkan, 1)) >= (kijun_shift := np.roll(kijun, 1))
     
-    for i in range(1, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Handle first element for roll
+    tk_cross_up[0] = False
+    tk_cross_down[0] = False
     
-    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d cloud filter (Senkou Span A and B from 1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < period_senkou_b:
+        return np.zeros(n)
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = np.zeros(n)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # 1d Ichimoku components
+    tenkan_1d_high = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    tenkan_1d_low = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan_1d = (tenkan_1d_high + tenkan_1d_low) / 2
+    
+    kijun_1d_high = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    kijun_1d_low = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun_1d = (kijun_1d_high + kijun_1d_low) / 2
+    
+    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
+    
+    senkou_b_1d_high = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    senkou_b_1d_low = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b_1d = (senkou_b_1d_high + senkou_b_1d_low) / 2
+    
+    # Align 1d cloud to 6h
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_1d_aligned, senkou_b_1d_aligned)
+    cloud_bottom = np.minimum(senkou_a_1d_aligned, senkou_b_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = max(period_senkou_b, period_kijun)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend based on price vs KAMA
-        is_uptrend = close[i] > kama[i]
-        is_downtrend = close[i] < kama[i]
-        
         if position == 0:
-            # Long entry: RSI < 40 (oversold) in uptrend + volume confirmation
-            if rsi[i] < 40 and is_uptrend and volume[i] > vol_threshold[i]:
+            # Long: TK cross up + price above cloud
+            if tk_cross_up[i] and close[i] > cloud_top[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI > 60 (overbought) in downtrend + volume confirmation
-            elif rsi[i] > 60 and is_downtrend and volume[i] > vol_threshold[i]:
+            # Short: TK cross down + price below cloud
+            elif tk_cross_down[i] and close[i] < cloud_bottom[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 60 (overbought) or trend reversal
-            if rsi[i] > 60 or not is_uptrend:
+            # Long exit: TK cross down OR price below cloud
+            if tk_cross_down[i] or close[i] < cloud_bottom[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 40 (oversold) or trend reversal
-            if rsi[i] < 40 or not is_downtrend:
+            # Short exit: TK cross up OR price above cloud
+            if tk_cross_up[i] or close[i] > cloud_top[i]:
                 signals[i] = 0.0
                 position = 0
             else:
