@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_Trend_Follow
-# Hypothesis: Weekly pivot levels (S1, R1) act as strong support/resistance in trending markets.
-# In bull markets, price bouncing off weekly S1 with upward momentum continues higher.
-# In bear markets, price rejecting at weekly R1 with downward momentum continues lower.
-# Uses 1-week trend filter (EMA50) to ensure trades align with higher-timeframe trend.
-# Volume confirmation filters out false breakouts. Designed for low frequency (10-25 trades/year)
-# to minimize fee drag and improve generalization across bull/bear cycles.
+# 12h_OrderBlock_1dTrend_Volume
+# Hypothesis: Institutional order blocks on 12h chart provide high-probability reversal zones.
+# In trending markets (1d EMA50), price pulling back to bullish/bearish order blocks
+# offers continuation trades with favorable risk-reward. Volume confirmation filters
+# weak signals. Works in bull markets (pullbacks to bullish OBs in uptrend) and
+# bear markets (pullbacks to bearish OBs in downtrend). Target: 15-35 trades/year.
 
-name = "1d_WeeklyPivot_Trend_Follow"
-timeframe = "1d"
+name = "12h_OrderBlock_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,71 +24,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    # Pivot = (H + L + C) / 3
-    # R1 = (2 * Pivot) - L
-    # S1 = (2 * Pivot) - H
-    weekly_pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
-    weekly_r1 = (2 * weekly_pivot) - df_1w['low']
-    weekly_s1 = (2 * weekly_pivot) - df_1w['high']
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1.values)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1.values)
+    # Calculate 12h order blocks (bullish/bearish)
+    # Bullish OB: strong down candle followed by strong up candle closing above midpoint
+    # Bearish OB: strong up candle followed by strong down candle closing below midpoint
+    body_size = np.abs(close - open_)
+    avg_body = pd.Series(body_size).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation (20-period MA on daily = ~20 days)
+    bullish_ob = np.zeros(n, dtype=bool)
+    bearish_ob = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n):
+        if np.isnan(avg_body[i]) or np.isnan(avg_body[i-1]) or np.isnan(avg_body[i-2]):
+            continue
+            
+        # Current candle
+        curr_body = body_size[i]
+        curr_mid = (high[i] + low[i]) / 2
+        
+        # Previous candle
+        prev_close = close[i-1]
+        prev_open = open_[i-1]
+        prev_body = body_size[i-1]
+        
+        # Two candles ago
+        prev2_close = close[i-2]
+        prev2_open = open_[i-2]
+        prev2_body = body_size[i-2]
+        
+        # Bullish OB: two red candles followed by strong green closing above midpoint of second red
+        if (close[i-2] < open_[i-2] and  # red
+            close[i-1] < open_[i-1] and  # red
+            close[i] > open_[i] and      # green
+            curr_body > avg_body[i] * 1.5 and  # strong body
+            close[i] > (high[i-1] + low[i-1]) / 2):  # above midpoint of prev candle
+            bullish_ob[i] = True
+            
+        # Bearish OB: two green candles followed by strong red closing below midpoint of second green
+        if (close[i-2] > open_[i-2] and  # green
+            close[i-1] > open_[i-1] and  # green
+            close[i] < open_[i] and      # red
+            curr_body > avg_body[i] * 1.5 and  # strong body
+            close[i] < (high[i-1] + low[i-1]) / 2):  # below midpoint of prev candle
+            bearish_ob[i] = True
+    
+    # Volume confirmation (20-period MA on 12h = ~10 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA50 (50), volume MA (20)
+    # Warmup: need 1d EMA50 (50), volume MA (20)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # 1d trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price crosses above weekly S1 + volume
-            if uptrend and close[i] > weekly_s1_aligned[i] and volume_confirm:
+            # Long entry: uptrend + bullish OB + volume
+            if uptrend and bullish_ob[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price crosses below weekly R1 + volume
-            elif downtrend and close[i] < weekly_r1_aligned[i] and volume_confirm:
+            # Short entry: downtrend + bearish OB + volume
+            elif downtrend and bearish_ob[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price falls back below weekly S1
-            if not uptrend or close[i] < weekly_s1_aligned[i]:
+            # Long exit: trend breaks or bearish OB appears
+            if not uptrend or bearish_ob[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price rises back above weekly R1
-            if not downtrend or close[i] > weekly_r1_aligned[i]:
+            # Short exit: trend breaks or bullish OB appears
+            if not downtrend or bullish_ob[i]:
                 signals[i] = 0.0
                 position = 0
             else:
