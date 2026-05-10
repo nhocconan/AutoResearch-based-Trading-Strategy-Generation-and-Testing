@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_2x
-# Hypothesis: Daily Camarilla pivot levels (R1/S1) provide strong support/resistance. 
-# Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. 
-# Volume > 2x 20-period MA filters false breakouts. 
-# Targets 15-25 trades/year to avoid fee drag.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_CustomFilter
+# Hypothesis: Daily pivot points (R1/S1) provide key support/resistance. Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. Volume confirmation filters false breakouts. Tightened entry conditions (volume > 2.5x MA, stricter trend) to reduce trade frequency and avoid overtrading. Works in bull markets by riding uptrends and in bear markets by following downtrends.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_2x"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_CustomFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -32,14 +29,14 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily pivot levels (standard formula)
+    # Calculate daily pivot levels (Camarilla formula)
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
     pivot_point = (daily_high + daily_low + daily_close) / 3
-    daily_r1 = 2 * pivot_point - daily_low
-    daily_s1 = 2 * pivot_point - daily_high
+    daily_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    daily_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
     daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
     daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
@@ -68,8 +65,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation (stricter: >2.5x MA to reduce false signals)
+        volume_confirm = volume[i] > volume_ma[i] * 2.5
         
         if position == 0:
             # Long entry: uptrend + price breaks above daily R1 + volume
