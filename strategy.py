@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
-# Hypothesis: Breakouts above Camarilla R3 or below S3 with 1d EMA34 trend filter and volume confirmation.
-# Works in bull markets via R3 breakouts and bear markets via S3 breakdowns. Volume filter reduces false signals.
-# Target: ~25-35 trades/year to stay within fee-efficient range.
+# 12h_MultiFactor_Trend_Follow
+# Hypothesis: Trend following strategy for 12h timeframe using 1w EMA trend filter, 12h EMA crossovers, and volume confirmation.
+# Designed to work in both bull and bear markets by capturing major trends with proper filtering to avoid whipsaws.
+# Uses weekly EMA for trend bias, daily EMA for entry timing, and volume spike for confirmation.
+# Targets ~15-25 trades/year to minimize fee drag while maintaining robustness.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_MultiFactor_Trend_Follow"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,93 +15,83 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1w data for primary trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 1d EMA34 trend
+    # 1w EMA20 trend
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_1w_up = close_1w > ema20_1w
+    trend_1w_down = close_1w < ema20_1w
+    
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    
+    # 1d data for entry timing
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # 1d EMA21 for entry signals
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    ema21_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align 1d EMA21 to 12h
+    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # Calculate for each 1d bar: (H-L)/12
-    range_1d = high_1d - low_1d
-    camarilla_multiplier = range_1d / 12.0
-    
-    # Camarilla levels for current day based on previous day's action
-    # R3 = C + (H-L)*1.1/12*4 = C + 1.1*(H-L)/3
-    # S3 = C - (H-L)*1.1/12*4 = C - 1.1*(H-L)/3
-    r3 = close_1d_prev + 1.1 * camarilla_multiplier * 4
-    s3 = close_1d_prev - 1.1 * camarilla_multiplier * 4
-    
-    # Align Camarilla levels to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume spike detection (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > (1.5 * vol_ma)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 40  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(volume_ok[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(ema21_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R3 with uptrend and volume
-            if (close[i] > r3_aligned[i] and
-                trend_1d_up_aligned[i] > 0.5 and
-                volume_ok[i]):
+            # Long: 1w uptrend + price above 1d EMA21 + volume spike
+            if (trend_1w_up_aligned[i] > 0.5 and
+                close[i] > ema21_1d_aligned[i] and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with downtrend and volume
-            elif (close[i] < s3_aligned[i] and
-                  trend_1d_down_aligned[i] > 0.5 and
-                  volume_ok[i]):
+            # Short: 1w downtrend + price below 1d EMA21 + volume spike
+            elif (trend_1w_down_aligned[i] > 0.5 and
+                  close[i] < ema21_1d_aligned[i] and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below S3 or trend reversal
-            if (close[i] < s3_aligned[i] or
-                trend_1d_down_aligned[i] > 0.5):
+            # Exit: 1w trend turns down OR price breaks below 1d EMA21
+            if (trend_1w_up_aligned[i] <= 0.5 or
+                close[i] < ema21_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above R3 or trend reversal
-            if (close[i] > r3_aligned[i] or
-                trend_1d_up_aligned[i] > 0.5):
+            # Exit: 1w trend turns up OR price breaks above 1d EMA21
+            if (trend_1w_down_aligned[i] <= 0.5 or
+                close[i] > ema21_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
