@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum_v4
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h momentum filter (price > 12h EMA40) and volume confirmation (5x average).
-# Targets 15-25 trades/year to avoid fee drag. Works in bull/bear via momentum filter. Uses 12h EMA40 for stronger trend filter.
+# 4h_12h_Camarilla_R1_S1_Breakout_Volume_Volatility_v1
+# Hypothesis: 4h breakout at Camarilla R1/S1 levels with volume spike and volatility filter (ATR(30) < 0.8 * ATR(100)).
+# Uses 12h EMA50 as trend filter. Designed for 15-25 trades/year to avoid fee drag. Works in bull/bear via trend filter.
 
-name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum_v4"
+name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_Volatility_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -13,10 +13,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 12h data for momentum filter
+    # Get 12h data for trend filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 60:
         return np.zeros(n)
@@ -27,12 +27,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA40 for momentum filter (stronger trend filter)
+    # 12h EMA50 for trend filter
     close_12h = df_12h['close'].values
-    ema_40 = pd.Series(close_12h).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_aligned = align_htf_to_ltf(prices, df_12h, ema_40)
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Calculate Camarilla levels (R1, S1) from previous day using 1d data
+    # 1d data for Camarilla levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -50,58 +50,62 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h 10-period EMA for exit
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Volatility filter: ATR(30) < 0.8 * ATR(100) (low volatility regime)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first bar
+    atr_30 = pd.Series(tr).rolling(window=30, min_periods=30).mean().values
+    atr_100 = pd.Series(tr).rolling(window=100, min_periods=100).mean().values
+    low_volatility = atr_30 < (0.8 * atr_100)
     
-    # Volume confirmation (5.0x 30-period average - tighter)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation (4.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup
-    start_idx = 80
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_40_aligned[i]) or
+        if (np.isnan(ema_50_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(ema_10[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(vol_ma[i]) or
+            np.isnan(atr_30[i]) or
+            np.isnan(atr_100[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Momentum filter from 12h EMA40
-        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        bullish_momentum = close_12h_aligned[i] > ema_40_aligned[i]
-        bearish_momentum = close_12h_aligned[i] < ema_40_aligned[i]
+        # Trend filter from 12h EMA50
+        bullish_trend = close[i] > ema_50_aligned[i]
+        bearish_trend = close[i] < ema_50_aligned[i]
         
-        # Volume confirmation (5.0x average - tighter)
-        volume_surge = volume[i] > 5.0 * vol_ma[i]
+        # Volume confirmation (4.0x average)
+        volume_surge = volume[i] > 4.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above R1 in bullish momentum with volume surge
-            if close[i] > r1_aligned[i] and bullish_momentum and volume_surge:
+            # Long: breakout above R1 in bullish trend with volume surge and low volatility
+            if close[i] > r1_aligned[i] and bullish_trend and volume_surge and low_volatility[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S1 in bearish momentum with volume surge
-            elif close[i] < s1_aligned[i] and bearish_momentum and volume_surge:
+            # Short: breakdown below S1 in bearish trend with volume surge and low volatility
+            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge and low_volatility[i]:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: price crosses below 10-period EMA
-                if close[i] < ema_10[i]:
+                # Long exit: price crosses below 12h EMA50 (trend change)
+                if close[i] < ema_50_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price crosses above 10-period EMA
-                if close[i] > ema_10[i]:
+                # Short exit: price crosses above 12h EMA50 (trend change)
+                if close[i] > ema_50_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
