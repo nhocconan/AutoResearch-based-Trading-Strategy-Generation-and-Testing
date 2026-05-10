@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels (R3, S3) from daily timeframe act as strong support/resistance.
-Breakout above R3 or below S3 with volume confirmation and aligned 1d trend (price > EMA34 for longs,
-price < EMA34 for shorts) captures institutional breakout moves. Works in both bull and bear markets
-by trading breakouts in the direction of the higher timeframe trend. Uses 12h timeframe to limit
-trades to 12-37/year, reducing fee drag. Volume spike (>2x 20-period average) confirms institutional
-participation. Target: 50-150 total trades over 4 years.
+4h_MidPoint_Rebound_1dTrend
+Hypothesis: Price rebounds from daily midpoint (average of daily high/low) with 1d trend filter and volume confirmation.
+Long when price > daily midpoint and above 1d EMA50 with volume surge; short when price < daily midpoint and below 1d EMA50 with volume surge.
+Works in bull/bear by capturing mean-reversion within the dominant daily trend.
+Target: 20-40 trades/year (80-160 total) to minimize fee drag.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_MidPoint_Rebound_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,78 +25,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend filter
+    # 1d data
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla levels from previous day's OHLC
-    # R3 = Close + 1.1 * (High - Low)
-    # S3 = Close - 1.1 * (High - Low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
+    # Daily midpoint: (daily high + daily low) / 2
+    midpoint_1d = (high_1d + low_1d) / 2
     
-    # Align Camarilla levels to 12h timeframe (available after daily bar closes)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # 1d EMA34 for trend filter
-    if len(close_1d) >= 34:
-        ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False).mean().values
-    else:
-        ema34_1d = np.full_like(close_1d, np.nan)
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # 20-period volume average for volume confirmation
-    if len(df_1d) >= 20:
-        vol_ma20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    else:
-        vol_ma20_1d = np.full_like(df_1d['volume'].values, np.nan)
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    # Align 1d indicators to 4h
+    midpoint_aligned = align_htf_to_ltf(prices, df_1d, midpoint_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have all indicators ready
-    start_idx = 20  # Need 20 days for volume MA
+    start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_aligned[i]) or np.isnan(vol_ma20_aligned[i]):
+        if np.isnan(midpoint_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 2x 20-day average volume (scaled to 12h)
-        # 1 day = 2 periods of 12h, so scale daily volume by 1/2
-        vol_12h_equiv = vol_ma20_aligned[i] / 2.0
-        volume_confirm = volume[i] > 2.0 * vol_12h_equiv
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Trend filter: price vs 1d EMA34
-        is_uptrend = close[i] > ema34_aligned[i]
-        is_downtrend = close[i] < ema34_aligned[i]
+        # Trend and position relative to midpoint
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
+        price_above_mid = close[i] > midpoint_aligned[i]
+        price_below_mid = close[i] < midpoint_aligned[i]
         
         if position == 0:
-            # Long: break above R3 with volume and uptrend
-            if close[i] > r3_aligned[i] and volume_confirm and is_uptrend:
+            # Long: price above midpoint, in uptrend, with volume
+            if price_above_mid and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with volume and downtrend
-            elif close[i] < s3_aligned[i] and volume_confirm and is_downtrend:
+            # Short: price below midpoint, in downtrend, with volume
+            elif price_below_mid and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns below R3 or trend breaks
-            if close[i] < r3_aligned[i] or not is_uptrend:
+            # Exit: price falls below midpoint or trend turns down
+            if not price_above_mid or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns above S3 or trend breaks
-            if close[i] > s3_aligned[i] or not is_downtrend:
+            # Exit: price rises above midpoint or trend turns up
+            if not price_below_mid or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
