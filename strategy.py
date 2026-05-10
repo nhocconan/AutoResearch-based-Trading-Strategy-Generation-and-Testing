@@ -1,72 +1,64 @@
 #!/usr/bin/env python3
-# 6H_Keltner_Channel_Breakout_Momentum
-# Hypothesis: Price breaking out of Keltner Channel (ATR-based) with momentum confirmation (RSI > 50 for longs, < 50 for shorts) and volume spike indicates institutional participation. Uses 1d trend filter (price above/below EMA50) to align with higher timeframe direction. Works in bull/bear by following trend and using volatility-based breakouts that capture momentum moves. Target: 15-30 trades/year per symbol.
+# 12h_Williams_Alligator_ElderRay_Signal
+# Hypothesis: Combine Williams Alligator trend direction with Elder Ray power for high-conviction trades.
+# Use 1-day trend filter to avoid counter-trend trades. Enter on Alligator alignment with bullish/bearish Elder Ray.
+# Williams Alligator: Jaw (13-bar SMMA, 8 offset), Teeth (8-bar SMMA, 5 offset), Lips (5-bar SMMA, 3 offset).
+# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND 1-day Uptrend.
+# Short when: Jaw > Teeth > Lips (bearish alignment) AND Bear Power > 0 AND 1-day Downtrend.
+# Position size: 0.25. Max 1 trade every 5 bars to reduce churn.
+# Works in bull/bear by following 1-day trend and using Alligator for entry timing.
 
-name = "6H_Keltner_Channel_Breakout_Momentum"
-timeframe = "6h"
+name = "12h_Williams_Alligator_ElderRay_Signal"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(source, length):
+    """Smoothed Moving Average (SMMA)"""
+    if length < 1:
+        return np.full_like(source, np.nan, dtype=float)
+    result = np.full_like(source, np.nan, dtype=float)
+    if len(source) == 0:
+        return result
+    result[0] = source[0]
+    for i in range(1, len(source)):
+        result[i] = (result[i-1] * (length-1) + source[i]) / length
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 6h indicators
+    # Williams Alligator components
     close_s = pd.Series(close)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    volume_s = pd.Series(volume)
+    jaw = smma(close_s.values, 13)  # 13-period SMMA
+    teeth = smma(close_s.values, 8)  # 8-period SMMA
+    lips = smma(close_s.values, 5)   # 5-period SMMA
     
-    # EMA20 for Keltner Channel middle
-    ema20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Apply offsets: Jaw +8, Teeth +5, Lips +3
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Set rolled values to NaN
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    # Average True Range (ATR) for Keltner Channel width
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.zeros_like(tr)
-    if len(tr) > 0:
-        atr[0] = tr[0]
-        for i in range(1, len(tr)):
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14  # Wilder's smoothing
-    # Prepend NaN for alignment (since we lost first bar)
-    atr = np.concatenate([np.full(1, np.nan), atr])
+    # Elder Ray components
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # High - EMA13
+    bear_power = ema13 - low   # EMA13 - Low
     
-    # Keltner Channel: Upper = EMA20 + 2*ATR, Lower = EMA20 - 2*ATR
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-    
-    # RSI (14) for momentum confirmation
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    if len(gain) > 0:
-        avg_gain[0] = gain[0] if len(gain) > 0 else 0
-        avg_loss[0] = loss[0] if len(loss) > 0 else 0
-        for i in range(1, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend NaN for alignment (since we lost first bar in diff)
-    rsi = np.concatenate([np.full(1, np.nan), rsi])
-    
-    # Volume average (20-period)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # Daily trend filter: price above/below EMA50
+    # 1-day trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -76,53 +68,59 @@ def generate_signals(prices):
     daily_uptrend = close_1d > ema50_1d
     daily_downtrend = close_1d < ema50_1d
     
-    # Align daily trend to 6h
+    # Align daily trend to 12h
     daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
     daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_last_trade = 0
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
+        bars_since_last_trade += 1
+        
         # Skip if data not ready
-        if (np.isnan(ema20[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
+        # Check for Alligator alignment
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
         
         daily_up = daily_uptrend_aligned[i] > 0.5
         daily_down = daily_downtrend_aligned[i] > 0.5
         
-        if position == 0:
-            # Enter long: price breaks above Keltner Upper + RSI > 50 (bullish momentum) + volume + daily uptrend
-            if close[i] > kc_upper[i] and rsi[i] > 50 and volume_confirm and daily_up:
+        if position == 0 and bars_since_last_trade >= 5:
+            # Enter long: bullish alignment + bullish power + daily uptrend
+            if bullish_alignment and bull_power[i] > 0 and daily_up:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Keltner Lower + RSI < 50 (bearish momentum) + volume + daily downtrend
-            elif close[i] < kc_lower[i] and rsi[i] < 50 and volume_confirm and daily_down:
+                bars_since_last_trade = 0
+            # Enter short: bearish alignment + bearish power + daily downtrend
+            elif bearish_alignment and bear_power[i] > 0 and daily_down:
                 signals[i] = -0.25
                 position = -1
+                bars_since_last_trade = 0
         
         elif position == 1:
-            # Exit: price re-enters Keltner Channel or momentum fades
-            if close[i] < kc_upper[i] or rsi[i] < 50:
+            # Exit conditions: alignment breaks or power fades
+            if not bullish_alignment or bull_power[i] <= 0 or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price re-enters Keltner Channel or momentum fades
-            if close[i] > kc_lower[i] or rsi[i] > 50:
+            # Exit conditions: alignment breaks or power fades
+            if not bearish_alignment or bear_power[i] <= 0 or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
