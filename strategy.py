@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_TRIX_VolumeSpike_Regime
-Hypothesis: Uses TRIX momentum crossover combined with volume spikes and Choppiness Index regime filter.
-TRIX captures momentum changes; volume spikes confirm institutional interest; Choppiness Index filters for trending vs ranging markets.
-Works in bull markets by catching strong momentum and in bear markets by identifying mean-reversion opportunities in ranging conditions.
-Target: 15-25 trades/year per symbol (30-100 total over 4 years).
+12h_Camarilla_Pivot_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R3/S3) from daily chart act as strong support/resistance.
+Breakouts above R3 or below S3 with volume confirmation and aligned daily trend capture
+institutional moves. Works in bull markets by catching breakouts and in bear markets by
+selling breakdowns. Uses 12h for execution and 1d for pivot calculation and trend filter.
+Target: 15-30 trades/year per symbol.
 """
 
-name = "1d_TRIX_VolumeSpike_Regime"
-timeframe = "1d"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,98 +26,83 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Convert to Series for indicator calculations
-    close_s = pd.Series(close)
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
+    # Calculate Camarilla pivot levels from previous day
+    # Formula: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We'll use daily data to calculate pivots for the previous day
+    
+    # Get 1d data for pivot calculation (OHLC)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate daily OHLC
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Camarilla levels for each day (based on previous day's OHLC)
+    # R3 = C + ((H-L)*1.1/4), S3 = C - ((H-L)*1.1/4)
+    camarilla_r3 = daily_close + ((daily_high - daily_low) * 1.1 / 4)
+    camarilla_s3 = daily_close - ((daily_high - daily_low) * 1.1 / 4)
+    
+    # Align 1d Camarilla levels to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Daily trend filter: EMA34
+    ema34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = daily_close > ema34_1d
+    trend_1d_down = daily_close < ema34_1d
+    
+    # Align trend to 12h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # Volume confirmation: 20-period average
     volume_s = pd.Series(volume)
-    
-    # TRIX (15-period)
-    # Single EMA
-    ema1 = close_s.ewm(span=15, adjust=False, min_periods=15).mean()
-    # Double EMA
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    # Triple EMA
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    # TRIX = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = trix.fillna(0).values
-    trix_prev = np.roll(trix, 1)
-    trix_prev[0] = 0
-    
-    # Volume average (20-period)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # Choppiness Index (14-period)
-    # True Range
-    tr1 = high_s - low_s
-    tr2 = abs(high_s - close_s.shift(1))
-    tr3 = abs(low_s - close_s.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr14 = tr.rolling(window=14, min_periods=14).mean()
-    
-    # Sum of True Range over 14 periods
-    sum_tr14 = tr.rolling(window=14, min_periods=14).sum()
-    
-    # Highest high and lowest low over 14 periods
-    hh14 = high_s.rolling(window=14, min_periods=14).max()
-    ll14 = low_s.rolling(window=14, min_periods=14).min()
-    
-    # Chop = 100 * log10(sum_tr14 / (hh14 - ll14)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh14 - ll14
-    chop = 100 * np.log10(sum_tr14 / range_hl.replace(0, np.nan)) / np.log10(14)
-    chop = chop.replace([np.inf, -np.inf], np.nan).fillna(50).values  # neutral when undefined
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
+    # Start after we have enough data for all indicators
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(trix_prev[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(chop[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 2.0
-        
-        # TRIX crossover signals
-        trix_bullish = trix[i] > 0 and trix_prev[i] <= 0
-        trix_bearish = trix[i] < 0 and trix_prev[i] >= 0
-        
-        # Chop regime: > 61.8 = ranging (mean revert), < 38.2 = trending (trend follow)
-        chop_high = chop[i] > 61.8  # ranging market
-        chop_low = chop[i] < 38.2   # trending market
+        volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: TRIX bullish cross + volume + trending OR ranging with mean reversion bias
-            if (trix_bullish and volume_confirm and
-                (chop_low or (chop_high and trix[i] < -0.1))):  # in ranging, look for oversold bounce
+            # Enter long: price breaks above R3 with uptrend and volume
+            if (close[i] > r3_aligned[i] and trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX bearish cross + volume + trending OR ranging with mean reversion bias
-            elif (trix_bearish and volume_confirm and
-                  (chop_low or (chop_high and trix[i] > 0.1))):  # in ranging, look for overbought fade
+            # Enter short: price breaks below S3 with downtrend and volume
+            elif (close[i] < s3_aligned[i] and trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when momentum fades or chop indicates strong ranging
-            if (trix[i] < 0 or chop[i] > 70):  # strong ranging or momentum loss
+            # Exit long: price returns below R3 or trend changes
+            if (close[i] < r3_aligned[i] or trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when momentum fades or chop indicates strong ranging
-            if (trix[i] > 0 or chop[i] > 70):  # strong ranging or momentum loss
+            # Exit short: price returns above S3 or trend changes
+            if (close[i] > s3_aligned[i] or trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
