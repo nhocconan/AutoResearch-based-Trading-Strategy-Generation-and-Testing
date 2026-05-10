@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Weekly_Pivot_Momentum
-Hypothesis: Price reacts strongly to weekly pivot levels (S3/S2/R2/R3) with volume confirmation and trend alignment. Works in bull markets via buying S3/S2 bounces and in bear markets via selling R2/R3 rejections. Uses weekly pivots for structure and 4h EMA50 for trend filter to avoid counter-trend trades. Target: 20-40 trades/year to minimize fee drag.
+4h_Weekly_Pivot_Momentum_v2
+Hypothesis: Price reacts strongly to weekly pivot levels (S3/S2/R2/R3) with volume confirmation and trend alignment. Works in bull markets via buying S3/S2 bounces and in bear markets via selling R2/R3 rejections. Uses weekly pivots for structure and 4h EMA50 for trend filter to avoid counter-trend trades. Target: 20-40 trades/year to minimize fee drift.
 """
 
-name = "4h_Weekly_Pivot_Momentum"
+name = "4h_Weekly_Pivot_Momentum_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,9 +27,6 @@ def generate_signals(prices):
     close_w = df_w['close'].values
     
     # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
-    # S1 = 2*P - H, S2 = P - (H - L), S3 = L - 2*(H - P)
-    # R1 = 2*P - L, R2 = P + (H - L), R3 = H + 2*(P - L)
     pivot_w = (high_w + low_w + close_w) / 3.0
     s1_w = 2 * pivot_w - high_w
     s2_w = pivot_w - (high_w - low_w)
