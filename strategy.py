@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1D_EMA_Cross_With_4H_CCI_Trend
-# Hypothesis: Daily EMA34 establishes trend direction, 4h CCI(20) confirms momentum with
-# overbought/oversold conditions, and 4h volume filter eliminates false signals.
-# Works in bull markets by buying dips in uptrends, in bear markets by selling rallies
-# in downtrends. Uses only 3 conditions to minimize trade frequency and fee drag.
+# 6h_RSI_Streak_With_Trend_and_Volume
+# Hypothesis: RSI streak (consecutive closes above/below 50) identifies momentum bursts.
+# In trending markets (1d EMA50), streaks of 3+ indicate strong directional moves.
+# Volume confirmation filters false signals. Works in bull/bear by following daily trend.
 
-name = "4h_1D_EMA_Cross_With_4H_CCI_Trend"
-timeframe = "4h"
+name = "6h_RSI_Streak_With_Trend_and_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,39 +24,55 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 4h data for CCI calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate RSI(14) on 6h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate CCI(20) on 4h data
-    tp_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
-    sma_tp = tp_4h.rolling(window=20, min_periods=20).mean()
-    mad = tp_4h.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
-    cci_4h = (tp_4h - sma_tp) / (0.015 * mad)
-    cci_4h = cci_4h.replace([np.inf, -np.inf], np.nan).fillna(0).values
-    cci_4h_aligned = align_htf_to_ltf(prices, df_4h, cci_4h)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation on 4h (20-period MA)
+    # Calculate RSI streak: consecutive closes above/below 50
+    above_50 = rsi > 50
+    below_50 = rsi < 50
+    
+    # Streak of consecutive True values
+    streak_above = np.zeros(n, dtype=int)
+    streak_below = np.zeros(n, dtype=int)
+    
+    for i in range(1, n):
+        if above_50[i]:
+            streak_above[i] = streak_above[i-1] + 1
+        else:
+            streak_above[i] = 0
+            
+        if below_50[i]:
+            streak_below[i] = streak_below[i-1] + 1
+        else:
+            streak_below[i] = 0
+    
+    # Volume confirmation (20-period MA on 6h = ~5 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34), 4h CCI (20), volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need daily EMA50 (50), RSI (14), volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(cci_4h_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(rsi[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,35 +80,31 @@ def generate_signals(prices):
             continue
         
         # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # CCI conditions
-        cci_oversold = cci_4h_aligned[i] < -100
-        cci_overbought = cci_4h_aligned[i] > 100
-        
         if position == 0:
-            # Long entry: uptrend + CCI oversold + volume
-            if uptrend and cci_oversold and volume_confirm:
+            # Long entry: uptrend + RSI streak >= 3 + volume
+            if uptrend and streak_above[i] >= 3 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + CCI overbought + volume
-            elif downtrend and cci_overbought and volume_confirm:
+            # Short entry: downtrend + RSI streak <= -3 (streak_below >= 3) + volume
+            elif downtrend and streak_below[i] >= 3 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or CCI becomes overbought
-            if not uptrend or cci_4h_aligned[i] > 100:
+            # Long exit: trend breaks or RSI streak breaks
+            if not uptrend or streak_above[i] == 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or CCI becomes oversold
-            if not downtrend or cci_4h_aligned[i] < -100:
+            # Short exit: trend breaks or RSI streak breaks
+            if not downtrend or streak_below[i] == 0:
                 signals[i] = 0.0
                 position = 0
             else:
