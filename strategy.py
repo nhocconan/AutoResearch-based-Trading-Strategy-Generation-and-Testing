@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_Donchian_Breakout
-Hypothesis: Use weekly pivot points (from 1w HTF) to determine directional bias, 
-then trade Donchian channel breakouts (20-period) on 6h chart only when aligned 
-with weekly pivot bias. Volume confirmation filters out weak breakouts.
-Works in both bull and bear markets by following weekly pivot trend and using 
-volatility-adjusted breakouts with volume filter. Targets 15-25 trades/year per 
-symbol with discrete position sizing (0.25) to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+Hypothesis: Breakout above Camarilla R1 or below S1 with 1-week EMA50 trend filter and volume confirmation.
+Works in both bull and bear markets by following weekly trend and using volatility-adjusted breakouts.
+Targets 15-30 trades/year per symbol with discrete position sizing to minimize fee drag.
 """
 
-name = "6h_WeeklyPivot_Donchian_Breakout"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,14 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channel (20-period) - highest high and lowest low
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-    
-    # Calculate ATR(14) for volume filter
+    # Calculate ATR(14) for volatility
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -53,67 +43,72 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
     
-    # Get weekly data for pivot points (calculate once before loop)
+    # Calculate 1-week EMA50 for trend filter (using HTF data)
     df_1w = get_htf_data(prices, '1w')
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    weekly_pivot = np.full(len(weekly_close), np.nan)
-    weekly_r1 = np.full(len(weekly_close), np.nan)
-    weekly_s1 = np.full(len(weekly_close), np.nan)
-    
-    for i in range(len(weekly_close)):
-        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
-            weekly_pivot[i] = (weekly_high[i] + weekly_low[i] + weekly_close[i]) / 3.0
-            weekly_r1[i] = 2 * weekly_pivot[i] - weekly_low[i]
-            weekly_s1[i] = 2 * weekly_pivot[i] - weekly_high[i]
-    
-    # Align weekly pivot points to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 20)  # Ensure Donchian and volume filters are ready
+    start_idx = max(21, 50)  # Ensure volume SMA and EMA are ready
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(vol_sma[i]) or np.isnan(weekly_pivot_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(vol_sma[i]) or np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly bias: above pivot = bullish bias, below pivot = bearish bias
-        weekly_bias = 1 if close[i] > weekly_pivot_aligned[i] else -1
+        # Calculate Camarilla levels from previous day
+        if i >= 2:  # Need at least 2 bars (previous day's data on 12h chart)
+            # Previous day's OHLC (assuming 2 bars per day on 12h chart)
+            prev_day_start = max(0, i - 2)
+            prev_day_high = np.max(high[prev_day_start:i])
+            prev_day_low = np.min(low[prev_day_start:i])
+            prev_day_close = close[i-1]
+            
+            # Camarilla levels
+            range_val = prev_day_high - prev_day_low
+            r1 = prev_day_close + (range_val * 1.1 / 12)
+            s1 = prev_day_close - (range_val * 1.1 / 12)
+        else:
+            # Not enough data for Camarilla calculation
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 0:
-            # Long: Break above Donchian high with bullish weekly bias and volume confirmation
-            if close[i] > donchian_high[i] and weekly_bias == 1 and volume_confirm:
+            # Long: Break above R1 with uptrend and volume confirmation
+            if close[i] > r1 and close[i] > ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low with bearish weekly bias and volume confirmation
-            elif close[i] < donchian_low[i] and weekly_bias == -1 and volume_confirm:
+            # Short: Break below S1 with downtrend and volume confirmation
+            elif close[i] < s1 and close[i] < ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Close crosses back below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit: Close crosses back below 1-week EMA50
+            if close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Close crosses back above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit: Close crosses back above 1-week EMA50
+            if close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
