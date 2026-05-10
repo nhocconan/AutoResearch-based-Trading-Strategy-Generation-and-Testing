@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""
-6h_ElderRay_Slope_ZeroCross_V2
-Hypothesis: Elder Ray (Bull/Bear Power) with EMA13 slope and zero-cross exit.
-Long when Bull Power > 0 and EMA13 slope turns up. Short when Bear Power < 0 and EMA13 slope turns down.
-Exit when Bull/Bear Power crosses zero or EMA13 slope reverses.
-Uses 1d EMA200 for trend filter to avoid counter-trend trades.
-Designed for 6h timeframe with ~15-35 trades/year.
-"""
+# 4H_Donchian_20_Breakout_1dTrend_Volume
+# Hypothesis: Uses 4h timeframe with Donchian channel breakout (20-period) and 1d trend filter (EMA50).
+# Enters long when price breaks above Donchian upper band in uptrend (close > EMA50) with volume > 1.5x 20-period average.
+# Enters short when price breaks below Donchian lower band in downtrend (close < EMA50) with volume confirmation.
+# Exits when price returns to opposite Donchian band or trend reverses.
+# Uses daily EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
+# Targets 20-50 trades per year on 4h timeframe with position size 0.25 to minimize fee drag.
 
-name = "6h_ElderRay_Slope_ZeroCross_V2"
-timeframe = "6h"
+name = "4H_Donchian_20_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,78 +17,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for EMA200 trend filter
+    # Get 1d data for EMA trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA200 for trend filter
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate EMA13 for slope (on 6h chart)
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Donchian channel (20-period) on 4h data
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate EMA13 slope (change over 3 periods)
-    ema13_slope = np.zeros_like(ema_13)
-    ema13_slope[3:] = ema_13[3:] - ema_13[:-3]
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 13)  # Warmup
+    start_idx = max(50, 20)  # Warmup for EMA and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(ema13_slope[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA200
-        price_above_ema200 = close[i] > ema_200_1d_aligned[i]
-        price_below_ema200 = close[i] < ema_200_1d_aligned[i]
-        
-        # Slope direction
-        slope_up = ema13_slope[i] > 0
-        slope_down = ema13_slope[i] < 0
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0, EMA13 slope up, price above 1d EMA200
-            if (bull_power[i] > 0 and 
-                slope_up and 
-                price_above_ema200):
+            # Long entry: price breaks above Donchian upper in uptrend with volume spike
+            if (close[i] > donchian_upper[i] and 
+                price_above_ema and 
+                volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0, EMA13 slope down, price below 1d EMA200
-            elif (bear_power[i] < 0 and 
-                  slope_down and 
-                  price_below_ema200):
+            # Short entry: price breaks below Donchian lower in downtrend with volume spike
+            elif (close[i] < donchian_lower[i] and 
+                  price_below_ema and 
+                  volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power crosses zero OR slope turns down
-            if (bull_power[i] <= 0 or 
-                slope_down):
+            # Long exit: price returns to Donchian lower or trend reverses to downtrend
+            if (close[i] < donchian_lower[i] or 
+                price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power crosses zero OR slope turns up
-            if (bear_power[i] >= 0 or 
-                slope_up):
+            # Short exit: price returns to Donchian upper or trend reverses to uptrend
+            if (close[i] > donchian_upper[i] or 
+                price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
