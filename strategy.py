@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily EMA34 trend filter and volume confirmation.
+# Hypothesis: 4-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume confirmation.
 # Daily EMA34 filters trend direction to avoid counter-trend trades; daily Camarilla levels provide precise entry/exit;
-# Volume confirmation ensures breakout strength. Designed for 4h to achieve 20-50 trades/year, suitable for both bull and bear markets.
+# Volume confirmation ensures breakout strength. Designed for 4h to achieve 19-50 trades/year, suitable for both bull and bear markets.
 
 name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
