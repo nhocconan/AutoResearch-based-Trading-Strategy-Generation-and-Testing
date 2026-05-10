@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Williams_Alligator_Supertrend
-# Hypothesis: Williams Alligator (Jaw=TEETH=LIPS) combined with Supertrend on 4h timeframe.
-# Goes long when price > Alligator Teeth (SMA8) and Supertrend gives buy signal.
-# Goes short when price < Alligator Teeth and Supertrend gives sell signal.
-# Uses Alligator to filter choppy markets (when lines are intertwined) and Supertrend for trend direction.
-# Designed to work in both bull and bear markets by using trend-following components.
-# Targets 20-50 trades per year on 4h timeframe with position size 0.25.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 breakouts filtered by 1-day trend and volume spike on 12h timeframe.
+# Goes long when price breaks above R3 and 1-day trend is up (close > EMA34) with volume > 1.5x average.
+# Goes short when price breaks below S3 and 1-day trend is down (close < EMA34) with volume > 1.5x average.
+# Uses 1-day EMA34 for trend filter and 20-period volume average for confirmation.
+# Designed to work in both bull and bear markets by aligning with higher timeframe trend.
+# Targets 12-30 trades per year on 12h timeframe with position size 0.25.
 
-name = "4h_Williams_Alligator_Supertrend"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,114 +23,74 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for 1-week trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1-week EMA(50) for trend filter
-    ema_50_1w = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1w)
+    # Calculate 1d EMA(34) for trend direction
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Williams Alligator components on 4h data
-    # Jaw (13-period SMMA, shifted 8 bars)
-    jaw = pd.Series(close).rolling(window=13, center=False).mean().shift(8).values
-    # Teeth (8-period SMMA, shifted 5 bars)
-    teeth = pd.Series(close).rolling(window=8, center=False).mean().shift(5).values
-    # Lips (5-period SMMA, shifted 3 bars)
-    lips = pd.Series(close).rolling(window=5, center=False).mean().shift(3).values
+    # Calculate Camarilla levels from previous day
+    # Typical Price = (High + Low + Close) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Pivot = Typical Price
+    pivot = typical_price.values
+    # Range = High - Low
+    range_val = (df_1d['high'] - df_1d['low']).values
+    # R3 = Pivot + (Range * 1.1)
+    r3 = pivot + (range_val * 1.1)
+    # S3 = Pivot - (Range * 1.1)
+    s3 = pivot - (range_val * 1.1)
     
-    # Supertrend calculation
-    atr_period = 10
-    atr_multiplier = 3.0
+    # Align Camarilla levels to 12h timeframe (previous day's levels available at open)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Calculate ATR
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # Calculate basic upper and lower bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + (atr_multiplier * atr)
-    lower_band = hl2 - (atr_multiplier * atr)
-    
-    # Initialize Supertrend
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, n):
-        if np.isnan(atr[i-1]) or np.isnan(upper_band[i-1]) or np.isnan(lower_band[i-1]):
-            continue
-            
-        # Supertrend logic
-        if close[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                lower_band[i] = lower_band[i-1]
-            if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                upper_band[i] = upper_band[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
+    # Calculate volume average (20-period) for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(13, 8, 5, atr_period)  # Warmup for Alligator and ATR
+    start_idx = max(34, 20)  # Warmup for 1d EMA and volume average
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or np.isnan(supertrend[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_avg[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator condition: Teeth > Lips for bullish alignment, Teeth < Lips for bearish
-        # But we use a simpler condition: price relative to Teeth
-        price_above_teeth = close[i] > teeth[i]
-        price_below_teeth = close[i] < teeth[i]
+        # Trend filter from 1d
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Supertrend direction
-        st_uptrend = direction[i] == 1
-        st_downtrend = direction[i] == -1
-        
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
+        # Volume confirmation
+        vol_spike = volume[i] > (vol_avg[i] * 1.5)
         
         if position == 0:
-            # Long entry: price > Teeth AND Supertrend uptrend AND weekly uptrend
-            if price_above_teeth and st_uptrend and weekly_uptrend:
+            # Long entry: price breaks above R3 AND 1-day uptrend AND volume spike
+            if close[i] > r3_aligned[i] and uptrend and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price < Teeth AND Supertrend downtrend AND weekly downtrend
-            elif price_below_teeth and st_downtrend and weekly_downtrend:
+            # Short entry: price breaks below S3 AND 1-day downtrend AND volume spike
+            elif close[i] < s3_aligned[i] and downtrend and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price < Teeth OR Supertrend downtrend OR weekly downtrend
-            if not (price_above_teeth and st_uptrend and weekly_uptrend):
+            # Long exit: price breaks below S3 OR 1-day trend turns down
+            if close[i] < s3_aligned[i] or downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price > Teeth OR Supertrend uptrend OR weekly uptrend
-            if not (price_below_teeth and st_downtrend and weekly_downtrend):
+            # Short exit: price breaks above R3 OR 1-day trend turns up
+            if close[i] > r3_aligned[i] or uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
