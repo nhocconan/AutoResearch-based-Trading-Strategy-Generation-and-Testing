@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_1dTrend_Volume
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction. 
-Combined with 1d EMA trend filter and volume confirmation to avoid false signals.
-Works in both bull (KAMA upward) and bear (KAMA downward) markets.
-Target: 75-200 total trades over 4 years (19-50/year).
+6h_Ichimoku_Kijun_Sen_Rebound
+Hypothesis: Price rebounds from Ichimoku Kijun Sen (26-period) on 6h timeframe when aligned with 1d Kumo (cloud) trend.
+In trending markets, price respects Kijun Sen as dynamic support/resistance. Cloud color from 1d filter ensures
+trading in direction of higher timeframe trend. Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "4h_KAMA_Direction_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Ichimoku_Kijun_Sen_Rebound"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,82 +17,110 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1d EMA34 for trend filter
+    # 1d Ichimoku components for trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema34_1d[33] = np.mean(close_1d[:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1d volume SMA20 for volume confirmation
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    # Tenkan Sen (9-period): (HH9 + LL9)/2
+    tenkan_9 = np.full(len(high_1d), np.nan)
+    kijun_26 = np.full(len(high_1d), np.nan)
+    senkou_span_a = np.full(len(high_1d), np.nan)
+    senkou_span_b = np.full(len(high_1d), np.nan)
     
-    # KAMA on 4h data
-    kama = np.full(n, np.nan)
-    if n >= 10:
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=10))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.zeros(n)
-        er[9:] = change[9:] / np.maximum(volatility[9:], 1e-10)
-        # Smoothing constants
-        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-        # Initialize KAMA
-        kama[9] = close[9]
-        for i in range(10, n):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    if len(high_1d) >= 26:
+        # Calculate Tenkan Sen (9)
+        for i in range(8, len(high_1d)):
+            hh9 = np.max(high_1d[i-8:i+1])
+            ll9 = np.min(low_1d[i-8:i+1])
+            tenkan_9[i] = (hh9 + ll9) / 2
+        
+        # Calculate Kijun Sen (26)
+        for i in range(25, len(high_1d)):
+            hh26 = np.max(high_1d[i-25:i+1])
+            ll26 = np.min(low_1d[i-25:i+1])
+            kijun_26[i] = (hh26 + ll26) / 2
+        
+        # Senkou Span A: (Tenkan + Kijun)/2 plotted 26 periods ahead
+        for i in range(len(tenkan_9)):
+            if not np.isnan(tenkan_9[i]) and not np.isnan(kijun_26[i]):
+                idx = i + 26
+                if idx < len(senkou_span_a):
+                    senkou_span_a[idx] = (tenkan_9[i] + kijun_26[i]) / 2
+        
+        # Senkou Span B: 52-period HL/2 plotted 26 periods ahead
+        if len(high_1d) >= 52:
+            for i in range(51, len(high_1d)):
+                hh52 = np.max(high_1d[i-51:i+1])
+                ll52 = np.min(low_1d[i-51:i+1])
+                idx = i + 26
+                if idx < len(senkou_span_b):
+                    senkou_span_b[idx] = (hh52 + ll52) / 2
+    
+    # Align 1d Ichimoku to 6h
+    kijun_26_aligned = align_htf_to_ltf(prices, df_1d, kijun_26)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # 6h Ichimoku Kijun Sen (26-period) for entry signal
+    kijun_26_6h = np.full(n, np.nan)
+    if n >= 26:
+        for i in range(25, n):
+            hh26 = np.max(high[i-25:i+1])
+            ll26 = np.min(low[i-25:i+1])
+            kijun_26_6h[i] = (hh26 + ll26) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 10)  # warmup
+    start_idx = max(52, 26)  # warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(kama[i]):
+        if (np.isnan(kijun_26_aligned[i]) or np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(senkou_span_b_aligned[i]) or np.isnan(kijun_26_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 4h volume from 1d
-        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0  # 24h/4h = 6
-        volume_confirm = volume[i] > 1.5 * vol_4h_approx
+        # Determine 1d cloud color and position
+        senkou_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        senkou_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_green = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]  # bullish cloud
+        price_above_cloud = close[i] > senkou_top
+        price_below_cloud = close[i] < senkou_bottom
         
         if position == 0:
-            # Long: KAMA trending up + price above KAMA + 1d uptrend + volume
-            if kama[i] > kama[i-1] and close[i] > kama[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
+            # Long: Price rebounds from 6h Kijun Sen in bullish cloud
+            if (cloud_green and close[i] <= kijun_26_6h[i] * 1.005 and  # near Kijun Sen
+                close[i] > kijun_26_6h[i] and  # above Kijun Sen
+                price_above_cloud):  # above cloud (strong uptrend)
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA trending down + price below KAMA + 1d downtrend + volume
-            elif kama[i] < kama[i-1] and close[i] < kama[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
+            # Short: Price rebounds from 6h Kijun Sen in bearish cloud
+            elif (not cloud_green and close[i] >= kijun_26_6h[i] * 0.995 and  # near Kijun Sen
+                  close[i] < kijun_26_6h[i] and  # below Kijun Sen
+                  price_below_cloud):  # below cloud (strong downtrend)
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: KAMA turns down or price below KAMA
-            if kama[i] < kama[i-1] or close[i] < kama[i]:
+            # Exit: Price breaks below Kijun Sen or cloud turns bearish
+            if close[i] < kijun_26_6h[i] * 0.995 or not cloud_green:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA turns up or price above KAMA
-            if kama[i] > kama[i-1] or close[i] > kama[i]:
+            # Exit: Price breaks above Kijun Sen or cloud turns bullish
+            if close[i] > kijun_26_6h[i] * 1.005 or cloud_green:
                 signals[i] = 0.0
                 position = 0
             else:
