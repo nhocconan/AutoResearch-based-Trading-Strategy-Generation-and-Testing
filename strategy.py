@@ -1,9 +1,9 @@
-#/usr/bin/env python3
-# 4h_Volume_Crush_Breakout_1dTrend_Volume
-# Hypothesis: After a volume surge (vol > 2.0 * 20-period average), price often breaks out in the direction of the daily trend. This captures momentum after periods of accumulation/distribution. Daily trend filter ensures we trade with the higher timeframe momentum, reducing counter-trend trades. Volume surge acts as a catalyst for breakout, improving signal quality. Designed for low frequency (~20-50 trades/year) to minimize fee drag.
+#!/usr/bin/env python3
+# 6h_ElderRay_Force_With_1dTrend_And_Volume
+# Hypothesis: Elder Ray Bull/Bear Power combined with daily trend filter and volume confirmation captures institutional momentum while avoiding false signals in choppy markets. Works in bull/bear by requiring alignment with daily trend. Designed for low frequency (~15-30 trades/year) to minimize fee drag.
 
-name = "4h_Volume_Crush_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ElderRay_Force_With_1dTrend_And_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,15 +20,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for trend filter and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Volume surge: volume > 2.0 * 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    volume_surge = volume > (2.0 * vol_ma)
+    # EMA13 for Elder Ray calculation
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
     # Daily trend: EMA34 on daily close
     close_1d = df_1d['close'].values
@@ -36,25 +40,23 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align daily trend to 4h
+    # Align daily trend to 6h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Donchian breakout (20-period) for entry
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Volume confirmation: 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -62,24 +64,24 @@ def generate_signals(prices):
                 position = 0
             continue
         
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_confirm = vol_ratio > 1.5
+        
         if position == 0:
-            # Enter long: Donchian high breakout + volume surge + daily uptrend
-            if (close[i] > donchian_high[i] and 
-                volume_surge[i] and 
-                trend_1d_up_aligned[i] > 0.5):
+            # Enter long: Bull Power positive, daily uptrend, volume confirmation
+            if (bull_power[i] > 0 and 
+                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Donchian low breakout + volume surge + daily downtrend
-            elif (close[i] < donchian_low[i] and 
-                  volume_surge[i] and 
-                  trend_1d_down_aligned[i] > 0.5):
+            # Enter short: Bear Power negative, daily downtrend, volume confirmation
+            elif (bear_power[i] < 0 and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to Donchian mid or trend fails
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if (close[i] < donchian_mid or 
+            # Exit when Bull Power turns negative or trend fails
+            if (bull_power[i] <= 0 or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -87,9 +89,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to Donchian mid or trend fails
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if (close[i] > donchian_mid or 
+            # Exit when Bear Power turns positive or trend fails
+            if (bear_power[i] >= 0 or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
