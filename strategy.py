@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Breakout_1dTrend_Volume
-# Hypothesis: 6-hour breakouts from weekly pivot levels with daily trend filter (EMA34) and volume confirmation.
-# Weekly pivots provide strong support/resistance levels that work across market regimes.
-# Daily EMA34 filters trend direction to avoid counter-trend trades; volume confirms breakout strength.
-# Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 12h_ParabolicSAR_VolumeTrend
+# Hypothesis: 12-hour Parabolic SAR trend following with volume confirmation and daily EMA50 trend filter.
+# Parabolic SAR captures trend direction and provides trailing stop. Volume confirmation ensures breakout strength.
+# Daily EMA50 filters for higher timeframe trend to avoid counter-trend trades. Designed for 12h to achieve 12-37 trades/year.
 
-name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_ParabolicSAR_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,38 +22,67 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Daily data for EMA34 trend filter
+    # Daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly pivot points (based on previous week)
-    def calculate_pivots(h, l, c):
-        pivot = (h + l + c) / 3.0
-        r1 = 2 * pivot - l
-        s1 = 2 * pivot - h
-        r2 = pivot + (h - l)
-        s2 = pivot - (h - l)
-        return pivot, r1, s1, r2, s2
+    # Parabolic SAR calculation
+    def calculate_parabolic_sar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+        n = len(high)
+        sar = np.full(n, np.nan)
+        trend = np.full(n, np.nan)  # 1 for uptrend, -1 for downtrend
+        af = np.full(n, af_start)
+        ep = np.full(n, np.nan)  # extreme point
+        
+        # Initialize
+        if n < 2:
+            return sar, trend
+        
+        sar[0] = low[0]
+        trend[0] = 1
+        ep[0] = high[0]
+        
+        for i in range(1, n):
+            if trend[i-1] == 1:  # uptrend
+                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+                # Reverse if price falls below SAR
+                if low[i] < sar[i]:
+                    trend[i] = -1
+                    sar[i] = ep[i-1]  # SAR becomes previous EP
+                    af[i] = af_start
+                    ep[i] = low[i]
+                else:
+                    trend[i] = 1
+                    if high[i] > ep[i-1]:
+                        ep[i] = high[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+            else:  # downtrend
+                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+                # Reverse if price rises above SAR
+                if high[i] > sar[i]:
+                    trend[i] = 1
+                    sar[i] = ep[i-1]  # SAR becomes previous EP
+                    af[i] = af_start
+                    ep[i] = high[i]
+                else:
+                    trend[i] = -1
+                    if low[i] < ep[i-1]:
+                        ep[i] = low[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+        
+        return sar, trend
     
-    pivot = np.full_like(close_1w, np.nan)
-    r1 = np.full_like(close_1w, np.nan)
-    s1 = np.full_like(close_1w, np.nan)
-    r2 = np.full_like(close_1w, np.nan)
-    s2 = np.full_like(close_1w, np.nan)
-    for i in range(1, len(close_1w)):
-        pivot[i], r1[i], s1[i], r2[i], s2[i] = calculate_pivots(high_1w[i-1], low_1w[i-1], close_1w[i-1])
+    sar, psar_trend = calculate_parabolic_sar(high, low)
     
     # Daily volume confirmation: 20-period average
     def mean_arr(arr, p):
@@ -65,15 +93,8 @@ def generate_signals(prices):
         return res
     vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align weekly pivots to 6h timeframe (wait for weekly bar to close)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Align daily indicators to 6h timeframe (wait for daily bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
@@ -82,33 +103,32 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or \
+           np.isnan(sar[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R2, above daily EMA34, strong volume
-            if close[i] > r2_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: SAR indicates uptrend, price above SAR, above daily EMA50, strong volume
+            if psar_trend[i] == 1 and close[i] > sar[i] and close[i] > ema_50_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2, below daily EMA34, strong volume
-            elif close[i] < s2_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: SAR indicates downtrend, price below SAR, below daily EMA50, strong volume
+            elif psar_trend[i] == -1 and close[i] < sar[i] and close[i] < ema_50_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1 or below daily EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: SAR flips to downtrend or price drops below SAR
+            if psar_trend[i] == -1 or close[i] < sar[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 or above daily EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: SAR flips to uptrend or price rises above SAR
+            if psar_trend[i] == 1 or close[i] > sar[i]:
                 signals[i] = 0.0
                 position = 0
             else:
