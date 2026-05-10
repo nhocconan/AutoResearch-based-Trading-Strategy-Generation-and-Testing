@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4
-# Hypothesis: Uses tighter breakout at Camarilla R1/S1 with 1d EMA trend filter and volume confirmation.
-# Designed to reduce trade frequency vs previous version by increasing volume threshold to 2.5x and adding ATR filter.
-# Targets 15-30 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
+# 12h_Camarilla_R1S1_Breakout_1wTrend_Volume
+# Hypothesis: Uses 12h timeframe with weekly trend filter (EMA200) and daily Camarilla R1/S1 breakouts.
+# Volume confirmation reduces false breaks. Targets 15-30 trades/year to avoid fee drag.
+# Weekly EMA200 trend filter works in both bull and bear markets by aligning with major trend.
 # Position size 0.25 for balanced risk.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,10 +23,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (using previous day's data)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    # Get daily data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
+    
+    # Calculate weekly EMA200 for trend filter
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # Calculate ATR for volatility filter
     tr1 = high - low
@@ -47,13 +56,9 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Get 1d data for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -61,41 +66,41 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Warmup for volume MA, 1d EMA, and ATR
+    start_idx = max(200, 20, 14)  # Warmup for weekly EMA200, volume MA, and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1d
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from weekly
+        uptrend = close[i] > ema_200_1w_aligned[i]
+        downtrend = close[i] < ema_200_1w_aligned[i]
         
-        # Stronger volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 2.5
+        # Volume confirmation and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation, 1d uptrend, and volatility
+            # Long entry: price breaks above R1 with volume confirmation, weekly uptrend, and volatility
             if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation, 1d downtrend, and volatility
+            # Short entry: price breaks below S1 with volume confirmation, weekly downtrend, and volatility
             elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or trend turns down
+            # Long exit: price falls below R1 or weekly trend turns down
             if close[i] < r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or trend turns up
+            # Short exit: price rises above S1 or weekly trend turns up
             if close[i] > s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
