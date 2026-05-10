@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyTrend_KAMA_Exit
-Hypothesis: Go long when weekly close > weekly EMA34 and daily KAMA is rising, short when weekly close < weekly EMA34 and daily KAMA is falling.
-Exit when KAMA changes direction. Uses weekly trend filter to avoid counter-trend trades.
-Designed for 1d timeframe to target 10-25 trades/year.
-Weekly EMA provides strong trend filter; KAMA adapts to volatility for smooth entries/exits.
-Works in bull/bear markets by following higher timeframe trend.
+4h_TrueRangeBreakout_ATR1_DailyTrend
+Hypothesis: Go long when price closes above previous bar's high + ATR(14) and daily close > daily EMA34.
+Go short when price closes below previous bar's low - ATR(14) and daily close < daily EMA34.
+Exit when price crosses back below daily EMA34 (for longs) or above (for shorts).
+Uses ATR-based breakout to capture momentum with volatility scaling, and daily EMA for trend filter.
+Designed for 4h timeframe to target 20-40 trades/year per symbol. Works in both bull and bear markets
+by following the higher timeframe trend and using volatility-adjusted breakouts.
 """
 
-name = "1d_WeeklyTrend_KAMA_Exit"
-timeframe = "1d"
+name = "4h_TrueRangeBreakout_ATR1_DailyTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,74 +19,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
-    # Calculate weekly EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_34_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema_34_1w[33] = np.mean(close_1w[:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1w)):
-            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate ATR(14) for volatility scaling
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Calculate daily KAMA (adaptive moving average)
-    # Using Efficiency Ratio (ER) method
-    kama = np.full(n, np.nan)
-    if n >= 30:
-        # Calculate change and volatility
-        change = np.abs(np.diff(close, n=10))  # 10-period change
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-        
-        # Avoid division by zero
-        er = np.where(volatility != 0, change / volatility, 0)
-        
-        # Smoothing constants
-        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-        
-        # Initialize KAMA
-        kama[29] = np.mean(close[:30])
-        for i in range(30, n):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate daily EMA34 for trend filter (using HTF data)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure sufficient warmup for KAMA
+    start_idx = max(15, 34)  # Ensure ATR and EMA are ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Weekly uptrend and KAMA rising
-            if close[i] > ema_34_1w_aligned[i] and kama[i] > kama[i-1]:
+            # Long: Close breaks above previous high + ATR(14) and daily uptrend
+            if close[i] > high[i-1] + atr[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Weekly downtrend and KAMA falling
-            elif close[i] < ema_34_1w_aligned[i] and kama[i] < kama[i-1]:
+            # Short: Close breaks below previous low - ATR(14) and daily downtrend
+            elif close[i] < low[i-1] - atr[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: KAMA turns down (end of upward move)
-            if kama[i] < kama[i-1]:
+            # Exit: Close crosses back below daily EMA34
+            if close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: KAMA turns up (end of downward move)
-            if kama[i] > kama[i-1]:
+            # Exit: Close crosses back above daily EMA34
+            if close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
