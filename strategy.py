@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 1h_Aroon_Trend_4hATR_Volume_Confirmation
-# Hypothesis: Aroon(25) identifies strong trends on 1h with 4h ATR-based position sizing and volume confirmation.
-# Aroon measures trend strength and direction, filtering for trending markets while avoiding ranging conditions.
-# 4h ATR provides volatility-based sizing to adapt to market conditions, reducing risk in high volatility.
-# Volume confirmation ensures breakouts have institutional participation.
-# Designed for 1h timeframe with 15-35 trades/year using tight entry conditions.
+# 6h_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Breakouts from daily Camarilla R3/S3 levels on 6h with weekly trend filter (EMA50) and volume confirmation.
+# Uses weekly EMA50 to filter trend direction (bull/bear), daily Camarilla for intraday S/R, and volume spike for breakout confirmation.
+# Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets by aligning with higher timeframe trend.
 
-name = "1h_Aroon_Trend_4hATR_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,109 +22,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for ATR-based volatility sizing
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Aroon indicator (25-period) for trend strength and direction
-    def calculate_aroon(high_arr, low_arr, period):
-        n = len(high_arr)
-        aroon_up = np.full(n, np.nan)
-        aroon_down = np.full(n, np.nan)
-        
-        for i in range(period - 1, n):
-            # Find highest high and lowest low in the lookback period
-            highest_high_idx = np.argmax(high_arr[i - period + 1:i + 1]) + (i - period + 1)
-            lowest_low_idx = np.argmin(low_arr[i - period + 1:i + 1]) + (i - period + 1)
-            
-            aroon_up[i] = ((period - 1) - (i - highest_high_idx)) / (period - 1) * 100
-            aroon_down[i] = ((period - 1) - (i - lowest_low_idx)) / (period - 1) * 100
-            
-        return aroon_up, aroon_down
+    # Get daily data for Camarilla levels and volume
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    aroon_up, aroon_down = calculate_aroon(high, low, 25)
+    # Weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h ATR for volatility-based position sizing
-    def calculate_atr(high_arr, low_arr, close_arr, period):
-        n = len(high_arr)
-        tr = np.full(n, np.nan)
-        atr = np.full(n, np.nan)
-        
-        for i in range(n):
-            if i == 0:
-                tr[i] = high_arr[i] - low_arr[i]
-            else:
-                tr[i] = max(high_arr[i] - low_arr[i], 
-                           abs(high_arr[i] - close_arr[i-1]),
-                           abs(low_arr[i] - close_arr[i-1]))
-        
-        # Calculate ATR using Wilder's smoothing
-        if n >= period:
-            atr[period-1] = np.mean(tr[0:period])
-            for i in range(period, n):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-                
-        return atr
+    # Daily Camarilla levels (based on previous day)
+    def calculate_camarilla(h, l, c):
+        typical = (h + l + c) / 3.0
+        range_ = h - l
+        R3 = c + (range_ * 1.1000 / 4)
+        S3 = c - (range_ * 1.1000 / 4)
+        return R3, S3
     
-    atr_4h = calculate_atr(high_4h, low_4h, close_4h, 14)
+    R3_1d = np.full_like(close_1d, np.nan)
+    S3_1d = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        R3_1d[i], S3_1d[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # Volume confirmation: 20-period average
-    def mean_arr(arr, period):
+    # Daily volume confirmation: 20-period average
+    def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
-        if len(arr) >= period:
-            for i in range(period - 1, len(arr)):
-                res[i] = np.mean(arr[i - period + 1:i + 1])
+        if len(arr) >= p:
+            for i in range(p - 1, len(arr)):
+                res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
+    vol_ma_20_1d = mean_arr(volume_1d, 20)
     
-    vol_ma_20 = mean_arr(volume, 20)
-    
-    # Align 4h ATR to 1h timeframe (wait for 4h bar to close)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Align all indicators to 6h timeframe (wait for weekly/daily bar to close)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    R3_1d_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for Aroon and ATR
+    start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(aroon_up[i]) or np.isnan(aroon_down[i]) or \
-           np.isnan(atr_4h_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(R3_1d_aligned[i]) or \
+           np.isnan(S3_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Calculate position size based on 4h ATR (inverse volatility)
-        # Normalize ATR to get volatility factor (lower ATR = higher size)
-        atr_normalized = atr_4h_aligned[i] / np.nanmean(atr_4h_aligned[max(0, i-50):i+1])
-        vol_factor = np.clip(1.0 / (atr_normalized + 0.001), 0.5, 2.0)  # Limit volatility adjustment
-        base_size = 0.20
-        position_size = base_size * vol_factor
-        
         if position == 0:
-            # Long: Aroon up > 70 and Aroon down < 30 (strong uptrend) + volume confirmation
-            if aroon_up[i] > 70 and aroon_down[i] < 30 and volume[i] > 1.5 * vol_ma_20[i]:
-                signals[i] = position_size
+            # Long: price breaks above R3, above weekly EMA50 (bullish trend), strong volume
+            if close[i] > R3_1d_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Aroon down > 70 and Aroon up < 30 (strong downtrend) + volume confirmation
-            elif aroon_down[i] > 70 and aroon_up[i] < 30 and volume[i] > 1.5 * vol_ma_20[i]:
-                signals[i] = -position_size
+            # Short: price breaks below S3, below weekly EMA50 (bearish trend), strong volume
+            elif close[i] < S3_1d_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Trend weakening (Aroon down > 50) or volume drops significantly
-            if aroon_down[i] > 50 or volume[i] < 0.5 * vol_ma_20[i]:
+            # Long exit: price drops below S3 or below weekly EMA50 (trend change)
+            if close[i] < S3_1d_aligned[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Trend weakening (Aroon up > 50) or volume drops significantly
-            if aroon_up[i] > 50 or volume[i] < 0.5 * vol_ma_20[i]:
+            # Short exit: price rises above R3 or above weekly EMA50 (trend change)
+            if close[i] > R3_1d_aligned[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.25
     
     return signals
