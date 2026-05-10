@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Keltner_Breakout_Volume_Squeeze
-Hypothesis: Daily Keltner channel breakout with volume squeeze filter and weekly trend filter.
-Works in bull/bear markets by using volatility-based breakouts (Keltner) combined with volume confirmation
-and weekly trend alignment to filter counter-trend moves. Target: 15-25 trades/year to minimize fee drag.
+4h_RVOL_Spike_Donchian_Breakout_TrendFilter
+Hypothesis: Donchian(20) breakout with volume spike confirmation (RVOL > 2.0) and EMA34 trend filter.
+RVOL filters out low-volume false breakouts. Works in bull (breakouts continue) and bear (breakouts fail fast, stopped by trend filter).
+Target: 20-35 trades/year to avoid fee drag.
 """
 
-name = "1d_Keltner_Breakout_Volume_Squeeze"
-timeframe = "1d"
+name = "4h_RVOL_Spike_Donchian_Breakout_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,87 +19,67 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily ATR for Keltner channels
+    # Price arrays
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    
-    # True Range components
-    tr1 = high - low
-    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
-    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(10) for Keltner channels
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
-    # Daily EMA20 for Keltner center
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner channels: EMA20 ± 2 * ATR
-    keltner_upper = ema_20 + 2 * atr
-    keltner_lower = ema_20 - 2 * atr
-    
-    # Volume filter: volume > 1.5x 20-day EMA of volume
     volume = prices['volume'].values
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
     
-    # Volatility squeeze filter: ATR(10) < ATR(50) indicates low volatility
-    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
-    volatility_squeeze = atr < atr_50
+    # Donchian channels (20-period)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # RVOL: volume / 20-period average volume
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    rvol = volume / np.where(vol_ma20 > 0, vol_ma20, 1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need ATR(50) and EMA20
-    start_idx = 50
+    # Warmup: need Donchian (20) and EMA34 (34)
+    start_idx = max(lookback, 34)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(keltner_upper[i]) or
-            np.isnan(keltner_lower[i]) or
-            np.isnan(ema_20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(rvol[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above upper Keltner band with weekly uptrend, volume, and volatility squeeze
-            if (close[i] > keltner_upper[i] and 
-                close[i] > ema_20_1w_aligned[i] and 
-                volume_filter[i] and 
-                volatility_squeeze[i]):
+            # Long: break above Donchian high with uptrend and volume spike
+            if high[i] > highest_high[i] and close[i] > ema_34_1d_aligned[i] and rvol[i] > 2.0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Keltner band with weekly downtrend, volume, and volatility squeeze
-            elif (close[i] < keltner_lower[i] and 
-                  close[i] < ema_20_1w_aligned[i] and 
-                  volume_filter[i] and 
-                  volatility_squeeze[i]):
+            # Short: break below Donchian low with downtrend and volume spike
+            elif low[i] < lowest_low[i] and close[i] < ema_34_1d_aligned[i] and rvol[i] > 2.0:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price back below EMA20 or weekly trend change
-            if close[i] < ema_20[i] or close[i] < ema_20_1w_aligned[i]:
+            # Long exit: price back below Donchian low or trend change
+            if low[i] < lowest_low[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price back above EMA20 or weekly trend change
-            if close[i] > ema_20[i] or close[i] > ema_20_1w_aligned[i]:
+            # Short exit: price back above Donchian high or trend change
+            if high[i] > highest_high[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
