@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Liquidity_Sweep_Retest_4hTrend_1dVolatility
-# Hypothesis: In 1h timeframe, enter after liquidity sweeps (equal highs/lows) retest during 4h trend alignment and 1d low volatility.
-# Works in bull/bear: liquidity sweeps occur in all regimes, trend filter ensures directionality, volatility filter avoids chop.
-# Target: 20-35 trades/year via strict entry conditions.
+# 6h_WeeklyPivot_Breakout_1dTrend_Volume
+# Hypothesis: Breakout of weekly pivot resistance/support with 1d trend alignment and volume confirmation.
+# Weekly pivots provide strong structural levels; breakouts indicate institutional interest.
+# 1d trend ensures alignment with higher timeframe momentum; volume confirms breakout strength.
+# Works in bull markets (breakout continuation) and bear markets (mean reversion at extremes).
+# Target: 15-30 trades/year.
 
-name = "1h_Liquidity_Sweep_Retest_4hTrend_1dVolatility"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,75 +24,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Equal highs/lows detection (liquidity pools) - 20 lookback
-    lookback = 20
-    equal_high = np.zeros(n, dtype=bool)
-    equal_low = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback, n):
-        # Equal high: current high within 0.1% of lookback high
-        lookback_high = np.max(high[i-lookback:i])
-        if abs(high[i] - lookback_high) / lookback_high < 0.001:
-            equal_high[i] = True
-        
-        # Equal low: current low within 0.1% of lookback low
-        lookback_low = np.min(low[i-lookback:i])
-        if abs(low[i] - lookback_low) / lookback_low < 0.001:
-            equal_low[i] = True
-    
-    # Liquidity sweep detection: price breaks equal level then reverses
-    liquidity_sweep_high = np.zeros(n, dtype=bool)  # swept high then closed below
-    liquidity_sweep_low = np.zeros(n, dtype=bool)    # swept low then closed above
-    
-    for i in range(1, n):
-        # Bullish sweep: swept equal low, then closed above it
-        if equal_low[i] and low[i] < low[i-1] and close[i] > low[i]:
-            liquidity_sweep_low[i] = True
-        # Bearish sweep: swept equal high, then closed below it
-        if equal_high[i] and high[i] > high[i-1] and close[i] < high[i]:
-            liquidity_sweep_high[i] = True
-    
-    # 4h trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly high/low for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Align 4h trend to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # Weekly pivot points (standard formula)
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
+    r2 = pivot + (weekly_high - weekly_low)
+    s2 = pivot - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
     
-    # 1d volatility filter (ATR ratio low volatility)
+    # Align weekly pivot levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # 1d trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Calculate ATR(14) for 1d
-    tr1 = np.zeros(len(high_1d))
-    tr1[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(high_1d)):
-        tr1[i] = max(high_1d[i] - low_1d[i], 
-                     abs(high_1d[i] - close_1d[i-1]),
-                     abs(low_1d[i] - close_1d[i-1]))
+    # Align 1d trend to 6h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    atr_1d = np.zeros(len(high_1d))
-    for i in range(13, len(tr1)):
-        atr_1d[i] = np.mean(tr1[i-13:i+1])
-    
-    # Current ATR vs 20-period average (low volatility filter)
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    low_volatility = atr_1d < atr_ma_1d  # ATR below average = low volatility
-    
-    # Align 1d volatility to 1h
-    low_volatility_aligned = align_htf_to_ltf(prices, df_1d, low_volatility.astype(float))
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -98,43 +75,45 @@ def generate_signals(prices):
     start_idx = 100  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(low_volatility_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(trend_1d_up_aligned[i]) or
+            np.isnan(trend_1d_down_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: liquidity sweep low retest, 4h uptrend, low volatility
-            if (liquidity_sweep_low[i] and
-                trend_4h_up_aligned[i] > 0.5 and
-                low_volatility_aligned[i] > 0.5):
-                signals[i] = 0.20
+            # Long: break above R1 with 1d uptrend and volume
+            if (close[i] > r1_aligned[i] and
+                trend_1d_up_aligned[i] > 0.5 and
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: liquidity sweep high retest, 4h downtrend, low volatility
-            elif (liquidity_sweep_high[i] and
-                  trend_4h_down_aligned[i] > 0.5 and
-                  low_volatility_aligned[i] > 0.5):
-                signals[i] = -0.20
+            # Short: break below S1 with 1d downtrend and volume
+            elif (close[i] < s1_aligned[i] and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: liquidity sweep high or 4h trend turns down
-            if (liquidity_sweep_high[i] or
-                trend_4h_up_aligned[i] < 0.5):
+            # Exit: price falls below pivot or 1d trend turns down
+            if (close[i] < pivot_aligned[i] or
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: liquidity sweep low or 4h trend turns up
-            if (liquidity_sweep_low[i] or
-                trend_4h_down_aligned[i] < 0.5):
+            # Exit: price rises above pivot or 1d trend turns up
+            if (close[i] > pivot_aligned[i] or
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
