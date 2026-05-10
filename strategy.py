@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from Camarilla R3/S3 levels on 12h with 1d trend filter (EMA34) and volume confirmation.
-# Uses 12h primary timeframe to reduce trade frequency (target 12-37 trades/year). 1d EMA34 filters trend direction,
-# volume confirms breakout strength. Designed to work in both bull and bear markets by following the trend.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
+# Camarilla levels provide institutional support/resistance; EMA34 filters trend direction; volume confirms breakout strength.
+# Designed for 4h to achieve 19-50 trades/year, suitable for both bull and bear markets.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_ata, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -65,7 +65,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 40  # Need enough history for indicators
     
     for i in range(start_idx, n):
         if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
