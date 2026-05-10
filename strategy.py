@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_Breakout_12hEMA50_Trend_Volume
-Hypothesis: 4h Donchian(20) breakouts in the direction of 12h EMA50 trend, with volume confirmation.
-Works in bull markets by buying breakouts in uptrends, and in bear markets by selling breakdowns in downtrends.
-Target: 20-50 trades/year to minimize fee drag.
+1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+Hypothesis: 1h Camarilla R1/S1 breakout in direction of 4h EMA21 trend, with volume confirmation.
+Uses 4h trend direction to avoid counter-trend trades, 1h for precise entry timing.
+Session filter (08-20 UTC) reduces noise. Target 15-37 trades/year (60-150 total over 4 years).
+Works in bull/bear by following higher timeframe trend and using institutional levels.
 """
 
-name = "4h_Donchian20_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -19,76 +20,88 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h data for trend filter and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
     
-    if len(df_12h) < 1:
+    if len(df_4h) < 1:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # 4h EMA21 for trend filter
+    ema_21 = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_aligned = align_htf_to_ltf(prices, df_4h, ema_21)
     
-    # Get price and volume
+    # Calculate 4h Camarilla levels (using previous bar's OHLC)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate Camarilla levels for each 4h bar
+    camarilla_r1 = close_4h + (high_4h - low_4h) * 1.1 / 12
+    camarilla_s1 = close_4h - (high_4h - low_4h) * 1.1 / 12
+    
+    # Align Camarilla levels to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
+    
+    # Get price, volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 4h Donchian channels (20-period)
-    # We need to calculate highest high and lowest low over the last 20 periods
-    highest_high = np.zeros(n)
-    lowest_low = np.zeros(n)
-    
-    for i in range(n):
-        start_idx = max(0, i - 19)  # Look back 20 periods including current
-        highest_high[i] = np.max(high[start_idx:i+1])
-        lowest_low[i] = np.min(low[start_idx:i+1])
-    
     # Volume filter: current volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ema20 * 1.5
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA50 (50) and enough history for Donchian (20)
-    start_idx = 50
+    # Warmup: need EMA21 (21) and enough history for Camarilla calculation
+    start_idx = 21
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if np.isnan(ema_50_aligned[i]):
+        if (np.isnan(ema_21_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend: bullish if close > EMA50, bearish if close < EMA50
-        is_uptrend = close[i] > ema_50_aligned[i]
-        is_downtrend = close[i] < ema_50_aligned[i]
+        # Apply session filter
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long: uptrend AND price breaks above 20-period high WITH volume
-            if is_uptrend and high[i] > highest_high[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: above EMA21 (uptrend) AND price breaks above R1 with volume
+            if close[i] > ema_21_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: downtrend AND price breaks below 20-period low WITH volume
-            elif is_downtrend and low[i] < lowest_low[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: below EMA21 (downtrend) AND price breaks below S1 with volume
+            elif close[i] < ema_21_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 20-period low OR trend turns bearish
-            if low[i] < lowest_low[i] or close[i] < ema_50_aligned[i]:
+            # Long exit: price breaks below S1 OR trend turns bearish
+            if low[i] < s1_aligned[i] or close[i] < ema_21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above 20-period high OR trend turns bullish
-            if high[i] > highest_high[i] or close[i] > ema_50_aligned[i]:
+            # Short exit: price breaks above R1 OR trend turns bullish
+            if high[i] > r1_aligned[i] or close[i] > ema_21_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
