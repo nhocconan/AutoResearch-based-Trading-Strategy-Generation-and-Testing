@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_1dTrend_VolumeBreakout
-Hypothesis: On 12h timeframe, price breaks Donchian(20) channels in the direction of 1d EMA50 trend with volume confirmation.
-In uptrends, buy breakouts above 20-period high; in downtrends, sell breakdowns below 20-period low.
-Volume confirmation filters false breakouts. Works in bull (buy dips/breakouts) and bear (sell rallies/breakdowns).
-Targets 15-30 trades/year (60-120 total) to minimize fee drag. Uses 1d EMA50 for trend filter and 1d volume SMA20 for confirmation.
+4h_Engulfing_1dTrend_Volume
+Hypothesis: On 4h timeframe, bullish/bearish engulfing candles aligned with 1d EMA50 trend and volume spike provide high-probability entries. 
+Engulfing patterns signal strong momentum shifts, and when combined with daily trend and volume confirmation, they work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+Uses 1d EMA50 for trend filter and 1d volume spike for confirmation. Targets 20-40 trades per year to minimize fee drag.
 """
 
-name = "12h_Donchian20_1dTrend_VolumeBreakout"
-timeframe = "12h"
+name = "4h_Engulfing_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,9 +19,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
+    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
     # 1d EMA50 for trend filter
@@ -36,58 +36,63 @@ def generate_signals(prices):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d volume SMA20 for volume confirmation
+    # 1d volume average for spike detection
     volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    vol_avg_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        vol_avg_1d[19] = np.mean(volume_1d[:20])
         for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
-    
-    # Donchian(20) channels on 12h data
-    high_max20 = np.full(n, np.nan)
-    low_min20 = np.full(n, np.nan)
-    for i in range(19, n):
-        high_max20[i] = np.max(high[i-19:i+1])
-        low_min20[i] = np.min(low[i-19:i+1])
+            vol_avg_1d[i] = np.mean(volume_1d[i-19:i+1])
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need EMA50 and Donchian20
+    start_idx = 50  # Need EMA50 warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or \
-           np.isnan(high_max20[i]) or np.isnan(low_min20[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.8x average 1d volume (scaled to 12h)
-        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h periods in 1d
-        volume_confirm = volume[i] > 1.8 * vol_12h_approx
+        # Volume spike: current 4h volume > 2x average 1d volume (scaled)
+        # 6 four-hour periods in 1 day, so divide daily average by 6
+        vol_4h_avg = vol_avg_1d_aligned[i] / 6.0
+        volume_spike = volume[i] > 2.0 * vol_4h_avg
+        
+        # Bullish engulfing: current green candle fully engulfs previous red candle
+        bullish_engulf = (close[i] > open_price[i]) and \
+                         (open_price[i-1] > close[i-1]) and \
+                         (close[i] >= open_price[i-1]) and \
+                         (open_price[i] <= close[i-1])
+        
+        # Bearish engulfing: current red candle fully engulfs previous green candle
+        bearish_engulf = (close[i] < open_price[i]) and \
+                         (open_price[i-1] < close[i-1]) and \
+                         (open_price[i] >= close[i-1]) and \
+                         (close[i] <= open_price[i-1])
         
         if position == 0:
-            # Long: Breakout above Donchian high in uptrend with volume confirmation
-            if close[i] > high_max20[i] and close[i] > ema50_1d_aligned[i] and volume_confirm:
+            # Long: bullish engulfing in uptrend with volume spike
+            if bullish_engulf and close[i] > ema50_1d_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Donchian low in downtrend with volume confirmation
-            elif close[i] < low_min20[i] and close[i] < ema50_1d_aligned[i] and volume_confirm:
+            # Short: bearish engulfing in downtrend with volume spike
+            elif bearish_engulf and close[i] < ema50_1d_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price closes below Donchian low or trend reversal
-            if close[i] < low_min20[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: trend reversal or opposite engulfing
+            if close[i] < ema50_1d_aligned[i] or bearish_engulf:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price closes above Donchian high or trend reversal
-            if close[i] > high_max20[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: trend reversal or opposite engulfing
+            if close[i] > ema50_1d_aligned[i] or bullish_engulf:
                 signals[i] = 0.0
                 position = 0
             else:
