@@ -1,12 +1,14 @@
+0
+
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Price reversal at Camarilla R1/S1 levels confirmed by 1d trend and volume spike.
-Works in bull/bear via trend filter + avoids false signals in low volume.
-Targets 20-40 trades/year by requiring confluence of price level, trend, and volume.
+4h_ADX_Filtered_Donchian_Breakout_With_Volume
+Hypothesis: Donchian breakout with ADX > 25 trend filter and volume spike works in both bull and bear markets.
+ADX ensures we only trade in trending conditions, avoiding whipsaws in ranges. Volume confirms breakout strength.
+Target: 25-40 trades/year by requiring ADX trend + Donchian breakout + volume confirmation.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+name = "4h_ADX_Filtered_Donchian_Breakout_With_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,82 +26,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get 4h data for indicators
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate ADX(14) on 4h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        plus_dm = np.concatenate([[0], plus_dm])
+        minus_dm = np.concatenate([[0], minus_dm])
+        
+        # Smoothed TR, +DM, -DM
+        atr = np.full_like(high, np.nan)
+        plus_dm_smooth = np.full_like(high, np.nan)
+        minus_dm_smooth = np.full_like(high, np.nan)
+        
+        # First values (simple average)
+        if len(high) >= period:
+            atr[period-1] = np.nanmean(tr[1:period])
+            plus_dm_smooth[period-1] = np.nanmean(plus_dm[1:period])
+            minus_dm_smooth[period-1] = np.nanmean(minus_dm[1:period])
+            
+            # Wilder's smoothing
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Directional Indicators
+        plus_di = np.full_like(high, np.nan)
+        minus_di = np.full_like(high, np.nan)
+        dx = np.full_like(high, np.nan)
+        
+        for i in range(period-1, len(high)):
+            if atr[i] != 0 and not np.isnan(atr[i]):
+                plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
+                minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
+                if plus_di[i] + minus_di[i] != 0:
+                    dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+        
+        # ADX: smoothed DX
+        adx = np.full_like(high, np.nan)
+        if len(high) >= 2*period-1:
+            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+            for i in range(2*period-1, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # Calculate 1d average volume for volume filter
-    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate ADX
+    adx = calculate_adx(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We use previous day's OHLC, so shift by 1
-    prev_close = np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].values[:-1]])
-    prev_high = np.concatenate([[df_1d['high'].iloc[0]], df_1d['high'].values[:-1]])
-    prev_low = np.concatenate([[df_1d['low'].iloc[0]], df_1d['low'].values[:-1]])
+    # Calculate Donchian channels (20-period) on 4h data
+    def donchian_channels(high, low, period=20):
+        upper = np.full_like(high, np.nan)
+        lower = np.full_like(high, np.nan)
+        for i in range(period-1, len(high)):
+            upper[i] = np.max(high[i-period+1:i+1])
+            lower[i] = np.min(low[i-period+1:i+1])
+        return upper, lower
     
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
+    dc_upper, dc_lower = donchian_channels(df_4h['high'].values, df_4h['low'].values, 20)
+    dc_upper_aligned = align_htf_to_ltf(prices, df_4h, dc_upper)
+    dc_lower_aligned = align_htf_to_ltf(prices, df_4h, dc_lower)
     
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 4h average volume for volume filter
+    vol_avg_4h = np.full_like(volume, np.nan)
+    for i in range(19, len(volume)):  # 20-period MA
+        vol_avg_4h[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA34 (34) and 1d vol avg (20)
-    start_idx = max(34, 20)
+    # Warmup: need ADX (28), Donchian (20), volume avg (19)
+    start_idx = max(28, 20, 19)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or 
+            np.isnan(dc_upper_aligned[i]) or 
+            np.isnan(dc_lower_aligned[i]) or 
+            np.isnan(vol_avg_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Higher timeframe trend filter (1d)
-        uptrend_1d = close[i] > ema_34_1d_aligned[i]
-        downtrend_1d = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: ADX > 25 indicates strong trend
+        strong_trend = adx_aligned[i] > 25
         
-        # Volume filter: current 4h volume > 1.5x average 1d volume (scaled)
-        vol_4h = volume[i]
-        # Scale 1d volume to 4h equivalent (1d = 6x 4h)
-        vol_4h_equiv = vol_avg_1d_aligned[i] / 6.0
-        volume_filter = vol_4h > vol_4h_equiv * 1.5
+        # Volume filter: current volume > 1.5x average volume
+        volume_filter = volume[i] > vol_avg_4h[i] * 1.5
         
         if position == 0:
-            # Long entry: price at S1 support + uptrend + volume participation
-            if close[i] <= s1_aligned[i] and uptrend_1d and volume_filter:
+            # Long entry: price breaks above Donchian upper + trend + volume
+            if close[i] > dc_upper_aligned[i] and strong_trend and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price at R1 resistance + downtrend + volume participation
-            elif close[i] >= r1_aligned[i] and downtrend_1d and volume_filter:
+            # Short entry: price breaks below Donchian lower + trend + volume
+            elif close[i] < dc_lower_aligned[i] and strong_trend and volume_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches R1 or trend breaks
-            if close[i] >= r1_aligned[i] or not uptrend_1d:
+            # Long exit: price breaks below Donchian lower or trend weakens
+            if close[i] < dc_lower_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches S1 or trend breaks
-            if close[i] <= s1_aligned[i] or not downtrend_1d:
+            # Short exit: price breaks above Donchian upper or trend weakens
+            if close[i] > dc_upper_aligned[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+0
