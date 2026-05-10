@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_AdaptiveKeltner_RSI2_Trend
-Hypothesis: Combine RSI(2) mean reversion with Keltner Channel (ATR-based) breakouts on 6h,
-filtered by 1d ADX trend strength. In high ADX (>25), trade breakouts; in low ADX (<20),
-trade RSI(2) reversals. Uses volatility-adjusted position sizing to manage risk.
-Works in bull (breakouts) and bear (mean reversion in ranges). Target: 50-150 total trades.
+12h_PivotBreakout_1dTrend_Volume
+Hypothesis: Trading breakouts from 12-hour price channels confirmed by daily trend (EMA50) and volume spikes.
+In bull markets, price tends to break above channel resistance with strong volume; in bear markets,
+it breaks below support. The 1d EMA50 filter ensures we only trade in the direction of the higher timeframe trend,
+reducing false breakouts in ranging markets. Volume confirmation filters weak breakouts.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "6h_AdaptiveKeltner_RSI2_Trend"
-timeframe = "6h"
+name = "12h_PivotBreakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,175 +26,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d ADX for trend strength filter
+    # Daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate ADX(14) on 1d
-    def calculate_adx(high, low, close, period=14):
-        n = len(high)
-        if n < period * 2:
-            return np.full(n, np.nan)
-        
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smoothed values
-        atr = np.zeros(n)
-        plus_dm_smooth = np.zeros(n)
-        minus_dm_smooth = np.zeros(n)
-        
-        # Initial values
-        atr[period-1] = np.mean(tr[:period])
-        plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
-        minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
-        
-        # Wilder's smoothing
-        for i in range(period, n):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
-            minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
-        
-        # Directional Indicators
-        plus_di = np.where(atr != 0, plus_dm_smooth / atr * 100, 0)
-        minus_di = np.where(atr != 0, minus_dm_smooth / atr * 100, 0)
-        
-        # DX and ADX
-        dx = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-        adx = np.full(n, np.nan)
-        adx[2*period-2] = np.mean(dx[period-1:2*period-1])
-        for i in range(2*period-1, n):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Daily volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
-    
-    # 6h Keltner Channel (ATR-based)
-    def calculate_atr(high, low, close, period):
-        n = len(high)
-        if n < period:
-            return np.full(n, np.nan)
-        
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        atr = np.zeros(n)
-        atr[period-1] = np.mean(tr[:period])
-        for i in range(period, n):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        return atr
-    
-    atr_10 = calculate_atr(high, low, close, 10)
-    atr_ma_20 = np.full(n, np.nan)
-    if n >= 20:
-        atr_ma_20[19] = np.mean(atr_10[:20])
-        for i in range(20, n):
-            atr_ma_20[i] = (atr_ma_20[i-1] * 19 + atr_10[i]) / 20
-    
-    # Keltner Channels
-    ema20 = np.full(n, np.nan)
-    if n >= 20:
-        ema20[19] = np.mean(close[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, n):
-            ema20[i] = alpha * close[i] + (1 - alpha) * ema20[i-1]
-    
-    kc_upper = ema20 + 2 * atr_ma_20
-    kc_lower = ema20 - 2 * atr_ma_20
-    
-    # RSI(2) for mean reversion
-    def calculate_rsi(close, period):
-        n = len(close)
-        if n < period + 1:
-            return np.full(n, np.nan)
-        
-        delta = np.diff(close)
-        delta = np.concatenate([[np.nan], delta])
-        
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros(n)
-        avg_loss = np.zeros(n)
-        
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, n):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi2 = calculate_rsi(close, 2)
+    # 12-period high/low for price channel (using 12h data)
+    high_12 = np.full(n, np.nan)
+    low_12 = np.full(n, np.nan)
+    if n >= 12:
+        # Initialize first value
+        high_12[11] = np.max(high[:12])
+        low_12[11] = np.min(low[:12])
+        # Rolling max/min
+        for i in range(12, n):
+            high_12[i] = max(high_12[i-1], high[i])
+            low_12[i] = min(low_12[i-1], low[i])
+            # Remove values that fall out of the 12-period window
+            if i >= 24:
+                if high_12[i-12] == high_12[i-1]:
+                    high_12[i] = np.max(high[i-11:i+1])
+                if low_12[i-12] == low_12[i-1]:
+                    low_12[i] = np.min(low[i-11:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # warmup
+    start_idx = max(20, 12, 50)  # warmup
     
     for i in range(start_idx, n):
-        if np.isnan(adx_14_1d_aligned[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(rsi2[i]) or np.isnan(ema20[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(high_12[i]) or np.isnan(low_12[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility-adjusted size (inverse vol)
-        vol_factor = np.clip(atr_10[i] / np.nanmedian(atr_10[i-50:i+1] if i >= 50 else atr_10[:i+1]), 0.5, 2.0)
-        base_size = 0.25
-        size = base_size / vol_factor
-        size = np.clip(size, 0.15, 0.35)
+        # Volume approximation: 12h volume from daily (12h = 1/2 day)
+        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0
+        volume_confirm = volume[i] > 1.5 * vol_12h_approx
         
         if position == 0:
-            # High ADX (>25): trend mode - trade breakouts
-            if adx_14_1d_aligned[i] > 25:
-                if close[i] > kc_upper[i]:
-                    signals[i] = size
-                    position = 1
-                elif close[i] < kc_lower[i]:
-                    signals[i] = -size
-                    position = -1
-            # Low ADX (<20): range mode - trade RSI extremes
-            elif adx_14_1d_aligned[i] < 20:
-                if rsi2[i] < 10 and close[i] > ema20[i]:  # Oversold but above average
-                    signals[i] = size
-                    position = 1
-                elif rsi2[i] > 90 and close[i] < ema20[i]:  # Overbought but below average
-                    signals[i] = -size
-                    position = -1
+            # Long: price breaks above 12-period high with uptrend and volume
+            if close[i] > high_12[i] and close[i] > ema50_1d_aligned[i] and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below 12-period low with downtrend and volume
+            elif close[i] < low_12[i] and close[i] < ema50_1d_aligned[i] and volume_confirm:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: reverse signal or volatility expansion
-            if (adx_14_1d_aligned[i] < 20 and rsi2[i] > 70) or close[i] < kc_lower[i]:
+            # Exit: price breaks below channel low or trend reversal
+            if close[i] < low_12[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = size
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: reverse signal or volatility expansion
-            if (adx_14_1d_aligned[i] < 20 and rsi2[i] < 30) or close[i] > kc_upper[i]:
+            # Exit: price breaks above channel high or trend reversal
+            if close[i] > high_12[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -size
+                signals[i] = -0.25
     
     return signals
