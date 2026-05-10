@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic on 12h timeframe.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic.
 # Long when price breaks above R1 with volume > 2x average and price > daily EMA34.
 # Short when price breaks below S1 with volume > 2x average and price < daily EMA34.
 # Exits when price crosses back below/above EMA34.
-# Designed for 20-30 trades/year on 12h to avoid overtrading and work in both bull and bear markets.
+# Designed for 20-40 trades/year to avoid overtrading and work in both bull and bear markets.
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camilla_R1S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
