@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R3/S3 levels from 1d act as strong support/resistance. Breakout above R3 or below S3 with volume confirmation and 1d EMA34 trend filter. Works in bull/bear by following higher timeframe structure.
-Target: 15-25 trades/year per symbol.
+1d_WeeklyPivot_Breakout_Volume_Spike
+Hypothesis: Weekly pivot points act as strong support/resistance. A breakout above or below the weekly pivot with volume confirmation indicates strong momentum. Weekly trend filter (price vs weekly EMA20) avoids counter-trend trades. Works in bull/bear by following higher timeframe structure. Target: 15-25 trades/year per symbol.
 """
 
-name = "12h_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_WeeklyPivot_Breakout_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,25 +22,26 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily OHLC for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly high/low/close for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4.0
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4.0
+    # Weekly pivot point: (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Weekly EMA20 for trend filter
+    ema_20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema_20_1w[19] = np.mean(close_1w[:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, len(close_1w)):
+            ema_20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_20_1w[i-1]
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # 1d EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike: current volume > 1.5x average volume (20-period)
+    # Volume spike: current volume > 2.0x average volume (20-period)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
@@ -49,37 +49,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # need EMA34 and volume SMA
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        volume_confirm = volume[i] > 1.5 * vol_sma[i]
+        # Volume confirmation: volume spike
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 0:
-            # Long: Breakout above R3 with trend filter
-            if high[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+            # Long: Price breaks above weekly pivot AND above weekly EMA20 (uptrend)
+            if close[i] > pivot_1w_aligned[i] and close[i] > ema_20_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S3 with trend filter
-            elif low[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+            # Short: Price breaks below weekly pivot AND below weekly EMA20 (downtrend)
+            elif close[i] < pivot_1w_aligned[i] and close[i] < ema_20_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit: Price crosses below weekly pivot OR below weekly EMA20
+            if close[i] < pivot_1w_aligned[i] or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit: Price crosses above weekly pivot OR above weekly EMA20
+            if close[i] > pivot_1w_aligned[i] or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
