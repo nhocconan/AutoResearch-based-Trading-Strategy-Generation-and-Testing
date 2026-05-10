@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S3_Breakout_1dTrend_Filter_v2
+4H_Camarilla_R1_S3_Breakout_1dTrend_Filter_v3
 Hypothesis: Breakouts at key Camarilla levels (R1 for longs, S3 for shorts) on 1d timeframe with volume confirmation and 1d trend alignment capture momentum moves while avoiding whipsaws. Uses strict entry conditions to limit trades and reduce fee drag. Works in bull/bear by following 1d trend direction.
 """
 
-name = "4H_Camarilla_R1_S3_Breakout_1dTrend_Filter_v2"
+name = "4H_Camarilla_R1_S3_Breakout_1dTrend_Filter_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -53,7 +53,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume filter: volume > 1.5x 20-period average (less strict to allow more trades)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 1.5
     
