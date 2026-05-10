@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter
-# Hypothesis: This strategy uses daily trend direction (EMA 50) to filter Camarilla breakout entries, ensuring trades align with the higher timeframe trend. By using 1d EMA instead of 12h, we reduce noise and increase signal reliability. Volume confirmation (>2x average) ensures momentum behind breakouts. Designed for low trade frequency (target: 20-40/year) to minimize fee drag, with discrete position sizing (0.25) to avoid churn. Works in both bull and bear markets by following the 1d trend, avoiding counter-trend trades.
+# 12H_Donchian_Breakout_1dTrend_Volume
+# Hypothesis: Daily trend direction (EMA50) filters Donchian(20) breakouts on 12h chart, with volume spike confirmation (>2x 20-period average).
+# Designed for 12h timeframe to capture multi-day trend continuation moves with low trade frequency (target: 15-30 trades/year).
+# Works in both bull and bear markets by following daily trend direction, avoiding counter-trend trades.
+# Uses discrete position sizing (0.25) to minimize fee churn.
 
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "12H_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +23,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (HTF)
+    # Get daily data for EMA trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend direction
+    # Calculate daily EMA(50) for trend direction
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
-    # We reuse df_1d for pivots
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Donchian(20) on 12h chart
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from prior day's OHLC
-    # R1 = C + ((H-L) * 1.1 / 12)
-    # S1 = C - ((H-L) * 1.1 / 12)
-    camarilla_r1 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
-    camarilla_s1 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
-    
-    # Align Camarilla levels to 4h timeframe (use prior day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
-    
-    # Volume filter: volume > 2x 20-period average on 4h chart
+    # Volume filter: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and volume MA
+    start_idx = max(50, 20)  # Warmup for EMA and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA50
+        # Trend filter: price above/below daily EMA50
         price_above_ema = close[i] > ema_1d_aligned[i]
         price_below_ema = close[i] < ema_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above R1 + above 1d EMA + volume spike
-            if (close[i] > r1_aligned[i] and 
+            # Long entry: price breaks above Donchian high + above daily EMA + volume spike
+            if (close[i] > donchian_high[i] and 
                 price_above_ema and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 + below 1d EMA + volume spike
-            elif (close[i] < s1_aligned[i] and 
+            # Short entry: price breaks below Donchian low + below daily EMA + volume spike
+            elif (close[i] < donchian_low[i] and 
                   price_below_ema and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or volume drops below average
-            if (close[i] < s1_aligned[i] or volume[i] < vol_ma[i]):
+            # Long exit: price breaks below Donchian low or volume drops below average
+            if (close[i] < donchian_low[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 or volume drops below average
-            if (close[i] > r1_aligned[i] or volume[i] < vol_ma[i]):
+            # Short exit: price breaks above Donchian high or volume drops below average
+            if (close[i] > donchian_high[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
