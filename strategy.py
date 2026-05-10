@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-Hypothesis: Breakout above Camarilla R1 or below S1 with 1d EMA34 trend filter and volume spike.
-Works in both bull and bear markets by following daily trend and using volatility-adjusted breakouts.
-Targets 20-30 trades/year per symbol with discrete position sizing to minimize fee drag.
+6h_Camarilla_R3_S3_Fade_1dTrend_Volume
+Hypothesis: Fade at Camarilla R3/S3 levels (mean reversion) with 1d EMA34 trend filter and volume spike confirmation.
+Works in bull markets by fading overextended rallies and in bear markets by fading panic drops.
+Targets 15-25 trades/year per symbol with discrete position sizing to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Fade_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility context
+    # Calculate ATR(14) for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -67,17 +67,17 @@ def generate_signals(prices):
             continue
         
         # Calculate Camarilla levels from previous day
-        if i >= 6:  # Need at least 6 bars (previous day's data)
-            # Previous day's OHLC (assuming 6 bars per day on 4h chart)
-            prev_day_start = max(0, i - 6)
+        if i >= 4:  # Need at least 4 bars (previous day's data on 6h chart)
+            # Previous day's OHLC (assuming 4 bars per day on 6h chart)
+            prev_day_start = max(0, i - 4)
             prev_day_high = np.max(high[prev_day_start:i])
             prev_day_low = np.min(low[prev_day_start:i])
             prev_day_close = close[i-1]
             
             # Camarilla levels
             range_val = prev_day_high - prev_day_low
-            r1 = prev_day_close + (range_val * 1.1 / 12)
-            s1 = prev_day_close - (range_val * 1.1 / 12)
+            r3 = prev_day_close + (range_val * 1.1 / 4)
+            s3 = prev_day_close - (range_val * 1.1 / 4)
         else:
             # Not enough data for Camarilla calculation
             if position != 0:
@@ -85,30 +85,30 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume spike: current volume > 2.0x average volume (more selective)
-        volume_spike = volume[i] > 2.0 * vol_sma[i]
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 0:
-            # Long: Break above R1 with uptrend and volume spike
-            if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and volume_spike:
+            # Long: Fade below S3 with uptrend and volume spike
+            if close[i] < s3 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 with downtrend and volume spike
-            elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and volume_spike:
+            # Short: Fade above R3 with downtrend and volume spike
+            elif close[i] > r3 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Close crosses back below 1d EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit: Price crosses above EMA34 or reaches opposite extreme
+            if close[i] > ema_34_1d_aligned[i] or close[i] > (s3 + (r3 - s3) * 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Close crosses back above 1d EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit: Price crosses below EMA34 or reaches opposite extreme
+            if close[i] < ema_34_1d_aligned[i] or close[i] < (r3 - (r3 - s3) * 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
