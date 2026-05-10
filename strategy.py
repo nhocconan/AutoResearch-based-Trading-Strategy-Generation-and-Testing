@@ -1,10 +1,12 @@
-# 1h_TRIX_Momentum_4hTrend_Volume
-# Hypothesis: TRIX (triple EMA) momentum on 1h captures short-term trends, while 4h EMA50 provides trend filter and volume confirms breakouts.
-# Works in bull (momentum continuations) and bear (mean reversion at extremes) with tight entries to avoid overtrading.
-# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+#!/usr/bin/env python3
+# 6h_WeeklyPivot_DailyTrend_Breakout
+# Hypothesis: Weekly pivot levels (from weekly OHLC) act as strong support/resistance.
+# Breakouts above weekly R2 or below weekly S2 with daily trend alignment and volume
+# confirmation capture strong momentum moves. Works in bull (breakouts) and bear (mean
+# reversion at extremes) with tight entries to avoid overtrading.
 
-name = "1h_TRIX_Momentum_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,29 +23,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 1w data for weekly pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h EMA50 trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
+    # 1d data for daily trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align 4h trend to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # Weekly pivot levels (standard calculation)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    R1 = pivot_1w + range_1w
+    S1 = pivot_1w - range_1w
+    R2 = pivot_1w + 2 * range_1w
+    S2 = pivot_1w - 2 * range_1w
     
-    # TRIX on 1h: triple EMA of ROC
-    # TRIX = EMA(EMA(EMA(ROC, 12), 12), 12)
-    close_series = pd.Series(close)
-    roc = close_series.pct_change(periods=12)  # Rate of change over 12 periods
-    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = ema3.values
+    # Align weekly pivot levels to 6h
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    
+    # Daily EMA34 trend
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
+    
+    # Align daily trend to 6h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
     # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
@@ -55,8 +68,9 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(trix[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,33 +80,37 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: TRIX crosses above zero with 4h uptrend and volume spike
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                trend_4h_up_aligned[i] > 0.5 and volume_spike):
-                signals[i] = 0.20
+            # Long: break above weekly R2 with daily uptrend and volume spike
+            if (close[i] > R2_aligned[i] and 
+                trend_1d_up_aligned[i] > 0.5 and volume_spike):
+                signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with 4h downtrend and volume spike
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  trend_4h_down_aligned[i] > 0.5 and volume_spike):
-                signals[i] = -0.20
+            # Short: break below weekly S2 with daily downtrend and volume spike
+            elif (close[i] < S2_aligned[i] and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_spike):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below zero or trend fails
-            if (trix[i] < 0 and trix[i-1] >= 0) or \
-               trend_4h_up_aligned[i] < 0.5:
+            # Exit: close below weekly S1 or daily trend fails
+            S1 = pivot_1w[i] - range_1w[i] if not (np.isnan(pivot_1w[i]) or np.isnan(range_1w[i])) else np.nan
+            S1_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, S1))[i] if not np.isnan(S1) else np.nan
+            if (close[i] < S1_aligned or 
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX crosses above zero or trend fails
-            if (trix[i] > 0 and trix[i-1] <= 0) or \
-               trend_4h_down_aligned[i] < 0.5:
+            # Exit: close above weekly R1 or daily trend fails
+            R1 = pivot_1w[i] + range_1w[i] if not (np.isnan(pivot_1w[i]) or np.isnan(range_1w[i])) else np.nan
+            R1_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, R1))[i] if not np.isnan(R1) else np.nan
+            if (close[i] > R1_aligned or 
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
