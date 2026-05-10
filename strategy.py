@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Linear_Regression_Channel_v1
-Hypothesis: Price tends to revert to the mean within a 60-period linear regression channel on 6h timeframe, 
-with entries at ±1.5 standard deviations from the regression line. Uses 1-week trend filter to align with 
-higher timeframe momentum and volume confirmation to avoid false signals. Designed to work in both bull 
-and bear markets by fading extremes in ranging conditions and following trend when channel breaks.
-Target: 20-40 trades/year to minimize fee drag.
+12h_Camarilla_R1_S1_1dTrend_Volume
+Hypothesis: Price breaks Camarilla R1 (resistance) or S1 (support) levels calculated from the prior day,
+with volume confirmation and 1d trend filter. Uses 1d EMA50 as trend filter and 1d volume spike
+for confirmation. Designed for 12h timeframe to capture multi-day moves while minimizing trades.
+Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
-name = "6h_Linear_Regression_Channel_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,83 +17,39 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 50:
+    # Get 1d data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_w = df_w['close'].values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # Calculate 50-period EMA on weekly for trend filter
-    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
+    # Calculate Camarilla levels (R1, S1)
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # Get 6h data for linear regression channel and volume
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 60:
-        return np.zeros(n)
+    # Align Camarilla levels to 12h timeframe (with 1-bar delay for completed 1d bar)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    close_6h = df_6h['close'].values
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    volume_6h = df_6h['volume'].values
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate 60-period linear regression and standard error on 6h close
-    def linreg(src, length):
-        if length < 2:
-            return np.full_like(src, np.nan), np.full_like(src, np.nan)
-        sum_x = (length - 1) * length / 2.0
-        sum_x2 = (length - 1) * length * (2 * length - 1) / 6.0
-        src_series = pd.Series(src)
-        sum_y = src_series.rolling(window=length, min_periods=length).sum().values
-        sum_xy = src_series.rolling(window=length, min_periods=length).apply(
-            lambda x: np.sum(x * np.arange(length)), raw=True
-        ).values
-        slope = (length * sum_xy - sum_x * sum_y) / (length * sum_x2 - sum_x * sum_x)
-        intercept = (sum_y - slope * sum_x) / length
-        return slope * np.arange(length) + intercept, slope
+    # 1d volume for volume confirmation (current day's volume > 1.5x 20-day average)
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # Calculate linear regression values and standard error
-    lr_slope = np.full(n, np.nan)
-    lr_intercept = np.full(n, np.nan)
-    lr_value = np.full(n, np.nan)
-    std_err = np.full(n, np.nan)
-    
-    for i in range(59, n):  # Start from index 59 to have 60 points (0-59)
-        window_close = close_6h[i-59:i+1]
-        if len(window_close) < 60:
-            continue
-        sum_x = 60 * 59 / 2.0  # sum of 0 to 59
-        sum_x2 = 60 * 59 * 119 / 6.0  # sum of squares of 0 to 59
-        sum_y = np.sum(window_close)
-        sum_xy = np.sum(window_close * np.arange(60))
-        slope = (60 * sum_xy - sum_x * sum_y) / (60 * sum_x2 - sum_x * sum_x)
-        intercept = (sum_y - slope * sum_x) / 60
-        lr_slope[i] = slope
-        lr_intercept[i] = intercept
-        lr_value[i] = slope * 59 + intercept  # Value at bar i (most recent)
-        # Standard error of estimate
-        y_pred = slope * np.arange(60) + intercept
-        residuals = window_close - y_pred
-        std_err[i] = np.sqrt(np.sum(residuals**2) / 58)  # 60-2 degrees of freedom
-    
-    # Align LR values to 6h timeframe (already calculated on 6h data)
-    lr_value_aligned = lr_value  # Already on 6h timeframe
-    std_err_aligned = std_err    # Already on 6h timeframe
-    
-    # Calculate upper and lower channel lines (±1.5 standard errors)
-    upper_channel = lr_value_aligned + 1.5 * std_err_aligned
-    lower_channel = lr_value_aligned - 1.5 * std_err_aligned
-    
-    # Volume filter: current 6h volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(volume_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema20_aligned = align_htf_to_ltf(prices, df_6h, vol_ema20)
-    volume_filter = volume_6h > vol_ema20_aligned * 1.5
-    
-    # 6h data for signal generation
+    # 12h data for signal generation
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -103,54 +58,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly trend (50), 60-period LR (59)
-    start_idx = max(50, 59)
+    # Warmup: need 1d EMA50 (50) and volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema50_w_aligned[i]) or 
-            np.isnan(lr_value_aligned[i]) or
-            np.isnan(std_err_aligned[i]) or
-            np.isnan(upper_channel[i]) or
-            np.isnan(lower_channel[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: weekly EMA50 direction
-        # Use slope of weekly EMA to determine trend (avoid look-ahead)
-        if i >= 51:  # Need at least 2 points to calculate slope
-            ema50_prev = ema50_w_aligned[i-1]
-            ema50_curr = ema50_w_aligned[i]
-            w_trend_up = ema50_curr > ema50_prev
-            w_trend_down = ema50_curr < ema50_prev
-        else:
-            w_trend_up = False
-            w_trend_down = False
+        # Trend filter: price vs 1d EMA50
+        uptrend_1d = close[i] > ema50_1d_aligned[i]
+        downtrend_1d = close[i] < ema50_1d_aligned[i]
         
-        # Volume filter
-        vol_filter = volume[i] > vol_ema20_aligned[i] if i < len(vol_ema20_aligned) else False
+        # Volume filter: current 12h volume > 1.5x 20-day 1h volume average
+        # Note: Using 12h volume compared to 1d volume MA - we need to align properly
+        # For volume confirmation, we'll use current 12h volume vs previous day's volume MA
+        volume_filter = volume[i] > vol_ma20_1d_aligned[i] * 1.5
         
         if position == 0:
-            # Long entry: price at or below lower channel + up trend + volume
-            if low[i] <= lower_channel[i] and w_trend_up and vol_filter:
+            # Long entry: price breaks above R1 + uptrend + volume
+            if high[i] > r1_aligned[i] and uptrend_1d and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price at or above upper channel + down trend + volume
-            elif high[i] >= upper_channel[i] and w_trend_down and vol_filter:
+            # Short entry: price breaks below S1 + downtrend + volume
+            elif low[i] < s1_aligned[i] and downtrend_1d and volume_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches middle line or trend fails
-            if close[i] >= lr_value_aligned[i] or not w_trend_up:
+            # Long exit: price returns below R1 or trend fails
+            if close[i] < r1_aligned[i] or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches middle line or trend fails
-            if close[i] <= lr_value_aligned[i] or not w_trend_down:
+            # Short exit: price returns above S1 or trend fails
+            if close[i] > s1_aligned[i] or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
