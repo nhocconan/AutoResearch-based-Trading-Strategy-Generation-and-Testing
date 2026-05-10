@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_HTF_S1_R1_Breakout_1dTrend_Filter
-Hypothesis: Trading breakouts at S1/R1 of daily Camarilla pivot with 1-day trend filter and volume confirmation captures momentum moves in both bull and bear markets. Uses 12h timeframe to balance trade frequency and signal quality, targeting 12-37 trades/year with low fee drain.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Trading breakouts at inner Camarilla levels (R1/S1) from daily pivot with volume confirmation and 1-day trend filter captures strong momentum moves in both bull and bear markets. Timeframe: 4h balances trade frequency and signal quality for 1-day trend alignment, targeting 20-50 trades/year with low fee drift.
 """
 
-name = "12h_HTF_S1_R1_Breakout_1dTrend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -39,7 +39,7 @@ def generate_signals(prices):
     R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
@@ -47,7 +47,7 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 12h data for signal generation
+    # 4h data for signal generation
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
