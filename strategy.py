@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_Donchian20_Breakout_WeeklyPivot_Direction_Volume
-Hypothesis: Price breaks 6h Donchian(20) high/low with weekly pivot direction filter (1w trend) and volume confirmation.
-Weekly pivot determines overall trend: price above weekly pivot = long bias, below = short bias.
-Volume confirmation ensures breakouts are genuine. Works in bull/bear by aligning with weekly trend.
-Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+12h_Camarilla_R3_S3_Breakout_1dTrend
+Hypothesis: Price breaks Camarilla R3 (long) or S3 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
+Works in bull/bear by filtering trades in direction of daily trend. Target: 12-37 trades/year (50-150 total) to minimize fee drag.
 """
 
-name = "6h_Donchian20_Breakout_WeeklyPivot_Direction_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,75 +23,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot and trend
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d data
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly Pivot Point (standard calculation)
-    # PP = (H + L + C) / 3
-    pp_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Camarilla levels from prior day: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # 6h Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    for i in range(n):
-        if i >= lookback - 1:
-            highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-            lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Align weekly pivot to 6h
-    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    # Align 1d indicators to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = lookback - 1  # Wait for Donchian
+    start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(pp_1w_aligned[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter: price above/below weekly pivot
-        is_uptrend_bias = close[i] > pp_1w_aligned[i]
-        is_downtrend_bias = close[i] < pp_1w_aligned[i]
+        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled)
+        # 12h is half of 1d, so scale factor is 2
+        vol_1d_scaled = vol_sma20_1d_aligned[i] * 2.0
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > highest_high[i]
-        breakout_down = low[i] < lowest_low[i]
-        
-        # Volume confirmation: current volume > 1.5x average of last 6 periods
-        if i >= 6:
-            vol_avg = np.mean(volume[i-6:i])
-            volume_confirm = volume[i] > 1.5 * vol_avg
-        else:
-            volume_confirm = False
+        # Trend and price relative to Camarilla levels
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
+        price_above_r3 = close[i] > r3_aligned[i]
+        price_below_s3 = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: breakout above Donchian high, weekly uptrend bias, volume
-            if breakout_up and is_uptrend_bias and volume_confirm:
+            # Long: price breaks above R3, in uptrend, with volume
+            if price_above_r3 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian low, weekly downtrend bias, volume
-            elif breakout_down and is_downtrend_bias and volume_confirm:
+            # Short: price breaks below S3, in downtrend, with volume
+            elif price_below_s3 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Donchian low or trend bias shifts
-            if low[i] < lowest_low[i] or not is_uptrend_bias:
+            # Exit: price falls back below R3 or trend turns down
+            if not price_above_r3 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Donchian high or trend bias shifts
-            if high[i] > highest_high[i] or not is_downtrend_bias:
+            # Exit: price rises back above S3 or trend turns up
+            if not price_below_s3 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
