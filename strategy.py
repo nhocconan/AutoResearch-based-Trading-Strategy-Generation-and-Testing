@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_RSI_Stochastic
-# Hypothesis: KAMA trend direction on 12h combined with RSI and Stochastic for entry timing, with volume confirmation.
-# KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI identifies overbought/oversold conditions,
-# Stochastic confirms momentum. Volume ensures breakout strength. Designed for 12h to achieve 12-37 trades/year.
-# Works in both bull and bear markets by adapting trend strength and avoiding false signals in low volatility.
+# 1d_Stochastic_Oversold_Bounce_1wTrend_Filter
+# Hypothesis: Buy when daily stochastic falls below 20 (oversold) with weekly uptrend filter (price above 50-week SMA).
+# Sell when stochastic rises above 80 (overbought) or weekly trend turns bearish.
+# Uses mean reversion in oversold conditions with trend filter to avoid catching falling knives.
+# Designed for 1d timeframe to achieve 7-25 trades/year with low frequency and high win rate.
 
-name = "12h_KAMA_Trend_RSI_Stochastic"
-timeframe = "12h"
+name = "1d_Stochastic_Oversold_Bounce_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,117 +23,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for KAMA trend, RSI, and Stochastic
+    # 1d data for stochastic
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend indicator
-    def calculate_kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=length))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0) if length > 1 else np.zeros_like(change)
-        er = np.zeros_like(close)
-        er[length:] = change[length-1:] / np.where(volatility[length-1:] == 0, 1, volatility[length-1:])
-        # Smoothing Constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA
-        kama = np.full_like(close, np.nan)
-        kama[length] = close[length]
-        for i in range(length+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # RSI (Relative Strength Index)
-    def calculate_rsi(close, length=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(close)
-        avg_loss = np.zeros_like(close)
-        avg_gain[length] = np.mean(gain[:length])
-        avg_loss[length] = np.mean(loss[:length])
-        for i in range(length+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i-1]) / length
-            avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i-1]) / length
-        rs = np.where(avg_loss == 0, 100, avg_gain / avg_loss)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Stochastic %K (14,3,3) on daily
+    lookback = 14
+    lowest_low = np.full_like(close_1d, np.nan)
+    highest_high = np.full_like(close_1d, np.nan)
+    for i in range(lookback - 1, len(close_1d)):
+        lowest_low[i] = np.min(low_1d[i - lookback + 1:i + 1])
+        highest_high[i] = np.max(high_1d[i - lookback + 1:i + 1])
     
-    # Stochastic Oscillator
-    def calculate_stochastic(high, low, close, k_length=14, d_length=3):
-        lowest_low = np.full_like(low, np.nan)
-        highest_high = np.full_like(high, np.nan)
-        for i in range(k_length-1, len(low)):
-            lowest_low[i] = np.min(low[i-k_length+1:i+1])
-            highest_high[i] = np.max(high[i-k_length+1:i+1])
-        k = 100 * (close - lowest_low) / (highest_high - lowest_low)
-        k = np.where(highest_high == lowest_low, 50, k)  # avoid division by zero
-        # D is SMA of K
-        d = np.full_like(close, np.nan)
-        for i in range(d_length-1, len(k)):
-            d[i] = np.mean(k[i-d_length+1:i+1])
-        return k, d
+    # Avoid division by zero
+    diff = highest_high - lowest_low
+    stoch_k = np.full_like(close_1d, np.nan)
+    mask = diff != 0
+    stoch_k[mask] = 100 * (close_1d[mask] - lowest_low[mask]) / diff[mask]
     
-    # Calculate indicators on 1d data
-    kama = calculate_kama(close_1d, length=10, fast=2, slow=30)
-    rsi = calculate_rsi(close_1d, length=14)
-    stoch_k, stoch_d = calculate_stochastic(high_1d, low_1d, close_1d, k_length=14, d_length=3)
+    # Stochastic %D (3-period SMA of %K)
+    stoch_d = np.full_like(close_1d, np.nan)
+    for i in range(2, len(stoch_k)):  # need 3 values for SMA
+        if not np.isnan(stoch_k[i-2]) and not np.isnan(stoch_k[i-1]) and not np.isnan(stoch_k[i]):
+            stoch_d[i] = (stoch_k[i-2] + stoch_k[i-1] + stoch_k[i]) / 3.0
     
-    # Volume confirmation: 20-period average
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
-        return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    # Weekly 50 SMA for trend filter
+    sma_50_1w = np.full_like(close_1w, np.nan)
+    for i in range(49, len(close_1w)):  # 50-period SMA
+        sma_50_1w[i] = np.mean(close_1w[i-49:i+1])
     
-    # Align all indicators to lower timeframe (wait for 1d bar to close)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    stoch_k_aligned = align_htf_to_ltf(prices, df_1d, stoch_k)
+    # Align all indicators to lower timeframe (wait for close of bar)
     stoch_d_aligned = align_htf_to_ltf(prices, df_1d, stoch_d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or \
-           np.isnan(stoch_k_aligned[i]) or np.isnan(stoch_d_aligned[i]) or \
-           np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(stoch_d_aligned[i]) or np.isnan(sma_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA (uptrend), RSI < 70 (not overbought), Stochastic K > D (bullish momentum), strong volume
-            if close[i] > kama_aligned[i] and rsi_aligned[i] < 70 and stoch_k_aligned[i] > stoch_d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Enter long when stochastic is oversold (<20) and weekly trend is bullish (price > 50-week SMA)
+            if stoch_d_aligned[i] < 20 and close[i] > sma_50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (downtrend), RSI > 30 (not oversold), Stochastic K < D (bearish momentum), strong volume
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] > 30 and stoch_k_aligned[i] < stoch_d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
-                signals[i] = -0.25
-                position = -1
         elif position == 1:
-            # Long exit: price below KAMA or RSI > 70 (overbought) or Stochastic K < D (momentum loss)
-            if close[i] < kama_aligned[i] or rsi_aligned[i] > 70 or stoch_k_aligned[i] < stoch_d_aligned[i]:
+            # Exit when stochastic becomes overbought (>80) or weekly trend turns bearish (price < 50-week SMA)
+            if stoch_d_aligned[i] > 80 or close[i] < sma_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price above KAMA or RSI < 30 (oversold) or Stochastic K > D (momentum loss)
-            if close[i] > kama_aligned[i] or rsi_aligned[i] < 30 or stoch_k_aligned[i] > stoch_d_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
