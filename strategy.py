@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 1h_4H1D_Trend_Retracement
-# Hypothesis: In 4h and 1d trends, price retraces to EMA21 on 1h before continuing.
-# Enter long in 4h/1d uptrend when 1h price touches EMA21 with rejection candle.
-# Enter short in 4h/1d downtrend when 1h price touches EMA21 with rejection candle.
-# Uses 4h/1d for trend direction, 1h for entry timing. Reduces frequency vs pure 1h trend.
+# 4h_Trend_Follow_With_Weekly_Pivot_Confirmation
+# Hypothesis: Price breaking above weekly pivot levels (R1/R2) during a daily uptrend (price > EMA34) 
+# indicates institutional buying pressure and continuation. Conversely, breaking below weekly S1/S2 
+# during a daily downtrend (price < EMA34) indicates institutional selling pressure and continuation.
+# Weekly pivots act as dynamic support/resistance, filtering false breakouts. Volume confirmation 
+# ensures genuine participation. Trend filter prevents counter-trend trading in choppy markets.
+# Works in both bull and bear markets by only trading in direction of daily trend.
+# Weekly timeframe provides stability; 4h balances trade frequency and signal quality.
 
-name = "1h_4H1D_Trend_Retracement"
-timeframe = "1h"
+name = "4h_Trend_Follow_With_Weekly_Pivot_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,97 +18,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_price = prices['open'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    # Get 1d data for trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate EMA21 on 4h close
-    ema21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
-    # Calculate EMA21 on 1d close
-    ema21_1d = pd.Series(df_1d['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate EMA21 on 1h for entry
-    ema21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Calculate weekly pivot levels (standard formula)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * pivot_point - weekly_low
+    weekly_s1 = 2 * pivot_point - weekly_high
+    weekly_r2 = pivot_point + (weekly_high - weekly_low)
+    weekly_s2 = pivot_point - (weekly_high - weekly_low)
+    
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+    
+    # Volume confirmation (20-period MA on 4h = ~3.3 days)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 4h EMA21 (21), 1d EMA21 (21), 1h EMA21 (21)
-    start_idx = 21
+    # Warmup: need daily EMA34 (34), weekly pivot (10), volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema21_4h_aligned[i]) or 
-            np.isnan(ema21_1d_aligned[i]) or 
-            np.isnan(ema21_1h[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or 
+            np.isnan(weekly_r2_aligned[i]) or 
+            np.isnan(weekly_s2_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 4h and 1d trend
-        trend_4h_up = close[i] > ema21_4h_aligned[i]
-        trend_4h_down = close[i] < ema21_4h_aligned[i]
-        trend_1d_up = close[i] > ema21_1d_aligned[i]
-        trend_1d_down = close[i] < ema21_1d_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Both 4h and 1d must agree on trend
-        uptrend = trend_4h_up and trend_1d_up
-        downtrend = trend_4h_down and trend_1d_down
-        
-        # 1h rejection candle: close near high for bullish rejection, near low for bearish
-        body_size = abs(close[i] - open_price[i])
-        range_size = high[i] - low[i]
-        if range_size > 0:
-            upper_wick = high[i] - max(close[i], open_price[i])
-            lower_wick = min(close[i], open_price[i]) - low[i]
-            # Bullish rejection: long lower wick, small body, close near high
-            bullish_rejection = (lower_wick > body_size * 1.5) and (close[i] > open_price[i]) and (upper_wick < body_size * 0.5)
-            # Bearish rejection: long upper wick, small body, close near low
-            bearish_rejection = (upper_wick > body_size * 1.5) and (close[i] < open_price[i]) and (lower_wick < body_size * 0.5)
-        else:
-            bullish_rejection = False
-            bearish_rejection = False
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend on 4h/1d + price at EMA21(1h) + bullish rejection
-            if uptrend and abs(close[i] - ema21_1h[i]) / ema21_1h[i] < 0.005 and bullish_rejection:
-                signals[i] = 0.20
+            # Long entry: uptrend + price breaks above weekly R1 + volume
+            # Using R1 as primary breakout level, R2 as stronger confirmation if needed
+            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend on 4h/1d + price at EMA21(1h) + bearish rejection
-            elif downtrend and abs(close[i] - ema21_1h[i]) / ema21_1h[i] < 0.005 and bearish_rejection:
-                signals[i] = -0.20
+            # Short entry: downtrend + price breaks below weekly S1 + volume
+            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price moves far from EMA21
-            if not uptrend or abs(close[i] - ema21_1h[i]) / ema21_1h[i] > 0.02:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < weekly_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price moves far from EMA21
-            if not downtrend or abs(close[i] - ema21_1h[i]) / ema21_1h[i] > 0.02:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > weekly_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
