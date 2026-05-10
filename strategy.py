@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Russell_Momentum_Regime_Filter
-# Hypothesis: Combine Russell 2000-inspired momentum (RSI + price > SMA) with 1d ADX regime filter to avoid chop.
-# Works in bull/bear: momentum captures trends, ADX > 25 filters false signals in ranging markets.
-# Target: 20-40 trades/year with disciplined entries.
+# 1d_WeeklyPivot_Breakout_1dTrend
+# Hypothesis: Breakout from weekly pivot levels with daily trend alignment and volume confirmation.
+# Weekly pivot levels act as key support/resistance, and breakouts above/below these levels
+# with volume confirmation and daily trend alignment provide high-probability trades.
+# This strategy targets low-frequency, high-conviction trades suitable for 1d timeframe.
+# Works in both bull and bear markets by trading breakouts in the direction of weekly trend.
 
-name = "4h_Russell_Momentum_Regime_Filter"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_1dTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,98 +24,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # SMA(50) for trend filter
-    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
-    
-    # Momentum condition: RSI > 50 and price above SMA50
-    momentum_long = (rsi > 50) & (close > sma50)
-    momentum_short = (rsi < 50) & (close < sma50)
-    
-    # 1d ADX regime filter (avoid chop)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly timeframe data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    # Pivot = (High + Low + Close) / 3
+    # R1 = 2*Pivot - Low
+    # S1 = 2*Pivot - High
+    # R2 = Pivot + (High - Low)
+    # S2 = Pivot - (High - Low)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # Align weekly pivot levels to daily timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_plus_14 = pd.Series(dm_plus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    dm_minus_14 = pd.Series(dm_minus).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Daily trend filter (EMA 50)
+    close_series = pd.Series(close)
+    ema50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_uptrend = close > ema50
+    daily_downtrend = close < ema50
     
-    # DI and DX
-    di_plus = 100 * np.divide(dm_plus_14, tr14, out=np.zeros_like(dm_plus_14), where=tr14!=0)
-    di_minus = 100 * np.divide(dm_minus_14, tr14, out=np.zeros_like(dm_minus_14), where=tr14!=0)
-    dx = 100 * np.divide(np.abs(di_plus - di_minus), (di_plus + di_minus), out=np.zeros_like(di_plus), where=(di_plus + di_minus)!=0)
-    
-    # ADX(14)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align 1d momentum and ADX to 4h
-    momentum_long_aligned = align_htf_to_ltf(prices, df_1d, momentum_long.astype(float))
-    momentum_short_aligned = align_htf_to_ltf(prices, df_1d, momentum_short.astype(float))
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Volume confirmation (volume > 1.5x 20-day average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for EMA and volume MA
     
     for i in range(start_idx, n):
-        if (np.isnan(momentum_long_aligned[i]) or np.isnan(momentum_short_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or np.isnan(ema50[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: momentum long and ADX > 25 (trending market)
-            if momentum_long_aligned[i] > 0.5 and adx_aligned[i] > 25:
+            # Long: break above weekly R1 with volume and daily uptrend
+            if (close[i] > weekly_r1_aligned[i] and 
+                volume_confirm[i] and 
+                daily_uptrend[i]):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: momentum short and ADX > 25 (trending market)
-            elif momentum_short_aligned[i] > 0.5 and adx_aligned[i] > 25:
+            # Short: break below weekly S1 with volume and daily downtrend
+            elif (close[i] < weekly_s1_aligned[i] and 
+                  volume_confirm[i] and 
+                  daily_downtrend[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: momentum fades or ADX drops below 20 (range)
-            if (momentum_long_aligned[i] < 0.5) or (adx_aligned[i] < 20):
+            # Exit: price crosses below weekly pivot or daily trend turns down
+            if (close[i] < weekly_pivot_aligned[i] or 
+                not daily_uptrend[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: momentum fades or ADX drops below 20 (range)
-            if (momentum_short_aligned[i] < 0.5) or (adx_aligned[i] < 20):
+            # Exit: price crosses above weekly pivot or daily trend turns up
+            if (close[i] > weekly_pivot_aligned[i] or 
+                not daily_downtrend[i]):
                 signals[i] = 0.0
                 position = 0
             else:
