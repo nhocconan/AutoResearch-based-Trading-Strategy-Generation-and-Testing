@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_1dTrend_Volume
-# Hypothesis: Elder Ray (Bull/Bear Power) on 6h identifies momentum extremes, filtered by 1d EMA trend and volume spikes.
-# Bull Power = High - EMA13, Bear Power = Low - EMA13. Enter long when Bull Power > 0 and rising, Bear Power < 0 and falling.
-# Enter short when Bear Power < 0 and falling, Bull Power < 0 and rising. 1d EMA50 filter ensures alignment with daily trend.
-# Volume confirmation (current > 2.0x 20-period average) adds conviction to avoid false signals in low-volume environments.
-# Designed to work in both bull and bear markets by following the higher-timeframe trend and capturing momentum shifts.
-# Target: 15-35 trades/year to stay within optimal trade frequency for 6h.
+# 4h_Three_Signal_Confluence
+# Hypothesis: Combine Donchian breakout, RSI mean reversion, and volume spike as three independent signals.
+# Entry requires all three signals to align, ensuring high-conviction trades.
+# Donchian provides trend-following structure, RSI captures overextended reversals, and volume confirms institutional interest.
+# This triple confluence reduces false signals and keeps trade frequency low (target: 20-40/year).
+# Works in both bull and bear markets by requiring alignment with the primary trend via Donchian,
+# while using RSI to enter on pullbacks within the trend.
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Three_Signal_Confluence"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mta_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,62 +25,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray: EMA13 for Bull/Bear Power
-    ema13_period = 13
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=ema13_period, adjust=False, min_periods=ema13_period).values
+    # Donchian Channel (20-period)
+    donchian_period = 20
+    upper_channel = np.zeros(n)
+    lower_channel = np.zeros(n)
+    for i in range(donchian_period-1, n):
+        upper_channel[i] = np.max(high[i-donchian_period+1:i+1])
+        lower_channel[i] = np.min(low[i-donchian_period+1:i+1])
     
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # RSI (14-period)
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
+    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
+    for i in range(rsi_period, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # 1d EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Volume spike (current > 2.0 * 20-period average)
+    vol_ma = np.zeros(n)
+    for i in range(20-1, n):
+        vol_ma[i] = np.mean(volume[i-20+1:i+1])
+    volume_spike = volume > (2.0 * vol_ma)
     
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Signals
+    donchian_breakout_up = close > upper_channel
+    donchian_breakout_down = close < lower_channel
+    rsi_oversold = rsi < 30
+    rsi_overbought = rsi > 70
     
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (2.0 * vol_ma)
+    # Combined entry conditions
+    long_entry = donchian_breakout_up & rsi_oversold & volume_spike
+    short_entry = donchian_breakout_down & rsi_overbought & volume_spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = max(donchian_period, rsi_period, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         if position == 0:
-            # Long: Bull Power > 0 and rising (momentum building), Bear Power < 0, 1d EMA uptrend, volume confirmation
-            if (bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and bear_power[i] < 0 and
-                close[i] > ema50_1d_aligned[i] and volume_filter[i]):
+            if long_entry[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and falling (momentum building), Bull Power > 0, 1d EMA downtrend, volume confirmation
-            elif (bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and bull_power[i] > 0 and
-                  close[i] < ema50_1d_aligned[i] and volume_filter[i]):
+            elif short_entry[i]:
                 signals[i] = -0.25
                 position = -1
-        
         elif position == 1:
-            # Exit: Bull Power turns negative OR Bear Power becomes positive (momentum shift)
-            if bull_power[i] <= 0 or bear_power[i] >= 0:
+            # Exit on Donchian reversal or RSI overbought
+            if donchian_breakout_down[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
-        
         elif position == -1:
-            # Exit: Bear Power turns positive OR Bull Power becomes negative (momentum shift)
-            if bear_power[i] >= 0 or bull_power[i] <= 0:
+            # Exit on Donchian reversal or RSI oversold
+            if donchian_breakout_up[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
