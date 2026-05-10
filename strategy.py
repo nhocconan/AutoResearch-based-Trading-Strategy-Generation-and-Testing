@@ -1,12 +1,14 @@
+# NOTE: This is a modified version of the original strategy.py
 #!/usr/bin/env python3
-# 1h_HTF_Direction_Volume_Entry
-# Hypothesis: Use 4h trend and 1d volatility filter for direction, 1h for precise entry.
-# Long when 4h close > 4h EMA50 and 1d volatility low; enter on 1h pullback to EMA20 with volume.
-# Short when 4h close < 4h EMA50 and 1d volatility low; enter on 1h bounce to EMA20 with volume.
+# 6h_WeeklyPivot_DailyTrend_Volume
+# Hypothesis: Use weekly pivot point bias and daily trend for direction, enter on 6h pullback with volume.
+# Long when weekly close > weekly pivot AND daily close > daily EMA50; enter on 6h pullback to EMA20 with volume.
+# Short when weekly close < weekly pivot AND daily close < daily EMA50; enter on 6h bounce to EMA20 with volume.
+# Weekly pivot provides structural bias, daily trend confirms, volume confirms momentum.
 # Designed for low trade frequency (15-30/year) to avoid fee drag, works in bull/bear via trend filter.
 
-name = "1h_HTF_Direction_Volume_Entry"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,46 +25,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Weekly data for pivot bias
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d data for volatility filter
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 4h EMA50 trend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
+    # Weekly pivot point calculation (using previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Bias: price above/below pivot
+    weekly_bias_up = close_1w > pivot_1w
+    weekly_bias_down = close_1w < pivot_1w
     
-    # Align 4h trend to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
-    
-    # 1d ATR(20) for volatility filter (low volatility = ranging market good for mean reversion)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Daily EMA50 trend
     close_1d = df_1d['close'].values
-    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.absolute(high_1d[1:] - close_1d[:-1]), np.absolute(low_1d[1:] - close_1d[:-1]))
-    tr1 = np.concatenate([[0], tr1])  # first value
-    atr20_1d = pd.Series(tr1).rolling(window=20, min_periods=20).mean().values
-    # Normalize ATR by price to get volatility percentage
-    vol_pct = atr20_1d / close_1d
-    # Low volatility threshold: bottom 30% of historical volatility
-    vol_threshold = pd.Series(vol_pct).rolling(window=50, min_periods=50).quantile(0.3).values
-    low_vol = vol_pct <= vol_threshold
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_trend_up = close_1d > ema50_1d
+    daily_trend_down = close_1d < ema50_1d
     
-    # Align 1d volatility filter to 1h
-    low_vol_aligned = align_htf_to_ltf(prices, df_1d, low_vol.astype(float))
+    # Align weekly bias to 6h
+    weekly_bias_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_up.astype(float))
+    weekly_bias_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_down.astype(float))
     
-    # 1h EMA20 for entry timing
+    # Align daily trend to 6h
+    daily_trend_up_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_up.astype(float))
+    daily_trend_down_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_down.astype(float))
+    
+    # 6h EMA20 for entry timing
     ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume filter: current volume > 1.5 * 20-period average (avoid low-volume noise)
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -72,8 +71,9 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(low_vol_aligned[i]) or np.isnan(ema20[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(weekly_bias_up_aligned[i]) or np.isnan(weekly_bias_down_aligned[i]) or
+            np.isnan(daily_trend_up_aligned[i]) or np.isnan(daily_trend_down_aligned[i]) or
+            np.isnan(ema20[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,39 +83,39 @@ def generate_signals(prices):
         volume_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: 4h uptrend + low volatility + price near EMA20 with volume
-            if (trend_4h_up_aligned[i] > 0.5 and 
-                low_vol_aligned[i] > 0.5 and
+            # Long: weekly bullish bias + daily uptrend + price near EMA20 with volume
+            if (weekly_bias_up_aligned[i] > 0.5 and 
+                daily_trend_up_aligned[i] > 0.5 and
                 close[i] <= ema20[i] * 1.01 and  # within 1% above EMA20 (pullback)
                 close[i] >= ema20[i] * 0.99 and  # within 1% below EMA20
                 volume_filter):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend + low volatility + price near EMA20 with volume
-            elif (trend_4h_down_aligned[i] > 0.5 and 
-                  low_vol_aligned[i] > 0.5 and
+            # Short: weekly bearish bias + daily downtrend + price near EMA20 with volume
+            elif (weekly_bias_down_aligned[i] > 0.5 and 
+                  daily_trend_down_aligned[i] > 0.5 and
                   close[i] >= ema20[i] * 0.99 and  # within 1% below EMA20
                   close[i] <= ema20[i] * 1.01 and  # within 1% above EMA20
                   volume_filter):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: 4h trend fails or volatility increases
-            if (trend_4h_up_aligned[i] < 0.5 or 
-                low_vol_aligned[i] < 0.5):
+            # Exit: weekly bias fails or daily trend fails
+            if (weekly_bias_up_aligned[i] < 0.5 or 
+                daily_trend_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: 4h trend fails or volatility increases
-            if (trend_4h_down_aligned[i] < 0.5 or 
-                low_vol_aligned[i] < 0.5):
+            # Exit: weekly bias fails or daily trend fails
+            if (weekly_bias_down_aligned[i] < 0.5 or 
+                daily_trend_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
