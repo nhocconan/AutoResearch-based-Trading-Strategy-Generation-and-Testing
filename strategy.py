@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Reversal_v1
-Hypothesis: Price reverses at weekly pivot levels (S2/S3/R2/R3) with volume confirmation. Works in bull markets by buying S2/S3 bounces and in bear markets by selling R2/R3 rejections. Uses weekly pivots for structure and 6h EMA34 for trend filter to avoid counter-trend trades. Target: 15-30 trades/year to minimize fee drag.
+6h_Weekly_Pivot_Reversal_v2
+Hypothesis: Price reverses at weekly pivot levels (S2/S3/R2/R3) with volume confirmation and trend filter. 
+Uses 1d ATR to dynamically adjust entry/exit zones and filter out low-volatility periods. 
+Trades only when price approaches weekly support/resistance with volume spike and trend alignment.
+Designed for 6h timeframe to balance signal frequency and profit potential.
+Target: 15-30 trades/year to minimize fee drag.
 """
 
-name = "6h_Weekly_Pivot_Reversal_v1"
+name = "6h_Weekly_Pivot_Reversal_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -42,6 +46,24 @@ def generate_signals(prices):
     r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
     r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
     
+    # Get 1d data for ATR calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 14-period ATR on 1d
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0] = np.inf  # First value has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    
     # Get 6h data for trend filter and volume
     df_6h = get_htf_data(prices, '6h')
     if len(df_6h) < 34:
@@ -63,8 +85,8 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly pivot (5 weeks) and 6h EMA34 (34)
-    start_idx = max(5, 34)
+    # Warmup: need weekly pivot (5 weeks), 1d ATR (14), and 6h EMA34 (34)
+    start_idx = max(5, 14, 34)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
@@ -72,7 +94,8 @@ def generate_signals(prices):
             np.isnan(s2_w_aligned[i]) or
             np.isnan(s3_w_aligned[i]) or
             np.isnan(r2_w_aligned[i]) or
-            np.isnan(r3_w_aligned[i])):
+            np.isnan(r3_w_aligned[i]) or
+            np.isnan(atr_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,22 +105,25 @@ def generate_signals(prices):
         uptrend_6h = close[i] > ema34_6h_aligned[i]
         downtrend_6h = close[i] < ema34_6h_aligned[i]
         
-        # Volume filter: current 6h volume > 1.8x 20-period average
+        # Volume filter: current 6h volume > 2.0x 20-period average
         vol_ma20 = pd.Series(volume_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
         vol_ma20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma20)
-        volume_filter = volume[i] > vol_ma20_aligned[i] * 1.8
+        volume_filter = volume[i] > vol_ma20_aligned[i] * 2.0
+        
+        # Dynamic zone size based on 1d ATR (as fraction of price)
+        zone_size = (atr_1d_aligned[i] * 0.5) / close[i]  # 0.5x ATR as zone
         
         # Distance to weekly levels (as fraction of price)
-        dist_to_s3 = (close[i] - s3_w_aligned[i]) / close[i] if s3_w_aligned[i] > 0 else 1.0
         dist_to_s2 = (close[i] - s2_w_aligned[i]) / close[i] if s2_w_aligned[i] > 0 else 1.0
+        dist_to_s3 = (close[i] - s3_w_aligned[i]) / close[i] if s3_w_aligned[i] > 0 else 1.0
         dist_to_r2 = (r2_w_aligned[i] - close[i]) / close[i] if r2_w_aligned[i] > 0 else 1.0
         dist_to_r3 = (r3_w_aligned[i] - close[i]) / close[i] if r3_w_aligned[i] > 0 else 1.0
         
-        # Entry zones: within 0.3% of weekly S2/S3 or R2/R3
-        near_s2 = abs(dist_to_s2) < 0.003
-        near_s3 = abs(dist_to_s3) < 0.003
-        near_r2 = abs(dist_to_r2) < 0.003
-        near_r3 = abs(dist_to_r3) < 0.003
+        # Entry zones: within dynamic zone of weekly S2/S3 or R2/R3
+        near_s2 = abs(dist_to_s2) < zone_size
+        near_s3 = abs(dist_to_s3) < zone_size
+        near_r2 = abs(dist_to_r2) < zone_size
+        near_r3 = abs(dist_to_r3) < zone_size
         
         if position == 0:
             # Long entry: near S2/S3 + uptrend + volume
