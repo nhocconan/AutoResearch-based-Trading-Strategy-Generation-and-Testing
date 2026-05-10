@@ -1,10 +1,10 @@
-#!/usr/bin/env python3
-# 12h_KAMA_With_1wTrend_Filter_v2
-# Hypothesis: KAMA trend direction on 12h combined with weekly trend filter (1w EMA50) and volume confirmation (1.5x 24-period average).
-# Uses 12h timeframe for institutional entries, works in bull/bear markets via dual timeframe trend alignment.
-# Target: 12-37 trades/year to minimize fee drag on 12h timeframe.
+#/usr/bin/env python3
+# 12h_Donchian_20_1dTrend_WeeklyPivot_Filter
+# Hypothesis: Breakouts from Donchian(20) channels on 12h with 1d trend filter (EMA50) and weekly pivot support/resistance as confluence.
+# Uses 12h timeframe to reduce trade frequency, targets 15-35 trades/year. Works in bull/bear via trend alignment.
+# Weekly pivot adds institutional level confluence to filter false breakouts.
 
-name = "12h_KAMA_With_1wTrend_Filter_v2"
+name = "12h_Donchian_20_1dTrend_WeeklyPivot_Filter"
 timeframe = "12h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,65 +22,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w trend filter (EMA50)
+    # 1d trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
+    
+    # Align 1d trend to 12h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # Weekly pivot points from previous week
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema50_1w
-    trend_1w_down = close_1w < ema50_1w
     
-    # Align 1w trend to 12h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Calculate weekly pivot (standard formula)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
     
-    # KAMA calculation (ER=10) on 12h
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # Align weekly pivot levels to 12h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    close_12h = df_12h['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_12h, n=10))
-    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=0)
-    er = np.zeros_like(close_12h)
-    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA
-    kama = np.zeros_like(close_12h)
-    kama[0] = close_12h[0]
-    for i in range(1, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    # Trend direction
-    kama_up = close_12h > kama
-    kama_down = close_12h < kama
+    # Donchian channel (20-period) on 12h data
+    donchian_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Align KAMA trend to 12h (itself)
-    kama_up_aligned = align_htf_to_ltf(prices, df_12h, kama_up.astype(float))
-    kama_down_aligned = align_htf_to_ltf(prices, df_12h, kama_down.astype(float))
+    for i in range(n):
+        if i >= donchian_period - 1:
+            start_idx = i - donchian_period + 1
+            upper[i] = np.max(high[start_idx:i+1])
+            lower[i] = np.min(low[start_idx:i+1])
     
-    # Volume confirmation (1.5x 24-period average)
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 24:
-            vol_sum -= volume[i-24]
-        if i >= 23:
-            vol_ma[i] = vol_sum / 24
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma[i] = vol_sum / 20
     volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = max(50, donchian_period)  # Need enough data
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(kama_up_aligned[i]) or np.isnan(kama_down_aligned[i]) or
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
             np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,32 +98,36 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA up with 1w uptrend and volume confirmation
-            if (kama_up_aligned[i] > 0.5 and
-                trend_1w_up_aligned[i] > 0.5 and
-                volume_confirm[i]):
+            # Long: price breaks above Donchian upper with volume, 1d uptrend, and above weekly S1
+            if (high[i] > upper[i] and
+                trend_1d_up_aligned[i] > 0.5 and
+                volume_confirm[i] and
+                close[i] > s1_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down with 1w downtrend and volume confirmation
-            elif (kama_down_aligned[i] > 0.5 and
-                  trend_1w_down_aligned[i] > 0.5 and
-                  volume_confirm[i]):
+            # Short: price breaks below Donchian lower with volume, 1d downtrend, and below weekly R1
+            elif (low[i] < lower[i] and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  volume_confirm[i] and
+                  close[i] < r1_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: KAMA down or 1w trend turns down
-            if (kama_down_aligned[i] > 0.5 or
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit: price breaks below Donchian lower or 1d trend turns down or below weekly pivot
+            if (low[i] < lower[i] or
+                trend_1d_up_aligned[i] < 0.5 or
+                close[i] < pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: KAMA up or 1w trend turns up
-            if (kama_up_aligned[i] > 0.5 or
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit: price breaks above Donchian upper or 1d trend turns up or above weekly pivot
+            if (high[i] > upper[i] or
+                trend_1d_down_aligned[i] < 0.5 or
+                close[i] > pivot_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
