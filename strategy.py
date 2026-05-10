@@ -1,15 +1,14 @@
-#150151
 #!/usr/bin/env python3
-# 6h_Session_VWAP_Deviation_1dTrend
-# Hypothesis: Mean-revert from session VWAP with 1d trend filter and volume confirmation.
-# In 6h timeframe, price often deviates from daily VWAP then reverts, especially in ranging markets.
-# Long when price < VWAP - 1*sigma and in 1d uptrend with volume spike.
-# Short when price > VWAP + 1*sigma and in 1d downtrend with volume spike.
-# Uses 6h session VWAP (reset daily) and standard deviation bands.
-# Target: 50-150 total trades over 4 years with disciplined entries to avoid fee drag.
+# 12h_Donchian_20_1dTrend_VolumeFilter
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+# Breakouts above upper Donchian (20) signal bullish momentum; breakdowns below lower Donchian (20) signal bearish momentum.
+# Only trade breakouts aligned with daily trend (price > EMA34 for longs, price < EMA34 for shorts).
+# Volume must be above 1.5x 20-period average to confirm breakout strength.
+# Exits when price returns to the Donchian midpoint or trend reverses.
+# Targets 15-30 trades/year to minimize fee drag while capturing significant moves.
 
-name = "6h_Session_VWAP_Deviation_1dTrend"
-timeframe = "6h"
+name = "12h_Donchian_20_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,47 +24,20 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = pd.to_datetime(prices['open_time'])
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily EMA for trend filter
+    # 12h Donchian channel (20-period high/low)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
+    
+    # Get daily EMA for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate session VWAP and std dev (reset daily)
-    typical_price = (high + low + close) / 3.0
-    vwap = np.full(n, np.nan)
-    vwap_sum = np.full(n, np.nan)
-    vol_sum = np.full(n, np.nan)
-    
-    # Track daily session
-    current_date = None
-    session_tp_vol = 0.0
-    session_vol = 0.0
-    
-    for i in range(n):
-        date = open_time[i].date()
-        if date != current_date:
-            # New session, reset accumulators
-            current_date = date
-            session_tp_vol = 0.0
-            session_vol = 0.0
-        
-        session_tp_vol += typical_price[i] * volume[i]
-        session_vol += volume[i]
-        
-        if session_vol > 0:
-            vwap[i] = session_tp_vol / session_vol
-    
-    # Calculate rolling standard deviation of price-VWAP deviation
-    price_dev = typical_price - vwap
-    # Use 20-period rolling std dev of the deviation
-    price_dev_series = pd.Series(price_dev)
-    std_dev = price_dev_series.rolling(window=20, min_periods=20).std().values
     
     # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -73,11 +45,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for daily EMA and VWAP/std calculations
+    start_idx = max(20, 34, 20)  # Warmup for Donchian, daily EMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vwap[i]) or np.isnan(std_dev[i]) or 
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -91,31 +63,25 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Price deviation from VWAP
-        if std_dev[i] > 0:
-            dev_ratio = (typical_price[i] - vwap[i]) / std_dev[i]
-        else:
-            dev_ratio = 0
-        
         if position == 0:
-            # Long entry: price below VWAP by 1*sigma, uptrend, volume spike
-            if dev_ratio < -1.0 and uptrend and volume_confirm:
+            # Long entry: price breaks above upper Donchian + uptrend + volume spike
+            if close[i] > donchian_high[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price above VWAP by 1*sigma, downtrend, volume spike
-            elif dev_ratio > 1.0 and downtrend and volume_confirm:
+            # Short entry: price breaks below lower Donchian + downtrend + volume spike
+            elif close[i] < donchian_low[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back above VWAP or trend breaks
-            if typical_price[i] >= vwap[i] or not uptrend:
+            # Long exit: price returns to Donchian midpoint or trend reversal
+            if close[i] < donchian_mid[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back below VWAP or trend breaks
-            if typical_price[i] <= vwap[i] or not downtrend:
+            # Short exit: price returns to Donchian midpoint or trend reversal
+            if close[i] > donchian_mid[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
