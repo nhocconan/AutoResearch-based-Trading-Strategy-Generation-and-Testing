@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_With_1wVWAP_Filter
-Hypothesis: On daily chart, KAMA trend direction combined with price above/below weekly VWAP 
-provides robust trend following that works in both bull and bear markets. Weekly VWAP acts 
-as dynamic support/resistance, reducing false signals. Low turnover expected (<15 trades/year).
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
+Works in bull/bear by following 1d trend; volatility-based entries reduce false breakouts.
+Target: 12-37 trades/year per symbol with strict entry conditions to minimize fee drag.
 """
 
-name = "1d_KAMA_Trend_With_1wVWAP_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,90 +19,93 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    fast_ema = 2
-    slow_ema = 30
+    # Calculate 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Efficiency Ratio and Smoothing Constant
-    change = np.abs(np.diff(close, n=1))
-    change = np.insert(change, 0, 0)  # align length
-    
-    volatility = np.zeros(n)
-    for i in range(1, n):
-        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
-    
-    er = np.zeros(n)
-    for i in range(1, n):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Weekly VWAP calculation
-    df_1w = get_htf_data(prices, '1w')
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    vwap_num = (typical_price_1w * df_1w['volume']).values
-    vwap_den = df_1w['volume'].values
-    
-    vwap_cumsum_num = np.cumsum(vwap_num)
-    vwap_cumsum_den = np.cumsum(vwap_den)
-    vwap_1w = np.divide(vwap_cumsum_num, vwap_cumsum_den, 
-                        out=np.full_like(vwap_cumsum_num, np.nan), 
-                        where=vwap_cumsum_den!=0)
-    
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # Calculate volume SMA(20)
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # KAMA warmup
+    start_idx = max(20, 34)
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(vwap_1w_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filters
-        price_above_kama = close[i] > kama[i]
-        price_above_vwap = close[i] > vwap_1w_aligned[i]
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
-        if position == 0:
-            # Long: Price above both KAMA and weekly VWAP
-            if price_above_kama and price_above_vwap:
-                signals[i] = 0.25
-                position = 1
-            # Short: Price below both KAMA and weekly VWAP
-            elif not price_above_kama and not price_above_vwap:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit long: Price crosses below KAMA OR below VWAP
-            if not (price_above_kama and price_above_vwap):
-                signals[i] = 0.0
-                position = 0
+        # Calculate Camarilla levels from previous day's OHLC
+        if i > 0:
+            prev_day_idx = i - 1
+            # Check if previous bar is from previous day
+            curr_date = pd.Timestamp(prices['open_time'].iloc[i]).date()
+            prev_date = pd.Timestamp(prices['open_time'].iloc[prev_day_idx]).date()
+            
+            if curr_date != prev_date:
+                # Previous bar is from previous day, use its OHLC
+                ph = prices['high'].iloc[prev_day_idx]
+                pl = prices['low'].iloc[prev_day_idx]
+                pc = prices['close'].iloc[prev_day_idx]
+                
+                # Camarilla levels
+                range_ = ph - pl
+                r1 = pc + (range_ * 1.1 / 12)
+                s1 = pc - (range_ * 1.1 / 12)
+                
+                if position == 0:
+                    # Long: Break above R1 with uptrend and volume confirmation
+                    if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+                        signals[i] = 0.25
+                        position = 1
+                    # Short: Break below S1 with downtrend and volume confirmation
+                    elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+                        signals[i] = -0.25
+                        position = -1
+                elif position == 1:
+                    # Exit: Close crosses back below EMA34_1d
+                    if close[i] < ema_34_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
+                elif position == -1:
+                    # Exit: Close crosses back above EMA34_1d
+                    if close[i] > ema_34_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
             else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit short: Price crosses above KAMA OR above VWAP
-            if price_above_kama or price_above_vwap:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                # Same day, hold current position
+                if position == 1:
+                    signals[i] = 0.25
+                elif position == -1:
+                    signals[i] = -0.25
+                else:
+                    signals[i] = 0.0
+        else:
+            # First bar, hold flat
+            signals[i] = 0.0
     
     return signals
