@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+"""
+4h_ADX_VolumeBreakout_Trend
+Hypothesis: Combine ADX trend strength with volume breakout signals on 4h timeframe.
+Long when ADX > 25, +DI > -DI, and volume breaks above 1.5x 20-period average.
+Short when ADX > 25, -DI > +DI, and volume breaks above 1.5x 20-period average.
+Uses 1d EMA50 as additional trend filter to avoid counter-trend trades.
+Volume confirmation reduces false breakouts. Designed for fewer trades (~25-40/year)
+to minimize fee drag while capturing strong trending moves in both bull and bear markets.
+"""
+
+name = "4h_ADX_VolumeBreakout_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +27,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
+    # ADX calculation (14-period)
+    period_adx = 14
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First period has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Camarilla R1 and S1 levels
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Weekly trend filter (1w close > 20-period EMA)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Smoothed values using Wilder's smoothing (alpha = 1/period)
+    def wilders_smoothing(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.mean(data[:period])
+            alpha = 1.0 / period
+            for i in range(period, len(data)):
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
     
-    # Volume confirmation: current volume > 1.5x 20-day average volume
+    tr_smoothed = wilders_smoothing(tr, period_adx)
+    plus_dm_smoothed = wilders_smoothing(plus_dm, period_adx)
+    minus_dm_smoothed = wilders_smoothing(minus_dm, period_adx)
+    
+    # DI values
+    plus_di = 100 * plus_dm_smoothed / tr_smoothed
+    minus_di = 100 * minus_dm_smoothed / tr_smoothed
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, period_adx)
+    
+    # Volume SMA (20-period)
     vol_sma20 = np.full(n, np.nan)
     if n >= 20:
         vol_sma20[19] = np.mean(volume[:20])
         for i in range(20, n):
             vol_sma20[i] = (vol_sma20[i-1] * 19 + volume[i]) / 20
     
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Need previous day data
+    start_idx = max(period_adx * 2, 20, 50)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or \
-           np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_sma20[i]):
+        if np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or \
+           np.isnan(vol_sma20[i]) or np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        volume_confirm = volume[i] > 1.5 * vol_sma20[i]
+        # Volume breakout: current volume > 1.5x 20-period average
+        volume_breakout = volume[i] > 1.5 * vol_sma20[i]
         
-        # Trend filter: price above/below weekly EMA20
-        is_uptrend = close[i] > ema20_1w_aligned[i]
-        is_downtrend = close[i] < ema20_1w_aligned[i]
+        # Trend filter: price vs 1d EMA50
+        uptrend_filter = close[i] > ema50_1d_aligned[i]
+        downtrend_filter = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Long when price breaks above Camarilla R1 in uptrend with volume
-            if close[i] > camarilla_r1[i] and is_uptrend and volume_confirm:
+            # Long: ADX > 25, +DI > -DI, volume breakout, uptrend filter
+            if (adx[i] > 25 and 
+                plus_di[i] > minus_di[i] and
+                volume_breakout and
+                uptrend_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short when price breaks below Camarilla S1 in downtrend with volume
-            elif close[i] < camarilla_s1[i] and is_downtrend and volume_confirm:
+            # Short: ADX > 25, -DI > +DI, volume breakout, downtrend filter
+            elif (adx[i] > 25 and 
+                  minus_di[i] > plus_di[i] and
+                  volume_breakout and
+                  downtrend_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price breaks below Camarilla S1 or trend changes
-            if close[i] < camarilla_s1[i] or not is_uptrend:
+            # Exit: ADX weakens (< 20) or trend filter fails
+            if (adx[i] < 20 or 
+                not uptrend_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price breaks above Camarilla R1 or trend changes
-            if close[i] > camarilla_r1[i] or not is_downtrend:
+            # Exit: ADX weakens (< 20) or trend filter fails
+            if (adx[i] < 20 or 
+                not downtrend_filter):
                 signals[i] = 0.0
                 position = 0
             else:
