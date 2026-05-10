@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Trend_Strength_1dFilter
-Hypothesis: Vortex Indicator identifies trend strength (VI+ > VI- for uptrend, VI- > VI+ for downtrend). 
-Combined with 1d EMA50 trend filter and volume confirmation to avoid whipsaws. 
-Works in bull markets (strong VI+) and bear markets (strong VI-). 
-Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag.
+12h_Keltner_Channel_Breakout_1dTrend_Volume
+Hypothesis: Keltner Channel breakout on 12h combined with 1d EMA34 trend filter and volume confirmation.
+Keltner Channels (EMA-based ATR bands) adapt to volatility, reducing false breakouts in ranging markets.
+Trend filter ensures alignment with higher timeframe momentum. Volume confirmation filters weak breakouts.
+Works in bull markets (upward breakouts with volume) and bear markets (downward breakouts with volume).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "4h_Vortex_Trend_Strength_1dFilter"
-timeframe = "4h"
+name = "12h_Keltner_Channel_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,16 +26,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # 1d volume SMA20 for volume confirmation
     volume_1d = df_1d['volume'].values
@@ -45,70 +46,63 @@ def generate_signals(prices):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Vortex Indicator (period=14) on 4h data
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.abs(high[0] - low[0])  # first period
-    vm_minus[0] = np.abs(high[0] - low[0])
-    
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # first period
-    
-    # Sum over last 14 periods
-    n_v = 14
-    vi_plus = np.zeros(n)
-    vi_minus = np.zeros(n)
-    
-    for i in range(n_v, n):
-        if np.isnan(tr[i-n_v:i]).any() or np.isnan(vm_plus[i-n_v:i]).any() or np.isnan(vm_minus[i-n_v:i]).any():
-            vi_plus[i] = np.nan
-            vi_minus[i] = np.nan
-        else:
-            sum_vm_plus = np.sum(vm_plus[i-n_v+1:i+1])
-            sum_vm_minus = np.sum(vm_minus[i-n_v+1:i+1])
-            sum_tr = np.sum(tr[i-n_v+1:i+1])
-            if sum_tr > 0:
-                vi_plus[i] = sum_vm_plus / sum_tr
-                vi_minus[i] = sum_vm_minus / sum_tr
+    # Keltner Channel parameters (20-period EMA, 2x ATR)
+    ema20 = np.full(n, np.nan)
+    atr = np.full(n, np.nan)
+    if n >= 20:
+        # EMA20
+        ema20[19] = np.mean(close[:20])
+        alpha20 = 2 / (20 + 1)
+        for i in range(20, n):
+            ema20[i] = alpha20 * close[i] + (1 - alpha20) * ema20[i-1]
+        # ATR (True Range)
+        tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+        tr = np.concatenate([[np.nan], tr])
+        atr[19] = np.nanmean(tr[1:20]) if np.sum(~np.isnan(tr[1:20])) >= 20 else np.nan
+        for i in range(20, n):
+            if np.isnan(tr[i]):
+                atr[i] = atr[i-1]
             else:
-                vi_plus[i] = np.nan
-                vi_minus[i] = np.nan
+                atr[i] = (atr[i-1] * 19 + tr[i]) / 20
+    
+    upper = ema20 + 2 * atr
+    lower = ema20 - 2 * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, n_v)  # warmup
+    start_idx = max(34, 20)  # warmup for EMA34 and Keltner
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(ema20[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
-        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0  # 24h/4h = 6
-        volume_confirm = volume[i] > 1.5 * vol_4h_approx
+        # Volume confirmation: current 12h volume > 1.5x average 12h volume (scaled from 1d)
+        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0  # 1d volume / 2 for 12h approximation
+        volume_confirm = volume[i] > 1.5 * vol_12h_approx
         
         if position == 0:
-            # Long: VI+ > VI- (uptrend) + above 1d EMA50 + volume confirmation
-            if vi_plus[i] > vi_minus[i] and close[i] > ema50_1d_aligned[i] and volume_confirm:
+            # Long: Close above upper Keltner band with uptrend and volume
+            if close[i] > upper[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ (downtrend) + below 1d EMA50 + volume confirmation
-            elif vi_minus[i] > vi_plus[i] and close[i] < ema50_1d_aligned[i] and volume_confirm:
+            # Short: Close below lower Keltner band with downtrend and volume
+            elif close[i] < lower[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Trend weakness (VI- > VI+) or trend reversal (below EMA50)
-            if vi_minus[i] > vi_plus[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: Close below EMA20 (middle band) or trend reversal
+            if close[i] < ema20[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Trend weakness (VI+ > VI-) or trend reversal (above EMA50)
-            if vi_plus[i] > vi_minus[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: Close above EMA20 (middle band) or trend reversal
+            if close[i] > ema20[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
