@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_Follow_1wTrend_Volume
-# Hypothesis: Daily KAMA trend with weekly trend filter and volume confirmation.
-# KAMA adapts to market noise, reducing whipsaws in sideways markets.
-# Weekly trend filter ensures we only trade in the direction of the higher timeframe trend.
-# Volume confirmation ensures breakout strength.
-# Designed for 1d to achieve 7-25 trades/year, suitable for both bull and bear markets.
+# 6h_LongTermTrend_SwingReversion
+# Hypothesis: On 6-hour timeframe, trade reversions to the long-term trend (12h EMA50) after pullbacks, with volume confirmation and momentum filter (6h RSI). 
+# Uses 12h EMA50 as trend filter, 6h RSI for overbought/oversold conditions, and volume spike for entry confirmation. Designed to work in both bull and bear markets by following the higher timeframe trend.
 
-name = "1d_KAMA_Trend_Follow_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_LongTermTrend_SwingReversion"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,38 +16,29 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Daily KAMA (adaptive moving average)
-    def kama(close, length=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)
-        er = np.zeros_like(close)
-        for i in range(len(close)):
-            if volatility[i] > 0:
-                er[i] = change[i] / volatility[i]
-            else:
-                er[i] = 0
-        # Smoothing constant
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA
-        kama_vals = np.zeros_like(close)
-        kama_vals[0] = close[0]
-        for i in range(1, len(close)):
-            kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-        return kama_vals
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 6h RSI for momentum filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
     
-    # Daily volume confirmation: 20-period average
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 6h volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -59,12 +47,8 @@ def generate_signals(prices):
         return res
     vol_ma_20 = mean_arr(volume, 20)
     
-    # Align weekly indicators to daily timeframe (wait for weekly bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Align daily KAMA and volume MA
-    kama_vals = kama(close)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, pd.DataFrame({'close': close}), vol_ma_20)
+    # Align 12h EMA50 to 6h timeframe (wait for 12h bar to close)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,31 +56,33 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kama_vals[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA, above weekly EMA34, strong volume
-            if close[i] > kama_vals[i] and close[i] > ema_34_1w_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Long: price pulls back to 12h EMA50 from above, RSI oversold, volume spike
+            if close[i] <= ema_50_12h_aligned[i] * 1.005 and close[i] >= ema_50_12h_aligned[i] * 0.995 and \
+               rsi[i] < 30 and volume[i] > 1.5 * vol_ma_20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, below weekly EMA34, strong volume
-            elif close[i] < kama_vals[i] and close[i] < ema_34_1w_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Short: price pulls back to 12h EMA50 from below, RSI overbought, volume spike
+            elif close[i] >= ema_50_12h_aligned[i] * 0.995 and close[i] <= ema_50_12h_aligned[i] * 1.005 and \
+                 rsi[i] > 70 and volume[i] > 1.5 * vol_ma_20[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below KAMA or below weekly EMA34
-            if close[i] < kama_vals[i] or close[i] < ema_34_1w_aligned[i]:
+            # Long exit: price moves away from 12h EMA50 or RSI overbought
+            if close[i] > ema_50_12h_aligned[i] * 1.02 or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above KAMA or above weekly EMA34
-            if close[i] > kama_vals[i] or close[i] > ema_34_1w_aligned[i]:
+            # Short exit: price moves away from 12h EMA50 or RSI oversold
+            if close[i] < ema_50_12h_aligned[i] * 0.98 or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
