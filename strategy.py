@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 12H_1D_RSI_Retracement_Trend_Filter
-# Hypothesis: In strong daily trends, price pulls back to RSI levels before continuing.
-# Long when RSI(14) crosses above 30 in daily uptrend (close > EMA50).
-# Short when RSI(14) crosses below 70 in daily downtrend (close < EMA50).
-# Uses 1d EMA50 for trend filter and 1d RSI(14) for retracement entry.
-# Works in bull/bear by following daily trend direction. Target: 15-25 trades/year per symbol.
+# 4H_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
+# Hypothesis: Camarilla pivot breakouts at R3/S3 levels with 12h trend filter (EMA50) and volume spike confirmation.
+# Works in bull/bear by following 12h trend direction. Breakouts are momentum-based and effective in trending regimes.
+# Volume spike filters out false breakouts. Target: 20-50 trades/year per symbol.
 
-name = "12H_1D_RSI_Retracement_Trend_Filter"
-timeframe = "12h"
+name = "4H_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,39 +14,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter and volume analysis
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Daily EMA50 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 12h EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily RSI(14) for retracement entry
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # 12h volume average for spike detection (20-period)
+    volume_12h_series = pd.Series(volume_12h)
+    vol_ma_12h = volume_12h_series.rolling(window=20, min_periods=20).mean().values
     
-    # Trend: bullish if close > EMA50, bearish if close < EMA50
-    bullish_trend = close_1d > ema50_1d
-    bearish_trend = close_1d < ema50_1d
+    # Calculate Camarilla levels from previous day's OHLC
+    # Need daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align to 12h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
+    # Previous day's OHLC for Camarilla calculation
+    prev_close_1d = df_1d['close'].shift(1).values
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    
+    # Calculate Camarilla R3 and S3 levels
+    # R3 = close + 1.1 * (high - low) * 1.1/2
+    # S3 = close - 1.1 * (high - low) * 1.1/2
+    camarilla_r3 = prev_close_1d + 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
+    camarilla_s3 = prev_close_1d - 1.1 * (prev_high_1d - prev_low_1d) * 1.1 / 2
+    
+    # Align 12h trend and volume data to 4h
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,37 +69,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_aligned[i]) or
-            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or
+            np.isnan(vol_ma_12h_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(volume[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish = bullish_aligned[i] > 0.5
-        bearish = bearish_aligned[i] > 0.5
+        # Trend filter: bullish if close > EMA50, bearish if close < EMA50
+        bullish_trend = close[i] > ema50_12h_aligned[i]
+        bearish_trend = close[i] < ema50_12h_aligned[i]
+        
+        # Volume spike: current volume > 1.5x 12h volume average
+        volume_spike = volume[i] > 1.5 * vol_ma_12h_aligned[i]
         
         if position == 0:
-            # Enter long: bullish trend + RSI crosses above 30
-            if bullish and rsi_aligned[i] > 30 and rsi_aligned[i-1] <= 30:
+            # Enter long: bullish trend + price breaks above Camarilla R3 + volume spike
+            if bullish_trend and close[i] > camarilla_r3_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish trend + RSI crosses below 70
-            elif bearish and rsi_aligned[i] < 70 and rsi_aligned[i-1] >= 70:
+            # Enter short: bearish trend + price breaks below Camarilla S3 + volume spike
+            elif bearish_trend and close[i] < camarilla_s3_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish trend or RSI crosses below 50
-            if bearish or (rsi_aligned[i] < 50 and rsi_aligned[i-1] >= 50):
+            # Exit long: bearish trend or price breaks below Camarilla S3
+            if bearish_trend or close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish trend or RSI crosses above 50
-            if bullish or (rsi_aligned[i] > 50 and rsi_aligned[i-1] <= 50):
+            # Exit short: bullish trend or price breaks above Camarilla R3
+            if bullish_trend or close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
