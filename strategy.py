@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Alligator_ElderRay
-Hypothesis: Williams Alligator (13/8/5 SMAs) identifies trend direction and phase, Elder Ray (bull/bear power) measures momentum strength. 
-Long when jaw<teeth<lips (bullish alignment) AND bear power crosses above zero with volume confirmation. 
-Short when jaw>teeth>lips (bearish alignment) AND bull power crosses below zero with volume confirmation. 
-Timeframe: 12H reduces trade frequency to avoid fee drag while capturing multi-day trends. Works in both bull/bear by using momentum crossovers.
+1d_WeeklyPivot_Breakout_TrendFilter_Volume
+Hypothesis: Weekly pivot breakouts (R1/S1) on daily chart with 1w EMA trend filter and volume confirmation capture momentum in both bull and bear markets by trading breakouts of key weekly support/resistance levels. Timeframe: 1d balances trade frequency and signal quality for low turnover.
 """
 
-name = "12h_Williams_Alligator_ElderRay"
-timeframe = "12h"
+name = "1d_WeeklyPivot_Breakout_TrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,79 +17,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for trend context
+    # Get 1w data for weekly pivot calculation
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate 1-week EMA20 for trend filter
-    ema20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Williams Alligator: 13/8/5 period SMAs (median price)
-    median_price = (prices['high'].values + prices['low'].values) / 2
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().values  # Alligator's Jaw (13-period)
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().values    # Alligator's Teeth (8-period)
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().values     # Alligator's Lips (5-period)
+    # Calculate weekly pivot points using previous week's OHLC
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = high_1w[0]  # First value uses current week's high as placeholder
+    prev_low[0] = low_1w[0]
+    prev_close[0] = close_1w[0]
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(median_price).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = prices['high'].values - ema13
-    bear_power = prices['low'].values - ema13
+    # Calculate weekly pivot and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    R1 = 2 * pivot - prev_low
+    S1 = 2 * pivot - prev_high
+    R2 = pivot + (prev_high - prev_low)
+    S2 = pivot - (prev_high - prev_low)
     
-    # Volume confirmation: current volume > 1.5x 20-period EMA
-    vol_ema20 = pd.Series(prices['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align weekly pivot levels to daily timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
+    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    
+    # Get 1w data for EMA trend filter (34-period EMA)
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # Get 1d data for volume confirmation
+    volume = prices['volume'].values
+    vol_ma20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ma20 * 1.5
+    
+    # Price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Alligator lips (5) and Elder Ray EMA13 (13)
-    start_idx = 13
+    # Warmup: need weekly EMA34 (34 weeks)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ema20[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or
+            np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or
+            np.isnan(S2_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams Alligator alignment
-        bullish_alignment = jaw[i] < teeth[i] < lips[i]  # Jaw < Teeth < Lips (bullish)
-        bearish_alignment = jaw[i] > teeth[i] > lips[i]  # Jaw > Teeth > Lips (bearish)
-        
-        # Elder Ray signals
-        bull_power_cross_up = bull_power[i] > 0 and bull_power[i-1] <= 0  # Cross above zero
-        bear_power_cross_down = bear_power[i] < 0 and bear_power[i-1] >= 0  # Cross below zero
-        
-        # Volume filter
-        volume_filter = prices['volume'].values[i] > vol_ema20[i] * 1.5
-        
-        # 1-week trend filter
-        uptrend_1w = prices['close'].values[i] > ema20_1w_aligned[i]
-        downtrend_1w = prices['close'].values[i] < ema20_1w_aligned[i]
+        # Trend filter: price vs 1w EMA34
+        uptrend_1w = close[i] > ema34_1w_aligned[i]
+        downtrend_1w = close[i] < ema34_1w_aligned[i]
         
         if position == 0:
-            # Long: bullish Alligator alignment + bull power crosses up + volume + 1w uptrend
-            if bullish_alignment and bull_power_cross_up and volume_filter and uptrend_1w:
+            # Long breakout: price breaks above R1 with volume and uptrend
+            if high[i] > R1_aligned[i] and uptrend_1w and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish Alligator alignment + bear power crosses down + volume + 1w downtrend
-            elif bearish_alignment and bear_power_cross_down and volume_filter and downtrend_1w:
+            # Short breakout: price breaks below S1 with volume and downtrend
+            elif low[i] < S1_aligned[i] and downtrend_1w and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: bearish alignment OR bear power crosses down
-            if bearish_alignment or bear_power_cross_down:
+            # Long exit: price reaches R2 or trend fails
+            if high[i] >= R2_aligned[i] or not uptrend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: bullish alignment OR bull power crosses up
-            if bullish_alignment or bull_power_cross_up:
+            # Short exit: price reaches S2 or trend fails
+            if low[i] <= S2_aligned[i] or not downtrend_1w:
                 signals[i] = 0.0
                 position = 0
             else:
