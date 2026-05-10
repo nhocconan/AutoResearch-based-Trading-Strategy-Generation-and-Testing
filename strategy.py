@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_KAMA_RSI_Chop
-# Hypothesis: 12h Kaufman Adaptive Moving Average (KAMA) direction with RSI filter and 1d Choppiness regime. 
-# KAMA adapts to market noise, reducing false signals in ranging markets. RSI avoids overbought/oversold extremes. 
-# Choppiness index filters for trending regimes (CHOP < 38.2) to avoid whipsaws. Designed for low trade frequency (<30/year) 
-# to minimize fee drag in both bull and bear markets. Works on BTC/ETH by combining adaptive trend, momentum, and regime filters.
+# 1d_1w_TRIX_Zero_Cross_Volume_Confirm
+# Hypothesis: Daily TRIX (triple smoothed EMA) zero-cross for trend direction with 1-week EMA trend filter and volume confirmation.
+# TRIX is effective in both trending and ranging markets; zero-cross indicates momentum shift.
+# Combined with weekly EMA for higher timeframe trend bias and volume to confirm breakout strength.
+# Designed for low trade frequency (<25/year) to minimize fee drag.
 
-name = "12h_1d_KAMA_RSI_Chop"
-timeframe = "12h"
+name = "1d_1w_TRIX_Zero_Cross_Volume_Confirm"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,132 +15,116 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Choppiness index (HTF)
+    # Get daily data for TRIX calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h KAMA calculation ===
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    change = np.concatenate([[np.nan]*10, change])  # align to original index
-    
-    # Sum of absolute daily changes over 10 periods
-    abs_change = np.abs(np.diff(close, n=1))
-    abs_change = np.concatenate([[np.nan], abs_change])
-    volatility = pd.Series(abs_change).rolling(window=10, min_periods=10).sum().values
-    
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # KAMA direction (slope)
-    kama_slope = np.diff(kama, prepend=kama[0])
-    
-    # === 12h RSI (14) ===
-    delta = np.diff(close, n=1)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === 1d Choppiness Index (14) ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate TRIX (15-period triple EMA, then 1-period percent change)
     close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = pd.Series(ema3).pct_change() * 100  # percent change
+    trix_values = trix.values
     
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = high_1d[0] - low_1d[0]  # first bar
+    # Weekly EMA30 for trend filter
+    close_1w = df_1w['close'].values
+    ema30_1w = pd.Series(close_1w).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
+    # ATR for stoploss
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Volume confirmation (1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Choppiness Index
-    chi = np.where(tr_sum != 0, -100 * np.log10(tr_sum / (hh - ll)) / np.log10(14), 50)
-    # Handle division by zero or invalid cases
-    chi = np.where((hh - ll) == 0, 50, chi)
-    chi = np.where(np.isnan(chi), 50, chi)
+    # Align indicators to daily timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
+    ema30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema30_1w)
     
-    # Align 1d Choppiness to 12h timeframe
-    chi_aligned = align_htf_to_ltf(prices, df_1d, chi)
-    
-    # === Signals ===
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    # Warmup: ensure all indicators are valid
-    start_idx = max(50, 14, 10)  # RSI(14), KAMA needs lookback
+    # Warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_slope[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(chi_aligned[i])):
+        if (np.isnan(trix_aligned[i]) or
+            np.isnan(ema30_1w_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
             continue
         
-        # Conditions
-        kama_up = kama_slope[i] > 0
-        kama_down = kama_slope[i] < 0
-        rsi_not_extreme = (rsi[i] > 30) & (rsi[i] < 70)  # avoid overbought/oversold
-        trending_market = chi_aligned[i] < 38.2  # chop < 38.2 = trending
+        # TRIX zero-cross for momentum
+        trix_pos = trix_aligned[i] > 0
+        trix_neg = trix_aligned[i] < 0
+        
+        # Weekly EMA trend filter
+        bullish_trend = close[i] > ema30_1w_aligned[i]
+        bearish_trend = close[i] < ema30_1w_aligned[i]
+        
+        # Volume confirmation
+        volume_surge = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: KAMA up + RSI not extreme + trending market
-            if kama_up and rsi_not_extreme and trending_market:
+            # Long: TRIX positive in bullish weekly trend with volume surge
+            if trix_pos and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + RSI not extreme + trending market
-            elif kama_down and rsi_not_extreme and trending_market:
+                highest_high_since_entry = high[i]
+            # Short: TRIX negative in bearish weekly trend with volume surge
+            elif trix_neg and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = low[i]
         else:
-            # Exit when KAMA reverses OR RSI extreme OR market becomes choppy
             if position == 1:
-                if (kama_down or not rsi_not_extreme or chi_aligned[i] >= 38.2):
+                # Update highest high since entry
+                if high[i] > highest_high_since_entry:
+                    highest_high_since_entry = high[i]
+                
+                # Trailing stop: exit if price drops 3.0*ATR from highest high
+                if close[i] < highest_high_since_entry - 3.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    highest_high_since_entry = 0.0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (kama_up or not rsi_not_extreme or chi_aligned[i] >= 38.2):
+                # Update lowest low since entry
+                if low[i] < lowest_low_since_entry:
+                    lowest_low_since_entry = low[i]
+                
+                # Trailing stop: exit if price rises 3.0*ATR from lowest low
+                if close[i] > lowest_low_since_entry + 3.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    lowest_low_since_entry = 0.0
                 else:
                     signals[i] = -0.25
     
