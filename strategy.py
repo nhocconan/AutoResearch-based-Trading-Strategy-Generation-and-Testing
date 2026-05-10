@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume
-# Hypothesis: Weekly EMA50 trend filter with 12h chart using Camarilla R3/S3 breakout + volume confirmation.
-# Weekly trend reduces whipsaw in bear markets while capturing long-term direction. Volume filter ensures breakout strength.
-# Target: 15-25 trades/year to minimize fee drag. Works in bull/bear via trend alignment.
+# 4h_Williams_Alligator_Trend_Confirm_Volume
+# Hypothesis: Williams Alligator (Jaw=13, Teeth=8, Lips=5) with teeth/lips crossing for trend direction,
+# confirmed by price above/below jaw and volume spike. Works in bull/bear by following Alligator's
+# alignment: bullish when teeth>lips and price>jaw, bearish when teeth<lips and price<jaw.
+# Target: 20-40 trades/year to avoid fee drag. Uses Williams Alligator as primary trend filter.
 
-name = "12h_Camarilla_R3S3_Breakout_1wEMA50_Trend_Volume"
-timeframe = "12h"
+name = "4h_Williams_Alligator_Trend_Confirm_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,41 +15,40 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get daily data for Camarilla levels
+    # Get daily data for Williams Alligator components
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 1:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for additional trend confirmation
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate Williams Alligator lines (SMMA)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    median_price = (high_1d + low_1d) / 2
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].values
-    low_prev = df_1d['low'].values
-    close_prev = df_1d['close'].values
+    # Jaw (13-period SMMA of median)
+    jaw = np.full_like(median_price, np.nan)
+    for i in range(13, len(median_price)):
+        jaw[i] = np.mean(median_price[i-12:i+1])
     
-    # Camarilla formulas
-    camarilla_r3 = close_prev + (high_prev - low_prev) * 1.25
-    camarilla_s3 = close_prev - (high_prev - low_prev) * 1.25
+    # Teeth (8-period SMMA of median)
+    teeth = np.full_like(median_price, np.nan)
+    for i in range(8, len(median_price)):
+        teeth[i] = np.mean(median_price[i-7:i+1])
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Lips (5-period SMMA of median)
+    lips = np.full_like(median_price, np.nan)
+    for i in range(5, len(median_price)):
+        lips[i] = np.mean(median_price[i-4:i+1])
+    
+    # Align to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     # Get price, volume
     high = prices['high'].values
@@ -56,46 +56,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.8x 30-period EMA
-    vol_ema30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
-    volume_filter = volume > vol_ema30 * 1.8
+    # Volume filter: current volume > 1.8x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema20 * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA50 (50)
-    start_idx = 50
+    # Warmup: need all Alligator lines (13)
+    start_idx = 13
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above R3 with weekly/uptrend and volume
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_50_1w_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
+            # Bullish alignment: teeth > lips and price > jaw
+            if teeth_aligned[i] > lips_aligned[i] and close[i] > jaw_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with weekly/downtrend and volume
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_50_1w_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
+            # Bearish alignment: teeth < lips and price < jaw
+            elif teeth_aligned[i] < lips_aligned[i] and close[i] < jaw_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price back below S3 or weekly trend change
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long exit: bearish alignment or price below jaw
+            if teeth_aligned[i] < lips_aligned[i] or close[i] < jaw_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price back above R3 or weekly trend change
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short exit: bullish alignment or price above jaw
+            if teeth_aligned[i] > lips_aligned[i] or close[i] > jaw_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
