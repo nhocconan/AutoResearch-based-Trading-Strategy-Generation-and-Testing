@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_AntiFragile_Breakout_With_Volume_Regime_Filter
-# Hypothesis: Combine Donchian(20) breakout with volume confirmation and Choppiness Index regime filter.
-# Uses Choppiness Index > 61.8 for range (mean-revert) and < 38.2 for trend (follow breakout).
-# In trending regimes: breakout entries. In ranging regimes: fade extremes at Bollinger Bands.
-# Designed for low trade frequency (<40/year) to minimize fee drag and work in both bull/bear markets.
+# 6h_Momentum_Fade_With_Volume_And_Trend_Filter
+# Hypothesis: Fade extreme moves using 6h RSI extremes combined with 1d trend filter and volume confirmation.
+# In strong trends (1d EMA50), look for overextended RSI readings for mean reversion entries.
+# Works in bull markets by fading overextended rallies, in bear markets by fading oversold bounces.
+# Uses discrete position sizing (0.25) to limit turnover. Target: 20-50 trades/year.
 
-name = "4h_AntiFragile_Breakout_With_Volume_Regime_Filter"
-timeframe = "4h"
+name = "6h_Momentum_Fade_With_Volume_And_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,75 +15,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    def rolling_max(arr, window):
+    # 6h RSI (14-period) for mean reversion signals
+    def rsi(arr, period):
+        delta = np.diff(arr, prepend=arr[0])
+        up = np.where(delta > 0, delta, 0)
+        down = np.where(delta < 0, -delta, 0)
+        ma_up = np.zeros_like(arr)
+        ma_down = np.zeros_like(arr)
+        # Wilder's smoothing
+        ma_up[period-1] = np.mean(up[:period])
+        ma_down[period-1] = np.mean(down[:period])
+        for i in range(period, len(arr)):
+            ma_up[i] = (ma_up[i-1] * (period-1) + up[i]) / period
+            ma_down[i] = (ma_down[i-1] * (period-1) + down[i]) / period
+        rs = np.where(ma_down != 0, ma_up / ma_down, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi_6h = rsi(close, 14)
+    
+    # 1d trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # 6h volume confirmation: current volume > 1.5x 20-period average
+    def mean_arr(arr, period):
         res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.max(arr[i - window + 1:i + 1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window - 1, len(arr)):
-            res[i] = np.min(arr[i - window + 1:i + 1])
-        return res
-    
-    donchian_high = rolling_max(high, 20)
-    donchian_low = rolling_min(low, 20)
-    
-    # Bollinger Bands (20, 2) for mean reversion in ranging markets
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    
-    # Choppiness Index (14-period) for regime detection
-    def choppiness_index(high, low, close, window=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # align with index
-        
-        # ATR (smoothed TR)
-        atr = np.full_like(close, np.nan)
-        for i in range(window, len(atr)):
-            atr[i] = np.mean(tr[i - window + 1:i + 1])
-        
-        # Sum of TR over window
-        sum_tr = np.full_like(close, np.nan)
-        for i in range(window - 1, len(sum_tr)):
-            sum_tr[i] = np.sum(tr[i - window + 1:i + 1])
-        
-        # Highest high and lowest low over window
-        highest_high = rolling_max(high, window)
-        lowest_low = rolling_min(low, window)
-        
-        # Chop formula: 100 * log10(sum_tr / (highest_high - lowest_low)) / log10(window)
-        range_val = highest_high - lowest_low
-        chop = np.full_like(close, np.nan)
-        mask = (sum_tr > 0) & (range_val > 0) & ~np.isnan(range_val)
-        chop[mask] = 100 * np.log10(sum_tr[mask] / range_val[mask]) / np.log10(window)
-        return chop
-    
-    chop = choppiness_index(high, low, close, 14)
-    
-    # Volume confirmation: 20-period average volume
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
+        if len(arr) >= period:
+            for i in range(period - 1, len(arr)):
+                res[i] = np.mean(arr[i - period + 1:i + 1])
         return res
     
     vol_ma_20 = mean_arr(volume, 20)
@@ -94,69 +64,41 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or \
-           np.isnan(chop[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(rsi_6h[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime detection
-        is_trending = chop[i] < 38.2
-        is_ranging = chop[i] > 61.8
-        # Neutral zone (38.2-61.8) defaults to no action to avoid whipsaw
+        # Trend determination: price above/below 1d EMA50
+        is_uptrend = close[i] > ema_50_1d_aligned[i]
+        is_downtrend = close[i] < ema_50_1d_aligned[i]
         
+        # Volume condition
         volume_condition = volume[i] > 1.5 * vol_ma_20[i]
         
         if position == 0:
-            if is_trending and volume_condition:
-                # Trend following: breakout entries
-                if close[i] > donchian_high[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < donchian_low[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging and volume_condition:
-                # Mean reversion: fade Bollinger Bands extremes
-                if close[i] > bb_upper[i]:
-                    signals[i] = -0.25
-                    position = -1
-                elif close[i] < bb_lower[i]:
-                    signals[i] = 0.25
-                    position = 1
+            # Long entry: RSI oversold (<30) in uptrend with volume confirmation
+            if is_uptrend and rsi_6h[i] < 30 and volume_condition:
+                signals[i] = 0.25
+                position = 1
+            # Short entry: RSI overbought (>70) in downtrend with volume confirmation
+            elif is_downtrend and rsi_6h[i] > 70 and volume_condition:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit conditions
-            if is_trending:
-                # Exit on breakdown or range entry
-                if close[i] < donchian_low[i] or chop[i] > 61.8:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # ranging
-                # Exit at mean reversion
-                if close[i] > bb_mid[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: RSI returns to neutral (50) or trend turns down
+            if rsi_6h[i] >= 50 or not is_uptrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit conditions
-            if is_trending:
-                # Exit on breakout or range entry
-                if close[i] > donchian_high[i] or chop[i] > 61.8:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # ranging
-                # Exit at mean reversion
-                if close[i] < bb_mid[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: RSI returns to neutral (50) or trend turns up
+            if rsi_6h[i] <= 50 or not is_downtrend:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
