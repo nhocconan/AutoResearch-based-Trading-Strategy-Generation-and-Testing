@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
-# Camarilla levels provide institutional support/resistance. Breakouts above R1 or below S1
-# indicate institutional interest. Trend filter ensures we trade with the higher timeframe
-# direction (1d EMA34). Volume confirmation avoids false breakouts. Targets 20-50 trades/year.
-# Works in bull/bear by aligning with daily trend direction.
+# 6h_Trend_Stack_With_1dVWAP
+# Hypothesis: Stack multiple trend signals (6h EMA10/50, 1d EMA50, 1d VWAP) to capture strong trends in both bull and bear markets.
+# Long when price > EMA10 > EMA50 (6h) AND price > EMA50 (1d) AND price > VWAP (1d).
+# Short when price < EMA10 < EMA50 (6h) AND price < EMA50 (1d) AND price < VWAP (1d).
+# Uses volume-weighted average price (VWAP) as a dynamic support/resistance filter from higher timeframe.
+# Targets 20-40 trades/year by requiring confluence of multiple timeframe trends.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Trend_Stack_With_1dVWAP"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,72 +24,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
+    # Get daily data for VWAP and EMA
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Using previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 6h EMA10 and EMA50 for trend
+    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).values
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).values
     
-    # Camarilla formulas
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Daily EMA for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation (20-period MA)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily VWAP calculation (typical price * volume)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap = vwap.values
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 2  # Need at least 2 days for Camarilla calculation
+    start_idx = max(10, 50, 50)  # Warmup for EMAs
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_10[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vwap_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Trend alignment conditions
+        bullish_stack = (close[i] > ema_10[i]) and (ema_10[i] > ema_50[i]) and \
+                        (close[i] > ema_50_1d_aligned[i]) and (close[i] > vwap_aligned[i])
+        bearish_stack = (close[i] < ema_10[i]) and (ema_10[i] < ema_50[i]) and \
+                        (close[i] < ema_50_1d_aligned[i]) and (close[i] < vwap_aligned[i])
         
         if position == 0:
-            # Long entry: price breaks above R1 + uptrend + volume spike
-            if close[i] > R1_aligned[i] and uptrend and volume_confirm:
+            # Long entry: full bullish stack
+            if bullish_stack:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 + downtrend + volume spike
-            elif close[i] < S1_aligned[i] and downtrend and volume_confirm:
+            # Short entry: full bearish stack
+            elif bearish_stack:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns below R1 or trend reversal
-            if close[i] < R1_aligned[i] or not uptrend:
+            # Long exit: break of any trend layer
+            if not bullish_stack:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns above S1 or trend reversal
-            if close[i] > S1_aligned[i] or not downtrend:
+            # Short exit: break of any trend layer
+            if not bearish_stack:
                 signals[i] = 0.0
                 position = 0
             else:
