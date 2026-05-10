@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Pivot_Breakout_1dTrend_Volume_Confirm
-# Hypothesis: Daily pivot points (R1/S1) provide key support/resistance. Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. Volume confirmation filters false breakouts. Uses 12h timeframe for lower frequency (12-37 trades/year target) to reduce fee drag. Works in bull markets by riding uptrends and in bear markets by following downtrends.
+# 4h_Stochastic_Pullback_TrendFilter_v1
+# Hypothesis: In trending markets, price pulls back to the 40-60 range of the 14-period Stochastic oscillator before continuing the trend. This strategy uses 1-day EMA50 as the trend filter and enters on Stochastic pullbacks in the direction of the trend, with volume confirmation to filter false signals. Works in bull markets by buying pullbacks in uptrends and in bear markets by selling pullbacks in downtrends. Designed for low trade frequency (~20-40/year) to minimize fee drag.
 
-name = "12h_Pivot_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_Stochastic_Pullback_TrendFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +20,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily pivot levels (standard formula)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # Calculate 14-period Stochastic oscillator on 4h data
+    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    stoch_k = np.where((highest_high - lowest_low) != 0, 
+                       (close - lowest_low) / (highest_high - lowest_low) * 100, 
+                       50.0)  # Neutral when range is zero
     
-    pivot_point = (daily_high + daily_low + daily_close) / 3
-    daily_r1 = 2 * pivot_point - daily_low
-    daily_s1 = 2 * pivot_point - daily_high
-    
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
-    
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need daily EMA50 (50) and Stochastic (14) and volume MA (20)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(daily_r1_aligned[i]) or 
-            np.isnan(daily_s1_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(stoch_k[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from daily EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation (1.5x MA to balance signal quality and frequency)
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above daily R1 + volume
-            if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
+            # Long entry: uptrend + Stochastic pullback to 40-60 + volume
+            if uptrend and 40 <= stoch_k[i] <= 60 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below daily S1 + volume
-            elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
+            # Short entry: downtrend + Stochastic pullback to 40-60 + volume
+            elif downtrend and 40 <= stoch_k[i] <= 60 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < daily_r1_aligned[i]:
+            # Long exit: trend breaks or Stochastic overbought (>80)
+            if not uptrend or stoch_k[i] > 80:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > daily_s1_aligned[i]:
+            # Short exit: trend breaks or Stochastic oversold (<20)
+            if not downtrend or stoch_k[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
