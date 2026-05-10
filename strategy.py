@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1h_4H_Camarilla_R1_S1_Breakout_1DTrend_Volume
-# Hypothesis: 1-hour breakouts from 4-hour Camarilla R1/S1 levels with 1-day trend filter (EMA34) and volume confirmation.
-# The 4-hour chart provides the primary signal direction and structure, while the 1-day EMA34 filters for higher timeframe trend.
-# Volume confirmation ensures breakout strength. Using 1h as primary timeframe with 4h/1d filters aims for 15-37 trades/year.
-# Designed to work in both bull and bear markets by following the higher timeframe trend and avoiding counter-trend trades.
+# 1d_TRIX_VolumeSpike_1wTrend
+# Hypothesis: TRIX momentum with volume spike confirmation and weekly trend filter for 1d timeframe.
+# TRIX (12) captures momentum shifts, volume spike confirms breakout strength, weekly EMA (21) filters trend direction.
+# Designed to work in both bull and bear markets by following the weekly trend.
+# Target: 30-100 total trades over 4 years (7-25/year) with low frequency to minimize fee drag.
 
-name = "1h_4H_Camarilla_R1_S1_Breakout_1DTrend_Volume"
-timeframe = "1h"
+name = "1d_TRIX_VolumeSpike_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,57 +15,39 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4-hour data for Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 1-day data for EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly EMA21 for trend filter
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # 4-hour Camarilla levels (based on previous 4h bar)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
-        return R1, S1
+    # TRIX (12) calculation: triple EMA of log returns
+    log_returns = np.diff(np.log(close), prepend=np.log(close[0]))
+    ema1 = pd.Series(log_returns).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix = 100 * (np.diff(ema3, prepend=ema3[0]) / ema3)
     
-    R1_4h = np.full_like(close_4h, np.nan)
-    S1_4h = np.full_like(close_4h, np.nan)
-    for i in range(1, len(close_4h)):
-        R1_4h[i], S1_4h[i] = calculate_camarilla(high_4h[i-1], low_4h[i-1], close_4h[i-1])
-    
-    # 1-day EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # 4-hour volume confirmation: 20-period average
+    # Weekly volume spike: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20_4h = mean_arr(volume_4h, 20)
+    vol_ma_20_1w = mean_arr(volume_1w, 20)
     
-    # Align 4h indicators to 1h timeframe (wait for 4h bar to close)
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
-    vol_ma_20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20_4h)
-    
-    # Align 1d EMA34 to 1h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Align weekly indicators to daily timeframe (wait for weekly bar to close)
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,35 +55,34 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_4h_aligned[i]):
+        if np.isnan(trix[i]) or np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 4h R1, above 1d EMA34, strong 4h volume
-            if close[i] > R1_4h_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_4h[-1] > 2.0 * vol_ma_20_4h_aligned[i]:
-                signals[i] = 0.20
+            # Long: TRIX turns positive, above weekly EMA21, strong volume
+            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_21_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_1w_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h S1, below 1d EMA34, strong 4h volume
-            elif close[i] < S1_4h_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_4h[-1] > 2.0 * vol_ma_20_4h_aligned[i]:
-                signals[i] = -0.20
+            # Short: TRIX turns negative, below weekly EMA21, strong volume
+            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_21_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_1w_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below 4h S1 or below 1d EMA34
-            if close[i] < S1_4h_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: TRIX turns negative or price drops below weekly EMA21
+            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above 4h R1 or above 1d EMA34
-            if close[i] > R1_4h_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: TRIX turns positive or price rises above weekly EMA21
+            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
