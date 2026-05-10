@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1h_MomentumBreakout_4hTrend_1dVolume
-# Hypothesis: 1-hour momentum breakouts filtered by 4-hour trend direction and 1-day volume confirmation.
-# The 4-hour EMA50 determines trend (bullish if price > EMA50, bearish if price < EMA50).
-# 1-hour breakouts occur when price crosses the 20-period high/low with volume > 1.5x 20-period average.
-# In bullish 4h trend, only long breakouts are taken; in bearish 4h trend, only short breakdowns.
-# 1-day volume filter ensures sufficient market participation. Designed for 1h to achieve 15-37 trades/year.
+# 6h_Camarilla_R3_S3_Fade_1wTrend_Filter
+# Hypothesis: Fade at Camarilla R3/S3 levels on 6-hour chart when weekly trend is strong, using 1-week EMA50 as trend filter.
+# In strong weekly uptrend (price > weekly EMA50), short at R3 resistance with target at S3.
+# In strong weekly downtrend (price < weekly EMA50), long at S3 support with target at R3.
+# Uses volume confirmation to avoid low-liquidity whipsaws. Designed for 6h to achieve 15-35 trades/year.
 
-name = "1h_MomentumBreakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Fade_1wTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,47 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter (EMA50)
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # 1d data for volume confirmation (20-period average)
+    # 1d data for Camarilla calculation (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 20-period average volume on 1d
+    # Calculate Camarilla levels for each 1d bar
+    # R3 = close + 1.1 * (high - low)
+    # S3 = close - 1.1 * (high - low)
+    rng = high_1d - low_1d
+    r3_1d = close_1d + 1.1 * rng
+    s3_1d = close_1d - 1.1 * rng
+    
+    # Volume confirmation: 24-period average volume on 1d (4 days of 6h data)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20_1d = mean_arr(volume_1d, 20)
+    vol_ma_24_1d = mean_arr(df_1d['volume'].values, 24)
     
-    # 1h indicators: 20-period high/low for breakout
-    def highest(arr, p):
-        res = np.full_like(arr, np.nan)
-        for i in range(p - 1, len(arr)):
-            res[i] = np.max(arr[i - p + 1:i + 1])
-        return res
-    def lowest(arr, p):
-        res = np.full_like(arr, np.nan)
-        for i in range(p - 1, len(arr)):
-            res[i] = np.min(arr[i - p + 1:i + 1])
-        return res
-    high_20 = highest(high, 20)
-    low_20 = lowest(low, 20)
+    # Align 1w trend to 6h
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 4h trend to 1h (wait for 4h bar to close)
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Align 1d Camarilla levels to 6h (wait for 1d bar to close)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     
-    # Align 1d volume MA to 1h (wait for 1d bar to close)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align 1d volume MA to 6h
+    vol_ma_24_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_24_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,45 +66,45 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or \
-           np.isnan(high_20[i]) or np.isnan(low_20[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(r3_1d_aligned[i]) or \
+           np.isnan(s3_1d_aligned[i]) or np.isnan(vol_ma_24_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 4h trend: bullish if close > EMA50, bearish if close < EMA50
-        # Use current 4h close price (need to align 4h close to 1h)
-        close_4h_series = pd.Series(close_4h)
-        close_4h_aligned = align_htf_to_ltf(prices, df_4h, close_4h_series.values)
-        is_bullish_trend = close_4h_aligned[i] > ema_50_4h_aligned[i]
-        is_bearish_trend = close_4h_aligned[i] < ema_50_4h_aligned[i]
+        # Determine weekly trend
+        # Get weekly close price aligned to 6h
+        close_1w_series = pd.Series(close_1w)
+        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w_series.values)
+        is_uptrend = close_1w_aligned[i] > ema_50_1w_aligned[i]
+        is_downtrend = close_1w_aligned[i] < ema_50_1w_aligned[i]
         
-        # Volume condition: current 1h volume > 1.5x 20-day average volume
-        volume_condition = volume[i] > 1.5 * vol_ma_20_1d_aligned[i]
+        # Volume condition: current 6h volume > 1.5x 24-period 1d average
+        volume_condition = volume[i] > 1.5 * vol_ma_24_1d_aligned[i]
         
         if position == 0:
-            # Long breakout: price crosses above 20-period high, bullish 4h trend, volume confirmation
-            if close[i] > high_20[i] and is_bullish_trend and volume_condition:
-                signals[i] = 0.20
-                position = 1
-            # Short breakdown: price crosses below 20-period low, bearish 4h trend, volume confirmation
-            elif close[i] < low_20[i] and is_bearish_trend and volume_condition:
-                signals[i] = -0.20
+            # Fade at R3 in uptrend: short when price reaches R3 resistance
+            if is_uptrend and close[i] >= r3_1d_aligned[i] and volume_condition:
+                signals[i] = -0.25
                 position = -1
+            # Fade at S3 in downtrend: long when price reaches S3 support
+            elif is_downtrend and close[i] <= s3_1d_aligned[i] and volume_condition:
+                signals[i] = 0.25
+                position = 1
         elif position == 1:
-            # Long exit: price crosses below 20-period low or 4h trend turns bearish
-            if close[i] < low_20[i] or not is_bullish_trend:
+            # Long exit: price reaches R3 (target) or weekly trend turns up
+            if close[i] >= r3_1d_aligned[i] or is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 20-period high or 4h trend turns bullish
-            if close[i] > high_20[i] or not is_bearish_trend:
+            # Short exit: price reaches S3 (target) or weekly trend turns down
+            if close[i] <= s3_1d_aligned[i] or is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
