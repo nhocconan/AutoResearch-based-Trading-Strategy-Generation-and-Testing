@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_WeeklyTrend_Camarilla_R3_S3_Breakout_Volume_v2
-# Hypothesis: Refined version focusing on fewer, higher-quality trades by tightening volume confirmation (3x average)
-# and adding a weekly trend filter with hysteresis. Uses 25% position size for balanced risk.
-# Designed for 15-25 trades/year to minimize fee drag while maintaining edge in both bull and bear markets.
+# 4h_4H_1D_Momentum_Confluence_Strategy
+# Hypothesis: Combines 4-hour momentum (RSI divergence) with 1-day trend (EMA50) and volume confirmation.
+# Works in bull markets via trend-following momentum and in bear via mean-reversion at oversold/overbought levels.
+# Designed for low trade frequency (<30/year) to minimize fee drag.
 
-name = "4h_WeeklyTrend_Camarilla_R3_S3_Breakout_Volume_v2"
+name = "4h_4H_1D_Momentum_Confluence_Strategy"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,27 +22,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend (more stable than SMA)
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get daily data for Camarilla pivot levels
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    # Calculate typical price and range from previous day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_hl = df_1d['high'] - df_1d['low']
-    # Camarilla R3 and S3 levels
-    R3 = typical_price + (range_hl * 1.2500)
-    S3 = typical_price - (range_hl * 1.2500)
-    # Align daily levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    close_1d = df_1d['close'].values
+    # Daily EMA50 for trend
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation (24-period average on 4h = ~4 days)
-    vol_ma_period = 24
+    # 4-hour RSI for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = np.mean(gain[:14]) if len(gain) >= 14 else 0
+    avg_loss[0] = np.mean(loss[:14]) if len(loss) >= 14 else 0
+    
+    for i in range(1, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation (20-period average on 4h)
+    vol_ma_period = 20
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -54,38 +60,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 20) + 5  # need enough history for calculations
+    start_idx = max(50, 20) + 14  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
-           np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 3.0x average (stricter for fewer trades)
-        volume_confirm = volume[i] > 3.0 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: price breaks above R3 with volume, above weekly EMA20 (uptrend)
-            if close[i] > R3_aligned[i] and volume_confirm and close[i] > ema_1w_aligned[i]:
+            # Long: RSI < 30 (oversold) and price above daily EMA50 (uptrend) with volume
+            if rsi[i] < 30 and close[i] > ema_50_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume, below weekly EMA20 (downtrend)
-            elif close[i] < S3_aligned[i] and volume_confirm and close[i] < ema_1w_aligned[i]:
+            # Short: RSI > 70 (overbought) and price below daily EMA50 (downtrend) with volume
+            elif rsi[i] > 70 and close[i] < ema_50_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 or breaks below weekly EMA20
-            if close[i] < S3_aligned[i] or close[i] < ema_1w_aligned[i]:
+            # Long exit: RSI > 50 or price below daily EMA50
+            if rsi[i] > 50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R3 or breaks above weekly EMA20
-            if close[i] > R3_aligned[i] or close[i] > ema_1w_aligned[i]:
+            # Short exit: RSI < 50 or price above daily EMA50
+            if rsi[i] < 50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
