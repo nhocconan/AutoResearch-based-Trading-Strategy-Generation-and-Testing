@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_20_VolumeConfirmation_1dTrend_Filter
+# 4H_Donchian_Breakout_20_VolumeConfirmation_1dTrend_Filter
 # Hypothesis: Donchian(20) breakouts on 4h chart capture medium-term momentum. 
 # Volume confirmation (volume > 1.5x 20-period average) filters false breakouts.
 # Daily trend filter (close > EMA50) ensures alignment with higher timeframe trend.
 # Designed for low trade frequency (~25-40/year) with discrete sizing (0.25) to minimize fee drag.
 # Works in bull markets (breakouts with trend) and bear markets (short breakdowns against trend).
 
-name = "4h_Donchian_Breakout_20_VolumeConfirmation_1dTrend_Filter"
+name = "4H_Donchian_Breakout_20_VolumeConfirmation_1dTrend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
