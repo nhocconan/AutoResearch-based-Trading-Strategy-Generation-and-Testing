@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ChandelierExit_Breakout_12hTrend_Volume
-# Hypothesis: Long when price breaks above Chandelier Exit long, above 12h EMA50, with volume spike; short when breaks below Chandelier Exit short, below 12h EMA50, with volume spike.
-# Chandelier Exit adapts to volatility, providing dynamic support/resistance. EMA50 filters trend direction, volume confirms breakout strength.
-# Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets by adapting to volatility and using trend filter.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
+# Camarilla levels provide institutional support/resistance; EMA34 filters trend direction; volume confirms breakout strength.
+# Designed for 4h to achieve 19-50 trades/year, suitable for both bull and bear markets.
 
-name = "6h_ChandelierExit_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,41 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Chandelier Exit parameters
-    atr_period = 22
-    multiplier = 3.0
+    # 1d data for Camarilla levels, EMA34 trend, and volume
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range and ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(atr_period, n):
-        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    # Camarilla levels (based on previous day)
+    def calculate_camarilla(h, l, c):
+        # Typical price for the day
+        typical = (h + l + c) / 3.0
+        range_ = h - l
+        # Camarilla levels
+        R3 = c + (range_ * 1.1000 / 4)
+        S3 = c - (range_ * 1.1000 / 4)
+        return R3, S3
     
-    # Chandelier Exit Long and Short
-    chandelier_long = np.full(n, np.nan)
-    chandelier_short = np.full(n, np.nan)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    R3 = np.full_like(close_1d, np.nan)
+    S3 = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        R3[i], S3[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    highest_high[0] = high[0]
-    lowest_low[0] = low[0]
-    for i in range(1, n):
-        highest_high[i] = max(highest_high[i-1], high[i])
-        lowest_low[i] = min(lowest_low[i-1], low[i])
-    
-    for i in range(atr_period, n):
-        if not np.isnan(atr[i]):
-            chandelier_long[i] = highest_high[i] - multiplier * atr[i]
-            chandelier_short[i] = lowest_low[i] + multiplier * atr[i]
-    
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume confirmation: 20-period average
     def mean_arr(arr, p):
@@ -65,40 +54,46 @@ def generate_signals(prices):
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume, 20)
+    vol_ma_20 = mean_arr(volume_1d, 20)
+    
+    # Align all indicators to lower timeframe (wait for 1d bar to close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough history for indicators
+    start_idx = 40  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(chandelier_long[i]) or np.isnan(chandelier_short[i]) or \
-           np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
+           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Chandelier Long, above 12h EMA50, strong volume
-            if close[i] > chandelier_long[i] and close[i] > ema_50_12h_aligned[i] and volume[i] > 2.0 * vol_ma_20[i]:
+            # Long: price breaks above R3, above EMA34, strong volume
+            if close[i] > R3_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Chandelier Short, below 12h EMA50, strong volume
-            elif close[i] < chandelier_short[i] and close[i] < ema_50_12h_aligned[i] and volume[i] > 2.0 * vol_ma_20[i]:
+            # Short: price breaks below S3, below EMA34, strong volume
+            elif close[i] < S3_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below Chandelier Long or below 12h EMA50
-            if close[i] < chandelier_long[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: price drops below S3 or below EMA34
+            if close[i] < S3_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above Chandelier Short or above 12h EMA50
-            if close[i] > chandelier_short[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: price rises above R3 or above EMA34
+            if close[i] > R3_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
