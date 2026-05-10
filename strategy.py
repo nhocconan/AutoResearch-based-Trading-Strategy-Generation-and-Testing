@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_MultiTimeframe_ElderRay_Strategy
-Hypothesis: Elder Ray (Bull Power/Bear Power) from 1d data combined with 6s EMA crossover and volume confirmation.
-Bull Power = High - EMA13, Bear Power = EMA13 - Low. 
-Long when Bull Power > 0, EMA9 > EMA21, and volume > 1.5x average.
-Short when Bear Power > 0, EMA9 < EMA21, and volume > 1.5x average.
-Uses 1d Elder Ray for regime and 6s EMA for timing to work in both bull and bear markets.
+4h_ChaikinOscillator_Stochastic_Filter
+Hypothesis: Chaikin Oscillator crossing zero with Stochastic overbought/oversold levels provides momentum signals.
+Chaikin Oscillator measures accumulation/distribution; crosses indicate shifts in buying/selling pressure.
+Stochastic filters to avoid trend exhaustion. Works in bull/bear by requiring momentum alignment with price action.
 Target: 20-30 trades/year (80-120 total) to minimize fee drag.
 """
 
-name = "6h_MultiTimeframe_ElderRay_Strategy"
-timeframe = "6h"
+name = "4h_ChaikinOscillator_Stochastic_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -27,90 +25,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Accumulation/Distribution Line
+    clv = ((close - low) - (high - close)) / (high - low)
+    clv = np.where((high - low) == 0, 0, clv)
+    adl = np.cumsum(clv * volume)
     
-    # 1d EMA13 for Elder Ray
-    ema13_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 13:
-        ema13_1d[12] = np.mean(close_1d[:13])
-        alpha = 2 / (13 + 1)
-        for i in range(13, len(close_1d)):
-            ema13_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema13_1d[i-1]
+    # Chaikin Oscillator: (3-day EMA of ADL) - (10-day EMA of ADL)
+    def ema(values, period):
+        result = np.full_like(values, np.nan, dtype=np.float64)
+        if len(values) < period:
+            return result
+        multiplier = 2 / (period + 1)
+        result[period-1] = np.mean(values[:period])
+        for i in range(period, len(values)):
+            result[i] = (values[i] - result[i-1]) * multiplier + result[i-1]
+        return result
     
-    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    bull_power = high_1d - ema13_1d
-    bear_power = ema13_1d - low_1d
+    adl_ema3 = ema(adl, 3)
+    adl_ema10 = ema(adl, 10)
+    chaikin = adl_ema3 - adl_ema10
     
-    # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    # Stochastic Oscillator (14,3,3)
+    def stochastic(high, low, close, k_period=14, d_period=3):
+        k = np.full_like(close, np.nan, dtype=np.float64)
+        for i in range(k_period-1, len(close)):
+            highest_high = np.max(high[i-k_period+1:i+1])
+            lowest_low = np.min(low[i-k_period+1:i+1])
+            if highest_high - lowest_low == 0:
+                k[i] = 50
+            else:
+                k[i] = (close[i] - lowest_low) / (highest_high - lowest_low) * 100
+        
+        d = np.full_like(close, np.nan, dtype=np.float64)
+        for i in range(len(close)):
+            if i < k_period + d_period - 2:
+                continue
+            start_idx = i - d_period + 1
+            if start_idx < k_period-1:
+                continue
+            valid_k = k[start_idx:i+1]
+            if np.all(np.isnan(valid_k)):
+                d[i] = np.nan
+            else:
+                d[i] = np.nanmean(valid_k)
+        return k, d
     
-    # 6s EMA9 and EMA21 for entry timing
-    ema9 = np.full(n, np.nan)
-    ema21 = np.full(n, np.nan)
-    if n >= 21:
-        ema9[8] = np.mean(close[:9])
-        ema21[20] = np.mean(close[:21])
-        alpha9 = 2 / (9 + 1)
-        alpha21 = 2 / (21 + 1)
-        for i in range(9, n):
-            ema9[i] = alpha9 * close[i] + (1 - alpha9) * ema9[i-1]
-        for i in range(21, n):
-            ema21[i] = alpha21 * close[i] + (1 - alpha21) * ema21[i-1]
-    
-    # Align 1d indicators to 6s
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    stoch_k, stoch_d = stochastic(high, low, close, 14, 3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 21  # Wait for EMA21
+    start_idx = 20  # Wait for sufficient data
     
     for i in range(start_idx, n):
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(ema9[i]) or np.isnan(ema21[i]):
+        if np.isnan(chaikin[i]) or np.isnan(stoch_k[i]) or np.isnan(stoch_d[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 6s volume > 1.5x average 1d volume (scaled)
-        # 4x 6s bars in 1d (24h / 6h = 4)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 4.0
-        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        # Chaikin crossing zero
+        chaikin_cross_up = chaikin[i] > 0 and chaikin[i-1] <= 0
+        chaikin_cross_down = chaikin[i] < 0 and chaikin[i-1] >= 0
         
-        # 6s EMA trend
-        ema9_above_ema21 = ema9[i] > ema21[i]
-        ema9_below_ema21 = ema9[i] < ema21[i]
+        # Stochastic conditions
+        stoch_overbought = stoch_k[i] > 80
+        stoch_oversold = stoch_k[i] < 20
         
         if position == 0:
-            # Long: Bull Power > 0, EMA9 > EMA21, volume confirmation
-            if bull_power_aligned[i] > 0 and ema9_above_ema21 and volume_confirm:
+            # Long: Chaikin crosses up AND not overbought
+            if chaikin_cross_up and not stoch_overbought:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power > 0, EMA9 < EMA21, volume confirmation
-            elif bear_power_aligned[i] > 0 and ema9_below_ema21 and volume_confirm:
+            # Short: Chaikin crosses down AND not oversold
+            elif chaikin_cross_down and not stoch_oversold:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power <= 0 or EMA9 <= EMA21
-            if bull_power_aligned[i] <= 0 or not ema9_above_ema21:
+            # Exit: Chaikin crosses down OR overbought
+            if chaikin_cross_down or stoch_overbought:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power <= 0 or EMA9 >= EMA21
-            if bear_power_aligned[i] <= 0 or not ema9_below_ema21:
+            # Exit: Chaikin crosses up OR oversold
+            if chaikin_cross_up or stoch_oversold:
                 signals[i] = 0.0
                 position = 0
             else:
