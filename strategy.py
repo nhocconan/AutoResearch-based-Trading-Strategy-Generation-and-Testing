@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_Filter_With_RSI_Pullback_v2
-# Hypothesis: Combines Kaufman Adaptive Moving Average (KAMA) trend direction with RSI pullback entries for timely reversals.
-# Uses 12h trend filter to avoid counter-trend trades, improving performance in both bull and bear markets.
-# Volume confirmation ensures institutional participation. Designed for low trade frequency (~20-30/year) to minimize fee drag.
+# 1h_Camarilla_R1S1_Breakout_4hTrend_Volume_Precision
+# Hypothesis: Uses 4h trend (EMA34) for directional bias, 1h for timing entries at daily Camarilla R1/S1 breakouts with volume confirmation.
+# Targets 15-30 trades/year by combining 4h trend filter with tight 1h entry conditions. Works in bull/bear by following 4h trend.
+# Session filter (08-20 UTC) reduces noise trades. Position size 0.20 for controlled risk.
 
-name = "4h_KAMA_Trend_Filter_With_RSI_Pullback_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_Volume_Precision"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,92 +17,103 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
-        return np.zeros(n)
-    
-    # Calculate KAMA on 12h close
-    close_12h = df_12h['close'].values
-    delta = np.abs(np.diff(close_12h, prepend=close_12h[0]))
-    er = np.abs(np.diff(close_12h, n=10)) / (np.sum(delta[np.arange(10, len(close_12h))[:, None] == np.arange(len(delta))[:, None, None]], axis=1))
-    er = np.concatenate([np.full(10, np.nan), er])
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.full_like(close_12h, np.nan)
-    kama[9] = close_12h[9]
-    for i in range(10, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
-    
-    # Align KAMA to 4h
-    kama_aligned = align_htf_to_ltf(prices, df_12h, kama)
-    
-    # Get 1d data for RSI
+    # Get daily data for Camarilla pivot levels (using previous day's data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate RSI on 1d close
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
     
-    # Align RSI to 4h
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Calculate ATR for volatility filter (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Volume average for confirmation
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate R1 and S1 (tighter levels)
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # Align Camarilla levels to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Get 4h EMA34 for trend filter
+    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    
+    # Calculate volume average for confirmation (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Warmup for volume MA and indicators
+    start_idx = max(20, 34, 14)  # Warmup for volume MA, 4h EMA, and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(volume_ma[i]):
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 12h KAMA
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_4h_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Trend filter from 4h
+        uptrend = close[i] > ema_34_4h_aligned[i]
+        downtrend = close[i] < ema_34_4h_aligned[i]
+        
+        # Volume confirmation and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        volatility_filter = atr[i] > 0
         
         if position == 0:
-            # Long entry: price above KAMA (uptrend) + RSI pullback from oversold + volume
-            if uptrend and rsi_aligned[i] < 35 and rsi_aligned[i] > np.nanmin(rsi_aligned[max(0, i-5):i]) and volume_confirm:
-                signals[i] = 0.25
+            # Long entry: price breaks above R1 with volume confirmation, 4h uptrend
+            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price below KAMA (downtrend) + RSI pullback from overbought + volume
-            elif downtrend and rsi_aligned[i] > 65 and rsi_aligned[i] < np.nanmax(rsi_aligned[max(0, i-5):i]) and volume_confirm:
-                signals[i] = -0.25
+            # Short entry: price breaks below S1 with volume confirmation, 4h downtrend
+            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: trend turns down or RSI overbought
-            if not uptrend or rsi_aligned[i] > 70:
+            # Long exit: price falls below R1 or 4h trend turns down
+            if close[i] < r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: trend turns up or RSI oversold
-            if not downtrend or rsi_aligned[i] < 30:
+            # Short exit: price rises above S1 or 4h trend turns up
+            if close[i] > s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
