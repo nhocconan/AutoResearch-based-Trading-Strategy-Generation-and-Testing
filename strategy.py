@@ -1,104 +1,82 @@
-#!/usr/bin/env python3
-# 4h_RSI_Divergence_With_1dTrend_VolumeFilter
-# Hypothesis: RSI divergence on 4h combined with 1d trend and volume confirmation provides high-quality signals.
-# Bullish divergence (price makes lower low, RSI makes higher low) + 1d uptrend + volume spike = long.
-# Bearish divergence (price makes higher high, RSI makes lower high) + 1d downtrend + volume spike = short.
-# Uses 1d EMA for trend filter and volume confirmation to reduce false signals.
-# Designed for low trade frequency (target: 20-40 trades/year) with high win rate.
+# 1d_LongOnly_TrendFollow_With_WeeklyTrendFilter
+# Hypothesis: Long-only trend following on 1d using price above 50-day SMA and weekly trend alignment.
+# Weekly trend filter uses 10-week EMA slope to avoid counter-trend trades in bear markets.
+# Entry: Price > SMA(50) + weekly uptrend + volume > 1.5x average.
+# Exit: Price < SMA(50) or weekly trend turns down.
+# Position size: 0.30 when long, 0 when flat.
+# Designed for low trade frequency (~10-20 trades/year) to minimize fee drag and survive bear markets.
 
-name = "4h_RSI_Divergence_With_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "1d_LongOnly_TrendFollow_With_WeeklyTrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtd_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Calculate 50-day SMA for trend filter
+    sma_50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 10-week EMA for trend filter (weekly)
+    ema_10_1w = pd.Series(df_1w['close']).ewm(span=10, adjust=False, min_periods=10).mean().values
+    ema_10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_10_1w)
     
-    # Calculate daily EMA(34) for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate slope of weekly EMA (trend direction)
+    # Using 5-period difference to smooth noise
+    ema_slope = np.diff(ema_10_1w_aligned, prepend=ema_10_1w_aligned[0]) / 5.0
+    ema_slope = np.concatenate([[0], ema_slope[1:]])  # align length
     
-    # Volume confirmation (20-period MA on 4h)
+    # Volume confirmation (20-day average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
-    # Need enough data for RSI (14), EMA (34), volume MA (20)
-    start_idx = max(14, 34, 20)
+    # Warmup: need SMA(50), weekly EMA(10), volume MA(20)
+    start_idx = max(50, 10, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(sma_50[i]) or np.isnan(ema_10_1w_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(ema_slope[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Price above 50-day SMA
+        price_above_sma = close[i] > sma_50[i]
+        
+        # Weekly trend up (positive slope)
+        weekly_uptrend = ema_slope[i] > 0
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # RSI divergence detection (need at least 3 bars back)
-        if i >= 2:
-            # Bullish divergence: price makes lower low, RSI makes higher low
-            bullish_div = (close[i] < close[i-2]) and (rsi[i] > rsi[i-2])
-            # Bearish divergence: price makes higher high, RSI makes lower high
-            bearish_div = (close[i] > close[i-2]) and (rsi[i] < rsi[i-2])
-        else:
-            bullish_div = False
-            bearish_div = False
-        
         if position == 0:
-            # Long entry: bullish divergence + daily uptrend + volume spike
-            if bullish_div and uptrend and volume_confirm:
-                signals[i] = 0.25
+            # Long entry: price above SMA50 + weekly uptrend + volume spike
+            if price_above_sma and weekly_uptrend and volume_confirm:
+                signals[i] = 0.30
                 position = 1
-            # Short entry: bearish divergence + daily downtrend + volume spike
-            elif bearish_div and downtrend and volume_confirm:
-                signals[i] = -0.25
-                position = -1
         elif position == 1:
-            # Long exit: price crosses below 4h EMA(20) or divergence fails
-            ema_20 = pd.Series(close[:i+1]).ewm(span=20, adjust=False).mean().iloc[-1]
-            if close[i] < ema_20 or not bullish_div:
+            # Long exit: price crosses below SMA50 or weekly trend turns down
+            if close[i] < sma_50[i] or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price crosses above 4h EMA(20) or divergence fails
-            ema_20 = pd.Series(close[:i+1]).ewm(span=20, adjust=False).mean().iloc[-1]
-            if close[i] > ema_20 or not bearish_div:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                signals[i] = 0.30
     
     return signals
