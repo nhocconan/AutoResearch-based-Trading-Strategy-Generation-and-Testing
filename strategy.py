@@ -1,114 +1,98 @@
 #!/usr/bin/env python3
-# 6h_Ichimoku_Cloud_Trend_Filter_v2
-# Hypothesis: Ichimoku cloud with 1d Tenkan/Kijun cross + Kumo twist filter on 6h timeframe.
-# Uses 1d Ichimoku components for trend direction and Kumo twist for trend strength.
-# Entry: Price above/below cloud + TK cross aligned with Kumo twist direction.
-# Exit: Price enters cloud or TK cross reverses.
-# Designed for 6h timeframe with 1d Ichimoku filter to reduce whipsaws in sideways markets.
-# Target: 20-50 trades/year (80-200 total over 4 years) with controlled risk.
+# 4h_KAMA_Direction_RSI_Trend_Filter_v2
+# Hypothesis: KAMA trend direction combined with RSI momentum and volume confirmation.
+# Uses adaptive KAMA to filter noise, RSI for momentum strength, and volume spike for confirmation.
+# Designed for low trade frequency (~25-35/year) to minimize fee decay while capturing trends in bull/bear markets.
 
-name = "6h_Ichimoku_Cloud_Trend_Filter_v2"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_Trend_Filter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def kama(close, er_len=10, fast_len=2, slow_len=30):
+    """Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) > 1 else 0
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d data for Ichimoku calculation
+    # 1d data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Ichimoku components on 1d data
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = np.full_like(high_1d, np.nan)
-    period9_low = np.full_like(low_1d, np.nan)
-    for i in range(8, len(high_1d)):
-        period9_high[i] = np.max(high_1d[i-8:i+1])
-        period9_low[i] = np.min(low_1d[i-8:i+1])
-    tenkan_1d = (period9_high + period9_low) / 2
+    # KAMA for trend direction (adaptive smoothing)
+    kama_1d = kama(close_1d, er_len=10, fast_len=2, slow_len=30)
+    kama_dir = np.where(kama_1d > np.roll(kama_1d, 1), 1, -1)  # 1=rising, -1=falling
+    kama_dir_aligned = align_htf_to_ltf(prices, df_1d, kama_dir.astype(float))
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = np.full_like(high_1d, np.nan)
-    period26_low = np.full_like(low_1d, np.nan)
-    for i in range(25, len(high_1d)):
-        period26_high[i] = np.max(high_1d[i-25:i+1])
-        period26_low[i] = np.min(low_1d[i-25:i+1])
-    kijun_1d = (period26_high + period26_low) / 2
+    # RSI for momentum (14-period)
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a_1d = (tenkan_1d + kijun_1d) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period52_high = np.full_like(high_1d, np.nan)
-    period52_low = np.full_like(low_1d, np.nan)
-    for i in range(51, len(high_1d)):
-        period52_high[i] = np.max(high_1d[i-51:i+1])
-        period52_low[i] = np.min(low_1d[i-51:i+1])
-    senkou_b_1d = (period52_high + period52_low) / 2
-    
-    # Align Ichimoku components to 6h timeframe (wait for 1d bar to close)
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
-    
-    # Calculate Kumo twist (Senkou A - Senkou B) for trend strength
-    # Positive: bullish twist, Negative: bearish twist
-    kumo_twist = senkou_a_aligned - senkou_b_aligned
+    # Volume confirmation (20-period average)
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p-1, len(arr)):
+                res[i] = np.mean(arr[i-p+1:i+1])
+        return res
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough history for Ichimoku calculations
+    start_idx = 34  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or \
-           np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or \
-           np.isnan(kumo_twist[i]):
+        if np.isnan(kama_dir_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Cloud boundaries: upper band = max(Senkou A, Senkou B), lower band = min(Senkou A, Senkou B)
-        cloud_top = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
-        
         if position == 0:
-            # Long: Price above cloud + TK cross bullish + Kumo twist bullish (positive)
-            if (close[i] > cloud_top and 
-                tenkan_aligned[i] > kijun_aligned[i] and 
-                kumo_twist[i] > 0):
+            # Long: KAMA up, RSI > 50 (bullish momentum), volume spike
+            if kama_dir_aligned[i] > 0 and rsi_aligned[i] > 50 and volume[i] > 2.0 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below cloud + TK cross bearish + Kumo twist bearish (negative)
-            elif (close[i] < cloud_bottom and 
-                  tenkan_aligned[i] < kijun_aligned[i] and 
-                  kumo_twist[i] < 0):
+            # Short: KAMA down, RSI < 50 (bearish momentum), volume spike
+            elif kama_dir_aligned[i] < 0 and rsi_aligned[i] < 50 and volume[i] > 2.0 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price enters cloud or TK cross turns bearish
-            if close[i] < cloud_top or tenkan_aligned[i] <= kijun_aligned[i]:
+            # Long exit: KAMA turns down OR RSI < 40 (loss of momentum)
+            if kama_dir_aligned[i] < 0 or rsi_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price enters cloud or TK cross turns bullish
-            if close[i] > cloud_bottom or tenkan_aligned[i] >= kijun_aligned[i]:
+            # Short exit: KAMA turns up OR RSI > 60 (loss of bearish momentum)
+            if kama_dir_aligned[i] > 0 or rsi_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
