@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_20_1dTrend_Volume
-# Hypothesis: On 12h timeframe, breakout above/below 20-period Donchian channel with daily trend filter and volume confirmation works in both bull and bear markets. Daily trend avoids counter-trend trades, volume reduces false signals. Donchian channels adapt to volatility, capturing breakouts in trending and ranging markets. Designed for low frequency (~20-40 trades/year) to minimize fee drift.
+# 4h_Chaikin_Oscillator_Trend_Confirmation
+# Hypothesis: Chaikin Oscillator (3,10) crossing zero with daily trend confirmation and volume spike filters captures momentum shifts in both bull and bear markets. Daily trend avoids counter-trend trades, volume reduces false signals. Designed for low frequency (~20-50 trades/year) to minimize fee drift.
 
-name = "12h_Donchian_Breakout_20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Chaikin_Oscillator_Trend_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,29 +15,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Money Flow Multiplier and Volume
+    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
+    mfv = mfm * volume
+    
+    # Chaikin Oscillator: (3-period EMA of MFV) - (10-period EMA of MFV)
+    mfv_series = pd.Series(mfv)
+    ema3 = mfv_series.ewm(span=3, adjust=False, min_periods=3).mean().values
+    ema10 = mfv_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    chaikin = ema3 - ema10
+    
+    # Daily trend filter: EMA50 on daily close
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Donchian Channel (20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Daily trend: EMA34 on daily close
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # Align daily trend to 12h
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
@@ -48,13 +51,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+        if (np.isnan(chaikin[i]) or 
+            np.isnan(trend_1d_up_aligned[i]) or 
+            np.isnan(trend_1d_down_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,30 +68,26 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: breakout above Donchian high with daily uptrend and volume
-            if (close[i] > donchian_high[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: Chaikin crosses above zero with daily uptrend and volume
+            if chaikin[i] > 0 and chaikin[i-1] <= 0 and trend_1d_up_aligned[i] > 0.5 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: breakout below Donchian low with daily downtrend and volume
-            elif (close[i] < donchian_low[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: Chaikin crosses below zero with daily downtrend and volume
+            elif chaikin[i] < 0 and chaikin[i-1] >= 0 and trend_1d_down_aligned[i] > 0.5 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to Donchian low or trend fails
-            if (close[i] <= donchian_low[i] or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit when Chaikin crosses below zero or trend fails
+            if chaikin[i] < 0 and chaikin[i-1] >= 0 or trend_1d_up_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to Donchian high or trend fails
-            if (close[i] >= donchian_high[i] or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit when Chaikin crosses above zero or trend fails
+            if chaikin[i] > 0 and chaikin[i-1] <= 0 or trend_1d_down_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
