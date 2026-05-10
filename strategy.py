@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-# 6H_Ichimoku_Cloud_Twist_With_Volume
-# Hypothesis: Combines Ichimoku cloud twist (Tenkan/Kijun cross) with cloud color from 1d timeframe
-# and volume confirmation to capture trend changes with low frequency.
-# Cloud twist signals momentum shift; cloud color from higher timeframe filters counter-trend trades.
-# Works in bull markets (green cloud + bullish twist) and bear markets (red cloud + bearish twist).
-# Targets 15-35 trades/year to avoid fee drag.
+# 4H_BollingerBand_Breakout_Volume_Trend_Filter
+# Hypothesis: Bollinger Band breakouts above the upper band indicate strong upward momentum, while breaks below the lower band indicate strong downward momentum.
+# Combined with volume confirmation (volume > 2x 20-period average) to filter false breakouts and a 1-day EMA50 trend filter to ensure alignment with the higher timeframe trend.
+# Designed for low trade frequency (~15-30/year) with discrete sizing (0.25) to minimize fee drag. Works in both bull and bear markets by following the trend.
 
-name = "6H_Ichimoku_Cloud_Twist_With_Volume"
-timeframe = "6h"
+name = "4H_BollingerBand_Breakout_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,87 +22,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52)
-    tenkan = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
-              pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
-    kijun = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
-             pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
-    senkou_a = ((tenkan + kijun) / 2)
-    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
-                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2)
+    # Bollinger Bands: 20-period SMA with 2 standard deviations
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper_band = sma20 + 2 * std20
+    lower_band = sma20 - 2 * std20
     
-    # Shift Senkou spans forward by 26 periods (cloud ahead)
-    senkou_a = np.roll(senkou_a, 26)
-    senkou_b = np.roll(senkou_b, 26)
-    senkou_a[:26] = np.nan
-    senkou_b[:26] = np.nan
-    
-    # Cloud color: green if Senkou A > Senkou B, red otherwise
-    cloud_green = senkou_a > senkou_b
-    
-    # Twist: Tenkan/Kijun cross
-    twist_up = tenkan > kijun
-    twist_down = tenkan < kijun
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_threshold = vol_ma * 2.0
     
-    # Daily trend filter: cloud color from 1d timeframe
+    # Daily trend filter: EMA 50
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    tenkan_1d = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
-                 pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
-    kijun_1d = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
-                pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
-    senkou_b_1d = ((pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
-                    pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2)
-    senkou_a_1d = np.roll(senkou_a_1d, 26)
-    senkou_b_1d = np.roll(senkou_b_1d, 26)
-    senkou_a_1d[:26] = np.nan
-    senkou_b_1d[:26] = np.nan
-    
-    cloud_green_1d = senkou_a_1d > senkou_b_1d
-    cloud_green_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_green_1d.astype(float))
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 52  # Need enough history for Ichimoku
+    start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or \
-           np.isnan(vol_threshold[i]) or np.isnan(cloud_green_1d_aligned[i]):
+        if np.isnan(sma20[i]) or np.isnan(std20[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        is_green_cloud = cloud_green_1d_aligned[i] > 0.5  # True if 1d cloud is green
-        is_red_cloud = cloud_green_1d_aligned[i] <= 0.5   # True if 1d cloud is red
+        # Get daily close for trend determination
+        close_1d_series = pd.Series(close_1d)
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_series.values)
+        
+        is_uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        is_downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Green cloud from 1d + bullish twist + volume confirmation
-            if is_green_cloud and twist_up[i] and volume[i] > vol_threshold[i]:
+            # Long entry: Price breaks above upper Bollinger Band + volume confirmation + daily uptrend
+            if close[i] > upper_band[i] and volume[i] > vol_threshold[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Red cloud from 1d + bearish twist + volume confirmation
-            elif is_red_cloud and twist_down[i] and volume[i] > vol_threshold[i]:
+            # Short entry: Price breaks below lower Bollinger Band + volume confirmation + daily downtrend
+            elif close[i] < lower_band[i] and volume[i] > vol_threshold[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Red cloud or bearish twist
-            if is_red_cloud or twist_down[i]:
+            # Long exit: Price crosses below the 20-period SMA (mean reversion signal)
+            if close[i] < sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Green cloud or bullish twist
-            if is_green_cloud or twist_up[i]:
+            # Short exit: Price crosses above the 20-period SMA (mean reversion signal)
+            if close[i] > sma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
