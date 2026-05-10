@@ -1,13 +1,15 @@
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: On 12-hour timeframe, price breaking above Camarilla R3 or below S3 with
-# daily trend alignment and volume spike captures strong momentum moves. This strategy
-# works in both bull and bear markets by following the daily trend direction while
-# using volume to filter false breakouts. Camarilla levels provide natural support/resistance
-# based on prior day's range, and breaking R3/S3 indicates institutional interest.
-# Timeframe: 12h (slower = fewer trades, less fee drag). Target: 20-50 trades/year.
+#!/usr/bin/env python3
+# 1h_4h1d_Trend_Follow_With_Volume_Confirmation
+# Hypothesis: In 1h timeframe, follow the higher timeframe trend (4h/1d) with volume confirmation
+# to avoid false breakouts. Use 4h EMA50 for trend direction and 1d EMA200 for regime filter.
+# Enter on pullbacks to 4h EMA20 in direction of higher timeframe trend.
+# Long when: 4h trend up (close > EMA50_4h) AND 1d regime bullish (close > EMA200_1d) AND price pulls back to 4h EMA20 from below with volume confirmation.
+# Short when: 4h trend down (close < EMA50_4h) AND 1d regime bearish (close < EMA200_1d) AND price pulls back to 4h EMA20 from above with volume confirmation.
+# Exit when trend breaks or reverse signal occurs.
+# Uses session filter (08-20 UTC) to reduce noise. Position size: 0.20.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_4h1d_Trend_Follow_With_Volume_Confirmation"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,84 +26,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for trend and entry signals
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = pd.Series(df_1d['close'])
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get 1d data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 200:
+        return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: H = high, L = low, C = close of previous day
-    # R4 = C + ((H-L) * 1.5000), R3 = C + ((H-L) * 1.2500)
-    # S3 = C - ((H-L) * 1.2500), S4 = C - ((H-L) * 1.5000)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate 4h EMA50 for trend direction
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Avoid division by zero and NaN for first day
-    valid_prev = (~np.isnan(prev_high)) & (~np.isnan(prev_low)) & (~np.isnan(prev_close))
-    high_low_diff = np.where(valid_prev, prev_high - prev_low, 0.0)
+    # Calculate 4h EMA20 for entry pullback signals
+    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
     
-    camarilla_r3 = np.where(valid_prev, prev_close + (high_low_diff * 1.25), np.nan)
-    camarilla_s3 = np.where(valid_prev, prev_close - (high_low_diff * 1.25), np.nan)
+    # Calculate 1d EMA200 for regime filter
+    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Align Camarilla levels to 12h timeframe (they change only at daily boundaries)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: 2-period volume MA on 12h chart (approx 1 day)
-    volume_ma = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    # Volume confirmation (20-period MA on 1h chart)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA50_1d (50) and volume MA (2)
-    start_idx = max(50, 2)
+    # Warmup: need EMA50_4h (50), EMA20_4h (20), EMA200_1d (200), volume MA (20)
+    start_idx = max(50, 20, 200, 20)
+    
+    # Pre-compute session hours for efficiency
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(volume_ma[i])):
+        # Session filter: 08-20 UTC
+        if not (8 <= hours[i] <= 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Skip if any critical values are NaN
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_20_4h_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Volume confirmation: current volume > 1.5x average
+        # Higher timeframe trend and regime filters
+        uptrend_4h = close[i] > ema_50_4h_aligned[i]
+        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        bullish_regime = close[i] > ema_200_1d_aligned[i]
+        bearish_regime = close[i] < ema_200_1d_aligned[i]
+        
+        # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
+        # Price relative to 4h EMA20 for pullback detection
+        if i > 0:
+            cross_above_ema20_4h = (close[i] > ema_20_4h_aligned[i]) and (close[i-1] <= ema_20_4h_aligned[i-1])
+            cross_below_ema20_4h = (close[i] < ema_20_4h_aligned[i]) and (close[i-1] >= ema_20_4h_aligned[i-1])
+        else:
+            cross_above_ema20_4h = False
+            cross_below_ema20_4h = False
+        
         if position == 0:
-            # Long entry: price breaks above R3, daily uptrend, volume confirmation
-            if (close[i] > camarilla_r3_aligned[i]) and uptrend and volume_confirm:
-                signals[i] = 0.25
+            # Long entry: 4h uptrend + bullish regime + pullback to EMA20 from below + volume
+            if uptrend_4h and bullish_regime and cross_above_ema20_4h and volume_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below S3, daily downtrend, volume confirmation
-            elif (close[i] < camarilla_s3_aligned[i]) and downtrend and volume_confirm:
-                signals[i] = -0.25
+            # Short entry: 4h downtrend + bearish regime + pullback to EMA20 from above + volume
+            elif downtrend_4h and bearish_regime and cross_below_ema20_4h and volume_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal) or trend breaks
-            if (close[i] < camarilla_s3_aligned[i]) or not uptrend:
+            # Long exit: 4h trend breaks, regime turns bearish, or reverse signal
+            if not uptrend_4h or not bullish_regime or cross_below_ema20_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above R3 (reversal) or trend breaks
-            if (close[i] > camarilla_r3_aligned[i]) or not downtrend:
+            # Short exit: 4h trend breaks, regime turns bullish, or reverse signal
+            if not downtrend_4h or not bearish_regime or cross_above_ema20_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
-
-#!/usr/bin/env python3
