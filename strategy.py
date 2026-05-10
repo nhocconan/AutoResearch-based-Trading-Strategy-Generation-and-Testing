@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_R1S1_Breakout_1dTrend_Volume
-Hypothesis: Use 1d Camarilla pivot levels (R1/S1) as breakout levels on 4h chart, with 1d EMA34 trend filter and volume confirmation. Works in both bull and bear by following higher timeframe trend, with volume filter to avoid false breakouts. Target: 75-200 total trades over 4 years (19-50/year).
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 4h price breaks above/below Camarilla R1/S1 levels with 1d EMA34 trend filter and volume confirmation. 
+Camarilla levels provide high-probability reversal points; breakouts indicate momentum continuation. 
+Trend filter ensures alignment with daily bias. Volume filter avoids false breakouts. 
+Target: 20-50 trades/year (80-200 total over 4 years).
 """
 
-name = "4h_Camarilla_Pivot_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -12,49 +15,51 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val == 0:
+        return close, close, close, close  # all levels same if no range
+    R4 = close + range_val * 1.500
+    R3 = close + range_val * 1.250
+    R2 = close + range_val * 1.166
+    R1 = close + range_val * 1.083
+    S1 = close - range_val * 1.083
+    S2 = close - range_val * 1.166
+    S3 = close - range_val * 1.250
+    S4 = close - range_val * 1.500
+    return R1, R2, R3, R4, S1, S2, S3, S4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for pivot calculation and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:  # Need at least 2 days for pivot calculation
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Using previous day's values (shifted by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First day has no previous day, so set to NaN
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    range_1d = prev_high - prev_low
-    camarilla_r1 = prev_close + range_1d * 1.1 / 12
-    camarilla_s1 = prev_close - range_1d * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
     # Daily EMA34 for trend filter
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Get price and volume
+    # Get price, volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Calculate Camarilla levels for each 4h bar using previous bar's OHLC
+    # We need to shift by 1 to avoid look-ahead (use previous bar's data)
+    R1 = np.full(n, np.nan)
+    S1 = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        r1, _, _, _, s1, _, _, _ = calculate_camarilla(high[i-1], low[i-1], close[i-1])
+        R1[i] = r1
+        S1[i] = s1
     
     # Volume filter: current volume > 1.3x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -69,32 +74,32 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+            np.isnan(R1[i]) or
+            np.isnan(S1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: uptrend AND price breaks above R1 with volume
-            if close[i] > ema_34_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
+            # Long: above EMA34 (uptrend) AND price breaks above R1 with volume
+            if close[i] > ema_34_aligned[i] and high[i] > R1[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend AND price breaks below S1 with volume
-            elif close[i] < ema_34_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
+            # Short: below EMA34 (downtrend) AND price breaks below S1 with volume
+            elif close[i] < ema_34_aligned[i] and low[i] < S1[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S1 OR trend turns bearish
-            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            if low[i] < S1[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above R1 OR trend turns bullish
-            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            if high[i] > R1[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
