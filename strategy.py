@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Breakout_1wTrend
-Hypothesis: Price breaks the weekly pivot resistance (long) or support (short) calculated from weekly data, with weekly EMA20 trend filter and volume confirmation.
-Breakouts from weekly pivot levels capture significant market turning points, while weekly trend filter ensures alignment with longer-term direction.
-Volume confirmation filters false breakouts. Works in bull/bear by trading only in direction of weekly trend.
-Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+4h_Pullback_to_EMA50_1dTrend_Filter
+Hypothesis: Buy dips to EMA50 in uptrend, sell rallies to EMA50 in downtrend, using 1d EMA200 for trend filter and volume confirmation.
+Works in bull by buying pullbacks in uptrend; works in bear by selling rallies in downtrend.
+Mean-reversion within trend reduces false breakouts and improves win rate.
+Target: 25-40 trades/year (100-160 total) to minimize fee drag.
 """
 
-name = "1d_WeeklyPivot_Breakout_1wTrend"
-timeframe = "1d"
+name = "4h_Pullback_to_EMA50_1dTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,96 +17,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points and trend
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly pivot points (using prior week's data)
-    pivot_1w = np.full(len(high_1w), np.nan)
-    r1_1w = np.full(len(high_1w), np.nan)
-    s1_1w = np.full(len(high_1w), np.nan)
+    # 1d EMA200 for trend filter
+    ema200_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        ema200_1d[199] = np.mean(close_1d[:200])
+        alpha = 2 / (200 + 1)
+        for i in range(200, len(close_1d)):
+            ema200_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema200_1d[i-1]
     
-    if len(high_1w) >= 2:
-        for i in range(1, len(high_1w)):
-            pivot_1w[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
-            r1_1w[i] = 2 * pivot_1w[i] - low_1w[i-1]
-            s1_1w[i] = 2 * pivot_1w[i] - high_1w[i-1]
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Weekly EMA20 for trend filter
-    ema20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema20_1w[19] = np.mean(close_1w[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close_1w)):
-            ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
+    # 4h EMA50 for entry
+    ema50_4h = np.full(len(close), np.nan)
+    if len(close) >= 50:
+        ema50_4h[49] = np.mean(close[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close)):
+            ema50_4h[i] = alpha * close[i] + (1 - alpha) * ema50_4h[i-1]
     
-    # Weekly volume SMA10 for volume confirmation
-    vol_sma10_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 10:
-        vol_sma10_1w[9] = np.mean(volume_1w[:10])
-        for i in range(10, len(volume_1w)):
-            vol_sma10_1w[i] = (vol_sma10_1w[i-1] * 9 + volume_1w[i]) / 10
-    
-    # Align weekly indicators to daily
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    vol_sma10_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma10_1w)
+    # Align 1d indicators to 4h
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for EMA20
+    start_idx = 200  # Wait for EMA200
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_sma10_1w_aligned[i]):
+        if np.isnan(ema200_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(ema50_4h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x average weekly volume (scaled)
-        # 5x daily bars in weekly (since 1w is 5x 1d)
-        vol_1w_scaled = vol_sma10_1w_aligned[i] / 5.0  # Average daily-equivalent volume from weekly data
-        volume_confirm = volume[i] > 1.5 * vol_1w_scaled
+        # Volume confirmation: current 4h volume > 1.5x average 4h-equivalent volume from 1d data
+        # 1d bar = 6 x 4h bars, so scale down
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # Average 4h-equivalent volume from 1d data
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Trend and price relative to weekly pivot levels
-        is_uptrend = close[i] > ema20_1w_aligned[i]
-        is_downtrend = close[i] < ema20_1w_aligned[i]
-        price_above_r1 = close[i] > r1_1w_aligned[i]
-        price_below_s1 = close[i] < s1_1w_aligned[i]
+        # Trend and price relative to 4h EMA50
+        is_uptrend = close[i] > ema200_1d_aligned[i]
+        is_downtrend = close[i] < ema200_1d_aligned[i]
+        near_ema50 = abs(close[i] - ema50_4h[i]) / ema50_4h[i] < 0.01  # Within 1% of EMA50
         
         if position == 0:
-            # Long: price breaks above weekly R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
+            # Long: price near EMA50 from below in uptrend with volume
+            if close[i] <= ema50_4h[i] and is_uptrend and near_ema50 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
+            # Short: price near EMA50 from above in downtrend with volume
+            elif close[i] >= ema50_4h[i] and is_downtrend and near_ema50 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below weekly pivot or trend turns down
-            if close[i] < pivot_1w_aligned[i] or not is_uptrend:
+            # Exit: price moves above EMA50 or trend turns down
+            if close[i] > ema50_4h[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above weekly pivot or trend turns up
-            if close[i] > pivot_1w_aligned[i] or not is_downtrend:
+            # Exit: price moves below EMA50 or trend turns up
+            if close[i] < ema50_4h[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
