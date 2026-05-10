@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_With_1dTrend_VolumeFilter
-# Hypothesis: 12h Donchian(20) breakout in direction of 1d EMA34 trend, with volume confirmation on 12h chart.
-# Works in bull markets via breakout momentum and in bear via trend-following shorts.
-# Volume filter reduces false breakouts. Target: 12-37 trades/year (50-150 total over 4 years).
+# 4h_Three_Stage_Trend_Filter
+# Hypothesis: Combines 1-day trend filter, 1-week regime filter, and 4-hour price action with volume confirmation.
+# Long when: price > 1d EMA34, price > 1w EMA89 (bull regime), and price > 4h KAMA with volume spike.
+# Short when: price < 1d EMA34, price < 1w EMA89 (bear regime), and price < 4h KAMA with volume spike.
+# Uses weekly EMA to distinguish bull/bear regimes, reducing whipsaw in sideways markets.
+# Target: 20-40 trades/year with strong trend signals only.
 
-name = "12h_Donchian_Breakout_With_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "4h_Three_Stage_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,75 +16,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily and weekly data for multi-timeframe filters
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 34 or len(df_1w) < 89:
         return np.zeros(n)
     
-    # Calculate 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 4h KAMA (adaptive moving average)
+    # Efficiency Ratio: |price change| / sum of absolute changes
+    change = np.abs(np.diff(close, prepend=close[0]))
+    abs_change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = pd.Series(abs_change).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
     
-    # Calculate daily EMA for trend filter (34-period)
+    # Smoothing constants for KAMA
+    fast_sc = 2 / (2 + 1)   # EMA 2
+    slow_sc = 2 / (30 + 1)  # EMA 30
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # Initialize KAMA
+    kama = np.full_like(close, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    
+    # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (20-period MA on 12h chart)
+    # Weekly EMA89 for regime filter (bull/bear detection)
+    ema_89_1w = pd.Series(df_1w['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
+    ema_89_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_89_1w)
+    
+    # Volume confirmation (20-period average)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Donchian (20), EMA (34), volume MA (20)
-    start_idx = max(20, 34, 20)
+    # Warmup: need sufficient data for all indicators
+    start_idx = max(10, 34, 89, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(ema_89_1w_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Multi-timeframe trend alignment
+        # Bull regime: price above both daily and weekly EMA
+        bull_regime = (close[i] > ema_34_1d_aligned[i]) and (close[i] > ema_89_1w_aligned[i])
+        # Bear regime: price below both daily and weekly EMA
+        bear_regime = (close[i] < ema_34_1d_aligned[i]) and (close[i] < ema_89_1w_aligned[i])
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Donchian breakout
-        breakout_up = close[i] > highest_high[i-1]  # break above prior period's high
-        breakout_down = close[i] < lowest_low[i-1]  # break below prior period's low
+        # Price relative to 4h KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
         if position == 0:
-            # Long entry: upward breakout + daily uptrend + volume spike
-            if breakout_up and uptrend and volume_confirm:
+            # Long entry: bull regime + price above KAMA + volume spike
+            if bull_regime and price_above_kama and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downward breakout + daily downtrend + volume spike
-            elif breakout_down and downtrend and volume_confirm:
+            # Short entry: bear regime + price below KAMA + volume spike
+            elif bear_regime and price_below_kama and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below Donchian low or trend turns down
-            if close[i] < lowest_low[i] or not uptrend:
+            # Long exit: regime turns bearish or price crosses below KAMA
+            if bear_regime or close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above Donchian high or trend turns up
-            if close[i] > highest_high[i] or not downtrend:
+            # Short exit: regime turns bullish or price crosses above KAMA
+            if bull_regime or close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
