@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1D_TRIX_VolumeSpike_Trend
-# Hypothesis: TRIX momentum with volume spike confirmation and weekly trend filter.
-# Long when TRIX crosses above zero with volume > 2x average and weekly uptrend.
-# Short when TRIX crosses below zero with volume > 2x average and weekly downtrend.
-# Uses volatility filter to avoid choppy markets.
-# Target: 15-25 trades/year per symbol.
+# 12H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Trade Camarilla pivot breakouts on 12h timeframe with 1d trend and volume confirmation.
+# Long when: price breaks above R1 with 1d uptrend and volume > 1.3x average.
+# Short when: price breaks below S1 with 1d downtrend and volume > 1.3x average.
+# Uses volume confirmation to filter false breakouts and trend alignment to avoid counter-trend trades.
+# Designed for low trade frequency (12-37/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "1D_TRIX_VolumeSpike_Trend"
-timeframe = "1d"
+name = "12H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,96 +24,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX calculation (15-period)
-    close_s = pd.Series(close)
-    # Triple EMA
-    ema1 = close_s.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    # Percent change
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
+    # 12h range calculation (using previous bar's high/low for Camarilla)
+    # Shift by 1 to avoid look-ahead: use previous bar's range
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    prev_close = np.concatenate([[np.nan], close[:-1]])
     
-    # Volume average (30-period)
+    # Camarilla levels for intraday trading
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    range_val = prev_high - prev_low
+    r1 = prev_close + range_val * 1.1 / 12
+    s1 = prev_close - range_val * 1.1 / 12
+    
+    # Volume average (20-period)
     volume_s = pd.Series(volume)
-    vol_ma = volume_s.rolling(window=30, min_periods=30).mean().values
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily trend filter (1d)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = close_1w > ema50_1w
-    weekly_downtrend = close_1w < ema50_1w
+    close_1d = df_1d['close'].values
+    # Use EMA34 for trend (more responsive than EMA50 for 1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    daily_uptrend = close_1d > ema34_1d
+    daily_downtrend = close_1d < ema34_1d
     
-    # Align weekly trend to daily
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
-    
-    # Volatility filter: avoid high chop (ATR ratio)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.zeros_like(tr)
-    if len(tr) > 0:
-        atr[0] = tr[0]
-        for i in range(1, len(tr)):
-            atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]
-    atr = np.concatenate([np.full(1, np.nan), atr])
-    # ATR ratio: current ATR / 50-period average ATR
-    atr_s = pd.Series(atr)
-    atr_ma = atr_s.rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr / atr_ma
-    # Only trade when ATR ratio < 1.5 (not too volatile)
-    low_volatility = atr_ratio < 1.5
+    # Align daily trend to 12h
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 60
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trix[i]) or np.isnan(vol_ma[i]) or np.isnan(weekly_uptrend_aligned[i]) or
-            np.isnan(weekly_downtrend_aligned[i]) or np.isnan(low_volatility[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_spike = vol_ratio > 2.0
+        volume_confirm = vol_ratio > 1.3
         
-        weekly_up = weekly_uptrend_aligned[i] > 0.5
-        weekly_down = weekly_downtrend_aligned[i] > 0.5
-        low_vol = low_volatility[i]
+        daily_up = daily_uptrend_aligned[i] > 0.5
+        daily_down = daily_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: TRIX bullish crossover + volume spike + weekly uptrend + low volatility
-            if i > 0 and trix[i-1] <= 0 and trix[i] > 0 and volume_spike and weekly_up and low_vol:
+            # Enter long: price breaks above R1 with 1d uptrend and volume confirmation
+            if daily_up and volume_confirm and close[i] > r1[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: TRIX bearish crossover + volume spike + weekly downtrend + low volatility
-            elif i > 0 and trix[i-1] >= 0 and trix[i] < 0 and volume_spike and weekly_down and low_vol:
+            # Enter short: price breaks below S1 with 1d downtrend and volume confirmation
+            elif daily_down and volume_confirm and close[i] < s1[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX turns bearish or volatility spikes
-            if trix[i] < 0 or not low_vol:
+            # Exit long: price moves back below R1 or trend changes
+            if close[i] < r1[i] or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX turns bullish or volatility spikes
-            if trix[i] > 0 or not low_vol:
+            # Exit short: price moves back above S1 or trend changes
+            if close[i] > s1[i] or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
