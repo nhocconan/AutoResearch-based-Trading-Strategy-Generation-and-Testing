@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-# 4h_Three_Signal_Confluence
-# Hypothesis: Combine Donchian breakout, RSI mean reversion, and volume spike as three independent signals.
-# Entry requires all three signals to align, ensuring high-conviction trades.
-# Donchian provides trend-following structure, RSI captures overextended reversals, and volume confirms institutional interest.
-# This triple confluence reduces false signals and keeps trade frequency low (target: 20-40/year).
-# Works in both bull and bear markets by requiring alignment with the primary trend via Donchian,
-# while using RSI to enter on pullbacks within the trend.
+# 1d_Range_Breakout_HTF_Trend
+# Hypothesis: Trade daily breakouts from 20-period range when aligned with weekly trend and volume confirmation.
+# Works in bull/bear by following weekly trend direction. Range breakouts capture momentum after consolidation.
+# Volume filter ensures breakout conviction. Designed for low trade frequency (~15-25/year) to minimize fee drag.
 
-name = "4h_Three_Signal_Confluence"
-timeframe = "4h"
+name = "1d_Range_Breakout_HTF_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mta_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,68 +22,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donchian_period = 20
-    upper_channel = np.zeros(n)
-    lower_channel = np.zeros(n)
-    for i in range(donchian_period-1, n):
-        upper_channel[i] = np.max(high[i-donchian_period+1:i+1])
-        lower_channel[i] = np.min(low[i-donchian_period+1:i+1])
+    # Daily range breakout: Donchian(20) channels
+    period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # RSI (14-period)
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-    avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-    for i in range(rsi_period, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    for i in range(period, n):
+        upper[i] = np.max(high[i-period:i])
+        lower[i] = np.min(low[i-period:i])
     
-    # Volume spike (current > 2.0 * 20-period average)
-    vol_ma = np.zeros(n)
-    for i in range(20-1, n):
-        vol_ma[i] = np.mean(volume[i-20+1:i+1])
-    volume_spike = volume > (2.0 * vol_ma)
+    # Weekly trend filter: EMA(50) on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # Signals
-    donchian_breakout_up = close > upper_channel
-    donchian_breakout_down = close < lower_channel
-    rsi_oversold = rsi < 30
-    rsi_overbought = rsi > 70
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Combined entry conditions
-    long_entry = donchian_breakout_up & rsi_oversold & volume_spike
-    short_entry = donchian_breakout_down & rsi_overbought & volume_spike
+    # Volume confirmation: current volume > 1.5 * 20-day average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(donchian_period, rsi_period, 20)
+    start_idx = 60  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if position == 0:
-            if long_entry[i]:
+            # Long: price breaks above upper band, weekly uptrend, volume confirmation
+            if close[i] > upper[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry[i]:
+            # Short: price breaks below lower band, weekly downtrend, volume confirmation
+            elif close[i] < lower[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
+        
         elif position == 1:
-            # Exit on Donchian reversal or RSI overbought
-            if donchian_breakout_down[i] or rsi[i] > 70:
+            # Exit: price breaks below lower band (range breakdown) or weekly trend turns down
+            if close[i] < lower[i] or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+        
         elif position == -1:
-            # Exit on Donchian reversal or RSI oversold
-            if donchian_breakout_up[i] or rsi[i] < 30:
+            # Exit: price breaks above upper band (range breakout) or weekly trend turns up
+            if close[i] > upper[i] or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
