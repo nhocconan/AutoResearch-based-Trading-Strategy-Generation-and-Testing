@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: 4h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume spike.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter (EMA34) and volume spike.
 # Camarilla levels from 1d provide institutional-grade support/resistance.
-# Breakouts at R3/S3 with trend alignment and volume confirmation capture
-# institutional breakouts while avoiding fakeouts. Works in bull/bear by requiring
-# trend alignment, avoiding counter-trend traps. Targets 50-150 total trades over 4 years.
+# Breakouts at R3/S3 with trend alignment and volume capture institutional moves.
+# Uses 12h timeframe to reduce trade frequency (target: 50-150 total trades over 4 years).
+# Works in bull/bear by requiring trend alignment, avoiding counter-trend traps.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data for Camarilla levels and trend filter
@@ -24,29 +24,21 @@ def generate_signals(prices):
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
     # Calculate 1d Camarilla levels (using previous day's OHLC)
-    # Camarilla: Close ± (High-Low) * multiplier
-    # R3 = Close + (High-Low) * 1.1/2
-    # S3 = Close - (High-Low) * 1.1/2
-    # R4 = Close + (High-Low) * 1.1
-    # S4 = Close - (High-Low) * 1.1
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
     camarilla_r3 = np.full(len(df_1d), np.nan)
     camarilla_s3 = np.full(len(df_1d), np.nan)
-    camarilla_r4 = np.full(len(df_1d), np.nan)
-    camarilla_s4 = np.full(len(df_1d), np.nan)
     
-    for i in range(1, len(df_1d)):  # Start from 1 to use previous day's data
+    for i in range(1, len(df_1d)):
         prev_high = high_1d[i-1]
         prev_low = low_1d[i-1]
         prev_close = close_1d[i-1]
@@ -54,27 +46,23 @@ def generate_signals(prices):
         
         camarilla_r3[i] = prev_close + diff * 1.1 / 2
         camarilla_s3[i] = prev_close - diff * 1.1 / 2
-        camarilla_r4[i] = prev_close + diff * 1.1
-        camarilla_s4[i] = prev_close - diff * 1.1
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
+    # Align Camarilla levels to 12h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume average (6-period for 4h = 1 day)
-    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
+    # Volume average (12-period for 12h = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for Camarilla (1d data) + EMA34 + vol MA
-    start_idx = 50
+    # Warmup: need enough history for 1d data + EMA34 + vol MA
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
