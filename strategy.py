@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Williams_Alligator_Volume_Spike
-Hypothesis: 12h Williams Alligator (jaw-teeth-lips crossover) with weekly trend filter and volume spike.
-Williams Alligator uses smoothed medians to identify trends; works in both bull/bear by following the alignment.
-Weekly trend filter avoids counter-trend trades. Volume spike confirms momentum.
-Target: 12-30 trades/year on 12h to avoid fee drag.
+4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn
+Hypothesis: Camarilla pivot breakout (R3/S3) with 1-day EMA34 trend filter and volume spike.
+Works in both bull/bear markets by using Camarilla levels for breakout entries and EMA34 for trend direction.
+Target: 25-40 trades/year to avoid fee drag.
 """
 
-name = "12h_Williams_Alligator_Volume_Spike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,17 +16,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for Camarilla and EMA
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = df_1d['high'].values
+    low_prev = df_1d['low'].values
+    close_prev = df_1d['close'].values
+    
+    # Camarilla formulas
+    # R4 = C + ((H-L) * 1.5000)
+    # R3 = C + ((H-L) * 1.2500)
+    # S3 = C - ((H-L) * 1.2500)
+    # S4 = C - ((H-L) * 1.5000)
+    camarilla_r3 = close_prev + (high_prev - low_prev) * 1.25
+    camarilla_s3 = close_prev - (high_prev - low_prev) * 1.25
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Get price, volume
     high = prices['high'].values
@@ -35,59 +52,45 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Williams Alligator (13,8,5 smoothed with 8,5,3)
-    # Jaw (13-period SMMA smoothed by 8)
-    sma13 = pd.Series(high + low).rolling(window=13, min_periods=13).mean().values / 2
-    jaw = pd.Series(sma13).rolling(window=8, min_periods=8).mean().values
-    
-    # Teeth (8-period SMMA smoothed by 5)
-    sma8 = pd.Series(high + low).rolling(window=8, min_periods=8).mean().values / 2
-    teeth = pd.Series(sma8).rolling(window=5, min_periods=5).mean().values
-    
-    # Lips (5-period SMMA smoothed by 3)
-    sma5 = pd.Series(high + low).rolling(window=5, min_periods=5).mean().values / 2
-    lips = pd.Series(sma5).rolling(window=3, min_periods=3).mean().values
-    
-    # Volume filter: current volume > 2.0x 20-period EMA
+    # Volume filter: current volume > 1.8x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 2.0
+    volume_filter = volume > vol_ema20 * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Alligator calculation (13+8=21) and weekly EMA (50)
-    start_idx = 50
+    # Warmup: need EMA34 (34)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(jaw[i]) or 
-            np.isnan(teeth[i]) or
-            np.isnan(lips[i]) or
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw (bullish alignment) AND price above weekly EMA50 AND volume spike
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema_50_1w_aligned[i] and volume_filter[i]:
+            # Long: break above R3 with uptrend and volume
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Jaws > Teeth > Lips (bearish alignment) AND price below weekly EMA50 AND volume spike
-            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and close[i] < ema_50_1w_aligned[i] and volume_filter[i]:
+            # Short: break below S3 with downtrend and volume
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Teeth < Lips OR price below weekly EMA50
-            if teeth[i] < lips[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long exit: price back below S3 or trend change
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Teeth > Lips OR price above weekly EMA50
-            if teeth[i] > lips[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short exit: price back above R3 or trend change
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
