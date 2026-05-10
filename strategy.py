@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Breakout_DailyTrend_Volume
-# Hypothesis: Weekly pivot levels provide strong institutional support/resistance.
-# Breakouts above weekly R1 in uptrend or below S1 in downtrend continue with momentum.
-# Uses daily EMA34 for trend filter and volume confirmation to avoid false breakouts.
-# Works in bull markets by following uptrends and bear markets by following downtrends.
-# Target: 15-35 trades/year to minimize fee drag on 6h timeframe.
+# 4h_TRIX_VolumeSpike_Regime - TRIX momentum with volume spike and Chop regime filter
+# Hypothesis: TRIX (Triple Exponential Average) captures momentum shifts. In trending markets,
+# TRIX crossovers signal strong moves. Combined with volume spikes (institutional interest)
+# and Chop regime filter (avoid ranging markets), this should work in both bull and bear
+# by only taking long signals when TRIX > 0 and short when TRIX < 0.
+# Target: 20-40 trades/year to minimize fee drag.
 
-name = "6h_WeeklyPivot_Breakout_DailyTrend_Volume"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,78 +24,78 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Get 12h data for regime filter (Chop)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 35:
-        return np.zeros(n)
+    # Calculate TRIX (15,9,9) - standard settings
+    # TRIX = EMA(EMA(EMA(close, 15), 9), 9)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix = (ema3.pct_change() * 100).values  # TRIX as percentage
     
-    # Calculate weekly pivot levels (using previous week's OHLC)
-    weekly_high = df_weekly['high']
-    weekly_low = df_weekly['low']
-    weekly_close = df_weekly['close']
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * pivot_point - weekly_low
-    weekly_s1 = 2 * pivot_point - weekly_high
+    # Calculate Chop index (14-period) for regime filter
+    # Chop = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) > 0, chop, 50)  # Avoid division by zero
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_daily = pd.Series(df_daily['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align weekly pivots and daily EMA to 6h timeframe
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1.values)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1.values)
-    ema_34_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_34_daily)
-    
-    # Volume confirmation (24-period MA on 6h = 6 days)
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation (20-period MA)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly pivots (10), daily EMA34 (34), volume MA (24)
-    start_idx = max(34, 24)
+    # Warmup: need TRIX (15+9+9=33), Chop (14), volume MA (20)
+    start_idx = max(33, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(ema_34_daily_aligned[i]) or 
+        if (np.isnan(trix[i]) or 
+            np.isnan(chop[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_daily_aligned[i]
-        downtrend = close[i] < ema_34_daily_aligned[i]
+        # Regime filter: Chop > 61.8 = ranging (avoid), Chop < 38.2 = trending
+        trending_regime = chop[i] < 38.2
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R1 + volume
-            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
+            # Long entry: TRIX > 0 (bullish momentum) + trending regime + volume spike
+            if trix[i] > 0 and trending_regime and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S1 + volume
-            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
+            # Short entry: TRIX < 0 (bearish momentum) + trending regime + volume spike
+            elif trix[i] < 0 and trending_regime and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below weekly R1
-            if not uptrend or close[i] < weekly_r1_aligned[i]:
+            # Long exit: TRIX turns negative or regime changes to ranging
+            if trix[i] <= 0 or not trending_regime:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above weekly S1
-            if not downtrend or close[i] > weekly_s1_aligned[i]:
+            # Short exit: TRIX turns positive or regime changes to ranging
+            if trix[i] >= 0 or not trending_regime:
                 signals[i] = 0.0
                 position = 0
             else:
