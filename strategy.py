@@ -1,11 +1,13 @@
-# 6H_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: 6-hour breakouts above/below daily Camarilla R3/S3 levels filtered by 1-day trend (close vs EMA50) and volume confirmation (volume > 1.5x average).
-# Uses 1-day EMA50 for trend filter to avoid counter-trend whipsaws in both bull and bear markets.
-# Target: 12-37 trades/year (50-150 total over 4 years) to stay below 300-trade limit for 6h.
-# Position sizing: 0.25 (25% of capital) for discrete levels to minimize churn.
+#!/usr/bin/env python3
+"""
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Breakouts above/below daily Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
+Trades only in direction of 1d trend to avoid counter-trend whipsaws. Uses discrete position sizing (0.25) to minimize churn.
+Target: 12-37 trades/year (50-150 total) to stay within optimal range.
+"""
 
-name = "6H_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,38 +24,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels (R3/S3)
+    # Daily data for Camarilla pivot levels (R3/S3) and trend filter
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
     # Calculate Camarilla R3 and S3 levels
     range_1d = high_1d - low_1d
     r3_1d = close_1d + 1.1 * range_1d
     s3_1d = close_1d - 1.1 * range_1d
     
-    # 1-day EMA50 for trend filter
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
-        ema50_1d = np.full(len(close_1d), np.nan)
         ema50_1d[49] = np.mean(close_1d[:50])
         alpha = 2 / (50 + 1)
         for i in range(50, len(close_1d)):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
-    else:
-        ema50_1d = np.full(len(close_1d), np.nan)
     
     # Daily volume SMA20 for volume confirmation
-    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
-        vol_sma20_1d = np.full(len(volume_1d), np.nan)
         vol_sma20_1d[19] = np.mean(volume_1d[:20])
         for i in range(20, len(volume_1d)):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    else:
-        vol_sma20_1d = np.full(len(volume_1d), np.nan)
     
-    # Align all indicators to 6h timeframe
+    # Align all indicators to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
@@ -71,8 +69,8 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x average daily volume (scaled to 6h equivalent)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 4.0  # 1 day = 4 x 6h bars
+        # Volume confirmation: current 12h volume > 1.5x average daily volume (scaled to 12h equivalent)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 1 day = 2 x 12h bars
         volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
         # Trend and price relative to Camarilla levels
