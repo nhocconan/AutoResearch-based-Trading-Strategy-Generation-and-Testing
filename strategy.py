@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
+# 12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2
+# Hypothesis: Uses 12h timeframe with 1d timeframe for higher trend confirmation.
+# Enters long when price breaks above daily R3 in uptrend (close > EMA50) with volume > 2x 20-period average.
+# Enters short when price breaks below daily S3 in downtrend (close < EMA50) with volume confirmation.
+# Exits when price returns to opposite level (S3 for long, R3 for short) or trend reverses.
+# Uses daily EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
+# Targets 12-37 trades per year on 12h timeframe with position size 0.25 to minimize fee drag.
 
-"""
-6H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2
-Hypothesis: Uses 6h timeframe with 1d timeframe for higher trend confirmation. 
-Enters long when price breaks above daily R3 in uptrend (close > EMA50) with volume > 2x 20-period average.
-Enters short when price breaks below daily S3 in downtrend (close < EMA50) with volume confirmation.
-Exits when price returns to opposite level (S3 for long, R3 for short) or trend reverses.
-Uses daily EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
-Targets 12-37 trades per year on 6h timeframe with position size 0.25 to minimize fee drag.
-"""
-
-name = "6H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "6h"
+name = "12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -45,11 +42,11 @@ def generate_signals(prices):
     r3_level = prev_close + 1.1 * pivot_range
     s3_level = prev_close - 1.1 * pivot_range
     
-    # Align pivot levels to 6h timeframe (available after 1d bar closes)
+    # Align pivot levels to 12h timeframe (available after 1d bar closes)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume filter: volume > 2x 20-period average on 6h chart
+    # Volume filter: volume > 2x 20-period average on 12h chart
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
