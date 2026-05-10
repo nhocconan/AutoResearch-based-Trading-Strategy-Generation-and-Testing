@@ -1,123 +1,97 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Trend_Slope_Filter
-# Hypothesis: Use 4h and 1d linear regression slopes to determine trend direction, and enter long/short on 1h when price pulls back to 20-period EMA with volume confirmation.
-# In bull markets, 4h/1d slopes are positive; in bear markets, negative. Pullbacks to EMA with volume offer high-probability entries.
-# Trend slope filters avoid whipsaws; volume confirms institutional interest. Designed for low trade frequency (15-30/year) on 1h.
-# Works in both bull and bear by following the higher timeframe trend.
+# 4h_Donchian_Breakout_1dTrend_VolumeConfirm
+# Hypothesis: Price breaking Donchian(20) channels on 4h chart with 1-day trend filter and volume confirmation.
+# Donchian channels capture volatility-based support/resistance; breakouts with volume and daily trend
+# capture sustained moves. Daily trend filter ensures alignment with intermediate-term direction.
+# Volume spike confirms institutional participation. Designed for moderate trade frequency to balance
+# signal quality and fee drag. Targets 20-40 trades per year on 4h timeframe.
 
-name = "1h_4h1d_Trend_Slope_Filter"
-timeframe = "1h"
+name = "4h_Donchian_Breakout_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def _linreg_slope(arr, window):
-    """Calculate linear regression slope over window, returns array same length as input."""
-    if len(arr) < window:
-        return np.full_like(arr, np.nan, dtype=np.float64)
-    slope = np.empty_like(arr, dtype=np.float64)
-    slope[:] = np.nan
-    for i in range(window - 1, len(arr)):
-        y = arr[i - window + 1:i + 1]
-        x = np.arange(window)
-        if np.all(np.isnan(y)):
-            slope[i] = np.nan
-        else:
-            # Use only non-nan points for regression
-            mask = ~np.isnan(y)
-            if np.sum(mask) < 2:
-                slope[i] = np.nan
-            else:
-                x_valid = x[mask]
-                y_valid = y[mask]
-                slope[i] = (len(x_valid) * np.sum(x_valid * y_valid) - np.sum(x_valid) * np.sum(y_valid)) / (len(x_valid) * np.sum(x_valid ** 2) - np.sum(x_valid) ** 2)
-    return slope
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data for trend filter
+    # Get daily data for trend filter and Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate 4h close linear regression slope (20-period)
-    slope_4h = _linreg_slope(df_4h['close'].values, 20)
-    slope_4h_aligned = align_ltf_to_htf(prices, df_4h, slope_4h)
+    # Calculate daily EMA for trend filter (34-period)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 1d close linear regression slope (20-period)
-    slope_1d = _linreg_slope(df_1d['close'].values, 20)
-    slope_1d_aligned = align_ltf_to_htf(prices, df_1d, slope_1d)
+    # Calculate Donchian channels (20-period) from daily data
+    donchian_high = pd.Series(df_1d['high']).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().values
     
-    # 1h 20-period EMA for entry
-    close_series = pd.Series(close)
-    ema_20 = close_series.ewm(span=20, adjust=False, min_periods=20).values
+    # Align Donchian levels to 4h timeframe (use previous day's levels)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Volume confirmation: 20-period volume average
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (20-period MA on 4h chart ≈ 10 days)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 4h/1d slopes, EMA, volume MA
-    start_idx = max(20, 20)
+    # Warmup: need daily EMA (34), Donchian (20), and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(slope_4h_aligned[i]) or np.isnan(slope_1d_aligned[i]) or 
-            np.isnan(ema_20[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: both 4h and 1d slopes must agree
-        uptrend = slope_4h_aligned[i] > 0 and slope_1d_aligned[i] > 0
-        downtrend = slope_4h_aligned[i] < 0 and slope_1d_aligned[i] < 0
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
-        volume_confirm = volume[i] > vol_ma20[i] * 1.5
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Entry conditions: price near 20 EMA (within 0.5%)
-        near_ema = abs(close[i] - ema_20[i]) / ema_20[i] < 0.005
+        # Breakout conditions
+        breakout_long = close[i] > donchian_high_aligned[i]
+        breakout_short = close[i] < donchian_low_aligned[i]
         
         if position == 0:
-            # Long entry: uptrend on 4h/1d + price near EMA + volume
-            if uptrend and near_ema and volume_confirm:
-                signals[i] = 0.20
+            # Long entry: price breaks above Donchian high + daily uptrend + volume spike
+            if breakout_long and uptrend and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend on 4h/1d + price near EMA + volume
-            elif downtrend and near_ema and volume_confirm:
-                signals[i] = -0.20
+            # Short entry: price breaks below Donchian low + daily downtrend + volume spike
+            elif breakout_short and downtrend and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks down or price moves far from EMA
-            if not uptrend or abs(close[i] - ema_20[i]) / ema_20[i] > 0.02:
+            # Long exit: price breaks back below Donchian low or daily trend turns down
+            if close[i] < donchian_low_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks up or price moves far from EMA
-            if not downtrend or abs(close[i] - ema_20[i]) / ema_20[i] > 0.02:
+            # Short exit: price breaks back above Donchian high or daily trend turns up
+            if close[i] > donchian_high_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
