@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses daily Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA trend filter and volume confirmation.
-# Designed for low trade frequency (12-37/year) to minimize fee drag. Works in bull/bear markets by aligning with 1d trend.
-# Entry: Price breaks R1/S1 with volume > 2x average and 1d trend alignment.
-# Exit: Price returns below/above the level or trend reverses.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4
+# Hypothesis: Uses tighter breakout at Camarilla R1/S1 with 1d EMA trend filter and volume confirmation.
+# Designed to reduce trade frequency vs previous version by increasing volume threshold to 2.5x and adding ATR filter.
+# Targets 15-30 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
 # Position size 0.25 for balanced risk.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,12 +23,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and trend filter
+    # Get 1d data for Camarilla pivot levels (using previous day's data)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR for volatility filter (using 12h data)
+    # Calculate ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -44,15 +43,15 @@ def generate_signals(prices):
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate R1 and S1 (tighter levels)
+    # Calculate R1 and S1 (tighter levels than R2/S2)
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Get 1d data for trend filter (EMA34)
+    # Get 1d data for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -75,8 +74,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Stronger volume confirmation and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 2.5
         volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
