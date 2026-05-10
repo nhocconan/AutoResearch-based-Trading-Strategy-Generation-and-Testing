@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 # 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
 # Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
@@ -10,7 +11,7 @@ leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_ata, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
