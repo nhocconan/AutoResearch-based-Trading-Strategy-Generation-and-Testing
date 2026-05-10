@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with 12h EMA trend filter and volume confirmation. 
-# Camarilla levels provide precise intraday support/resistance, 12h EMA filters trend direction, volume reduces false breakouts.
-# Designed for 4h timeframe to balance trade frequency and capture sustained moves in both bull and bear markets.
+# 1h_RSI_Extremes_Volume_Trend
+# Hypothesis: On 1h timeframe, use RSI extremes (below 30 for long, above 70 for short) with 4h trend filter and volume confirmation to capture mean-reversion bounces in ranging markets and pullbacks in trends. Volume ensures genuine momentum, 4h trend avoids counter-trend trades. Designed for 15-30 trades/year to minimize fee drag.
 
-name = "4H_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_RSI_Extremes_Volume_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,38 +20,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 4h trend filter: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from daily OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = close_4h > ema50_4h
+    trend_4h_down = close_4h < ema50_4h
     
-    # Camarilla calculations
-    range_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 12h EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema_12h
-    trend_12h_down = close_12h < ema_12h
-    
-    # Align 12h trend to 4h timeframe
-    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
-    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
     # Volume confirmation: 20-period average
     volume_s = pd.Series(volume)
@@ -62,14 +51,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(rsi[i]) or np.isnan(trend_4h_up_aligned[i]) or 
+            np.isnan(trend_4h_down_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,33 +66,29 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above R1 with 12h uptrend and volume confirmation
-            if (close[i] > camarilla_r1_aligned[i] and 
-                trend_12h_up_aligned[i] > 0.5 and volume_confirm):
-                signals[i] = 0.25
+            # Enter long: RSI < 30 (oversold) with 4h uptrend and volume
+            if (rsi[i] < 30 and trend_4h_up_aligned[i] > 0.5 and volume_confirm):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: price breaks below S1 with 12h downtrend and volume confirmation
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  trend_12h_down_aligned[i] > 0.5 and volume_confirm):
-                signals[i] = -0.25
+            # Enter short: RSI > 70 (overbought) with 4h downtrend and volume
+            elif (rsi[i] > 70 and trend_4h_down_aligned[i] > 0.5 and volume_confirm):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit when price returns below S1 or trend fails
-            if (close[i] < camarilla_s1_aligned[i] or 
-                trend_12h_up_aligned[i] < 0.5):
+            # Exit when RSI returns to neutral (50) or trend fails
+            if (rsi[i] > 50 or trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit when price returns above R1 or trend fails
-            if (close[i] > camarilla_r1_aligned[i] or 
-                trend_12h_down_aligned[i] < 0.5):
+            # Exit when RSI returns to neutral (50) or trend fails
+            if (rsi[i] < 50 or trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
