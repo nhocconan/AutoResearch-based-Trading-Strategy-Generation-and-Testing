@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Camarilla R1/S1 breakout on 12h with 1d EMA34 trend filter and volume confirmation.
-Works in bull/bear by following 1d trend; volatility-based entries reduce false breakouts.
-Target: 12-37 trades/year per symbol with strict entry conditions to minimize fee drag.
+1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+Hypothesis: For 1h timeframe, use 4h trend (EMA50) for signal direction and 1h only for entry timing.
+Enter on hourly close breaking Camarilla R1/S1 levels from previous day with volume confirmation.
+Use 4h EMA50 trend filter to align with higher timeframe bias. Strict conditions to limit trades to 15-30/year.
+Works in bull/bear by following 4h trend; volatility-based entries reduce false breakouts.
+Target: 15-30 trades/year per symbol.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,18 +26,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 4h EMA50 for trend filter (called ONCE before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_50_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 50:
+        ema_50_4h[49] = np.mean(close_4h[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_4h)):
+            ema_50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema_50_4h[i-1]
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate volume SMA(20)
+    # Calculate volume SMA(20) on 1h
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
@@ -43,10 +45,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,7 +60,6 @@ def generate_signals(prices):
         # Calculate Camarilla levels from previous day's OHLC
         if i > 0:
             prev_day_idx = i - 1
-            # Check if previous bar is from previous day
             curr_date = pd.Timestamp(prices['open_time'].iloc[i]).date()
             prev_date = pd.Timestamp(prices['open_time'].iloc[prev_day_idx]).date()
             
@@ -74,34 +75,34 @@ def generate_signals(prices):
                 s1 = pc - (range_ * 1.1 / 12)
                 
                 if position == 0:
-                    # Long: Break above R1 with uptrend and volume confirmation
-                    if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
-                        signals[i] = 0.25
+                    # Long: Break above R1 with uptrend (4h EMA50) and volume confirmation
+                    if close[i] > r1 and close[i] > ema_50_4h_aligned[i] and volume_confirm:
+                        signals[i] = 0.20
                         position = 1
-                    # Short: Break below S1 with downtrend and volume confirmation
-                    elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
-                        signals[i] = -0.25
+                    # Short: Break below S1 with downtrend (4h EMA50) and volume confirmation
+                    elif close[i] < s1 and close[i] < ema_50_4h_aligned[i] and volume_confirm:
+                        signals[i] = -0.20
                         position = -1
                 elif position == 1:
-                    # Exit: Close crosses back below EMA34_1d
-                    if close[i] < ema_34_1d_aligned[i]:
+                    # Exit: Close crosses back below 4h EMA50
+                    if close[i] < ema_50_4h_aligned[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
-                        signals[i] = 0.25
+                        signals[i] = 0.20
                 elif position == -1:
-                    # Exit: Close crosses back above EMA34_1d
-                    if close[i] > ema_34_1d_aligned[i]:
+                    # Exit: Close crosses back above 4h EMA50
+                    if close[i] > ema_50_4h_aligned[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
-                        signals[i] = -0.25
+                        signals[i] = -0.20
             else:
                 # Same day, hold current position
                 if position == 1:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
                 elif position == -1:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
                 else:
                     signals[i] = 0.0
         else:
