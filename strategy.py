@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Range_Filter_Momentum
-Hypothesis: Enter long when RSI(14) > 55 and price > 4h EMA(20); enter short when RSI(14) < 45 and price < 4h EMA(20). Use 1d ADX(14) > 20 to confirm trending regime and avoid ranging markets. Exit on opposite RSI crossover (RSI < 50 for long exit, RSI > 50 for short). This captures momentum in trending markets while avoiding false signals in ranges. RSI provides objective entry/exit levels, EMA(20) filters for trend alignment, and ADX ensures sufficient trend strength. Target: 20-40 trades/year.
+12h_Donchian_Breakout_1dTrend_Volume
+Hypothesis: Price breaks Donchian(20) channel calculated from prior 12h sessions, with confirmation from 1d EMA50 trend and volume spike. Donchian breakouts capture momentum in trending markets, while EMA50 trend filter ensures alignment with higher timeframe direction. Volume confirmation reduces false breakouts. Designed for 12h timeframe to target 12-37 trades/year with low frequency to minimize fee drag. Works in both bull and bear markets by following the trend via EMA50 filter.
 """
 
-name = "4h_RSI_Range_Filter_Momentum"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,108 +22,84 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    for i in range(14, len(gain)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h EMA(20)
-    ema_20 = np.full_like(close, np.nan)
-    if len(close) >= 20:
-        ema_20[19] = np.mean(close[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, len(close)):
-            ema_20[i] = alpha * close[i] + (1 - alpha) * ema_20[i-1]
-    
-    # 1d ADX(14) for trend strength
+    # 1d data for EMA50 trend filter and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate EMA50 on daily closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Directional Movement
-    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    dm_plus = np.concatenate([[np.nan], dm_plus])
-    dm_minus = np.concatenate([[np.nan], dm_minus])
+    # Calculate 20-period SMA of daily volume for volume confirmation
+    vol_sma_20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma_20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma_20_1d[i] = (vol_sma_20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
     
-    # Smoothed values
-    def smooth_wilder(arr, period):
-        smoothed = np.full_like(arr, np.nan)
-        if len(arr) >= period + 1:
-            smoothed[period] = np.nansum(arr[1:period+1])
-            for i in range(period+1, len(arr)):
-                smoothed[i] = smoothed[i-1] - (smoothed[i-1] / period) + arr[i]
-        return smoothed
+    # Calculate Donchian channels from 12h data (using prior completed 12h bar)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    atr = smooth_wilder(tr, 14)
-    dm_plus_smooth = smooth_wilder(dm_plus, 14)
-    dm_minus_smooth = smooth_wilder(dm_minus, 14)
+    # Calculate 20-period Donchian high and low
+    donchian_high_12h = np.full(len(high_12h), np.nan)
+    donchian_low_12h = np.full(len(low_12h), np.nan)
     
-    # DI+ and DI-
-    di_plus = np.divide(dm_plus_smooth, atr, out=np.full_like(dm_plus_smooth, np.nan), where=atr!=0) * 100
-    di_minus = np.divide(dm_minus_smooth, atr, out=np.full_like(dm_minus_smooth, np.nan), where=atr!=0) * 100
+    if len(high_12h) >= 20:
+        for i in range(len(high_12h)):
+            if i >= 19:
+                donchian_high_12h[i] = np.max(high_12h[i-19:i+1])
+                donchian_low_12h[i] = np.min(low_12h[i-19:i+1])
     
-    # DX and ADX
-    dx = np.divide(np.abs(di_plus - di_minus), (di_plus + di_minus), 
-                   out=np.full_like(di_plus, np.nan), where=(di_plus + di_minus)!=0) * 100
-    adx = smooth_wilder(dx, 14)
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align Donchian levels to 12h timeframe (wait for 12h bar to close)
+    donchian_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_high_12h)
+    donchian_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donchian_low_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # warmup for indicators
+    start_idx = 50  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(ema_20[i]) or np.isnan(adx_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i]) or \
+           np.isnan(donchian_high_12h_aligned[i]) or np.isnan(donchian_low_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: ADX > 20 indicates trending market
-        trending = adx_aligned[i] > 20
+        # Volume confirmation: current 12h volume > 1.5x average 12h volume
+        # Approximate 12h volume from 1d: 1d volume / 2 (since 24h/12h = 2)
+        vol_12h_approx = vol_sma_20_1d_aligned[i] / 2.0
+        volume_confirm = volume[i] > 1.5 * vol_12h_approx
         
         if position == 0:
-            # Long: RSI > 55, price above EMA20, in trending market
-            if rsi[i] > 55 and close[i] > ema_20[i] and trending:
+            # Long: Break above Donchian high with uptrend and volume
+            if close[i] > donchian_high_12h_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45, price below EMA20, in trending market
-            elif rsi[i] < 45 and close[i] < ema_20[i] and trending:
+            # Short: Break below Donchian low with downtrend and volume
+            elif close[i] < donchian_low_12h_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI < 50 (momentum fading)
-            if rsi[i] < 50:
+            # Exit: Close below EMA50 (trend reversal)
+            if close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI > 50 (momentum fading)
-            if rsi[i] > 50:
+            # Exit: Close above EMA50 (trend reversal)
+            if close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
