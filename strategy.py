@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""
-4H_Vortex_Vortex_Crossover_1dTrend_Filter_Volume
-Hypothesis: Vortex indicator (VI+ and VI-) identifies trend direction with less whipsaw than moving averages. 
-Combined with 1d trend filter (price vs 50 EMA) and volume confirmation (>2x average) to ensure trades align with higher timeframe momentum. 
-Designed for 4h timeframe to capture strong trends with minimal false signals. 
-Works in both bull and bear markets by following 1d trend direction, avoiding counter-trend trades.
-Target: 20-40 trades/year (<160 total over 4 years) to minimize fee drag.
-"""
+# 4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: Combines proven Camarilla R1/S1 breakouts with 1d EMA34 trend filter and dynamic volume spike (2x average volume).
+# Uses 1d EMA34 for trend direction to work in both bull/bear markets, volume confirmation to avoid false breakouts,
+# and dynamic exits based on price re-entering the Camarilla range. Designed for low trade frequency (target: 20-40/year)
+# with discrete position sizing (0.25) to minimize fee churn. Focuses on BTC/ETH as primary targets.
 
-name = "4H_Vortex_Vortex_Crossover_1dTrend_Filter_Volume"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,80 +23,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (50 EMA)
+    # Get 1d data for EMA trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1d EMA(34) for trend direction
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Vortex Indicator (VI) on 4h data
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate Camarilla levels from prior day's OHLC
+    # R1 = C + ((H-L) * 1.1 / 12)
+    # S1 = C - ((H-L) * 1.1 / 12)
+    camarilla_r1 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
+    camarilla_s1 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
     
-    # VM+ and VM-
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.nan
-    vm_minus[0] = np.nan
+    # Align Camarilla levels to 4h timeframe (use prior day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Sum over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
-    
-    # Volume filter: volume > 2x 20-period average
+    # Volume filter: volume > 2x 20-period average on 4h chart
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and VI
+    start_idx = max(34, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_34_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema_34_aligned[i]
+        price_below_ema = close[i] < ema_34_aligned[i]
         
         if position == 0:
-            # Long entry: VI+ crosses above VI- + above 1d EMA + volume spike
-            if (vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1] and 
+            # Long entry: price breaks above R1 + above 1d EMA34 + volume spike
+            if (close[i] > r1_aligned[i] and 
                 price_above_ema and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: VI- crosses above VI+ + below 1d EMA + volume spike
-            elif (vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1] and 
+            # Short entry: price breaks below S1 + below 1d EMA34 + volume spike
+            elif (close[i] < s1_aligned[i] and 
                   price_below_ema and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: VI- crosses above VI+ or volume drops below average
-            if (vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]) or volume[i] < vol_ma[i]:
+            # Long exit: price breaks back below S1 (re-enters range) or volume drops below average
+            if (close[i] < s1_aligned[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: VI+ crosses above VI- or volume drops below average
-            if (vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]) or volume[i] < vol_ma[i]:
+            # Short exit: price breaks back above R1 (re-enters range) or volume drops below average
+            if (close[i] > r1_aligned[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
