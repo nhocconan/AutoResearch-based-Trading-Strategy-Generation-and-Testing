@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume
-# Hypothesis: 1-hour breakouts from 4-hour Camarilla R1/S1 levels with 4-hour trend filter (EMA21) and 1-day volume confirmation.
-# Uses 4h for signal direction (trend + Camarilla levels) and 1h only for entry timing precision.
-# 1d volume filter ensures breakouts occur with institutional participation, reducing false signals.
-# Designed for 16-35 trades/year on 1h timeframe to avoid fee drag while capturing true breakouts.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume confirmation.
+# Uses breakout confirmation on close of bar + volume > 1.5x 20-day average to reduce false signals.
+# Designed for 12h timeframe to achieve 12-37 trades/year, suitable for both bull and bear markets.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,16 +22,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4-hour data for trend filter and Camarilla levels
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Daily data for EMA34 trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 4-hour EMA21 for trend filter
-    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 4-hour Camarilla levels (based on previous 4h bar)
+    # Camarilla levels (based on previous day)
     def calculate_camarilla(h, l, c):
         typical = (h + l + c) / 3.0
         range_ = h - l
@@ -40,29 +40,25 @@ def generate_signals(prices):
         S1 = c - (range_ * 1.1000 / 12)
         return R1, S1
     
-    R1_4h = np.full_like(close_4h, np.nan)
-    S1_4h = np.full_like(close_4h, np.nan)
-    for i in range(1, len(close_4h)):
-        R1_4h[i], S1_4h[i] = calculate_camarilla(high_4h[i-1], low_4h[i-1], close_4h[i-1])
+    R1 = np.full_like(close_1d, np.nan)
+    S1 = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # 1-day volume confirmation: 20-period average
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    # Daily volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20_1d = mean_arr(volume_1d, 20)
+    vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align 4h indicators to 1h timeframe (wait for 4h bar to close)
-    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
-    R1_4h_aligned = align_htf_to_ltf(prices, df_4h, R1_4h)
-    S1_4h_aligned = align_htf_to_ltf(prices, df_4h, S1_4h)
-    
-    # Align 1d volume to 1h timeframe (wait for 1d bar to close)
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,35 +66,35 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_4h_aligned[i]) or np.isnan(S1_4h_aligned[i]) or \
-           np.isnan(ema_21_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1_4h, above 4h EMA21, strong 1d volume
-            if close[i] > R1_4h_aligned[i] and close[i] > ema_21_4h_aligned[i] and volume[i] > 1.5 * vol_ma_20_1d_aligned[i]:
-                signals[i] = 0.20
+            # Long: price closes above R1, above daily EMA34, strong volume (1.5x avg)
+            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1_4h, below 4h EMA21, strong 1d volume
-            elif close[i] < S1_4h_aligned[i] and close[i] < ema_21_4h_aligned[i] and volume[i] > 1.5 * vol_ma_20_1d_aligned[i]:
-                signals[i] = -0.20
+            # Short: price closes below S1, below daily EMA34, strong volume (1.5x avg)
+            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1_4h or below 4h EMA21
-            if close[i] < S1_4h_aligned[i] or close[i] < ema_21_4h_aligned[i]:
+            # Long exit: price closes below S1 or below daily EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1_4h or above 4h EMA21
-            if close[i] > R1_4h_aligned[i] or close[i] > ema_21_4h_aligned[i]:
+            # Short exit: price closes above R1 or above daily EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
