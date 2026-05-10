@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_1dCamarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Price breaks above Camarilla R3 or below S3 calculated from daily data, with 1d EMA34 trend filter and volume confirmation. Camarilla levels provide institutional support/resistance. Trend filter ensures trades align with daily momentum. Volume confirmation filters false breakouts. Works in bull/bear by trading only in direction of 1d trend. Target: 15-30 trades/year (60-120 total) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Price breaks above Camarilla R1 (long) or below S1 (short) derived from daily levels,
+with daily EMA34 trend filter and volume confirmation. Camarilla levels provide mean-reversion
+boundaries that often act as support/resistance; breakouts from these levels with trend alignment
+capture momentum moves. Volume confirmation filters false breakouts. Works in bull/bear by trading
+only in direction of daily trend. Target: 20-30 trades/year (80-120 total) to minimize fee drag.
 """
 
-name = "12h_1dCamarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,26 +26,22 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels and trend
+    # Daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    camarilla_R3 = np.full(len(close_1d), np.nan)
-    camarilla_S3 = np.full(len(close_1d), np.nan)
+    # Camarilla levels from previous day (using typical price)
+    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    if len(high_1d) >= 2:
-        for i in range(1, len(high_1d)):
-            hl_range = high_1d[i-1] - low_1d[i-1]
-            camarilla_R3[i] = close_1d[i-1] + hl_range * 1.1 / 4
-            camarilla_S3[i] = close_1d[i-1] - hl_range * 1.1 / 4
+    # Camarilla R1 and S1 (most significant levels)
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # 1d EMA34 for trend filter
+    # Daily EMA34 for trend filter
     ema34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
         ema34_1d[33] = np.mean(close_1d[:34])
@@ -49,16 +49,16 @@ def generate_signals(prices):
         for i in range(34, len(close_1d)):
             ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
     
-    # 1d volume SMA20 for volume confirmation
+    # Daily volume SMA20 for volume confirmation
     vol_sma20_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
         vol_sma20_1d[19] = np.mean(volume_1d[:20])
         for i in range(20, len(volume_1d)):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Align 1d indicators to 12h
-    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
-    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    # Align daily indicators to 4h (6 bars per day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
@@ -68,42 +68,42 @@ def generate_signals(prices):
     start_idx = 34  # Wait for EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 12h-equivalent volume from 1d data
-        # 1d bar = 2 x 12h bars, so to get average 12h-equivalent volume from 1d data, divide by 2
-        vol_12h_equiv = vol_sma20_1d_aligned[i] / 2.0
-        volume_confirm = volume[i] > 1.5 * vol_12h_equiv
+        # Volume confirmation: current 4h volume > 1.5x average 4h-equivalent daily volume
+        # 6x 4h bars in 1d, so divide daily volume by 6 to get average 4h bar volume
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
         # Trend and price relative to Camarilla levels
         is_uptrend = close[i] > ema34_1d_aligned[i]
         is_downtrend = close[i] < ema34_1d_aligned[i]
-        price_above_R3 = close[i] > camarilla_R3_aligned[i]
-        price_below_S3 = close[i] < camarilla_S3_aligned[i]
+        price_above_r1 = close[i] > r1_aligned[i]
+        price_below_s1 = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3, in uptrend, with volume
-            if price_above_R3 and is_uptrend and volume_confirm:
+            # Long: price breaks above R1, in uptrend, with volume
+            if price_above_r1 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, in downtrend, with volume
-            elif price_below_S3 and is_downtrend and volume_confirm:
+            # Short: price breaks below S1, in downtrend, with volume
+            elif price_below_s1 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R3 or trend turns down
-            if not price_above_R3 or not is_uptrend:
+            # Exit: price falls back below R1 or trend turns down
+            if not price_above_r1 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S3 or trend turns up
-            if not price_below_S3 or not is_downtrend:
+            # Exit: price rises back above S1 or trend turns up
+            if not price_below_s1 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
