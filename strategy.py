@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume
-# Hypothesis: Weekly pivot levels (R4/S4) provide strong support/resistance. Price breaking above R4 in a weekly uptrend or below S4 in a weekly downtrend indicates momentum. Daily trend filter and volume confirmation reduce false signals. Designed to capture strong trending moves while avoiding chop. Works in bull markets by riding uptrends and in bear markets by following downtrends. Target: 50-150 total trades over 4 years.
+# 4h_Engulfing_Trend_Trig
+# Hypothesis: Bullish/bearish engulfing candles on 4h aligned with daily trend (EMA34) and volume > 1.5x 20-bar MA capture momentum moves. Engulfing patterns signal strong reversals/continuations; trend filter avoids counter-trend trades; volume filter ensures conviction. Works in bull markets by buying dips in uptrend and in bear markets by selling rallies in downtrend. Target: 20-40 trades/year.
 
-name = "12h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Engulfing_Trend_Trig"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,38 +16,33 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # Calculate daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly pivot levels (standard formula)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r4 = weekly_pivot + 3 * (weekly_high - weekly_low)
-    weekly_s4 = weekly_pivot - 3 * (weekly_high - weekly_low)
-    
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4)
-    
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation (20-period MA on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Engulfing detection
+    bullish_engulf = (close > open_) & (open_ < close) & (close >= open_) & (open_ <= close) & \
+                     (close >= open_.shift(1)) & (open_ <= close.shift(1)) & \
+                     (close > close.shift(1)) & (open_ < open_.shift(1))
+    bearish_engulf = (open_ > close) & (close < open_) & (open_ >= close) & (close <= open_) & \
+                     (open_ >= close.shift(1)) & (close <= open_.shift(1)) & \
+                     (open_ > open_.shift(1)) & (close < close.shift(1))
+    # Fix: proper engulfing conditions
+    bullish_engulf = (close > open_) & (open_.shift(1) > close.shift(1)) & (close >= open_.shift(1)) & (open_ <= close.shift(1))
+    bearish_engulf = (open_ > close) & (close.shift(1) > open_.shift(1)) & (open_ >= close.shift(1)) & (close <= open_.shift(1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -58,8 +53,6 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(weekly_r4_aligned[i]) or 
-            np.isnan(weekly_s4_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -70,28 +63,28 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (2.0x MA)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation (>1.5x MA)
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R4 + volume
-            if uptrend and close[i] > weekly_r4_aligned[i] and volume_confirm:
+            # Long entry: bullish engulf + uptrend + volume
+            if bullish_engulf[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S4 + volume
-            elif downtrend and close[i] < weekly_s4_aligned[i] and volume_confirm:
+            # Short entry: bearish engulf + downtrend + volume
+            elif bearish_engulf[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R4
-            if not uptrend or close[i] < weekly_r4_aligned[i]:
+            # Long exit: trend breaks or bearish engulf
+            if not uptrend or bearish_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S4
-            if not downtrend or close[i] > weekly_s4_aligned[i]:
+            # Short exit: trend breaks or bullish engulf
+            if not downtrend or bullish_engulf[i]:
                 signals[i] = 0.0
                 position = 0
             else:
