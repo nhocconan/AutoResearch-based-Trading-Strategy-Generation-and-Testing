@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Ichimoku_Kumo_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking above/below Ichimoku Cloud with daily trend filter and volume confirmation.
-# Ichimoku provides dynamic support/resistance, daily trend avoids counter-trend trades, volume reduces false signals.
-# Designed for low frequency (~20-50 trades/year) to minimize fee drift in both bull and bear markets.
+# 12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, breakout above Camarilla R3 or below S3 with daily trend filter and volume confirmation captures strong moves in both bull and bear markets. Camarilla levels provide strong support/resistance, trend filter avoids counter-trend trades, volume reduces false signals. Designed for low frequency (12-37 trades/year) to minimize fee drag.
 
-name = "4h_Ichimoku_Kumo_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,43 +20,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Ichimoku Cloud: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (26, 52)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
+    # Calculate Camarilla levels from previous day
+    # Using high, low, close of previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (high_series.rolling(window=9, min_periods=9).max() + 
-                  low_series.rolling(window=9, min_periods=9).min()) / 2
+    # Calculate pivot and ranges
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (high_series.rolling(window=26, min_periods=26).max() + 
-                 low_series.rolling(window=26, min_periods=26).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((high_series.rolling(window=52, min_periods=52).max() + 
-                 low_series.rolling(window=52, min_periods=52).min()) / 2).shift(26)
-    
-    # Kumo (Cloud): between Senkou Span A and B
-    # For simplicity, we use the cloud's top and bottom as support/resistance
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    # Camarilla levels
+    r3 = pivot + range_hl * 1.1 / 2
+    s3 = pivot - range_hl * 1.1 / 2
     
     # Daily trend: EMA34 on daily close
-    close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align daily trend to 4h
+    # Align daily data to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
@@ -69,13 +57,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data (accounting for Ichomoku shifts)
-    start_idx = 60
+    # Start after we have enough data
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
-            np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -87,20 +74,20 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above Kumo top with daily uptrend and volume
-            if (close[i] > kumo_top[i] and 
+            # Enter long: price breaks above R3 with daily uptrend and volume
+            if (close[i] > r3_aligned[i] and 
                 trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Kumo bottom with daily downtrend and volume
-            elif (close[i] < kumo_bottom[i] and 
+            # Enter short: price breaks below S3 with daily downtrend and volume
+            elif (close[i] < s3_aligned[i] and 
                   trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns below Kumo bottom or trend fails
-            if (close[i] < kumo_bottom[i] or 
+            # Exit when price returns below R3 or trend fails
+            if (close[i] < r3_aligned[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -108,8 +95,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns above Kumo top or trend fails
-            if (close[i] > kumo_top[i] or 
+            # Exit when price returns above S3 or trend fails
+            if (close[i] > s3_aligned[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
