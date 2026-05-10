@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_RSI_40_60_MeanReversion_1dTrend_Filter
-Hypothesis: In 1h timeframe, mean-reversion at RSI 40-60 levels works when aligned with 1d trend.
-In bull markets: buy RSI<40 in uptrend, sell RSI>60 in uptrend (momentum continuation).
-In bear markets: sell RSI>60 in downtrend, buy RSI<40 in downtrend (trend continuation).
-Uses 1d EMA50 as trend filter to avoid counter-trend trades. Target: 20-40 trades/year.
+6h_WeeklyPivot_Donchian_Breakout
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+Uses weekly pivot levels to determine bias: long when price above weekly pivot, short when below.
+Works in bull/bear by adapting to weekly structure. Target: 12-30 trades/year.
 """
 
-name = "1h_RSI_40_60_MeanReversion_1dTrend_Filter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Donchian_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,84 +16,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # RSI(14) on 1h data
-    def rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0.0)
-        loss = np.where(delta < 0, -delta, 0.0)
-        
-        avg_gain = np.full_like(gain, np.nan)
-        avg_loss = np.full_like(loss, np.nan)
-        
-        if len(gain) >= period:
-            avg_gain[period-1] = np.mean(gain[:period])
-            avg_loss[period-1] = np.mean(loss[:period])
-            for i in range(period, len(gain)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-        rsi_vals = 100 - (100 / (1 + rs))
-        return rsi_vals
+    # Calculate weekly pivot points (standard formula)
+    pivot_1w = np.full(len(close_1w), np.nan)
+    r1_1w = np.full(len(close_1w), np.nan)
+    s1_1w = np.full(len(close_1w), np.nan)
     
-    rsi_vals = rsi(close, 14)
+    valid_idx = ~(np.isnan(high_1w) | np.isnan(low_1w) | np.isnan(close_1w))
+    if np.any(valid_idx):
+        pivot_1w[valid_idx] = (high_1w[valid_idx] + low_1w[valid_idx] + close_1w[valid_idx]) / 3.0
+        r1_1w[valid_idx] = 2 * pivot_1w[valid_idx] - low_1w[valid_idx]
+        s1_1w[valid_idx] = 2 * pivot_1w[valid_idx] - high_1w[valid_idx]
+    
+    # Align weekly pivot to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Donchian(20) on 6h data
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-20:i])
+        lowest_low[i] = np.min(low[i-20:i])
+    
+    # Volume spike: current volume > 2.0x average volume (20-period)
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)  # EMA + RSI warmup
+    start_idx = max(20, 20)  # Donchian + volume warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi_vals[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or \
+           np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi_vals[i]
-        price = close[i]
-        trend = ema_50_1d_aligned[i]
+        # Volume confirmation
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 0:
-            # Long: RSI < 40 (oversold) AND price above 1d EMA (uptrend)
-            # OR RSI > 60 (overbought) AND price below 1d EMA (downtrend continuation short)
-            if rsi_val < 40 and price > trend:
-                signals[i] = 0.20
+            # Long: Break above upper Donchian, above weekly pivot, with volume
+            if close[i] > highest_high[i] and close[i] > pivot_1w_aligned[i] and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            elif rsi_val > 60 and price < trend:
-                signals[i] = -0.20
+            # Short: Break below lower Donchian, below weekly pivot, with volume
+            elif close[i] < lowest_low[i] and close[i] < pivot_1w_aligned[i] and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 60 (overbought) or trend breaks down
-            if rsi_val > 60 or price < trend:
+            # Exit: Close below weekly pivot
+            if close[i] < pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 40 (oversold) or trend breaks up
-            if rsi_val < 40 or price > trend:
+            # Exit: Close above weekly pivot
+            if close[i] > pivot_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
