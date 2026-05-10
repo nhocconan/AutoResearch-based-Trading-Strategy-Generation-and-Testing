@@ -1,9 +1,12 @@
-# 6H_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance; breakouts with 1d trend and volume filter capture strong moves.
-# Works in bull (breakouts) and bear (mean reversion at extremes) with tight entries to avoid overtrading.
+#!/usr/bin/env python3
+# 4h_ThreeBar_Range_Breakout_1dTrend_Volume
+# Hypothesis: Three-bar range breakouts capture low-volatility breakouts with momentum.
+# Uses 1d trend filter and volume confirmation to avoid false breakouts.
+# Works in bull markets via breakouts and in bear via mean-reversion at extremes.
+# Target: 20-40 trades/year per symbol to minimize fee drag.
 
-name = "6H_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_ThreeBar_Range_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and Camarilla pivots
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -31,21 +34,19 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 6h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Camarilla levels from previous 1d bar (R3/S3 = stronger levels)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    range_1d = high_1d - low_1d
-    R3 = close_1d + 1.1 * range_1d / 4
-    S3 = close_1d - 1.1 * range_1d / 4
+    # Three-bar range: min(low) and max(high) of last 3 bars
+    low_min = np.minimum.reduce([low, np.roll(low, 1), np.roll(low, 2)])
+    high_max = np.maximum.reduce([high, np.roll(high, 1), np.roll(high, 2)])
     
-    # Align Camarilla levels to 6h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Shift to avoid look-ahead: use previous bar's three-bar range
+    low_min_prev = np.roll(low_min, 1)
+    high_max_prev = np.roll(high_max, 1)
+    low_min_prev[0:2] = np.nan
+    high_max_prev[0:2] = np.nan
     
     # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
@@ -54,11 +55,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 35
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(low_min_prev[i]) or np.isnan(high_max_prev[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,20 +69,20 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: break above R3 with 1d uptrend and volume spike
-            if (close[i] > R3_aligned[i] and 
+            # Long: break above 3-bar high with 1d uptrend and volume spike
+            if (close[i] > high_max_prev[i] and 
                 trend_1d_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 with 1d downtrend and volume spike
-            elif (close[i] < S3_aligned[i] and 
+            # Short: break below 3-bar low with 1d downtrend and volume spike
+            elif (close[i] < low_min_prev[i] and 
                   trend_1d_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below S3 or trend fails
-            if (close[i] < S3_aligned[i] or 
+            # Exit: close below 3-bar low or trend fails
+            if (close[i] < low_min_prev[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -89,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above R3 or trend fails
-            if (close[i] > R3_aligned[i] or 
+            # Exit: close above 3-bar high or trend fails
+            if (close[i] > high_max_prev[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
