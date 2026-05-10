@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Vortex_Trend_Volume_Confirmation
-# Hypothesis: Vortex indicator identifies trend direction on 12h timeframe; combined with weekly trend filter and volume spike.
-# Vortex > 1 indicates bullish trend, < 1 indicates bearish trend. Weekly trend ensures alignment with higher timeframe momentum.
-# Volume confirmation filters out false breakouts. Designed for low trade frequency (15-25/year) to minimize fee drag.
-# Works in both bull and bear markets by following the dominant trend on multiple timeframes.
+# 4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter
+# Hypothesis: Price breaking Camarilla R1/S1 levels on 4h chart with weekly trend filter and volume confirmation.
+# Uses tighter R1/S1 levels (not extreme R3/S3) for more frequent but still controlled entries.
+# Weekly trend filter ensures alignment with higher timeframe direction.
+# Volume confirmation filters out low-participation breakouts.
+# Designed for moderate trade frequency to balance edge and fee drag.
 
-name = "12h_Vortex_Trend_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1wTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -28,57 +29,40 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
+    # Get daily data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     # Calculate weekly EMA for trend filter (34-period)
     ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Vortex indicator (14-period)
-    # VM+ = |High - Prior Low|
-    # VM- = |Low - Prior High|
-    # Sum of VM+ and VM- over 14 periods
-    # VI+ = Sum(VM+) / Sum(TR)
-    # VI- = Sum(VM-) / Sum(TR)
-    # Where TR = True Range
+    # Calculate daily typical price and range for Camarilla
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_hl = df_1d['high'] - df_1d['low']
     
-    # Calculate true range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # Camarilla R1 and S1 levels (tighter than R3/S3)
+    r1 = typical_price + range_hl * 1.083 / 2
+    s1 = typical_price - range_hl * 1.083 / 2
     
-    # Calculate VM+ and VM-
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    # First values are invalid due to roll
-    vm_plus[0] = np.nan
-    vm_minus[0] = np.nan
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     
-    # Sum over 14 periods
-    sum_vm_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    sum_vm_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Vortex indicators
-    vi_plus = sum_vm_plus / sum_tr
-    vi_minus = sum_vm_minus / sum_tr
-    
-    # Align weekly EMA to 12h timeframe
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation (24-period MA on 12h chart ≈ 12 days)
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume confirmation (20-period MA on 4h chart)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Vortex (14), weekly EMA (34), volume MA (24)
-    start_idx = max(14, 34, 24)
+    # Warmup: need weekly EMA (34), volume MA (20), and Camarilla (need at least 1 day)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,32 +72,32 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1w_aligned[i]
         downtrend = close[i] < ema_34_1w_aligned[i]
         
-        # Vortex trend strength
-        bullish_vortex = vi_plus[i] > vi_minus[i] and vi_plus[i] > 1.0
-        bearish_vortex = vi_minus[i] > vi_plus[i] and vi_minus[i] > 1.0
-        
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
+        # Breakout conditions
+        breakout_long = close[i] > r1_aligned[i]
+        breakout_short = close[i] < s1_aligned[i]
+        
         if position == 0:
-            # Long entry: bullish Vortex + weekly uptrend + volume spike
-            if bullish_vortex and uptrend and volume_confirm:
+            # Long entry: price breaks above R1 + weekly uptrend + volume spike
+            if breakout_long and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish Vortex + weekly downtrend + volume spike
-            elif bearish_vortex and downtrend and volume_confirm:
+            # Short entry: price breaks below S1 + weekly downtrend + volume spike
+            elif breakout_short and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Vortex turns bearish or weekly trend turns down
-            if not bullish_vortex or not uptrend:
+            # Long exit: price breaks back below R1 or weekly trend turns down
+            if close[i] < r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Vortex turns bullish or weekly trend turns up
-            if not bearish_vortex or not downtrend:
+            # Short exit: price breaks back above S1 or weekly trend turns up
+            if close[i] > s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
