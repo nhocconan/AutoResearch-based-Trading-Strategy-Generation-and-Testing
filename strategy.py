@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Price breaks Camarilla R3/S3 levels (from 1d) with 1d trend filter (EMA50) and volume spike confirmation.
-Long when close > R3 and above 1d EMA50 with volume spike; short when close < S3 and below 1d EMA50 with volume spike.
-Works in bull/bear by trading breakouts in direction of higher timeframe trend.
-Target: 15-30 trades/year (60-120 total) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend
+Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
+Camarilla levels act as intraday support/resistance; breakouts with volume and trend alignment capture directional moves.
+Works in bull/bear by filtering trades in direction of daily trend.
+Target: 25-40 trades/year (100-160 total) to minimize fee drag.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,14 +30,10 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_range = high_1d - low_1d
-    r3 = close_1d + 1.1 * camarilla_range / 2
-    s3 = close_1d - 1.1 * camarilla_range / 2
+    # Camarilla levels from prior day: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
     # 1d EMA50 for trend filter
     ema50_1d = np.full(len(close_1d), np.nan)
@@ -48,15 +44,15 @@ def generate_signals(prices):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
     # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d = np.full(len(df_1d), np.nan)
+    if len(df_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(df_1d['volume'].values[:20])
+        for i in range(20, len(df_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + df_1d['volume'].values[i]) / 20
     
-    # Align 1d indicators to 12h (2 bars per day)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align 1d indicators to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
@@ -66,41 +62,41 @@ def generate_signals(prices):
     start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 2x average 1d volume (scaled)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h bars in 1d
-        volume_confirm = volume[i] > 2.0 * vol_1d_scaled
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
         # Trend and price relative to Camarilla levels
         is_uptrend = close[i] > ema50_1d_aligned[i]
         is_downtrend = close[i] < ema50_1d_aligned[i]
-        price_above_r3 = close[i] > r3_aligned[i]
-        price_below_s3 = close[i] < s3_aligned[i]
+        price_above_r1 = close[i] > r1_aligned[i]
+        price_below_s1 = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3, in uptrend, with volume spike
-            if price_above_r3 and is_uptrend and volume_confirm:
+            # Long: price breaks above R1, in uptrend, with volume
+            if price_above_r1 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, in downtrend, with volume spike
-            elif price_below_s3 and is_downtrend and volume_confirm:
+            # Short: price breaks below S1, in downtrend, with volume
+            elif price_below_s1 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R3 or trend turns down
-            if not price_above_r3 or not is_uptrend:
+            # Exit: price falls back below R1 or trend turns down
+            if not price_above_r1 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S3 or trend turns up
-            if not price_below_s3 or not is_downtrend:
+            # Exit: price rises back above S1 or trend turns up
+            if not price_below_s1 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
