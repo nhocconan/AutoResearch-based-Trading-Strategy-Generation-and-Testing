@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
-# 6h_Ichimoku_Cloud_Twist_1dTrend
-# Hypothesis: Use Ichimoku cloud twist (Tenkan/Kijun cross) on 6-timeframe for entry signals, filtered by 1-day trend (price above/below Kumo cloud).
-# The cloud acts as dynamic support/resistance, reducing whipsaws in sideways markets.
-# Trend filter ensures alignment with higher-timeframe momentum, improving signal quality in both bull and bear markets.
-# Target: 15-35 trades/year to stay within optimal trade frequency for 6h.
+# 4h_HTF_Breaker_Block_Demand_Supply
+# Hypothesis: Identify supply/demand zones on 1d (via swing highs/lows) and trade breakouts on 4h
+# when price breaks above/below these zones with volume confirmation. Uses 1d swing points as
+# dynamic support/resistance. Works in both bull and bear markets by trading breaks of
+# institutional levels. Target: 20-40 trades/year.
 
-name = "6h_Ichimoku_Cloud_Twist_1dTrend"
-timeframe = "6h"
+name = "4h_HTF_Breaker_Block_Demand_Supply"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,115 +22,86 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
-    
-    # Tenkan-sen (Conversion Line): (highest high + lowest low) / 2 over last 9 periods
-    def rolling_max(arr, window):
-        return np.maximum.accumulate(np.where(np.arange(len(arr)) < window-1, np.nan, arr))[window-1:] if len(arr) >= window else np.full_like(arr, np.nan)
-    
-    def rolling_min(arr, window):
-        return np.minimum.accumulate(np.where(np.arange(len(arr)) < window-1, np.nan, arr))[window-1:] if len(arr) >= window else np.full_like(arr, np.nan)
-    
-    # Calculate Tenkan-sen
-    max_tenkan = pd.Series(high).rolling(window=tenkan_period, min_periods=tenkan_period).max().values
-    min_tenkan = pd.Series(low).rolling(window=tenkan_period, min_periods=tenkan_period).min().values
-    tenkan_sen = (max_tenkan + min_tenkan) / 2
-    
-    # Calculate Kijun-sen (Base Line)
-    max_kijun = pd.Series(high).rolling(window=kijun_period, min_periods=kijun_period).max().values
-    min_kijun = pd.Series(low).rolling(window=kijun_period, min_periods=kijun_period).min().values
-    kijun_sen = (max_kijun + min_kijun) / 2
-    
-    # Calculate Senkou Span A (Leading Span A)
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
-    
-    # Calculate Senkou Span B (Leading Span B)
-    max_senkou_b = pd.Series(high).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max().values
-    min_senkou_b = pd.Series(low).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min().values
-    senkou_span_b = (max_senkou_b + min_senkou_b) / 2
-    
-    # Chikou Span (Lagging Span) - not used for signals but calculated for completeness
-    # chikou_span = np.roll(close, -kijun_period)  # Not used in signal logic
-    
-    # 1-day trend filter: price relative to Ichimoku cloud from 1-day timeframe
+    # 1d swing points for supply/demand zones
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < senkou_span_b_period:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on 1d
+    # Find swing highs and lows on 1d (3-bar lookback/forward)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    max_tenkan_1d = pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max().values
-    min_tenkan_1d = pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min().values
-    tenkan_sen_1d = (max_tenkan_1d + min_tenkan_1d) / 2
+    swing_high = np.zeros(len(high_1d), dtype=bool)
+    swing_low = np.zeros(len(low_1d), dtype=bool)
     
-    max_kijun_1d = pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max().values
-    min_kijun_1d = pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min().values
-    kijun_sen_1d = (max_kijun_1d + min_kijun_1d) / 2
+    for i in range(2, len(high_1d) - 2):
+        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
+            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
+            swing_high[i] = True
+        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
+            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
+            swing_low[i] = True
     
-    senkou_span_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2)
+    # Create supply (from swing highs) and demand (from swing lows) zones
+    supply_zones = np.full(len(high_1d), np.nan)
+    demand_zones = np.full(len(low_1d), np.nan)
     
-    max_senkou_b_1d = pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max().values
-    min_senkou_b_1d = pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min().values
-    senkou_span_b_1d = (max_senkou_b_1d + min_senkou_b_1d) / 2
+    for i in range(len(high_1d)):
+        if swing_high[i]:
+            supply_zones[i] = high_1d[i]  # Supply at swing high
+        if swing_low[i]:
+            demand_zones[i] = low_1d[i]   # Demand at swing low
     
-    # Align 1d Ichimoku components to 6h timeframe
-    senkou_span_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d)
-    senkou_span_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d)
+    # Forward fill zones to create continuous levels
+    supply_zones = pd.Series(supply_zones).ffill().bfill().values
+    demand_zones = pd.Series(demand_zones).ffill().bfill().values
     
-    # Determine trend based on 1d cloud: price above cloud = uptrend, below cloud = downtrend
-    # Cloud top = max(senkou_span_a, senkou_span_b), cloud bottom = min(senkou_span_a, senkou_span_b)
-    cloud_top_1d = np.maximum(senkou_span_a_1d_aligned, senkou_span_b_1d_aligned)
-    cloud_bottom_1d = np.minimum(senkou_span_a_1d_aligned, senkou_span_b_1d_aligned)
+    # Align to 4h timeframe
+    supply_zones_aligned = align_htf_to_ltf(prices, df_1d, supply_zones)
+    demand_zones_aligned = align_htf_to_ltf(prices, df_1d, demand_zones)
     
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume confirmation: current volume > 1.8 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.5 * vol_ma)
+    volume_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(tenkan_period, kijun_period, senkou_span_b_period, 20)
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        # Skip if any required values are NaN
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
-            np.isnan(cloud_top_1d[i]) or np.isnan(cloud_bottom_1d[i]) or
+        if (np.isnan(supply_zones_aligned[i]) or np.isnan(demand_zones_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        current_price = close[i]
+        supply_level = supply_zones_aligned[i]
+        demand_level = demand_zones_aligned[i]
+        
         if position == 0:
-            # Long: Tenkan crosses above Kijun (bullish twist) AND price above 1d cloud AND volume confirmation
-            if (tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1] and
-                close[i] > cloud_top_1d[i] and volume_filter[i]):
+            # Long: Break above supply zone with volume
+            if current_price > supply_level and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan crosses below Kijun (bearish twist) AND price below 1d cloud AND volume confirmation
-            elif (tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1] and
-                  close[i] < cloud_bottom_1d[i] and volume_filter[i]):
+            # Short: Break below demand zone with volume
+            elif current_price < demand_level and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Tenkan crosses below Kijun (bearish twist) OR price breaks below 1d cloud
-            if (tenkan_sen[i] < kijun_sen[i] and tenkan_sen[i-1] >= kijun_sen[i-1]) or \
-               close[i] < cloud_bottom_1d[i]:
+            # Long: Exit when price breaks below demand zone (support)
+            if current_price < demand_level:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Tenkan crosses above Kijun (bullish twist) OR price breaks above 1d cloud
-            if (tenkan_sen[i] > kijun_sen[i] and tenkan_sen[i-1] <= kijun_sen[i-1]) or \
-               close[i] > cloud_top_1d[i]:
+            # Short: Exit when price breaks above supply zone (resistance)
+            if current_price > supply_level:
                 signals[i] = 0.0
                 position = 0
             else:
