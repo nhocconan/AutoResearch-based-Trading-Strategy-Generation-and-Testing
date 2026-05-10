@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_PerformanceIndex_Momentum_1wTrend
-# Hypothesis: Long when Performance Index crosses above 0 with volume > 1.3x average in uptrend (price > 1w EMA50).
-# Short when Performance Index crosses below 0 with volume > 1.3x average in downtrend (price < 1w EMA50).
-# Exit when PI crosses back across zero or ATR-based stoploss hit.
-# Uses Performance Index (ROC-based momentum) to capture trend changes, works in both bull and bear markets.
-# Designed for 12-37 trades/year to avoid fee drag.
+# 4h_ChoppinessIndex_Regime_Breakout
+# Hypothesis: In trending regimes (Choppiness Index < 38.2), trade Donchian(20) breakouts with volume confirmation.
+# In ranging regimes (Choppiness Index > 61.8), fade the extremes (sell at upper band, buy at lower band).
+# Uses 12h EMA50 to filter breakout direction in trending markets. Designed for 20-40 trades/year to avoid fee drag.
+# Works in both bull and bear markets by adapting to market regime.
 
-name = "12h_PerformanceIndex_Momentum_1wTrend"
-timeframe = "12h"
+name = "4h_ChoppinessIndex_Regime_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(14) for Donchian and stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -33,26 +32,30 @@ def generate_signals(prices):
     for i in range(14, n):
         atr[i] = np.nanmean(tr[i-13:i+1])
     
-    # Performance Index: ROC(12) - ROC(25) normalized by ATR(14)
-    roc12 = np.full(n, np.nan)
-    roc25 = np.full(n, np.nan)
-    for i in range(25, n):
-        if close[i-12] != 0 and close[i-25] != 0:
-            roc12[i] = (close[i] - close[i-12]) / close[i-12]
-            roc25[i] = (close[i] - close[i-25]) / close[i-25]
-    pi = roc12 - roc25
-    # Normalize by ATR to make it scale-invariant
-    pi_norm = np.full(n, np.nan)
-    for i in range(25, n):
-        if not np.isnan(atr[i]) and atr[i] > 0:
-            pi_norm[i] = pi[i] / atr[i]
+    # Donchian Channel (20)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
-    # Get 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Choppiness Index (14)
+    chop = np.full(n, np.nan)
+    for i in range(14, n):
+        sum_tr = np.nansum(tr[i-13:i+1])
+        hh = np.max(high[i-13:i+1])
+        ll = np.min(low[i-13:i+1])
+        if hh > ll and sum_tr > 0:
+            chop[i] = 100 * np.log10(sum_tr / (hh - ll)) / np.log10(14)
+        else:
+            chop[i] = np.nan
     
-    # Volume average (20 periods)
+    # Get 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Volume average (20)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.nanmean(volume[i-20:i])
@@ -60,39 +63,48 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure sufficient warmup
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(pi_norm[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(chop[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trade only in direction of 1w EMA50 trend
-            if close[i] > ema_50_1w_aligned[i]:  # Uptrend
-                # Long: PI crosses above zero with volume confirmation
-                if pi_norm[i] > 0 and pi_norm[i-1] <= 0 and volume[i] > 1.3 * vol_ma[i]:
+            # Trending market: Chop < 38.2 -> trade breakouts
+            if chop[i] < 38.2:
+                # Long breakout with volume confirmation and trend filter
+                if close[i] > upper[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_50_12h_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            else:  # Downtrend
-                # Short: PI crosses below zero with volume confirmation
-                if pi_norm[i] < 0 and pi_norm[i-1] >= 0 and volume[i] > 1.3 * vol_ma[i]:
+                # Short breakdown with volume confirmation and trend filter
+                elif close[i] < lower[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_50_12h_aligned[i]:
                     signals[i] = -0.25
                     position = -1
+            # Ranging market: Chop > 61.8 -> fade extremes
+            elif chop[i] > 61.8:
+                # Sell at upper band (assume reversal)
+                if close[i] > upper[i] and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = -0.25
+                    position = -1
+                # Buy at lower band (assume reversal)
+                elif close[i] < lower[i] and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = 0.25
+                    position = 1
         
         elif position == 1:
-            # Exit: PI crosses back below zero or stoploss hit
-            if pi_norm[i] < 0 or (i > 0 and low[i] < close[i-1] - 2.0 * atr[i-1]):
+            # Exit: Price re-enters Donchian channel or stoploss hit
+            if close[i] < upper[i] or (i > 0 and low[i] < upper[i] - 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: PI crosses back above zero or stoploss hit
-            if pi_norm[i] > 0 or (i > 0 and high[i] > close[i-1] + 2.0 * atr[i-1]):
+            # Exit: Price re-enters Donchian channel or stoploss hit
+            if close[i] > lower[i] or (i > 0 and high[i] > lower[i] + 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
