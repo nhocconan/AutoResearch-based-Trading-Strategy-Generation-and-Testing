@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: On 12-hour timeframe, price breaking above Camarilla R3 level or below S3 level with daily trend filter (EMA34) and volume confirmation captures sustained moves. Daily trend avoids counter-trend trades, volume reduces false breakouts. Designed for low frequency (12-37 trades/year) to minimize fee drift.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS
+# Hypothesis: Combines Camarilla R1/S1 breakout levels from daily pivot with EMA34 trend filter on daily and volume confirmation. This structure targets sustained moves while avoiding counter-trend trades. Designed for low frequency (20-40 trades/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,49 +20,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter and Camarilla calculation
+    # Daily data for Camarilla pivot and EMA trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily close series for EMA34 trend
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
-    
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: R3 = close + (high - low) * 1.1/2, S3 = close - (high - low) * 1.1/2
-    # We use previous day's data to avoid lookahead
+    # Daily high, low, close for Camarilla calculation
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
-    camarilla_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 2
+    # Calculate Camarilla levels (R1, S1) from previous day
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    cam_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    cam_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align daily trend and Camarilla levels to 12h timeframe
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    cam_r1_aligned = align_htf_to_ltf(prices, df_1d, cam_r1)
+    cam_s1_aligned = align_htf_to_ltf(prices, df_1d, cam_s1)
     
-    # Volume confirmation: 20-period average on 12h
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation: 20-period average on 4h
     volume_s = pd.Series(volume)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
+    # Start after we have enough data
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(cam_r1_aligned[i]) or np.isnan(cam_s1_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,30 +67,30 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: break above Camarilla R3 with daily uptrend and volume
-            if (close[i] > camarilla_r3_aligned[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: break above Camarilla R1 with price above EMA34 and volume
+            if (close[i] > cam_r1_aligned[i] and 
+                close[i] > ema34_aligned[i] and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below Camarilla S3 with daily downtrend and volume
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: break below Camarilla S1 with price below EMA34 and volume
+            elif (close[i] < cam_s1_aligned[i] and 
+                  close[i] < ema34_aligned[i] and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to Camarilla S3 or trend fails
-            if (close[i] < camarilla_s3_aligned[i] or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit when price returns to Camarilla S1 or goes below EMA34
+            if (close[i] < cam_s1_aligned[i] or 
+                close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to Camarilla R3 or trend fails
-            if (close[i] > camarilla_r3_aligned[i] or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit when price returns to Camarilla R1 or goes above EMA34
+            if (close[i] > cam_r1_aligned[i] or 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
