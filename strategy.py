@@ -1,27 +1,16 @@
 #!/usr/bin/env python3
-# 6h_Weekly_Pivot_Reversal_With_Volume
-# Hypothesis: Weekly pivot levels act as strong support/resistance in crypto markets.
-# Price often reverses when approaching weekly S1/R1 or breaks through S2/R2 with momentum.
-# We use weekly pivot points (calculated from prior week) and enter on rejection of S1/R1
-# or breakout of S2/R2 with volume confirmation. Works in both trending and ranging markets.
-# Weekly timeframe provides structural context while 6h entries capture shorter-term moves.
+# 12h_WR_Trend_With_1wTrend
+# Hypothesis: Williams %R on 12h timeframe combined with 1-week EMA trend filter provides robust entries in both bull and bear markets. 
+# Williams %R identifies overbought/oversold conditions for mean reversion entries, while the weekly EMA ensures we trade with the higher timeframe trend. 
+# Volume confirmation filters out low-conviction signals. This combination should work in ranging markets (via mean reversion) and trending markets (via trend alignment).
 
-name = "6h_Weekly_Pivot_Reversal_With_Volume"
-timeframe = "6h"
+name = "12h_WR_Trend_With_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
-
-def calculate_weekly_pivots(high, low, close):
-    """Calculate weekly pivot points: P, R1, S1, R2, S2"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, s1, r2, s2
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,93 +22,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 5:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points from prior week's data
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate Williams %R on 12h chart (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Calculate pivots for each week
-    pivots = np.full_like(weekly_close, np.nan)
-    r1_vals = np.full_like(weekly_close, np.nan)
-    s1_vals = np.full_like(weekly_close, np.nan)
-    r2_vals = np.full_like(weekly_close, np.nan)
-    s2_vals = np.full_like(weekly_close, np.nan)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    for i in range(1, len(weekly_close)):  # Start from 1 to use prior week
-        pivot, r1, s1, r2, s2 = calculate_weekly_pivots(
-            weekly_high[i-1], weekly_low[i-1], weekly_close[i-1]
-        )
-        pivots[i] = pivot
-        r1_vals[i] = r1
-        s1_vals[i] = s1
-        r2_vals[i] = r2
-        s2_vals[i] = s2
-    
-    # Align weekly pivots to 6h timeframe (with 1-week delay for prior week data)
-    pivots_aligned = align_ltf_to_htf(prices, df_weekly, pivots)
-    r1_aligned = align_ltf_to_htf(prices, df_weekly, r1_vals)
-    s1_aligned = align_ltf_to_htf(prices, df_weekly, s1_vals)
-    r2_aligned = align_ltf_to_htf(prices, df_weekly, r2_vals)
-    s2_aligned = align_ltf_to_htf(prices, df_weekly, s2_vals)
-    
-    # Volume confirmation (20-period MA on 6h chart)
+    # Volume confirmation (20-period MA on 12h chart)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly data alignment and volume MA
-    start_idx = 20
+    # Warmup: need Williams %R (14), weekly EMA (50), volume MA (20)
+    start_idx = max(14, 50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(pivots_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(wr[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Price action relative to weekly pivot levels
-        at_s1 = abs(close[i] - s1_aligned[i]) / s1_aligned[i] < 0.005  # Within 0.5% of S1
-        at_r1 = abs(close[i] - r1_aligned[i]) / r1_aligned[i] < 0.005  # Within 0.5% of R1
-        above_r2 = close[i] > r2_aligned[i]  # Above R2
-        below_s2 = close[i] < s2_aligned[i]  # Below S2
+        # Weekly trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
+        # Williams %R conditions
+        wr_oversold = wr[i] < -80  # Oversold condition for long
+        wr_overbought = wr[i] > -20  # Overbought condition for short
+        
         if position == 0:
-            # Long entry: rejection of S1 (bounce) or breakout of R2 with volume
-            if (at_s1 and close[i] > close[i-1]) or (above_r2 and volume_confirm):
+            # Long entry: uptrend + Williams %R oversold + volume
+            if uptrend and wr_oversold and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: rejection of R1 (reversal) or breakdown of S2 with volume
-            elif (at_r1 and close[i] < close[i-1]) or (below_s2 and volume_confirm):
+            # Short entry: downtrend + Williams %R overbought + volume
+            elif downtrend and wr_overbought and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: rejection of R1 or breakdown below pivot
-            if at_r1 and close[i] < close[i-1]:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] < pivots_aligned[i]:
+            # Long exit: trend breaks or Williams %R returns from oversold
+            if not uptrend or wr[i] > -50:  # Exit when WR returns above -50
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: rejection of S1 or breakout above pivot
-            if at_s1 and close[i] > close[i-1]:
-                signals[i] = 0.0
-                position = 0
-            elif close[i] > pivots_aligned[i]:
+            # Short exit: trend breaks or Williams %R returns from overbought
+            if not downtrend or wr[i] < -50:  # Exit when WR returns below -50
                 signals[i] = 0.0
                 position = 0
             else:
