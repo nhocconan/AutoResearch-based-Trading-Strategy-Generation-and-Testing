@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dVWAP_Trend_Volume
-# Hypothesis: Uses Camarilla pivot levels (R3/S3) from daily pivot points with volume confirmation and 1d VWAP trend filter.
-# Enters long on break above R3 with volume spike and price above 1d VWAP (uptrend).
-# Enters short on break below S3 with volume spike and price below 1d VWAP (downtrend).
-# Exits when price returns to the daily VWAP or reverses past the opposite Camarilla level.
-# Designed for 20-35 trades/year on 4h to avoid overtrading and work in both bull and bear markets.
-# Uses Camarilla levels for institutional reference points and volume for confirmation.
+# 1d_Weekly_RSI_Reversal_With_Volume_Confirmation
+# Hypothesis: Uses weekly RSI(14) to detect overbought/oversold conditions on the weekly chart,
+# combined with daily volume spikes to confirm reversals. Enters long when weekly RSI < 30 and
+# daily volume > 1.5x 20-day average volume. Enters short when weekly RSI > 70 and volume spike.
+# Exits when RSI returns to neutral zone (40-60). Designed for low-frequency, high-conviction
+# trades to avoid overtrading and work in both bull and bear markets by catching extremes.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dVWAP_Trend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_RSI_Reversal_With_Volume_Confirmation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,84 +19,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily VWAP calculation (typical price * volume) / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
-    # Avoid division by zero
-    vwap = np.where(vwap_den == 0, typical_price, vwap)
+    # Calculate 20-day average volume for volume spike filter
+    vol_avg_20 = np.zeros(n)
+    vol_sum = 0.0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i - 20]
+        if i >= 19:  # Start from index 19 (20th element)
+            vol_avg_20[i] = vol_sum / 20.0
     
-    # Daily OHLC for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # Get weekly data for RSI calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2.0
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    # Calculate weekly RSI(14)
+    delta = np.diff(close_1w)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    avg_gain = np.zeros_like(close_1w)
+    avg_loss = np.zeros_like(close_1w)
     
-    # Align 1d VWAP to 4h timeframe
-    # Calculate VWAP for each 1d bar
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_num_1d = np.cumsum(typical_price_1d * df_1d['volume'].values)
-    vwap_den_1d = np.cumsum(df_1d['volume'].values)
-    vwap_1d = vwap_num_1d / vwap_den_1d
-    vwap_1d = np.where(vwap_den_1d == 0, typical_price_1d, vwap_1d)
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Initial average gain/loss
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Volume spike detection: current volume > 1.5 * 20-period average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    # Wilder's smoothing
+    for i in range(14, len(close_1w)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.zeros_like(close_1w)
+    rsi_1w = np.zeros_like(close_1w)
+    for i in range(14, len(close_1w)):
+        if avg_loss[i] != 0:
+            rs[i] = avg_gain[i] / avg_loss[i]
+            rsi_1w[i] = 100 - (100 / (1 + rs[i]))
+        else:
+            rsi_1w[i] = 100.0  # Avoid division by zero
+    
+    # Align weekly RSI to daily timeframe
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient warmup for volume MA
+    start_idx = 20  # Ensure sufficient warmup for volume average
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or np.isnan(volume_spike[i]):
+        if np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume spike condition: current volume > 1.5x 20-day average
+        volume_spike = volume[i] > 1.5 * vol_avg_20[i]
+        
         if position == 0:
-            # Long: Price breaks above R3 with volume spike and above 1d VWAP (uptrend)
-            if close[i] > camarilla_r3_aligned[i] and volume_spike[i] and close[i] > vwap_1d_aligned[i]:
+            # Long: Oversold weekly RSI + volume spike
+            if rsi_1w_aligned[i] < 30 and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume spike and below 1d VWAP (downtrend)
-            elif close[i] < camarilla_s3_aligned[i] and volume_spike[i] and close[i] < vwap_1d_aligned[i]:
+            # Short: Overbought weekly RSI + volume spike
+            elif rsi_1w_aligned[i] > 70 and volume_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns to VWAP or breaks below S3 (reversal signal)
-            if close[i] <= vwap_1d_aligned[i] or close[i] < camarilla_s3_aligned[i]:
+            # Exit: RSI returns to neutral zone (40-60)
+            if rsi_1w_aligned[i] >= 40:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns to VWAP or breaks above R3 (reversal signal)
-            if close[i] >= vwap_1d_aligned[i] or close[i] > camarilla_r3_aligned[i]:
+            # Exit: RSI returns to neutral zone (40-60)
+            if rsi_1w_aligned[i] <= 60:
                 signals[i] = 0.0
                 position = 0
             else:
