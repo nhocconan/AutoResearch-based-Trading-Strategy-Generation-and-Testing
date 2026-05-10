@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: 4H breakout of Camarilla R1/S1 levels with 12H EMA50 trend filter and volume confirmation.
-# The Camarilla pivot system identifies key intraday support/resistance levels.
-# Combining with higher timeframe trend (12H) and volume confirmation filters false breakouts.
-# Designed for 4H timeframe to target 20-50 trades/year, minimizing fee drag while capturing
-# sustained moves in both bull and bear markets. Works by buying strength in uptrends and
-# selling weakness in downtrends, avoiding counter-trend trades.
+# 1h_4h_1d_Trend_Filtered_Momentum
+# Hypothesis: Combines 4h trend (EMA21 vs EMA50) and 1d momentum (ROC10) to filter 1h breakouts.
+# Enters long when 1h price breaks above 4h EMA21 with 4h uptrend and positive 1d momentum.
+# Enters short when 1h price breaks below 4h EMA21 with 4h downtrend and negative 1d momentum.
+# Uses session filter (08-20 UTC) to avoid low-liquidity hours. Position size 0.20.
+# Designed for 15-30 trades/year to minimize fee drag while capturing trending moves.
 
-name = "4H_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_4h_1d_Trend_Filtered_Momentum"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,94 +22,92 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # 12H data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Daily data for Camarilla pivot calculation (using previous day's OHLC)
+    # 4h EMA21 and EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = ema21_4h > ema50_4h
+    trend_4h_down = ema21_4h < ema50_4h
+    
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    
+    # 1d data for momentum filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need to align these levels to the 4H chart
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # 1d ROC(10) for momentum
+    close_1d = df_1d['close'].values
+    roc_1d = np.zeros_like(close_1d)
+    roc_1d[10:] = (close_1d[10:] - close_1d[:-10]) / close_1d[:-10] * 100
     
-    # Calculate R1 and S1 for each day
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Align 1d ROC to 1h
+    roc_1d_aligned = align_htf_to_ltf(prices, df_1d, roc_1d)
     
-    # Align daily Camarilla levels to 4H timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 12H trend: EMA50 on 12H close
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h_up = close_12h > ema50_12h
-    trend_12h_down = close_12h < ema50_12h
-    
-    # Align 12H trend to 4H
-    trend_12h_up_4h = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
-    trend_12h_down_4h = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
-    
-    # Volume confirmation: 20-period average on 4H
-    volume_s = pd.Series(volume)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
-    start_idx = 100
-    
-    for i in range(start_idx, n):
+    for i in range(60, n):  # warmup period
         # Skip if data not ready
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or
-            np.isnan(trend_12h_up_4h[i]) or np.isnan(trend_12h_down_4h[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(roc_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Enter long: break above Camarilla R1 with 12H uptrend and volume
-            if (close[i] > r1_4h[i] and 
-                trend_12h_up_4h[i] > 0.5 and volume_confirm):
-                signals[i] = 0.25
+            # Enter long: price above 4h EMA21, 4h uptrend, positive 1d momentum
+            if (close[i] > ema21_4h_aligned[i] and 
+                trend_4h_up_aligned[i] > 0.5 and 
+                roc_1d_aligned[i] > 0):
+                signals[i] = 0.20
                 position = 1
-            # Enter short: break below Camarilla S1 with 12H downtrend and volume
-            elif (close[i] < s1_4h[i] and 
-                  trend_12h_down_4h[i] > 0.5 and volume_confirm):
-                signals[i] = -0.25
+            # Enter short: price below 4h EMA21, 4h downtrend, negative 1d momentum
+            elif (close[i] < ema21_4h_aligned[i] and 
+                  trend_4h_down_aligned[i] > 0.5 and 
+                  roc_1d_aligned[i] < 0):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to Camarilla S1 or trend fails
-            if (close[i] < s1_4h[i] or 
-                trend_12h_up_4h[i] < 0.5):
+            # Exit when price crosses below 4h EMA21 or trend fails
+            if (close[i] < ema21_4h_aligned[i] or 
+                trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit when price returns to Camarilla R1 or trend fails
-            if (close[i] > r1_4h[i] or 
-                trend_12h_down_4h[i] < 0.5):
+            # Exit when price crosses above 4h EMA21 or trend fails
+            if (close[i] > ema21_4h_aligned[i] or 
+                trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
