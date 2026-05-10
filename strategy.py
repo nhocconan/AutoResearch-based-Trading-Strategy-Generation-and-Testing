@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Uses Camarilla pivot levels from daily timeframe. Enters long when price breaks above R1 with volume confirmation and 1-day uptrend (close > EMA34).
-# Enters short when price breaks below S1 with volume confirmation and 1-day downtrend (close < EMA34).
-# Exits when price returns to the pivot point (CP) or reverses direction.
-# Uses 1-day EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 20-50 trades per year on 4h timeframe with position size 0.25.
+# 1d_1w_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Uses weekly Camarilla pivot levels. Enters long when price breaks above R1 with volume confirmation and weekly uptrend (close > EMA34 weekly).
+# Enters short when price breaks below S1 with volume confirmation and weekly downtrend (close < EMA34 weekly).
+# Exits when price returns to the weekly pivot point (CP) or trend reverses.
+# Uses weekly EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
+# Targets 7-25 trades per year on 1d timeframe with position size 0.25.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -24,31 +24,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for Camarilla pivots and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend direction
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1w EMA(34) for trend direction
+    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla pivot levels from previous day
-    # R4 = C + ((H-L)*1.1/2)
-    # R3 = C + ((H-L)*1.1/4)
-    # R2 = C + ((H-L)*1.1/6)
-    # R1 = C + ((H-L)*1.1/12)
-    # S1 = C - ((H-L)*1.1/12)
-    # S2 = C - ((H-L)*1.1/6)
-    # S3 = C - ((H-L)*1.1/4)
-    # S4 = C - ((H-L)*1.1/2)
-    # CP = (H + L + C) / 3
-    
-    # Shift by 1 to use previous day's data
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = 0  # first day has no previous day
+    # Calculate Camarilla pivot levels from previous week
+    prev_high = np.roll(df_1w['high'].values, 1)
+    prev_low = np.roll(df_1w['low'].values, 1)
+    prev_close = np.roll(df_1w['close'].values, 1)
+    prev_high[0] = 0
     prev_low[0] = 0
     prev_close[0] = 0
     
@@ -57,10 +46,10 @@ def generate_signals(prices):
     S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
     CP = (prev_high + prev_low + prev_close) / 3
     
-    # Align Camarilla levels to 4h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    CP_aligned = align_htf_to_ltf(prices, df_1d, CP)
+    # Align Camarilla levels to 1d
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
+    CP_aligned = align_htf_to_ltf(prices, df_1w, CP)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,15 +61,15 @@ def generate_signals(prices):
     start_idx = max(34, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(CP_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(CP_aligned[i]) or np.isnan(ema_34_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: price above/below 1w EMA34
+        price_above_ema = close[i] > ema_34_1w_aligned[i]
+        price_below_ema = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
             # Long entry: price breaks above R1 with volume confirmation and uptrend
