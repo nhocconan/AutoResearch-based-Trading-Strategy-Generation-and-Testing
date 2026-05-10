@@ -1,37 +1,21 @@
-# 1d_Weekly_Camarilla_Pullback_Reversal
-# Hypothesis: Camarilla pivot levels from weekly timeframe act as strong support/resistance.
-# Price tends to pull back to these levels before continuing the trend.
-# In bull markets, buy near S3/S4; in bear markets, sell near R3/R4.
-# Uses weekly Camarilla levels for structure and daily price action for entry.
-# Designed for low trade frequency (10-25/year) to minimize fee drag and work in both bull/bear markets.
+#!/usr/bin/env python3
+# 4h_Stochastic_RSI_Breakout
+# Hypothesis: Stochastic RSI identifies overbought/oversold conditions during low volatility squeezes.
+# A breakout from a Bollinger Bandwidth squeeze with Stochastic RSI crossing above 80 (overbought) or below 20 (oversold)
+# and volume confirmation signals a strong directional move. Uses 1d EMA trend filter for higher reliability.
+# Designed for low trade frequency (20-40/year) to minimize fee drift.
 
-name = "1d_Weekly_Camarilla_Pullback_Reversal"
-timeframe = "1d"
+name = "4h_Stochastic_RSI_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period."""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close
-    c = close
-    h = high
-    l = low
-    r4 = c + ((h - l) * 1.1 / 2)
-    r3 = c + ((h - l) * 1.1 / 4)
-    r2 = c + ((h - l) * 1.1 / 6)
-    s2 = c - ((h - l) * 1.1 / 6)
-    s3 = c - ((h - l) * 1.1 / 4)
-    s4 = c - ((h - l) * 1.1 / 2)
-    return r4, r3, r2, s2, s3, s4
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -39,46 +23,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) == 0:
-        return np.zeros(n)
-    
-    # Calculate weekly Camarilla levels
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Pre-calculate all Camarilla levels
-    r4_w = np.full_like(weekly_close, np.nan)
-    r3_w = np.full_like(weekly_close, np.nan)
-    r2_w = np.full_like(weekly_close, np.nan)
-    s2_w = np.full_like(weekly_close, np.nan)
-    s3_w = np.full_like(weekly_close, np.nan)
-    s4_w = np.full_like(weekly_close, np.nan)
-    
-    for i in range(len(weekly_close)):
-        r4, r3, r2, s2, s3, s4 = calculate_camarilla(weekly_high[i], weekly_low[i], weekly_close[i])
-        r4_w[i] = r4
-        r3_w[i] = r3
-        r2_w[i] = r2
-        s2_w[i] = s2
-        s3_w[i] = s3
-        s4_w[i] = s4
-    
-    # Align weekly Camarilla levels to daily timeframe
-    r4_w_aligned = align_htf_to_ltf(prices, df_1w, r4_w)
-    r3_w_aligned = align_htf_to_ltf(prices, df_1w, r3_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_1w, r2_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_1w, s2_w)
-    s3_w_aligned = align_htf_to_ltf(prices, df_1w, s3_w)
-    s4_w_aligned = align_htf_to_ltf(prices, df_1w, s4_w)
-    
-    # Daily trend filter: EMA 50
+    # Bollinger Bandwidth for squeeze detection (20, 2)
+    bb_period = 20
+    bb_mult = 2
     close_series = pd.Series(close)
-    ema_50 = close_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    bb_ma = close_series.ewm(span=bb_period, adjust=False, min_periods=bb_period).mean()
+    bb_std = close_series.ewm(span=bb_period, adjust=False, min_periods=bb_period).std()
+    bb_upper = bb_ma + bb_mult * bb_std
+    bb_lower = bb_ma - bb_mult * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_ma  # Normalized bandwidth
     
-    # Volume confirmation: 20-day average
+    # Bollinger Bandwidth rank (50-period) to identify squeeze (<20th percentile)
+    bbw_series = pd.Series(bb_width.values)
+    bbw_rank = bbw_series.rolling(window=50, min_periods=50).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False
+    )
+    squeeze_condition = bbw_rank < 0.2  # Below 20th percentile = low volatility squeeze
+    
+    # Stochastic RSI (14, 14, 3, 3)
+    rsi_period = 14
+    stoch_period = 14
+    k_smooth = 3
+    d_smooth = 3
+    
+    # RSI calculation
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Stochastic of RSI
+    rsi_min = rsi.rolling(window=stoch_period, min_periods=stoch_period).min()
+    rsi_max = rsi.rolling(window=stoch_period, min_periods=stoch_period).max()
+    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min) * 100
+    # Replace division by zero with 50 (neutral)
+    stoch_rsi = stoch_rsi.replace([np.inf, -np.inf], 50)
+    
+    # Smooth K and D
+    k = stoch_rsi.ewm(alpha=1/k_smooth, adjust=False, min_periods=k_smooth).mean()
+    d = k.ewm(alpha=1/d_smooth, adjust=False, min_periods=d_smooth).mean()
+    
+    # Volume confirmation (20-period average)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -87,53 +75,67 @@ def generate_signals(prices):
         return res
     vol_ma = mean_arr(volume, 20)
     
+    # 1d EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for EMA50
+    start_idx = max(60, 50)  # Enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(r4_w_aligned[i]) or np.isnan(r3_w_aligned[i]) or \
-           np.isnan(r2_w_aligned[i]) or np.isnan(s2_w_aligned[i]) or \
-           np.isnan(s3_w_aligned[i]) or np.isnan(s4_w_aligned[i]) or \
-           np.isnan(ema_50[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or \
+           np.isnan(k.iloc[i]) or np.isnan(d.iloc[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(ema_1d_aligned[i]) or \
+           np.isnan(squeeze_condition.iloc[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Extract values
+        bb_up = bb_upper[i]
+        bb_low = bb_lower[i]
+        k_val = k.iloc[i]
+        d_val = d.iloc[i]
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        squeeze_val = squeeze_condition.iloc[i]
+        trend_filter = ema_1d_aligned[i]
         
         if position == 0:
-            # Long entry: pullback to S3 or S4 in uptrend
-            if close[i] > ema_50[i]:  # Uptrend filter
-                if (close[i] <= s3_w_aligned[i] * 1.002 and close[i] >= s3_w_aligned[i] * 0.998) or \
-                   (close[i] <= s4_w_aligned[i] * 1.002 and close[i] >= s4_w_aligned[i] * 0.998):
-                    if vol_confirm:
-                        signals[i] = 0.25
-                        position = 1
-            # Short entry: pullback to R3 or R4 in downtrend
-            elif close[i] < ema_50[i]:  # Downtrend filter
-                if (close[i] >= r3_w_aligned[i] * 0.998 and close[i] <= r3_w_aligned[i] * 1.002) or \
-                   (close[i] >= r4_w_aligned[i] * 0.998 and close[i] <= r4_w_aligned[i] * 1.002):
-                    if vol_confirm:
-                        signals[i] = -0.25
-                        position = -1
+            # Long: price breaks above upper BB, Stochastic RSI K crosses above D (bullish crossover),
+            # during squeeze, with volume confirmation and above 1d EMA
+            if (close[i] > bb_up and 
+                k_val > d_val and k_val < 80 and  # Avoid extreme overbought
+                squeeze_val and vol_confirm and 
+                close[i] > trend_filter):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below lower BB, Stochastic RSI K crosses below D (bearish crossover),
+            # during squeeze, with volume confirmation and below 1d EMA
+            elif (close[i] < bb_low and 
+                  k_val < d_val and k_val > 20 and  # Avoid extreme oversold
+                  squeeze_val and vol_confirm and 
+                  close[i] < trend_filter):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: price reaches R2 or closes below EMA50
-            if close[i] >= r2_w_aligned[i] * 0.998 or close[i] < ema_50[i]:
+            # Long exit: price closes below middle BB OR Stochastic RSI crosses below 50 (momentum loss)
+            bb_mid = (bb_up + bb_low) / 2
+            if close[i] < bb_mid or k_val < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches S2 or closes above EMA50
-            if close[i] <= s2_w_aligned[i] * 1.002 or close[i] > ema_50[i]:
+            # Short exit: price closes above middle BB OR Stochastic RSI crosses above 50
+            bb_mid = (bb_up + bb_low) / 2
+            if close[i] > bb_mid or k_val > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
-
-#!/usr/bin/env python3
