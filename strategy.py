@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter
-Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d trend (ADX > 25) capture directional moves in trending markets. Avoids choppy markets using ADX filter to reduce false signals and lower trade frequency. Designed for low trade frequency (<30/year) to minimize fee drift while maintaining edge in both bull and bear markets by following strong trends.
+4H_HTF_Trend_Touch_Signal
+Hypothesis: Touch of 4h price to 1d/200 EMA or 1w/50 EMA with volume confirmation and HTF trend alignment captures directional moves in both bull and bear markets. Uses minimal conditions to keep trade frequency low (<25/year) and reduce fee drag. Long when price touches rising EMA from below; short when price touches falling EMA from above.
 """
 
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_ADXFilter"
+name = "4H_HTF_Trend_Touch_Signal"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,109 +21,84 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # 1d data for Camarilla and ADX trend filter
+    # 1d data for EMA 200
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Previous 1d bar for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1w data for EMA 50
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Calculate 1d EMA 200
     close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Calculate Camarilla levels from previous 1d bar
-    range_1d = high_1d - low_1d
-    s1 = close_1d - (range_1d * 1.08333)
-    r1 = close_1d + (range_1d * 1.08333)
+    # Calculate 1w EMA 50
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align to 4h timeframe (wait for 1d bar to close)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # 1d ADX filter for trend strength (avoid choppy markets)
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] > minus_dm[i]:
-                minus_dm[i] = 0
-            elif minus_dm[i] > plus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smooth using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-        def wilders_smoothing(arr, period):
-            result = np.full_like(arr, np.nan)
-            if len(arr) < period:
-                return result
-            # First value is simple average
-            result[period-1] = np.nansum(arr[1:period]) / period
-            # Subsequent values: Wilder's smoothing
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-            return result
-        
-        plus_di = 100 * wilders_smoothing(plus_dm, period) / wilders_smoothing(tr, period)
-        minus_di = 100 * wilders_smoothing(minus_dm, period) / wilders_smoothing(tr, period)
-        dx = np.zeros_like(high)
-        dx = np.where((plus_di + minus_di) != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-        adx = wilders_smoothing(dx, period)
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, period=14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Volume filter: volume > 2.0x 20-period average (tight to reduce trades)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for indicators
+    start_idx = max(200, 20)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Check for trending market (ADX > 25)
-        is_trending = adx_1d_aligned[i] > 25
+        # Determine EMA slopes using prior values (avoid look-ahead)
+        ema_200_prev = ema_200_1d_aligned[i-1] if i > 0 else ema_200_1d_aligned[i]
+        ema_50_prev = ema_50_1w_aligned[i-1] if i > 0 else ema_50_1w_aligned[i]
+        
+        ema_200_rising = ema_200_1d_aligned[i] > ema_200_prev
+        ema_200_falling = ema_200_1d_aligned[i] < ema_200_prev
+        ema_50_rising = ema_50_1w_aligned[i] > ema_50_prev
+        ema_50_falling = ema_50_1w_aligned[i] < ema_50_prev
         
         if position == 0:
-            # Long entry: Price breaks above R1 + volume confirmation + trending market
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > vol_threshold[i] and 
-                is_trending):
+            # Long: price touches rising 1d EMA200 from below OR rising 1w EMA50 from below
+            touch_1d = (low[i] <= ema_200_1d_aligned[i] * 1.001 and  # within 0.1%
+                       high[i-1] < ema_200_1d_aligned[i-1] if i > 0 else True)  # was below
+            touch_1w = (low[i] <= ema_50_1w_aligned[i] * 1.001 and
+                       high[i-1] < ema_50_1w_aligned[i-1] if i > 0 else True)
+            
+            if ((touch_1d and ema_200_rising) or (touch_1w and ema_50_rising)) and \
+               volume[i] > vol_threshold[i] and \
+               close[i] > open_price[i]:  # bullish candle confirmation
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 + volume confirmation + trending market
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > vol_threshold[i] and 
-                  is_trending):
+            # Short: price touches falling 1d EMA200 from above OR falling 1w EMA50 from above
+            elif ((low[i] >= ema_200_1d_aligned[i] * 0.999 and  # within 0.1%
+                   low[i-1] > ema_200_1d_aligned[i-1] if i > 0 else True) or  # was above
+                  (low[i] >= ema_50_1w_aligned[i] * 0.999 and
+                   low[i-1] > ema_50_1w_aligned[i-1] if i > 0 else True)) and \
+                  volume[i] > vol_threshold[i] and \
+                  close[i] < open_price[i]:  # bearish candle confirmation
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below S1 (opposite side)
-            if close[i] < s1_aligned[i]:
+            # Long exit: price crosses below EMA
+            if close[i] < ema_200_1d_aligned[i] * 0.995 or close[i] < ema_50_1w_aligned[i] * 0.995:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above R1 (opposite side)
-            if close[i] > r1_aligned[i]:
+            # Short exit: price crosses above EMA
+            if close[i] > ema_200_1d_aligned[i] * 1.005 or close[i] > ema_50_1w_aligned[i] * 1.005:
                 signals[i] = 0.0
                 position = 0
             else:
