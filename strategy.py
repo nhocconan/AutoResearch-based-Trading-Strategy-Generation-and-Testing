@@ -1,126 +1,133 @@
 #!/usr/bin/env python3
-# 12h_Williams_Alligator_ElderRay_Signal
-# Hypothesis: Combine Williams Alligator trend direction with Elder Ray power for high-conviction trades.
-# Use 1-day trend filter to avoid counter-trend trades. Enter on Alligator alignment with bullish/bearish Elder Ray.
-# Williams Alligator: Jaw (13-bar SMMA, 8 offset), Teeth (8-bar SMMA, 5 offset), Lips (5-bar SMMA, 3 offset).
-# Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-# Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND 1-day Uptrend.
-# Short when: Jaw > Teeth > Lips (bearish alignment) AND Bear Power > 0 AND 1-day Downtrend.
-# Position size: 0.25. Max 1 trade every 5 bars to reduce churn.
-# Works in bull/bear by following 1-day trend and using Alligator for entry timing.
+# 4H_Volatility_Regime_Momentum_Breakout
+# Hypothesis: Buy breakouts from low volatility regimes (Bollinger Band squeeze) with momentum confirmation.
+# In high volatility regimes (BB width > 80th percentile), use mean reversion at Bollinger Bands.
+# Uses 12h trend filter (EMA50) to align with higher timeframe direction.
+# Works in bull/bear by adapting to volatility regime and using trend filter for direction.
+# Target: 20-40 trades/year per symbol.
 
-name = "12h_Williams_Alligator_ElderRay_Signal"
-timeframe = "12h"
+name = "4H_Volatility_Regime_Momentum_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def smma(source, length):
-    """Smoothed Moving Average (SMMA)"""
-    if length < 1:
-        return np.full_like(source, np.nan, dtype=float)
-    result = np.full_like(source, np.nan, dtype=float)
-    if len(source) == 0:
-        return result
-    result[0] = source[0]
-    for i in range(1, len(source)):
-        result[i] = (result[i-1] * (length-1) + source[i]) / length
-    return result
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator components
     close_s = pd.Series(close)
-    jaw = smma(close_s.values, 13)  # 13-period SMMA
-    teeth = smma(close_s.values, 8)  # 8-period SMMA
-    lips = smma(close_s.values, 5)   # 5-period SMMA
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    volume_s = pd.Series(volume)
     
-    # Apply offsets: Jaw +8, Teeth +5, Lips +3
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # Set rolled values to NaN
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
+    # Bollinger Bands (20, 2)
+    bb_middle = close_s.rolling(window=20, min_periods=20).mean()
+    bb_std = close_s.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    bb_percent_b = (close - bb_lower.values) / (bb_upper.values - bb_lower.values + 1e-10)
     
-    # Elder Ray components
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
+    # Bollinger Band Width percentile (for regime detection)
+    bb_width_series = bb_width.values
+    bb_width_percentile = pd.Series(bb_width_series).rolling(
+        window=50, min_periods=20
+    ).apply(lambda x: pd.Series(x).rank(pct=True).iloc[-1] * 100, raw=False).values
     
-    # 1-day trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # RSI (14) for momentum
+    delta = close_s.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Volume confirmation (20-period average)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # 12h trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_uptrend = close_1d > ema50_1d
-    daily_downtrend = close_1d < ema50_1d
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema50_12h
+    trend_12h_down = close_12h < ema50_12h
     
-    # Align daily trend to 12h
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
-    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
+    # Align 12h trend to 4h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_last_trade = 0
     
     # Start after we have enough data
     start_idx = 50
     
     for i in range(start_idx, n):
-        bars_since_last_trade += 1
-        
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i])):
+        if (np.isnan(bb_width_percentile[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+            np.isnan(bb_percent_b[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Check for Alligator alignment
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        low_vol_regime = bb_width_percentile[i] < 30  # Bottom 30% = squeeze
+        high_vol_regime = bb_width_percentile[i] > 70  # Top 30% = expansion
+        rsi_overbought = rsi[i] > 70
+        rsi_oversold = rsi[i] < 30
         
-        daily_up = daily_uptrend_aligned[i] > 0.5
-        daily_down = daily_downtrend_aligned[i] > 0.5
+        trend_up = trend_12h_up_aligned[i] > 0.5
+        trend_down = trend_12h_down_aligned[i] > 0.5
         
-        if position == 0 and bars_since_last_trade >= 5:
-            # Enter long: bullish alignment + bullish power + daily uptrend
-            if bullish_alignment and bull_power[i] > 0 and daily_up:
-                signals[i] = 0.25
-                position = 1
-                bars_since_last_trade = 0
-            # Enter short: bearish alignment + bearish power + daily downtrend
-            elif bearish_alignment and bear_power[i] > 0 and daily_down:
-                signals[i] = -0.25
-                position = -1
-                bars_since_last_trade = 0
+        if position == 0:
+            # Low volatility regime: breakout in direction of 12h trend with volume
+            if low_vol_regime and vol_ratio > 1.5:
+                if trend_up and bb_percent_b[i] > 0.98:  # Break above upper BB
+                    signals[i] = 0.25
+                    position = 1
+                elif trend_down and bb_percent_b[i] < 0.02:  # Break below lower BB
+                    signals[i] = -0.25
+                    position = -1
+            # High volatility regime: mean reversion at BB extremes
+            elif high_vol_regime:
+                if rsi_oversold and bb_percent_b[i] < 0.02:  # Oversold at lower BB
+                    signals[i] = 0.20
+                    position = 1
+                elif rsi_overbought and bb_percent_b[i] > 0.98:  # Overbought at upper BB
+                    signals[i] = -0.20
+                    position = -1
         
         elif position == 1:
-            # Exit conditions: alignment breaks or power fades
-            if not bullish_alignment or bull_power[i] <= 0 or not daily_up:
+            # Exit long: reversal signals or volatility regime change
+            if (rsi[i] > 70 and bb_percent_b[i] > 0.95) or \
+               (trend_12h_down_aligned[i] > 0.5) or \
+               (bb_width_percentile[i] > 80 and bb_percent_b[i] > 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: alignment breaks or power fades
-            if not bearish_alignment or bear_power[i] <= 0 or not daily_down:
+            # Exit short: reversal signals or volatility regime change
+            if (rsi[i] < 30 and bb_percent_b[i] < 0.05) or \
+               (trend_12h_up_aligned[i] > 0.5) or \
+               (bb_width_percentile[i] > 80 and bb_percent_b[i] < 0.2):
                 signals[i] = 0.0
                 position = 0
             else:
