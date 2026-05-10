@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Parabolic_SAR_EMA_Trend
-Hypothesis: Parabolic SAR provides clear trend direction with built-in trailing stop.
-In trending markets (determined by EMA50), price respects SAR levels.
-Long when price > SAR and price > EMA50 with volume confirmation.
-Short when price < SAR and price < EMA50 with volume confirmation.
-Exit when price crosses SAR (trend reversal) or volume confirmation fails.
-Designed for 4h timeframe to capture intermediate trends with minimal whipsaw.
-Targets 80-150 trades over 4 years (20-37/year) to balance opportunity and cost.
-Works in bull (follow SAR uptrend) and bear (follow SAR downtrend).
+4h_Donchian20_Breakout_VolumeTrend_Filter
+Hypothesis: On 4h timeframe, price breaking Donchian(20) channels with volume confirmation 
+and EMA50 trend filter captures sustained moves. Works in bull markets (breakouts to upside) 
+and bear markets (breakdowns to downside). Volume ensures breakout legitimacy, EMA50 
+filters counter-trend noise. Target 20-50 trades/year to minimize fee drag.
 """
 
-name = "4h_Parabolic_SAR_EMA_Trend"
+name = "4h_Donchian20_Breakout_VolumeTrend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,106 +25,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Parabolic SAR calculation
-    # Start with long assumption
-    psar = np.zeros(n)
-    psar[0] = low[0]
-    bull = True  # True for long, False for short
-    af = 0.02    # acceleration factor
-    max_af = 0.2
-    ep = high[0] if bull else low[0]  # extreme point
+    # Donchian channel (20-period) - highest high and lowest low
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    for i in range(1, n):
-        if bull:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR doesn't penetrate previous two lows
-            if i >= 2:
-                psar[i] = min(psar[i], low[i-1], low[i-2])
-            # Check for trend reversal
-            if low[i] < psar[i]:
-                bull = False
-                psar[i] = ep  # SAR becomes previous EP
-                af = 0.02
-                ep = low[i]
-            else:
-                # Continue trend
-                if high[i] > ep:
-                    ep = high[i]
-                    af = min(af + 0.02, max_af)
-        else:
-            psar[i] = psar[i-1] + af * (ep - psar[i-1])
-            # Ensure SAR doesn't penetrate previous two highs
-            if i >= 2:
-                psar[i] = max(psar[i], high[i-1], high[i-2])
-            # Check for trend reversal
-            if high[i] > psar[i]:
-                bull = True
-                psar[i] = ep  # SAR becomes previous EP
-                af = 0.02
-                ep = high[i]
-            else:
-                # Continue trend
-                if low[i] < ep:
-                    ep = low[i]
-                    af = min(af + 0.02, max_af)
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # EMA50 for trend filter (using 1d HTF)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
+    # EMA50 for trend filter on 4h data
+    ema50 = np.full(n, np.nan)
+    if n >= 50:
+        ema50[49] = np.mean(close[:50])
         alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+        for i in range(50, n):
+            ema50[i] = alpha * close[i] + (1 - alpha) * ema50[i-1]
     
-    # Volume confirmation: 4h volume > 1.5x average 4h volume (using 1d SMA20 scaled)
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = alpha * volume_1d[i] + (1 - alpha) * vol_sma20_1d[i-1]
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
-    # Scale daily volume average to 4h (6 periods of 4h in 1d)
-    vol_4h_avg = vol_sma20_1d_aligned / 6.0
-    volume_confirm = volume > 1.5 * vol_4h_avg
+    # Volume confirmation: volume > 1.5x 20-period average volume
+    vol_ma20 = np.full(n, np.nan)
+    if n >= 20:
+        vol_ma20[19] = np.mean(volume[:20])
+        for i in range(20, n):
+            vol_ma20[i] = (vol_ma20[i-1] * 19 + volume[i]) / 20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need EMA50 warmup
+    start_idx = max(lookback - 1, 50)  # Need Donchian and EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_4h_avg[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
+           np.isnan(ema50[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation
+        volume_confirm = volume[i] > 1.5 * vol_ma20[i]
+        
         if position == 0:
-            # Long: Price above SAR and above EMA50 with volume confirmation
-            if close[i] > psar[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+            # Long: Price breaks above Donchian high with volume and uptrend
+            if close[i] > highest_high[i] and volume_confirm and close[i] > ema50[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below SAR and below EMA50 with volume confirmation
-            elif close[i] < psar[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
+            # Short: Price breaks below Donchian low with volume and downtrend
+            elif close[i] < lowest_low[i] and volume_confirm and close[i] < ema50[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long: Continue if price above SAR and EMA50, else exit
-            if close[i] > psar[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
+            # Long exit: Price falls below Donchian low or trend reversal
+            if close[i] < lowest_low[i] or close[i] < ema50[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
                 signals[i] = 0.25
-            else:
-                signals[i] = 0.0
-                position = 0
         elif position == -1:
-            # Short: Continue if price below SAR and EMA50, else exit
-            if close[i] < psar[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
-                signals[i] = -0.25
-            else:
+            # Short exit: Price rises above Donchian high or trend reversal
+            if close[i] > highest_high[i] or close[i] > ema50[i]:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
