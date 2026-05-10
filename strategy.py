@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1d_1w_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Uses weekly Camarilla pivot levels. Enters long when price breaks above R1 with volume confirmation and weekly uptrend (close > EMA34 weekly).
-# Enters short when price breaks below S1 with volume confirmation and weekly downtrend (close < EMA34 weekly).
-# Exits when price returns to the weekly pivot point (CP) or trend reverses.
-# Uses weekly EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 7-25 trades per year on 1d timeframe with position size 0.25.
+# 6h_Vol_Spike_Reversal_1dTrend
+# Hypothesis: Enter short-term reversals after volume spikes in the direction of the 1d trend.
+# Long when: volume spike + price > 1d EMA50 + RSI(14) < 40
+# Short when: volume spike + price < 1d EMA50 + RSI(14) > 60
+# Exit when RSI crosses 50 or opposite volume spike occurs.
+# Uses volume spike to catch exhaustion moves and 1d trend to filter direction.
+# Targets 15-30 trades per year on 6h timeframe with position size 0.25.
 
-name = "1d_1w_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Vol_Spike_Reversal_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,78 +25,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for Camarilla pivots and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 1d data for trend and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1w EMA(34) for trend direction
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla pivot levels from previous week
-    prev_high = np.roll(df_1w['high'].values, 1)
-    prev_low = np.roll(df_1w['low'].values, 1)
-    prev_close = np.roll(df_1w['close'].values, 1)
-    prev_high[0] = 0
-    prev_low[0] = 0
-    prev_close[0] = 0
+    # Calculate RSI(14) on 6h closes
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Calculate Camarilla levels
-    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
-    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
-    CP = (prev_high + prev_low + prev_close) / 3
-    
-    # Align Camarilla levels to 1d
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    CP_aligned = align_htf_to_ltf(prices, df_1w, CP)
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
+    # Volume spike: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for EMA and volume MA
+    start_idx = max(50, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(CP_aligned[i]) or np.isnan(ema_34_1w_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_spike[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1w EMA34
-        price_above_ema = close[i] > ema_34_1w_aligned[i]
-        price_below_ema = close[i] < ema_34_1w_aligned[i]
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        rsi_oversold = rsi[i] < 40
+        rsi_overbought = rsi[i] > 60
+        rsi_neutral = 40 <= rsi[i] <= 60
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation and uptrend
-            if (close[i] > R1_aligned[i] and 
-                volume_confirm[i] and 
-                price_above_ema):
+            # Long entry: volume spike + uptrend + RSI oversold
+            if (volume_spike[i] and 
+                price_above_ema and 
+                rsi_oversold):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation and downtrend
-            elif (close[i] < S1_aligned[i] and 
-                  volume_confirm[i] and 
-                  price_below_ema):
+            # Short entry: volume spike + downtrend + RSI overbought
+            elif (volume_spike[i] and 
+                  price_below_ema and 
+                  rsi_overbought):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to pivot point or trend reverses
-            if (close[i] <= CP_aligned[i] or 
-                price_below_ema):
+            # Long exit: RSI crosses 50 or opposite volume spike in downtrend
+            if (rsi[i] >= 50 or 
+                (volume_spike[i] and price_below_ema)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to pivot point or trend reverses
-            if (close[i] >= CP_aligned[i] or 
-                price_above_ema):
+            # Short exit: RSI crosses 50 or opposite volume spike in uptrend
+            if (rsi[i] <= 50 or 
+                (volume_spike[i] and price_above_ema)):
                 signals[i] = 0.0
                 position = 0
             else:
