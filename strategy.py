@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_ZeroCross_VolumeSpike_TrendFilter
-Hypothesis: TRIX (1-period rate of change of triple-smoothed EMA) zero cross with volume spike and 4h EMA50 trend filter.
-TRIX captures momentum shifts early; zero cross indicates trend change. Volume confirms breakout strength.
-Works in both bull/bear markets by using EMA50 for trend direction and requiring volume spike to avoid false signals.
-Target: 20-35 trades/year to avoid fee drag.
+1d_Keltner_Breakout_Volume_Squeeze
+Hypothesis: Daily Keltner channel breakout with volume squeeze filter and weekly trend filter.
+Works in bull/bear markets by using volatility-based breakouts (Keltner) combined with volume confirmation
+and weekly trend alignment to filter counter-trend moves. Target: 15-25 trades/year to minimize fee drag.
 """
 
-name = "4h_TRIX_ZeroCross_VolumeSpike_TrendFilter"
-timeframe = "4h"
+name = "1d_Keltner_Breakout_Volume_Squeeze"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +19,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 4h data for TRIX calculation (using same timeframe as primary)
-    df_4h = get_htf_data(prices, '4h')
-    
-    if len(df_4h) < 1:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # Calculate TRIX: 1-period ROC of triple-smoothed EMA (15-period)
-    close = df_4h['close'].values
-    # Triple EMA: EMA(EMA(EMA(close, 15), 15), 15)
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    # TRIX = 100 * (ema3 - ema3_prev) / ema3_prev
-    trix_raw = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix_raw[0] = 0  # first value undefined
+    # Calculate weekly EMA20 for trend filter
+    ema_20_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Align TRIX to 4h timeframe (same as primary, so no shift needed but use for consistency)
-    trix = align_htf_to_ltf(prices, df_4h, trix_raw)
-    
-    # Get EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
-    
-    # Get price and volume
+    # Calculate daily ATR for Keltner channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Volume filter: current volume > 2.0x 20-period EMA
+    # True Range components
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # ATR(10) for Keltner channels
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    
+    # Daily EMA20 for Keltner center
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Keltner channels: EMA20 ± 2 * ATR
+    keltner_upper = ema_20 + 2 * atr
+    keltner_lower = ema_20 - 2 * atr
+    
+    # Volume filter: volume > 1.5x 20-day EMA of volume
+    volume = prices['volume'].values
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 2.0
+    volume_filter = volume > vol_ema20 * 1.5
+    
+    # Volatility squeeze filter: ATR(10) < ATR(50) indicates low volatility
+    atr_50 = pd.Series(tr).ewm(span=50, adjust=False, min_periods=50).mean().values
+    volatility_squeeze = atr < atr_50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need TRIX (15*3=45) and EMA50 (50)
+    # Warmup: need ATR(50) and EMA20
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(keltner_upper[i]) or
+            np.isnan(keltner_lower[i]) or
+            np.isnan(ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero with uptrend and volume
-            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_50_aligned[i] and volume_filter[i]:
+            # Long: break above upper Keltner band with weekly uptrend, volume, and volatility squeeze
+            if (close[i] > keltner_upper[i] and 
+                close[i] > ema_20_1w_aligned[i] and 
+                volume_filter[i] and 
+                volatility_squeeze[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with downtrend and volume
-            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_50_aligned[i] and volume_filter[i]:
+            # Short: break below lower Keltner band with weekly downtrend, volume, and volatility squeeze
+            elif (close[i] < keltner_lower[i] and 
+                  close[i] < ema_20_1w_aligned[i] and 
+                  volume_filter[i] and 
+                  volatility_squeeze[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero or trend change
-            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema_50_aligned[i]:
+            # Long exit: price back below EMA20 or weekly trend change
+            if close[i] < ema_20[i] or close[i] < ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero or trend change
-            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema_50_aligned[i]:
+            # Short exit: price back above EMA20 or weekly trend change
+            if close[i] > ema_20[i] or close[i] > ema_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
