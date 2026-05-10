@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Adaptive_Camarilla_Trend_Breakout
-# Hypothesis: Adaptive position sizing based on volatility (ATR) combined with
-# Camarilla R3/S3 breakouts and daily trend filter. Uses volatility-adjusted
-# sizing to reduce drawdown in volatile periods while maintaining exposure
-# in trending markets. Target: 25-35 trades/year to minimize fee drag.
+# 1h_4h1d_Trend_Filter_with_Camarilla_Entry
+# Hypothesis: Combining 4h trend (EMA34) and 1d momentum (ROC5) filters with Camarilla breakouts on 1h
+# provides institutional-level entries with trend alignment, working in both bull and bear markets.
+# Uses volume confirmation (1.5x average) to filter false breakouts.
+# Target: 15-35 trades/year to minimize fee drag on 1h timeframe.
 
-name = "12h_Adaptive_Camarilla_Trend_Breakout"
-timeframe = "12h"
+name = "1h_4h1d_Trend_Filter_with_Camarilla_Entry"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,122 +23,121 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA34)
+    # 4h trend filter (EMA34)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_4h_up = close_4h > ema34_4h
+    trend_4h_down = close_4h < ema34_4h
+    
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    
+    # 1d momentum filter (ROC5)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 6:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    roc5_1d = np.zeros_like(close_1d)
+    roc5_1d[5:] = (close_1d[5:] - close_1d[:-5]) / close_1d[:-5] * 100
+    mom_1d_up = roc5_1d > 0
+    mom_1d_down = roc5_1d < 0
     
-    # Align 1d trend to 12h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align 1d momentum to 1h
+    mom_1d_up_aligned = align_htf_to_ltf(prices, df_1d, mom_1d_up.astype(float))
+    mom_1d_down_aligned = align_htf_to_ltf(prices, df_1d, mom_1d_down.astype(float))
     
-    # ATR for volatility (14-period)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = np.zeros(n)
-    atr_sum = 0
-    for i in range(n):
-        atr_sum += tr[i]
-        if i >= 14:
-            atr_sum -= tr[i-14]
-        if i >= 13:
-            atr[i] = atr_sum / 14
-        else:
-            atr[i] = np.nan
-    
-    # Volume spike filter (2x 20-period average)
+    # Volume confirmation (1.5x 24-period average)
     vol_ma = np.zeros_like(volume)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma[i] = vol_sum / 20
+        if i >= 24:
+            vol_sum -= volume[i-24]
+        if i >= 23:
+            vol_ma[i] = vol_sum / 24
         else:
             vol_ma[i] = np.nan
-    volume_spike = volume > (2 * vol_ma)
+    volume_confirm = volume > (1.5 * vol_ma)
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous 4h bar
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Get previous day's OHLC
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
+    # Shift to get previous 4h bar values
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Calculate Camarilla levels
+    # Calculate Camarilla levels (R3, S3, R4, S4)
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
+    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align Camarilla levels to 1h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_4h, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_4h, S4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA and ATR
+    start_idx = 35  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(mom_1d_up_aligned[i]) or np.isnan(mom_1d_down_aligned[i]) or
             np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(volume_spike[i]) or np.isnan(atr[i])):
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility-based position sizing (0.15 to 0.35 range)
-        atr_ratio = atr[i] / close[i] if close[i] > 0 else 0
-        # Normalize ATR ratio: 0.01 -> 0.35, 0.03 -> 0.15 (inverse relationship)
-        vol_factor = np.clip(0.5 - (atr_ratio - 0.01) * 10, 0.3, 1.0)
-        base_size = 0.25
-        position_size = base_size * vol_factor
-        
         if position == 0:
-            # Long: price breaks above R3 with volume spike and uptrend
+            # Long: price breaks above R3 with volume confirmation, 4h uptrend, and 1d momentum up
             if (high[i] > R3_aligned[i] and
-                trend_1d_up_aligned[i] > 0.5 and
-                volume_spike[i]):
-                signals[i] = position_size
+                trend_4h_up_aligned[i] > 0.5 and
+                mom_1d_up_aligned[i] > 0.5 and
+                volume_confirm[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 with volume spike and downtrend
+            # Short: price breaks below S3 with volume confirmation, 4h downtrend, and 1d momentum down
             elif (low[i] < S3_aligned[i] and
-                  trend_1d_down_aligned[i] > 0.5 and
-                  volume_spike[i]):
-                signals[i] = -position_size
+                  trend_4h_down_aligned[i] > 0.5 and
+                  mom_1d_down_aligned[i] > 0.5 and
+                  volume_confirm[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below S3 or trend changes
+            # Exit: price breaks below S3 or 4h trend turns down
             if (low[i] < S3_aligned[i] or
-                trend_1d_up_aligned[i] < 0.5):
+                trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = position_size
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price breaks above R3 or trend changes
+            # Exit: price breaks above R3 or 4h trend turns up
             if (high[i] > R3_aligned[i] or
-                trend_1d_down_aligned[i] < 0.5):
+                trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -position_size
+                signals[i] = -0.20
     
     return signals
