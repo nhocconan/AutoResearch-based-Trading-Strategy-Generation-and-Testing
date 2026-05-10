@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-# 4h_Keltner_Donchian_Breakout_1dTrend
-# Hypothesis: Combine Keltner Channel breakout with Donchian trend filter on 1d for high-probability trend entries.
-# Keltner (ATR-based) captures volatility breakouts, while 1d Donchian ensures alignment with higher timeframe trend.
-# Works in bull markets via breakouts and in bear via mean-reversion off bands when trend reverses.
-# Target: 20-30 trades/year with low turnover to minimize fee drag.
+# This strategy uses 4h RSI(14) with 1d EMA(50) trend filter and volume confirmation to capture medium-term momentum.
+# The 1d EMA provides a higher timeframe trend bias, while RSI identifies overbought/oversold conditions within that trend.
+# Volume confirmation ensures breakouts have institutional participation. Designed for 20-30 trades/year.
+# Works in bull markets by buying pullbacks in uptrends, and in bear markets by selling rallies in downtrends.
 
-name = "4h_Keltner_Donchian_Breakout_1dTrend"
+name = "4h_RSI_EMA50_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,65 +16,65 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20, 2.0)
-    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    upper = ma + 2.0 * atr
-    lower = ma - 2.0 * atr
+    # RSI(14) on 4h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Donchian Channel (20) on 1d for trend filter
+    # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align 1d Donchian to 4h
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / (vol_ma + 1e-10)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup
+    start_idx = 60  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: close above Keltner upper AND price above 1d Donchian low (uptrend bias)
-            if close[i] > upper[i] and close[i] > donchian_low_aligned[i]:
+            # Long: RSI < 40 (pullback in uptrend) AND price above 1d EMA50 AND volume confirmation
+            if rsi[i] < 40 and close[i] > ema_50_1d_aligned[i] and vol_ratio[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: close below Keltner lower AND price below 1d Donchian high (downtrend bias)
-            elif close[i] < lower[i] and close[i] < donchian_high_aligned[i]:
+            # Short: RSI > 60 (rally in downtrend) AND price below 1d EMA50 AND volume confirmation
+            elif rsi[i] > 60 and close[i] < ema_50_1d_aligned[i] and vol_ratio[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below Keltner middle OR trend bias lost
-            if close[i] < ma[i] or close[i] < donchian_low_aligned[i]:
+            # Exit: RSI > 60 (overbought) OR trend bias lost (price below EMA50)
+            if rsi[i] > 60 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above Keltner middle OR trend bias lost
-            if close[i] > ma[i] or close[i] > donchian_high_aligned[i]:
+            # Exit: RSI < 40 (oversold) OR trend bias lost (price above EMA50)
+            if rsi[i] < 40 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
