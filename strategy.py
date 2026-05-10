@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_TRIX_VolumeSpike_1wTrend
-# Hypothesis: TRIX momentum with volume spike confirmation and weekly trend filter for 1d timeframe.
-# TRIX (12) captures momentum shifts, volume spike confirms breakout strength, weekly EMA (21) filters trend direction.
-# Designed to work in both bull and bear markets by following the weekly trend.
-# Target: 30-100 total trades over 4 years (7-25/year) with low frequency to minimize fee drag.
+# 6h_ElderRay_BullBearPower_1dTrend_Volume
+# Hypothesis: Elder Ray (Bull/Bear Power) on 6h with daily trend filter (EMA34) and volume confirmation.
+# Bull Power = High - EMA13 (bull strength), Bear Power = EMA13 - Low (bear strength).
+# Long when Bull Power > 0 and rising, price > daily EMA34, volume > 2x average.
+# Short when Bear Power > 0 and rising, price < daily EMA34, volume > 2x average.
+# Designed for 6h to achieve 12-37 trades/year, works in both bull and bear markets by following daily trend.
 
-name = "1d_TRIX_VolumeSpike_1wTrend"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,39 +16,43 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Daily data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly EMA21 for trend filter
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # TRIX (12) calculation: triple EMA of log returns
-    log_returns = np.diff(np.log(close), prepend=np.log(close[0]))
-    ema1 = pd.Series(log_returns).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = 100 * (np.diff(ema3, prepend=ema3[0]) / ema3)
-    
-    # Weekly volume spike: 20-period average
+    # 6-day volume average for confirmation
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20_1w = mean_arr(volume_1w, 20)
+    vol_ma_6 = mean_arr(volume, 6)
     
-    # Align weekly indicators to daily timeframe (wait for weekly bar to close)
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
-    vol_ma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20_1w)
+    # Elder Ray components on 6h: Bull Power and Bear Power
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = ema13 - low   # Bear Power = EMA13 - Low
+    
+    # Smooth Bull/Bear Power with 3-period EMA to reduce noise
+    bull_power_smooth = pd.Series(bull_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=3, adjust=False, min_periods=3).mean().values
+    
+    # Align daily indicators to 6h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_6_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_6)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,31 +60,34 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(trix[i]) or np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma_20_1w_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_6_aligned[i]) or \
+           np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX turns positive, above weekly EMA21, strong volume
-            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_21_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_1w_aligned[i]:
+            # Long: Bull Power rising and positive, above daily EMA34, strong volume
+            if bull_power_smooth[i] > 0 and bull_power_smooth[i] > bull_power_smooth[i-1] and \
+               close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_6_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX turns negative, below weekly EMA21, strong volume
-            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_21_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_1w_aligned[i]:
+            # Short: Bear Power rising and positive, below daily EMA34, strong volume
+            elif bear_power_smooth[i] > 0 and bear_power_smooth[i] > bear_power_smooth[i-1] and \
+                 close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_6_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX turns negative or price drops below weekly EMA21
-            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema_21_1w_aligned[i]:
+            # Long exit: Bull Power turns negative or price drops below daily EMA34
+            if bull_power_smooth[i] <= 0 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX turns positive or price rises above weekly EMA21
-            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema_21_1w_aligned[i]:
+            # Short exit: Bear Power turns negative or price rises above daily EMA34
+            if bear_power_smooth[i] <= 0 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
