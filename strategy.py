@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 1d_Donchian_Breakout_VolumeTrend_Filter
-# Hypothesis: Daily Donchian(20) breakouts with volume confirmation and weekly trend filter.
-# In bull markets, price breaks above upper band in uptrend; in bear markets, breaks below lower band in downtrend.
-# Volume > 1.5x 20-day average confirms breakout strength. Weekly EMA40 determines trend direction.
-# Designed for low trade frequency (~15-25/year) to minimize fee drag and improve generalization.
+# 12h_Donchian_Breakout_TrendFilter_Volume
+# Hypothesis: 12h Donchian(20) breakouts with 1d EMA trend filter and volume confirmation capture sustained moves while avoiding false breakouts. Works in bull markets by riding uptrends and in bear markets by following downtrends. Low trade frequency (~15-30/year) minimizes fee drag.
 
-name = "1d_Donchian_Breakout_VolumeTrend_Filter"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_TrendFilter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,46 +20,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA40 for trend filter
-    ema_40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
-    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate daily Donchian channels (20-period)
+    # Calculate 12h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: 1.5x 20-day average
+    # Volume confirmation (20-period MA on 12h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Donchian (20), volume MA (20), and weekly EMA (40)
-    start_idx = max(20, 20, 40)
+    # Warmup: need Donchian (20) and EMA (50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ma[i]) or 
-            np.isnan(ema_40_1w_aligned[i])):
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_40_1w_aligned[i]
-        downtrend = close[i] < ema_40_1w_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation
+        # Volume confirmation (>1.5x MA to avoid chop)
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
