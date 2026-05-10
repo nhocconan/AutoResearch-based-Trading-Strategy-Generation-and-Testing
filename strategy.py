@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 12H_Camarilla_Pivot_S1R1_Breakout_1dTrend_Filter
-# Hypothesis: Camarilla pivot levels on daily chart provide key support/resistance levels. Price breaking above S1 or below R1 with daily trend filter captures institutional order flow. Designed for low trade frequency (~20-40/year) with discrete sizing (0.25) to minimize fee drag and work in both bull and bear markets.
+# 4h_Donchian_Breakout_20_VolumeConfirmation_1dTrend_Filter
+# Hypothesis: Donchian(20) breakouts on 4h chart capture medium-term momentum. 
+# Volume confirmation (volume > 1.5x 20-period average) filters false breakouts.
+# Daily trend filter (close > EMA50) ensures alignment with higher timeframe trend.
+# Designed for low trade frequency (~25-40/year) with discrete sizing (0.25) to minimize fee drag.
+# Works in bull markets (breakouts with trend) and bear markets (short breakdowns against trend).
 
-name = "12H_Camarilla_Pivot_S1R1_Breakout_1dTrend_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_20_VolumeConfirmation_1dTrend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,31 +24,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla pivot levels (S1, R1)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels: S1 = C - (H-L)*1.12/12, R1 = C + (H-L)*1.12/12
-    camarilla_S1 = close_1d - (high_1d - low_1d) * 1.12 / 12
-    camarilla_R1 = close_1d + (high_1d - low_1d) * 1.12 / 12
-    
-    # Align Camarilla levels to 12h timeframe (no additional delay needed for pivot levels)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 1.5
     
     # Daily trend filter: EMA 50
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for EMA
+    start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_R1_aligned[i]):
+        if np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,24 +58,24 @@ def generate_signals(prices):
         is_downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Price breaks above S1 and daily uptrend
-            if close[i] > camarilla_S1_aligned[i] and is_uptrend:
+            # Long entry: Price breaks above Donchian high + volume confirmation + daily uptrend
+            if close[i] > high_roll[i] and volume[i] > vol_threshold[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below R1 and daily downtrend
-            elif close[i] < camarilla_R1_aligned[i] and is_downtrend:
+            # Short entry: Price breaks below Donchian low + volume confirmation + daily downtrend
+            elif close[i] < low_roll[i] and volume[i] > vol_threshold[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S1 or daily trend turns down
-            if close[i] < camarilla_S1_aligned[i] or not is_uptrend:
+            # Long exit: Price breaks below Donchian low or daily trend turns down
+            if close[i] < low_roll[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above R1 or daily trend turns up
-            if close[i] > camarilla_R1_aligned[i] or not is_downtrend:
+            # Short exit: Price breaks above Donchian high or daily trend turns up
+            if close[i] > high_roll[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
