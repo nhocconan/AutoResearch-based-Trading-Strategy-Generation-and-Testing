@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 1H_4H_1D_Camarilla_R1_S1_Breakout_Trend_Filter
-# Hypothesis: Use 1d Camarilla pivot structure for trend direction and 4h EMA50 filter.
-# Enter on 1h breakouts of daily R1/S1 levels only when 4h EMA50 confirms trend.
-# Target: 15-35 trades/year per symbol (60-140 total over 4 years) to avoid fee drag.
+# 6H_1W_1D_VolumeBreakout_TrendFilter
+# Hypothesis: Combine weekly trend (price above/below weekly SMA50) with daily volume spike and 6h Donchian breakout.
+# Weekly trend filters for major market direction (works in bull/bear by following trend).
+# Daily volume spike (>2x 20-day average) confirms institutional interest.
+# 6h Donchian(20) breakout provides entry timing in trend direction.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
 
-name = "1H_4H_1D_Camarilla_R1_S1_Breakout_Trend_Filter"
-timeframe = "1h"
+name = "6H_1W_1D_VolumeBreakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,108 +22,89 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for each 1d bar using previous day's range
-    H4 = np.full_like(close_1d, np.nan)
-    L4 = np.full_like(close_1d, np.nan)
-    H3 = np.full_like(close_1d, np.nan)
-    L3 = np.full_like(close_1d, np.nan)
-    H2 = np.full_like(close_1d, np.nan)
-    L2 = np.full_like(close_1d, np.nan)
-    H1 = np.full_like(close_1d, np.nan)
-    L1 = np.full_like(close_1d, np.nan)
+    # Weekly SMA50 for trend filter
+    sma50_1w = np.full_like(close_1w, np.nan)
+    for i in range(50, len(close_1w)):
+        sma50_1w[i] = np.mean(close_1w[i-50:i])
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's high, low, close
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        
-        if range_val <= 0:
-            continue
-            
-        H4[i] = prev_close + range_val * 1.1 / 2
-        L4[i] = prev_close - range_val * 1.1 / 2
-        H3[i] = prev_close + range_val * 1.1 / 4
-        L3[i] = prev_close - range_val * 1.1 / 4
-        H2[i] = prev_close + range_val * 1.1 / 6
-        L2[i] = prev_close - range_val * 1.1 / 6
-        H1[i] = prev_close + range_val * 1.1 / 12
-        L1[i] = prev_close - range_val * 1.1 / 12
+    # Trend: price above/below weekly SMA50
+    trend_up = close_1w > sma50_1w
+    trend_down = close_1w < sma50_1w
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
+    # Daily volume spike: volume > 2x 20-day average
+    vol_avg_20 = np.full_like(volume_1d, np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_avg_20[i] = np.mean(volume_1d[i-20:i])
+    volume_spike = volume_1d > (2 * vol_avg_20)
     
-    close_4h = df_4h['close'].values
-    ema_4h_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 6h Donchian channels (20-period)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
     
-    # Align all indicators to 1h
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
+    # Align all indicators to 6h timeframe
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up.astype(float))
+    trend_down_aligned = align_htf_to_ltf(prices, df_1w, trend_down.astype(float))
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
     start_idx = 100
     
     for i in range(start_idx, n):
-        # Skip if any data not ready
-        if (np.isnan(H1_aligned[i]) or np.isnan(L1_aligned[i]) or 
-            np.isnan(H4_aligned[i]) or np.isnan(L4_aligned[i]) or
-            np.isnan(ema_4h_50_aligned[i])):
+        # Skip if data not ready
+        if (np.isnan(sma50_1w_aligned[i]) or np.isnan(trend_up_aligned[i]) or 
+            np.isnan(trend_down_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 4h EMA50
-        uptrend = close[i] > ema_4h_50_aligned[i]
-        downtrend = close[i] < ema_4h_50_aligned[i]
-        
+        # Entry conditions
         if position == 0:
-            # Enter long: price breaks above H1 with uptrend
-            if close[i] > H1_aligned[i] and uptrend:
-                signals[i] = 0.20
+            # Long: uptrend + volume spike + break above Donchian high
+            if trend_up_aligned[i] > 0.5 and volume_spike_aligned[i] > 0.5 and close[i] > donch_high[i]:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below L1 with downtrend
-            elif close[i] < L1_aligned[i] and downtrend:
-                signals[i] = -0.20
+            # Short: downtrend + volume spike + break below Donchian low
+            elif trend_down_aligned[i] > 0.5 and volume_spike_aligned[i] > 0.5 and close[i] < donch_low[i]:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below L1 or trend changes
-            if close[i] < L1_aligned[i] or not uptrend:
+            # Exit long: trend reversal or breakdown below Donchian low
+            if trend_down_aligned[i] > 0.5 or close[i] < donch_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above H1 or trend changes
-            if close[i] > H1_aligned[i] or not downtrend:
+            # Exit short: trend reversal or break above Donchian high
+            if trend_up_aligned[i] > 0.5 or close[i] > donch_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
