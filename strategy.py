@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_TRIX_15_VolumeSpike_ChoppyExit
-# Hypothesis: Uses TRIX(15) momentum with volume spike entry and choppy market exit.
-# Long when TRIX crosses above zero with volume > 2x average and market not choppy.
-# Short when TRIX crosses below zero with volume > 2x average and market not choppy.
-# Exit when market becomes choppy (Choppiness Index > 61.8) or TRIX reverses.
-# Designed for ~30-50 trades/year to avoid overtrading and work in trending markets.
+# 4h_Keltner_MeanReversion_1dATR_Filter
+# Hypothesis: Mean reversion at Keltner Channel lower/upper bands with ATR-based volatility filter.
+# Long when price touches lower Keltner band (EMA20 - 2*ATR) and 1d ATR ratio (current/20-period) > 1.5.
+# Short when price touches upper Keltner band (EMA20 + 2*ATR) and 1d ATR ratio > 1.5.
+# Exit when price returns to EMA20.
+# Designed for 25-40 trades/year to avoid overtrading and work in both bull and bear markets.
 
-name = "4h_TRIX_15_VolumeSpike_ChoppyExit"
+name = "4h_Keltner_MeanReversion_1dATR_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,76 +19,103 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate TRIX(15) - triple smoothed EMA
-    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value has no previous
+    # Calculate 1d ATR for volatility regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Volume average (20 periods)
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Choppiness Index (14 periods) for regime filter
-    def true_range(h, l, c_prev):
-        return np.maximum(h - l, np.maximum(np.abs(h - c_prev), np.abs(l - c_prev)))
+    # True Range for 1d
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0  # first bar has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    tr = np.full(n, np.nan)
-    for i in range(1, n):
-        tr[i] = true_range(high[i], low[i], close[i-1])
+    # ATR(20) on 1d
+    atr_20_1d = np.full(len(tr_1d), np.nan)
+    for i in range(20, len(tr_1d)):
+        atr_20_1d[i] = np.mean(tr_1d[i-20:i])
     
-    atr14 = np.full(n, np.nan)
-    for i in range(14, n):
-        atr14[i] = np.mean(tr[i-13:i+1])
+    # Current ATR (last value) and 20-period average for ratio
+    current_atr_1d = atr_20_1d[-1] if len(atr_20_1d) > 0 else np.nan
+    atr_avg_20_1d = np.full(len(tr_1d), np.nan)
+    for i in range(20, len(tr_1d)):
+        atr_avg_20_1d[i] = np.mean(tr_1d[i-20:i])
     
-    chop = np.full(n, np.nan)
-    for i in range(14, n):
-        if atr14[i] > 0:
-            sum_tr14 = np.sum(tr[i-13:i+1])
-            max_h = np.max(high[i-13:i+1])
-            min_l = np.min(low[i-13:i+1])
-            chop[i] = 100 * np.log10(sum_tr14 / (max_h - min_l)) / np.log10(14)
+    # ATR ratio: current ATR / 20-period average ATR
+    atr_ratio_1d = np.full(len(tr_1d), np.nan)
+    for i in range(20, len(tr_1d)):
+        if atr_avg_20_1d[i] > 0:
+            atr_ratio_1d[i] = atr_20_1d[i] / atr_avg_20_1d[i]
+    
+    # Align ATR ratio to 4h timeframe (needs 2-bar delay for ATR confirmation)
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d, additional_delay_bars=2)
+    
+    # Keltner Channel on 4h: EMA(20) ± 2*ATR(10)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # True Range for 4h
+    tr1_4h = np.abs(high - low)
+    tr2_4h = np.abs(high - np.roll(close, 1))
+    tr3_4h = np.abs(low - np.roll(close, 1))
+    tr1_4h[0] = 0
+    tr2_4h[0] = 0
+    tr3_4h[0] = 0
+    tr_4h = np.maximum(tr1_4h, np.maximum(tr2_4h, tr3_4h))
+    
+    # ATR(10) on 4h
+    atr_10_4h = np.full(len(tr_4h), np.nan)
+    for i in range(10, len(tr_4h)):
+        atr_10_4h[i] = np.mean(tr_4h[i-10:i])
+    
+    # Keltner Bands
+    keltner_lower = ema_20 - 2.0 * atr_10_4h
+    keltner_upper = ema_20 + 2.0 * atr_10_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # TRIX needs 30, vol needs 20
+    start_idx = max(20, 10)  # EMA20 and ATR10 warmup
     
     for i in range(start_idx, n):
-        if np.isnan(trix[i]) or np.isnan(vol_ma[i]) or np.isnan(chop[i]):
+        if np.isnan(keltner_lower[i]) or np.isnan(keltner_upper[i]) or np.isnan(atr_ratio_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume confirmation and not choppy
-            if trix[i] > 0 and trix[i-1] <= 0 and volume[i] > 2.0 * vol_ma[i] and chop[i] <= 61.8:
+            # Long: Price at lower Keltner band with high volatility regime (ATR ratio > 1.5)
+            if close[i] <= keltner_lower[i] and atr_ratio_1d_aligned[i] > 1.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume confirmation and not choppy
-            elif trix[i] < 0 and trix[i-1] >= 0 and volume[i] > 2.0 * vol_ma[i] and chop[i] <= 61.8:
+            # Short: Price at upper Keltner band with high volatility regime (ATR ratio > 1.5)
+            elif close[i] >= keltner_upper[i] and atr_ratio_1d_aligned[i] > 1.5:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below zero OR market becomes choppy
-            if trix[i] < 0 and trix[i-1] >= 0 or chop[i] > 61.8:
+            # Exit: Price returns to EMA20
+            if close[i] >= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX crosses above zero OR market becomes choppy
-            if trix[i] > 0 and trix[i-1] <= 0 or chop[i] > 61.8:
+            # Exit: Price returns to EMA20
+            if close[i] <= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
