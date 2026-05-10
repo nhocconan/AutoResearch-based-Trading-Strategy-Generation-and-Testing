@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend
-Hypothesis: Camarilla pivot breakouts in the direction of the 4h trend during active market hours.
-Uses 4h for trend direction and 1h for entry timing. Designed for 15-37 trades/year per symbol.
-Works in bull markets by buying breakouts above R1 in uptrends, and in bear markets by selling
-breakdowns below S1 in downtrends. Volume confirmation reduces false breakouts.
+12h_KAMA_Trend_With_Volume_Filter
+Hypothesis: KAUFMAN ADAPTIVE MOVING AVERAGE (KAMA) identifies trend direction.
+In trending markets, price stays above/below KAMA; in ranging markets, it crosses frequently.
+We take long when price > KAMA and short when price < KAMA, only when volume confirms
+(volume > 1.5x 20-period average) to avoid false breakouts in low-volume environments.
+Uses 12h for primary timeframe and 1d for trend filter (EMA34) to avoid counter-trend trades.
+Target: 15-25 trades/year per symbol.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend"
-timeframe = "1h"
+name = "12h_KAMA_Trend_With_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,60 +22,59 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day's range
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Convert to Series for indicator calculations
+    close_s = pd.Series(close)
+    volume_s = pd.Series(volume)
     
-    # Camarilla levels
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # KAMA(10, 2, 30) - ER=10, fast=2, slow=30
+    # Efficiency Ratio
+    change = abs(close_s - close_s.shift(10))
+    volatility = abs(close_s.diff()).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if not np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # 4h trend: EMA34
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 34:
+    # 1d trend filter: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_4h_up = close_4h > ema34_4h
-    trend_4h_down = close_4h < ema34_4h
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Align 4h trend to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # Align 1d trend to 12h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volume filter: 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # Volume average (20-period)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for volume MA
+    # Start after we have enough data
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(trend_4h_up_aligned[i]) or
-            np.isnan(trend_4h_down_aligned[i]) or np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Session filter: only trade 08-20 UTC
-        if hours[i] < 8 or hours[i] > 20:
+        if (np.isnan(kama[i]) or np.isnan(ema34_1d[i//12 if i//12 < len(close_1d) else -1]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,29 +84,29 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Long: price breaks above R1 in 4h uptrend with volume
-            if (close[i] > R1[i] and trend_4h_up_aligned[i] > 0.5 and volume_confirm):
-                signals[i] = 0.20
+            # Enter long: price > KAMA + 1d uptrend + volume confirmation
+            if close[i] > kama[i] and trend_1d_up_aligned[i] > 0.5 and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 in 4h downtrend with volume
-            elif (close[i] < S1[i] and trend_4h_down_aligned[i] > 0.5 and volume_confirm):
-                signals[i] = -0.20
+            # Enter short: price < KAMA + 1d downtrend + volume confirmation
+            elif close[i] < kama[i] and trend_1d_down_aligned[i] > 0.5 and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to mean (prev close) or trend changes
-            if (close[i] <= prev_close[i] or trend_4h_up_aligned[i] < 0.5):
+            # Exit when price crosses below KAMA or trend changes
+            if close[i] < kama[i] or trend_1d_up_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to mean or trend changes
-            if (close[i] >= prev_close[i] or trend_4h_down_aligned[i] < 0.5):
+            # Exit when price crosses above KAMA or trend changes
+            if close[i] > kama[i] or trend_1d_down_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
