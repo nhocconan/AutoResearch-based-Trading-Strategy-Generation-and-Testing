@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for breakout entries with daily trend filter and volume confirmation.
-In strong trends, price breaks R1/S1 and continues; in ranging markets, fewer triggers reduce whipsaw.
-Daily trend filter avoids counter-trend trades. Designed for 4h timeframe to capture multi-day moves with low frequency.
-Target: 15-30 trades/year per symbol.
+4h_Donchian_Breakout_20_200EMA_Volume
+Hypothesis: Donchian(20) breakout in direction of 200 EMA trend with volume confirmation.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+Volume filter reduces false breakouts. Designed for 4h to capture multi-day moves with low frequency.
+Target: 20-40 trades/year per symbol.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Donchian_Breakout_20_200EMA_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,51 +25,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend
+    # 4h indicators
+    # Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # 200 EMA trend filter
+    close_series = pd.Series(close)
+    ema200 = close_series.ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_up = close > ema200
+    trend_down = close < ema200
+    
+    # Volume confirmation: 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    
+    # Daily trend filter (1D)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day
-    # Typical price = (high + low + close) / 3
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_val = df_1d['high'] - df_1d['low']
-    
-    # Camarilla levels
-    R1 = typical_price + (range_val * 1.1 / 6)
-    S1 = typical_price - (range_val * 1.1 / 6)
-    
-    # Use previous day's levels (shift by 1 to avoid look-ahead)
-    R1_prev = R1.shift(1).values
-    S1_prev = S1.shift(1).values
-    
-    # Daily trend: EMA34
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # Align daily data to 4h
-    R1_prev_aligned = align_htf_to_ltf(prices, df_1d, R1_prev)
-    S1_prev_aligned = align_htf_to_ltf(prices, df_1d, S1_prev)
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
-    
-    # Volume confirmation: 6-period (1-day) average on 4h
-    volume_s = pd.Series(volume)
-    vol_ma = volume_s.rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_prev_aligned[i]) or np.isnan(S1_prev_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(trend_1d_up_aligned[i]) or
+            np.isnan(trend_1d_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,34 +76,30 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: break above R1 with daily uptrend and volume
-            if (close[i] > R1_prev_aligned[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: break above Donchian high with uptrend and volume
+            if (close[i] > donchian_high[i] and 
+                trend_up[i] and trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with daily downtrend and volume
-            elif (close[i] < S1_prev_aligned[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: break below Donchian low with downtrend and volume
+            elif (close[i] < donchian_low[i] and 
+                  trend_down[i] and trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to typical price or trend fails
-            typical_price_aligned = ((df_1d['high'] + df_1d['low'] + df_1d['close']) / 3).shift(1).values
-            typical_price_aligned = align_htf_to_ltf(prices, df_1d, typical_price_aligned)
-            if (close[i] < typical_price_aligned[i] or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit when price returns to Donchian low or trend fails
+            if (close[i] < donchian_low[i] or 
+                not trend_up[i] or trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to typical price or trend fails
-            typical_price_aligned = ((df_1d['high'] + df_1d['low'] + df_1d['close']) / 3).shift(1).values
-            typical_price_aligned = align_htf_to_ltf(prices, df_1d, typical_price_aligned)
-            if (close[i] > typical_price_aligned[i] or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit when price returns to Donchian high or trend fails
+            if (close[i] > donchian_high[i] or 
+                not trend_down[i] or trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
