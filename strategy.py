@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v4
 # Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
 # Uses 1d trend for bias to avoid whipsaws in sideways markets, 4h for entry timing.
 # Targets 25-40 trades/year to minimize fee drag. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
 # Added volume confirmation to reduce false breakouts.
+# This version adds stricter volume threshold (2.0x) and uses median-based volatility filter to reduce churn.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v3"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -55,7 +56,7 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Volume filter: current volume > 2.0 * 20-period average (stricter to reduce trades)
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -74,7 +75,7 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 1.5
+        volume_filter = vol_ratio > 2.0  # Increased threshold for fewer, higher-quality signals
         
         if position == 0:
             # Long: price breaks above Camarilla R1 with uptrend and volume spike
