@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_D1Trend_Reversal
-# Hypothesis: Fade at weekly pivot R4/S4 levels during strong 1-day trends with volume confirmation.
-# Works in bull/bear markets by fading extreme moves against the higher timeframe trend.
-# Target: 12-30 trades/year on 6h timeframe to minimize fee drag.
+# 4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike
+# Hypothesis: Breakouts at Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume spike (2x 24-period average).
+# Uses 4h timeframe with 1d trend filter to avoid counter-trend trades, reducing false signals in choppy markets.
+# Target: 20-50 trades/year to minimize fee drag on 4h timeframe. Works in bull/bear via trend alignment.
 
-name = "6h_WeeklyPivot_D1Trend_Reversal"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day trend filter (EMA34)
+    # 1d trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -32,47 +32,45 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1-day trend to 6h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Weekly pivot points (R4, S4) from previous week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Shift to get previous week values
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Calculate weekly pivot points
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_ = prev_high - prev_low
-    R4 = pivot + (range_ * 1.1 / 2)  # R4
-    S4 = pivot - (range_ * 1.1 / 2)  # S4
-    
-    # Align weekly pivot points to 6h
-    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
-    
-    # Volume confirmation (1.5x 20-period average)
+    # Volume spike (2x 24-period average)
     vol_ma = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma[i] = vol_sum / 20
-    volume_confirm = volume > (1.5 * vol_ma)
+        if i >= 24:
+            vol_sum -= volume[i-24]
+        if i >= 23:
+            vol_ma[i] = vol_sum / 24
+    volume_spike = volume > (2.0 * vol_ma)
+    
+    # Calculate Camarilla levels from previous 4h bar
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Shift to get previous 4h bar values
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate Camarilla levels (R3, S3)
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,30 +79,30 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long fade: price touches S4 with volume confirmation during 1-day uptrend
-            if (low[i] <= S4_aligned[i] and
+            # Long: price breaks above R3 with volume spike, 1d uptrend
+            if (high[i] > R3_aligned[i] and
                 trend_1d_up_aligned[i] > 0.5 and
-                volume_confirm[i]):
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short fade: price touches R4 with volume confirmation during 1-day downtrend
-            elif (high[i] >= R4_aligned[i] and
+            # Short: price breaks below S3 with volume spike, 1d downtrend
+            elif (low[i] < S3_aligned[i] and
                   trend_1d_down_aligned[i] > 0.5 and
-                  volume_confirm[i]):
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price moves back to pivot or 1-day trend turns down
-            if (close[i] >= pivot[i] or
+            # Exit: price breaks below S3 or 1d trend turns down
+            if (low[i] < S3_aligned[i] or
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -112,8 +110,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price moves back to pivot or 1-day trend turns up
-            if (close[i] <= pivot[i] or
+            # Exit: price breaks above R3 or 1d trend turns up
+            if (high[i] > R3_aligned[i] or
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
