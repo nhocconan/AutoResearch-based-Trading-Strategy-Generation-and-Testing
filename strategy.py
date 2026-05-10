@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_RSI_Divergence_Trend_Filter
-Hypothesis: Combines RSI divergence detection on 12h timeframe with 1w trend filter and volume confirmation.
-In bull markets: buy on bullish RSI divergence during pullbacks in uptrend.
-In bear markets: sell on bearish RSI divergence during rallies in downtrend.
-Uses 1w EMA50 for trend filter and 1d volume spike for confirmation to reduce false signals.
-Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla pivot levels (R1/S1) on daily chart provide high-probability support/resistance.
+Long when price breaks above R1 in uptrend (price > 1d EMA34) with volume spike.
+Short when price breaks below S1 in downtrend (price < 1d EMA34) with volume spike.
+Exit when price returns to the daily pivot point (PP).
+Uses 1d trend and volume confirmation to filter false breakouts.
+Designed for 4h timeframe with 20-30 trades/year to minimize fee drag.
+Works in bull markets by buying breakouts above resistance in uptrends.
+Works in bear markets by selling breakdowns below support in downtrends.
 """
 
-name = "12h_RSI_Divergence_Trend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +21,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,112 +29,90 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI on 12h with period 14
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        # Wilder's smoothing
-        avg_gain[period] = np.mean(gain[1:period+1])
-        avg_loss[period] = np.mean(loss[1:period+1])
-        
-        for i in range(period+1, len(close_prices)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close, 14)
-    
-    # Detect RSI divergence: bullish (price lower low, RSI higher low) and bearish (price higher high, RSI lower high)
-    def find_divergences(high_prices, low_prices, rsi_values, lookback=10):
-        bullish_div = np.zeros_like(rsi_values, dtype=bool)
-        bearish_div = np.zeros_like(rsi_values, dtype=bool)
-        
-        for i in range(lookback, len(rsi_values)):
-            # Look for swing low in price
-            if low_prices[i] == np.min(low_prices[i-lookback:i+1]):
-                # Check if this is a higher low in RSI compared to previous swing low
-                for j in range(i-lookback, i):
-                    if low_prices[j] == np.min(low_prices[j-lookback:j+1]) and j < i:
-                        if low_prices[i] < low_prices[j] and rsi_values[i] > rsi_values[j]:
-                            bullish_div[i] = True
-                            break
-            
-            # Look for swing high in price
-            if high_prices[i] == np.max(high_prices[i-lookback:i+1]):
-                # Check if this is a lower high in RSI compared to previous swing high
-                for j in range(i-lookback, i):
-                    if high_prices[j] == np.max(high_prices[j-lookback:j+1]) and j < i:
-                        if high_prices[i] > high_prices[j] and rsi_values[i] < rsi_values[j]:
-                            bearish_div[i] = True
-                            break
-        return bullish_div, bearish_div
-    
-    bullish_div, bearish_div = find_divergences(high, low, rsi, 10)
-    
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # 1d volume SMA20 for volume confirmation
+    # Daily data for Camarilla levels, trend, and volume
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    if len(df_1d) == 0:
+        return np.zeros(n)
+    
+    # Daily high, low, close for Camarilla calculation
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    daily_volume = df_1d['volume'].values
+    
+    # Calculate Camarilla levels for each day
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    # PP = (High + Low + Close) / 3
+    rang = daily_high - daily_low
+    r1 = daily_close + rang * 1.1 / 12
+    s1 = daily_close - rang * 1.1 / 12
+    pp = (daily_high + daily_low + daily_close) / 3
+    
+    # Align Camarilla levels to 4h timeframe (wait for daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = np.full(len(daily_close), np.nan)
+    if len(daily_close) >= 34:
+        ema34_1d[33] = np.mean(daily_close[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(daily_close)):
+            ema34_1d[i] = alpha * daily_close[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 1d volume SMA20 for volume confirmation spike
+    vol_sma20_1d = np.full(len(daily_volume), np.nan)
+    if len(daily_volume) >= 20:
+        vol_sma20_1d[19] = np.mean(daily_volume[:20])
+        for i in range(20, len(daily_volume)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + daily_volume[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Ensure RSI and divergence detection have enough data
+    # Start after enough data for all indicators
+    start_idx = 34  # Need at least 34 days for EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(pp_aligned[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h periods in 1d
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        # 1 day = 6 * 4h bars, so scale daily average by 1/6 for per-4h comparison
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0
         volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
         if position == 0:
-            # Long: Bullish RSI divergence in uptrend with volume confirmation
-            if bullish_div[i] and close[i] > ema50_1w_aligned[i] and volume_confirm:
+            # Long: Break above R1 in uptrend with volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish RSI divergence in downtrend with volume confirmation
-            elif bearish_div[i] and close[i] < ema50_1w_aligned[i] and volume_confirm:
+            # Short: Break below S1 in downtrend with volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bearish RSI divergence or trend reversal
-            if bearish_div[i] or close[i] < ema50_1w_aligned[i]:
+            # Long exit: Price returns to pivot point (mean reversion to daily mean)
+            if close[i] <= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bullish RSI divergence or trend reversal
-            if bullish_div[i] or close[i] > ema50_1w_aligned[i]:
+            # Short exit: Price returns to pivot point
+            if close[i] >= pp_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
