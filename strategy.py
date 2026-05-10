@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_Breakout_DailyTrend_Volume
-# Hypothesis: Weekly pivot levels provide strong institutional support/resistance.
-# In trending markets (1d EMA34), price breaking above weekly R1 in uptrend or
-# below weekly S1 in downtrend continues with momentum. Volume confirmation filters
-# false breakouts. Works in bull markets (follows uptrends) and bear markets
-# (follows downtrends) by only trading in direction of daily trend.
+# 12h_ChaikinMoneyFlow_BullBear_Trend_Filter
+# Hypothesis: Chaikin Money Flow (CMF) on 1d shows institutional accumulation/distribution.
+# In trending markets (price above/below 1d EMA50), CMF extremes confirm trend strength.
+# Enter long when price > EMA50 and CMF > +0.15; short when price < EMA50 and CMF < -0.15.
+# Exit when trend fails or CMF reverts toward zero. Works in bull/bear by following 1d trend.
+# Uses 12h timeframe for entries, targeting 50-150 trades over 4 years.
 
-name = "1d_WeeklyPivot_Breakout_DailyTrend_Volume"
-timeframe = "1d"
+name = "12h_ChaikinMoneyFlow_BullBear_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,81 +24,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for CMF and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly pivot levels (standard formula)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Chaikin Money Flow (CMF) over 20 days
+    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+    # Money Flow Volume = Money Flow Multiplier * Volume
+    # CMF = 20-period sum of Money Flow Volume / 20-period sum of Volume
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * pivot_point - weekly_low
-    weekly_s1 = 2 * pivot_point - weekly_high
+    mfm = np.where((high_1d - low_1d) != 0, 
+                   ((close_1d - low_1d) - (high_1d - close_1d)) / (high_1d - low_1d), 
+                   0.0)
+    mfv = mfm * volume_1d
     
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Volume confirmation (20-period MA on 1d = 20 days)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    cmf_20 = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values / \
+             pd.Series(volume_1d).rolling(window=20, min_periods=20).sum().values
+    cmf_20_aligned = align_htf_to_ltf(prices, df_1d, cmf_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34), weekly pivot (10), volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need EMA50 (50), CMF (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(cmf_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Trend filter: price vs EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R1 + volume
-            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
+            # Long entry: uptrend + CMF > +0.15 (strong buying pressure)
+            if uptrend and cmf_20_aligned[i] > 0.15:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S1 + volume
-            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
+            # Short entry: downtrend + CMF < -0.15 (strong selling pressure)
+            elif downtrend and cmf_20_aligned[i] < -0.15:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < weekly_r1_aligned[i]:
+            # Long exit: trend fails OR CMF drops below +0.05 (weakening buying)
+            if not uptrend or cmf_20_aligned[i] < 0.05:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > weekly_s1_aligned[i]:
+            # Short exit: trend fails OR CMF rises above -0.05 (weakening selling)
+            if not downtrend or cmf_20_aligned[i] > -0.05:
                 signals[i] = 0.0
                 position = 0
             else:
