@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-4H_InsideBar_Breakout_1dTrend_Volume
-Hypothesis: Uses daily inside bar (IB) patterns on 4h timeframe for breakout entries,
-confirmed by 1d EMA50 trend and volume spike. Inside bars indicate consolidation
-and low volatility; breakouts from these ranges often precede strong moves.
-Works in both bull and bear markets by following 1d trend direction. Uses
-discrete position sizing (0.25) to minimize fee churn. Target: 20-40 trades/year.
+1D_RSI_Extreme_1wTrend_Volume
+Hypothesis: Uses weekly trend direction with daily RSI extremes for mean reversion entries, filtered by volume spikes. Works in both bull and bear markets by following weekly trend direction for entries but using daily RSI extremes for counter-trend entries within the trend. Targets 15-30 trades/year with discrete sizing to minimize fee drag.
 """
 
-name = "4H_InsideBar_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1D_RSI_Extreme_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,75 +17,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA(20) for trend direction
+    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Get 1d data for inside bar detection (requires previous day's high/low)
-    # Inside bar: current day's high <= previous day's high AND low >= previous day's low
-    prev_high = df_1d['high'].shift(1)
-    prev_low = df_1d['low'].shift(1)
-    inside_bar = (df_1d['high'] <= prev_high) & (df_1d['low'] >= prev_low)
-    # Convert to 1 if inside bar, 0 otherwise
-    inside_bar_signal = inside_bar.astype(int).values
-    # Align to 4h timeframe (use previous day's inside bar signal)
-    inside_bar_aligned = align_htf_to_ltf(prices, df_1d, inside_bar_signal)
+    # Calculate daily RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Volume filter: volume > 2.0x 20-period average on 4h chart
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and volume MA
+    start_idx = max(50, 20)  # Warmup for EMA and RSI
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(inside_bar_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA20
+        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long entry: inside bar breakout up + above 1d EMA + volume spike
-            if (inside_bar_aligned[i] == 1 and 
-                close[i] > df_1d['high'].shift(1).values[i] and  # Break above prev day high
-                price_above_ema and 
+            # Long entry: RSI oversold (<30) + above weekly EMA + volume spike
+            if (rsi_values[i] < 30 and 
+                price_above_weekly_ema and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: inside bar breakout down + below 1d EMA + volume spike
-            elif (inside_bar_aligned[i] == 1 and 
-                  close[i] < df_1d['low'].shift(1).values[i] and  # Break below prev day low
-                  price_below_ema and 
+            # Short entry: RSI overbought (>70) + below weekly EMA + volume spike
+            elif (rsi_values[i] > 70 and 
+                  price_below_weekly_ema and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below previous day's low or volume drops
-            if (close[i] < df_1d['low'].shift(1).values[i] or volume[i] < vol_ma[i]):
+            # Long exit: RSI overbought (>70) or price below weekly EMA
+            if (rsi_values[i] > 70 or 
+                close[i] < ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above previous day's high or volume drops
-            if (close[i] > df_1d['high'].shift(1).values[i] or volume[i] < vol_ma[i]):
+            # Short exit: RSI oversold (<30) or price above weekly EMA
+            if (rsi_values[i] < 30 or 
+                close[i] > ema_20_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
