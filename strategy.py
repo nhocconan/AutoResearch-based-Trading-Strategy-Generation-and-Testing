@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# 1d_WideRangeBreakout_1wTrend_Volume
-# Hypothesis: On daily timeframe, enter long when price breaks above 20-day high with volume > 1.5x average and weekly trend up (price > weekly EMA50). Enter short when price breaks below 20-day low with volume > 1.5x average and weekly trend down (price < weekly EMA50). Uses ATR-based stoploss. Designed for 10-25 trades/year to avoid fee drag. Weekly trend filter ensures alignment with higher timeframe momentum, working in both bull and bear markets by only trading in the direction of the weekly trend.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakout above/below Camarilla R1/S1 levels on 12h, filtered by 1d EMA34 trend and volume confirmation (>1.5x average).
+# Uses ATR-based stoploss. Designed for 12-37 trades/year to avoid fee drag. Works in bull/bear via trend filter.
 
-name = "1d_WideRangeBreakout_1wTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 34:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,19 +30,27 @@ def generate_signals(prices):
     for i in range(20, n):
         atr[i] = np.nanmean(tr[i-19:i+1])
     
-    # Get weekly EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Get 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 20-day high/low for breakout
-    high_20 = np.full(n, np.nan)
-    low_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        high_20[i] = np.nanmax(high[i-20:i])
-        low_20[i] = np.nanmin(low[i-20:i])
+    # Calculate Camarilla levels from previous 1d bar
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 20-day volume average
+    camarilla_r1 = np.full(len(close_1d), np.nan)
+    camarilla_s1 = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        camarilla_r1[i] = close_1d[i-1] + 1.1 * (high_1d[i-1] - low_1d[i-1]) / 12
+        camarilla_s1[i] = close_1d[i-1] - 1.1 * (high_1d[i-1] - low_1d[i-1]) / 12
+    
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume average (20 periods)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.nanmean(volume[i-20:i])
@@ -49,39 +58,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient warmup
+    start_idx = 34  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trade only in direction of weekly EMA50 trend
-            if close[i] > ema_50_1w_aligned[i]:  # Weekly uptrend
-                # Long: Breakout above 20-day high with volume confirmation
-                if close[i] > high_20[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Trade only in direction of 1d EMA34 trend
+            if close[i] > ema_34_1d_aligned[i]:  # Uptrend
+                # Long: Breakout above Camarilla R1 with volume confirmation
+                if close[i] > camarilla_r1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
                     signals[i] = 0.25
                     position = 1
-            else:  # Weekly downtrend
-                # Short: Breakout below 20-day low with volume confirmation
-                if close[i] < low_20[i] and volume[i] > 1.5 * vol_ma[i]:
+            else:  # Downtrend
+                # Short: Breakout below Camarilla S1 with volume confirmation
+                if close[i] < camarilla_s1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: Price closes below weekly EMA50 or stoploss hit (2*ATR below entry)
-            if close[i] < ema_50_1w_aligned[i] or (i > 0 and low[i] < high_20[i] - 2.0 * atr[i]):
+            # Exit: Price closes below EMA34 or stoploss hit
+            if close[i] < ema_34_1d_aligned[i] or (i > 0 and low[i] < camarilla_s1_aligned[i] - 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price closes above weekly EMA50 or stoploss hit (2*ATR above entry)
-            if close[i] > ema_50_1w_aligned[i] or (i > 0 and high[i] > low_20[i] + 2.0 * atr[i]):
+            # Exit: Price closes above EMA34 or stoploss hit
+            if close[i] > ema_34_1d_aligned[i] or (i > 0 and high[i] > camarilla_r1_aligned[i] + 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
