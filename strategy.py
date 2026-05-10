@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-Hypothesis: Camarilla pivot breakout in direction of 1d EMA34 trend with volume spike confirmation.
-Works in bull/bear by following higher timeframe trend. Target: 20-30 trades/year.
+1d_1w_Camarilla_R1_S1_Breakout_Volume
+Hypothesis: Daily Camarilla R1/S1 breakout in direction of weekly EMA21 trend with volume confirmation.
+Works in bull/bear by following higher timeframe trend. Target: 10-25 trades/year.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,36 +23,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly EMA21 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_21_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 21:
+        ema_21_1w[20] = np.mean(close_1w[:21])
+        alpha = 2 / (21 + 1)
+        for i in range(21, len(close_1w)):
+            ema_21_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_21_1w[i-1]
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # Camarilla pivot levels from 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    # Daily Camarilla levels (based on previous day)
+    camarilla_high = np.full(n, np.nan)
+    camarilla_low = np.full(n, np.nan)
+    # Calculate pivot from previous day's OHLC
+    for i in range(1, n):
+        if not np.isnan(high[i-1]) and not np.isnan(low[i-1]) and not np.isnan(close[i-1]):
+            pivot = (high[i-1] + low[i-1] + close[i-1]) / 3.0
+            range_ = high[i-1] - low[i-1]
+            camarilla_high[i] = pivot + 1.1 * range_ / 2.0  # R1
+            camarilla_low[i] = pivot - 1.1 * range_ / 2.0   # S1
     
-    # Calculate pivot point and ranges
-    pivot = (high_1d + low_1d + close_1d_prev) / 3
-    range_hl = high_1d - low_1d
-    
-    # Camarilla levels: R1, S1
-    R1 = close_1d_prev + range_hl * 1.1 / 12
-    S1 = close_1d_prev - range_hl * 1.1 / 12
-    
-    # Align to 4h
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume spike: current volume > 1.5x average volume (20-period)
+    # Volume spike: current volume > 2x average volume (20-period)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
@@ -60,37 +53,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)
+    start_idx = max(21, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_21_1w_aligned[i]) or np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        volume_confirm = volume[i] > 1.5 * vol_sma[i]
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 0:
-            # Long: Close above R1 and above EMA34_1d
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+            # Long: Break above R1 and above weekly EMA21
+            if high[i] > camarilla_high[i] and close[i] > ema_21_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 and below EMA34_1d
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+            # Short: Break below S1 and below weekly EMA21
+            elif low[i] < camarilla_low[i] and close[i] < ema_21_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below EMA34_1d
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit: Close below weekly EMA21
+            if close[i] < ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above EMA34_1d
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit: Close above weekly EMA21
+            if close[i] > ema_21_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
