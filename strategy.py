@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Choppiness_Adjusted_Donchian_Breakout_Volume
-# Hypothesis: 4h Donchian breakout (20-period) filtered by 12h choppiness regime (Choppiness Index > 61.8 = range-bound, < 38.2 = trending).
-# In trending regimes (CHOP < 38.2), we take breakouts in the direction of the 12h EMA trend.
-# Volume confirmation (2x 24-period MA) filters weak breakouts. Designed to avoid false breakouts in chop.
-# Works in bull/bear by using trend filter + regime filter to avoid whipsaws. Target: 20-50 trades/year.
+# 1h_4h1d_Camarilla_Trend_Filter
+# Hypothesis: 1h breakout at 4h/1d Camarilla R3/S3 with 4h trend filter and volume spike.
+# Uses 4h trend (close > EMA50) for bias, reducing counter-trend trades.
+# Volume surge (1.5x 24-period MA) confirms institutional participation.
+# Designed for 1h timeframe to target 15-37 trades/year per symbol.
+# Works in bull/bear by requiring trend alignment, avoiding chop whipsaws.
 
-name = "4h_Choppiness_Adjusted_Donchian_Breakout_Volume"
-timeframe = "4h"
+name = "1h_4h1d_Camarilla_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -15,120 +16,96 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for trend and choppiness
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for trend and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 12h Choppiness Index (14-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 4h Camarilla levels (using previous bar's OHLC)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # True Range
-    tr1 = high_12h[1:] - low_12h[1:]
-    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
-    tr = np.maximum.reduce([tr1, tr2, tr3])
-    tr = np.concatenate([[np.nan], tr])  # align to same length
+    camarilla_r3 = np.full(len(df_4h), np.nan)
+    camarilla_s3 = np.full(len(df_4h), np.nan)
     
-    # ATR (14-period)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    for i in range(1, len(df_4h)):
+        prev_high = high_4h[i-1]
+        prev_low = low_4h[i-1]
+        prev_close = close_4h[i-1]
+        diff = prev_high - prev_low
+        
+        camarilla_r3[i] = prev_close + diff * 1.1 / 4
+        camarilla_s3[i] = prev_close - diff * 1.1 / 4
     
-    # Sum of ATR over 14 periods
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    # Align 4h indicators to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
     
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index: 100 * log10(sum(ATR)/ (HH - LL)) / log10(14)
-    # Avoid division by zero
-    range_hl = hh - ll
-    chop = np.full_like(close_12h, np.nan)
-    mask = (range_hl > 0) & ~np.isnan(sum_atr)
-    chop[mask] = 100 * np.log10(sum_atr[mask] / range_hl[mask]) / np.log10(14)
-    
-    # Trend: 12h close > EMA50
-    uptrend_12h = close_12h > ema_50_12h
-    downtrend_12h = close_12h < ema_50_12h
-    
-    # Align 12h indicators to 4h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
-    
-    # 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume average (24-period for 4h = 6 days)
+    # Volume average (24-period for 1h = 24 hours)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for 12h EMA50 (50) and Donchian (20)
+    # Warmup: need enough history for 4h EMA50 + vol MA
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(chop_aligned[i]) or
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade when market is trending (CHOP < 38.2)
-        if chop_aligned[i] >= 38.2:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
+        # Determine trend: 4h close > EMA50
+        close_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['close'].values)
+        uptrend = close_4h_aligned[i] > ema_50_4h_aligned[i]
+        downtrend = close_4h_aligned[i] < ema_50_4h_aligned[i]
         
-        # Volume confirmation (2x average for significance)
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (1.5x average for significance)
+        volume_surge = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Breakout above Donchian high in uptrend with volume surge
-            if close[i] > donchian_high[i] and uptrend_12h_aligned[i] > 0.5 and volume_surge:
-                signals[i] = 0.25
+            # Long: Breakout above Camarilla R3 in uptrend with volume spike
+            if close[i] > camarilla_r3_aligned[i] and uptrend and volume_surge:
+                signals[i] = 0.20
                 position = 1
-            # Short: Breakdown below Donchian low in downtrend with volume surge
-            elif close[i] < donchian_low[i] and downtrend_12h_aligned[i] > 0.5 and volume_surge:
-                signals[i] = -0.25
+            # Short: Breakdown below Camarilla S3 in downtrend with volume spike
+            elif close[i] < camarilla_s3_aligned[i] and downtrend and volume_surge:
+                signals[i] = -0.20
                 position = -1
         else:
             if position == 1:
-                # Long exit: close below Donchian low or trend fails
-                if close[i] < donchian_low[i] or uptrend_12h_aligned[i] <= 0.5:
+                # Long exit: close below Camarilla R3 or trend fails
+                if close[i] < camarilla_r3_aligned[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Short exit: close above Donchian high or trend fails
-                if close[i] > donchian_high[i] or downtrend_12h_aligned[i] <= 0.5:
+                # Short exit: close above Camarilla S3 or trend fails
+                if close[i] > camarilla_s3_aligned[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
