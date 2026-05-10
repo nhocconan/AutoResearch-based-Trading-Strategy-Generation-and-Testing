@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 6h_WilliamsVixFix_MeanReversion_1dTrend
-# Hypothesis: Williams Vix Fix (WVF) identifies extreme oversold/overbought conditions by measuring volatility relative to recent highs.
-# In both bull and bear markets, reversals from these extremes tend to revert to the mean, especially when aligned with the daily trend.
-# Uses 1d trend filter to avoid counter-trend trades, improving win rate. Designed for low frequency (~15-35 trades/year) to minimize fee drag.
-# Williams Vix Fix formula: wvf = ((highest_high - low) / highest_high) * 100, where highest_high is the highest high over lookback period.
-# Low WVF values indicate high volatility (fear), suggesting potential mean reversion upward.
-# High WVF values indicate low volatility (complacency), suggesting potential mean reversion downward.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, breakouts above Camarilla R1 or below S1 with daily trend filter and volume confirmation work in both bull and bear markets. Daily trend avoids counter-trend trades, volume reduces false signals. Camarilla levels provide institutional-grade support/resistance. Designed for low frequency (~15-30 trades/year) to minimize fee drag.
 
-name = "6h_WilliamsVixFix_MeanReversion_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,71 +15,78 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Vix Fix parameters
-    wvf_period = 22  # lookback period for highest high
-    
-    # Calculate highest high over the lookback period
-    high_series = pd.Series(high)
-    highest_high = high_series.rolling(window=wvf_period, min_periods=wvf_period).max().values
-    
-    # Williams Vix Fix: measures volatility as percentage deviation from recent high
-    # Higher values = lower volatility (complacency), Lower values = higher volatility (fear)
-    wvf_raw = ((highest_high - low) / highest_high) * 100
-    
-    # Daily trend filter: EMA34 on daily close
+    # Daily data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
+    
+    # Calculate Camarilla levels: R1, S1
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + 1.1 * camarilla_range / 12
+    s1 = prev_close - 1.1 * camarilla_range / 12
+    
+    # Daily trend: EMA34 on daily close
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align daily trend to 6h timeframe
+    # Align daily data to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volatility regime filter: use WVF itself to identify extreme readings
-    # We'll use the 50th percentile of WVF as dynamic threshold
-    wvf_series = pd.Series(wvf_raw)
-    wvf_median = wvf_series.rolling(window=50, min_periods=50).median().values
+    # Volume confirmation: 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for all indicators
-    start_idx = max(50, wvf_period)  # ensure we have WVF and median
+    # Start after we have enough data
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(wvf_raw[i]) or 
-            np.isnan(wvf_median[i]) or np.isnan(trend_1d_up_aligned[i]) or 
-            np.isnan(trend_1d_down_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_confirm = vol_ratio > 1.5
+        
         if position == 0:
-            # Enter long: extreme fear (low WVF = high volatility) during daily uptrend
-            if (wvf_raw[i] < wvf_median[i] * 0.7 and  # Oversold: volatility spike
-                trend_1d_up_aligned[i] > 0.5):
+            # Enter long: price breaks above R1 with daily uptrend and volume
+            if (close[i] > r1_aligned[i] and 
+                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: extreme complacency (high WVF = low volatility) during daily downtrend
-            elif (wvf_raw[i] > wvf_median[i] * 1.3 and  # Overbought: low volatility
-                  trend_1d_down_aligned[i] > 0.5):
+            # Enter short: price breaks below S1 with daily downtrend and volume
+            elif (close[i] < s1_aligned[i] and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: volatility normalization or trend failure
-            if (wvf_raw[i] > wvf_median[i] * 0.9 or  # Volatility normalized
+            # Exit when price returns below R1 or trend fails
+            if (close[i] < r1_aligned[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -92,8 +94,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: volatility normalization or trend failure
-            if (wvf_raw[i] < wvf_median[i] * 1.1 or  # Volatility normalized
+            # Exit when price returns above S1 or trend fails
+            if (close[i] > s1_aligned[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
