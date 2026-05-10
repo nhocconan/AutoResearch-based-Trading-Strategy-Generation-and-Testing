@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6H_MarketStructure_Reversal
-# Hypothesis: Identify reversals at key market structure levels (swing highs/lows) with volume confirmation.
-# Uses 1d swing points and 6h price action to catch institutional reversals.
-# Works in bull/bear by trading mean reversion at extremes with volume confirmation.
-# Target: 25-35 trades/year per symbol.
+# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Trade Camarilla R1/S1 breakouts with weekly trend filter and volume confirmation.
+# Long when price breaks above R1 with weekly uptrend and volume > 1.5x average.
+# Short when price breaks below S1 with weekly downtrend and volume > 1.5x average.
+# Uses weekly EMA50 for trend filter to capture major trends and avoid counter-trend trades.
+# Target: 12-37 trades/year per symbol.
 
-name = "6H_MarketStructure_Reversal"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,105 +24,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h indicators
-    close_s = pd.Series(close)
-    volume_s = pd.Series(volume)
+    # Calculate Camarilla levels for 12h using previous bar's OHLC
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    hl_range = high - low
+    r1 = close + 1.1 * hl_range / 12
+    s1 = close - 1.1 * hl_range / 12
     
-    # Volume moving average (20-period)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Shift to get previous bar's levels (no look-ahead)
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
     
-    # RSI (14-period) for momentum exhaustion
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Daily swing points (structure levels)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_uptrend = close_1w > ema50_1w
+    weekly_downtrend = close_1w < ema50_1w
     
-    # Swing high: higher high followed by lower high
-    swing_high = np.zeros_like(high_1d, dtype=bool)
-    swing_low = np.zeros_like(low_1d, dtype=bool)
+    # Align weekly trend to 12h
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
-    for i in range(2, len(high_1d)-2):
-        # Swing high: current high > previous 2 highs and next 2 highs
-        if (high_1d[i] > high_1d[i-1] and high_1d[i] > high_1d[i-2] and
-            high_1d[i] > high_1d[i+1] and high_1d[i] > high_1d[i+2]):
-            swing_high[i] = True
-        # Swing low: current low < previous 2 lows and next 2 lows
-        if (low_1d[i] < low_1d[i-1] and low_1d[i] < low_1d[i-2] and
-            low_1d[i] < low_1d[i+1] and low_1d[i] < low_1d[i+2]):
-            swing_low[i] = True
-    
-    # Create arrays of swing levels (0 when no swing, price level when swing)
-    swing_high_levels = np.where(swing_high, high_1d, 0)
-    swing_low_levels = np.where(swing_low, low_1d, 0)
-    
-    # Forward fill swing levels to create resistance/support zones
-    swing_high_levels = pd.Series(swing_high_levels).replace(0, np.nan).ffill().bfill().values
-    swing_low_levels = pd.Series(swing_low_levels).replace(0, np.nan).ffill().bfill().values
-    
-    # Align swing levels to 6h
-    swing_high_aligned = align_htf_to_ltf(prices, df_1d, swing_high_levels)
-    swing_low_aligned = align_htf_to_ltf(prices, df_1d, swing_low_levels)
+    # Volume average (24-period ≈ 12 days)
+    volume_s = pd.Series(volume)
+    vol_ma = volume_s.rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or 
-            np.isnan(swing_high_aligned[i]) or np.isnan(swing_low_aligned[i])):
+        if (np.isnan(r1_prev[i]) or np.isnan(s1_prev[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.8
+        volume_confirm = vol_ratio > 1.5
         
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
-        # Distance to swing levels (as percentage of price)
-        dist_to_resistance = (swing_high_aligned[i] - close[i]) / close[i] if swing_high_aligned[i] > 0 else 1
-        dist_to_support = (close[i] - swing_low_aligned[i]) / close[i] if swing_low_aligned[i] > 0 else 1
-        
-        near_resistance = dist_to_resistance < 0.005  # Within 0.5% of resistance
-        near_support = dist_to_support < 0.005       # Within 0.5% of support
+        weekly_up = weekly_uptrend_aligned[i] > 0.5
+        weekly_down = weekly_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: near support, RSI oversold, volume confirmation
-            if near_support and rsi_oversold and volume_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: near resistance, RSI overbought, volume confirmation
-            elif near_resistance and rsi_overbought and volume_confirm:
-                signals[i] = -0.25
-                position = -1
+            # Enter long: weekly uptrend + price breaks above R1 + volume confirmation
+            if weekly_up and volume_confirm:
+                if close[i] > r1_prev[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: weekly downtrend + price breaks below S1 + volume confirmation
+            elif weekly_down and volume_confirm:
+                if close[i] < s1_prev[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit long: RSI > 50 or price approaches resistance
-            if rsi[i] > 50 or near_resistance:
+            # Exit conditions: weekly trend reverses or price moves below R1
+            if not weekly_up or close[i] < r1_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: RSI < 50 or price approaches support
-            if rsi[i] < 50 or near_support:
+            # Exit conditions: weekly trend reverses or price moves above S1
+            if not weekly_down or close[i] > s1_prev[i]:
                 signals[i] = 0.0
                 position = 0
             else:
