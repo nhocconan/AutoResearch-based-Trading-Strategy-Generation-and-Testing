@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Dyn
-# Hypothesis: Uses 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation.
+# 12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Dyn
+# Hypothesis: Uses 1d Camarilla pivot levels (R3/S3) with 1d EMA34 trend filter and volume spike confirmation on 12h timeframe.
 # Enters long when price breaks above R3 in uptrend (close > EMA34) with volume > 2x 20-period average.
 # Enters short when price breaks below S3 in downtrend (close < EMA34) with volume confirmation.
 # Exits when price returns to the opposite pivot level (S3 for long, R3 for short) or trend reverses.
 # Designed to work in both bull and bear markets by following the 1d trend and using volatility-adjusted entries.
-# Targets 20-50 trades per year on 4h timeframe with discrete position sizing (0.30) to minimize churn.
+# Targets 12-37 trades per year on 12h timeframe with discrete position sizing (0.25) to minimize churn.
 
-name = "4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_Dyn"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,8 +35,6 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla pivot levels from previous 1d bar
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
-    # We use R3 and S3 as entry levels
     prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
@@ -44,11 +42,11 @@ def generate_signals(prices):
     r3_level = prev_close + 1.1 * pivot_range
     s3_level = prev_close - 1.1 * pivot_range
     
-    # Align pivot levels to 4h timeframe (available after 1d bar closes)
+    # Align pivot levels to 12h timeframe (available after 1d bar closes)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Volume filter: volume > 2x 20-period average on 4h chart
+    # Volume filter: volume > 2x 20-period average on 12h chart
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
@@ -73,13 +71,13 @@ def generate_signals(prices):
             if (close[i] > r3_aligned[i] and 
                 price_above_ema and 
                 volume[i] > vol_threshold[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short entry: price breaks below S3 in downtrend with volume spike
             elif (close[i] < s3_aligned[i] and 
                   price_below_ema and 
                   volume[i] > vol_threshold[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price returns to S3 or trend reverses to downtrend
@@ -88,7 +86,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: price returns to R3 or trend reverses to uptrend
             if (close[i] > r3_aligned[i] or 
@@ -96,6 +94,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
