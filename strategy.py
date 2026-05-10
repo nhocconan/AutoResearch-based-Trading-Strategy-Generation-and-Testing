@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_Force_With_1dTrend_And_Volume
-# Hypothesis: Elder Ray Bull/Bear Power combined with daily trend filter and volume confirmation captures institutional momentum while avoiding false signals in choppy markets. Works in bull/bear by requiring alignment with daily trend. Designed for low frequency (~15-30 trades/year) to minimize fee drag.
+# 12h_KAMA_Trend_With_1wTrend_Filter
+# Hypothesis: On 12h timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend detection with weekly trend filter and volume confirmation. The weekly trend filter prevents counter-trend trades during major trend reversals, while volume confirmation ensures momentum behind the move. KAMA adapts to market noise, reducing whipsaws in choppy markets and capturing strong trends. Designed for low frequency (12-37 trades/year) to minimize fee drift, suitable for both bull and bear markets.
 
-name = "6h_ElderRay_Force_With_1dTrend_And_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Trend_With_1wTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,27 +20,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter and EMA
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Daily data for additional confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # EMA13 for Elder Ray calculation
+    # KAMA (10, 2, 30) on 12h close
     close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Efficiency Ratio
+    change = abs(close_series - close_series.shift(10))
+    volatility = abs(close_series - close_series.shift(1)).rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.nan)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Handle NaN/inf
+    sc = sc.fillna(0).replace([np.inf, -np.inf], 0).values
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    # Weekly trend: EMA34 on weekly close
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = close_1w > ema34_1w
+    trend_1w_down = close_1w < ema34_1w
     
-    # Daily trend: EMA34 on daily close
+    # Align weekly trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    
+    # Daily trend: EMA34 on daily close for additional filter
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align daily trend to 6h
+    # Align daily trend to 12h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
@@ -56,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(kama[i]) or np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -68,20 +93,25 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: Bull Power positive, daily uptrend, volume confirmation
-            if (bull_power[i] > 0 and 
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: price above KAMA with weekly and daily uptrend and volume
+            if (close[i] > kama[i] and 
+                trend_1w_up_aligned[i] > 0.5 and 
+                trend_1d_up_aligned[i] > 0.5 and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Bear Power negative, daily downtrend, volume confirmation
-            elif (bear_power[i] < 0 and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: price below KAMA with weekly and daily downtrend and volume
+            elif (close[i] < kama[i] and 
+                  trend_1w_down_aligned[i] > 0.5 and 
+                  trend_1d_down_aligned[i] > 0.5 and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when Bull Power turns negative or trend fails
-            if (bull_power[i] <= 0 or 
+            # Exit when price crosses below KAMA or trend fails
+            if (close[i] <= kama[i] or 
+                trend_1w_up_aligned[i] < 0.5 or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -89,8 +119,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when Bear Power turns positive or trend fails
-            if (bear_power[i] >= 0 or 
+            # Exit when price crosses above KAMA or trend fails
+            if (close[i] >= kama[i] or 
+                trend_1w_down_aligned[i] < 0.5 or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
