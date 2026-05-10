@@ -1,16 +1,10 @@
-#!/usr/bin/env python3
-"""
-1d_Alligator_TRIX_Combo
-Hypothesis: Bill Williams Alligator (Jaw/Teeth/Lips) defines trend direction and strength.
-TRIX (15-period) filters for momentum confirmation and divergence. 
-In trending markets: Alligator aligned (Lips > Teeth > Jaw for long, reverse for short) + TRIX rising/falling.
-In ranging markets: Alligator intertwined (no clear order) + TRIX near zero → avoid trades.
-Uses 1-week trend filter to avoid counter-trend trades. Low trade frequency expected due to strict alignment requirements.
-Works in bull (follow green Alligator up) and bear (follow red Alligator down) by following Alligator alignment and TRIX momentum.
-"""
+# 6h_Ichimoku_Cloud_Breakout
+# Hypothesis: Ichimoku Cloud acts as dynamic support/resistance. In trending markets, price breaks above/below the cloud with TK cross confirmation signal strong moves. Using 1d Ichimoku for trend filter reduces whipsaws. Works in bull (breakouts up) and bear (breakdowns down) by following cloud color and TK cross. Low trade frequency expected due to strict cloud breakout + TK cross + volume confirmation.
 
-name = "1d_Alligator_TRIX_Combo"
-timeframe = "1d"
+#!/usr/bin/env python3
+
+name = "6h_Ichimoku_Cloud_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -27,96 +21,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # 50-period EMA on weekly for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # 1d Ichimoku components for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Williams Alligator (13,8,5 smoothed with 8,5,3)
-    # Jaw: 13-period SMMA smoothed 8 periods
-    # Teeth: 8-period SMMA smoothed 5 periods  
-    # Lips: 5-period SMMA smoothed 3 periods
-    def smoothed_moving_average(arr, period):
-        """SMMA: similar to EMA but with alpha = 1/period"""
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        res = np.full_like(arr, np.nan, dtype=float)
-        alpha = 1.0 / period
-        # First value is simple average
-        res[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            res[i] = (arr[i] * alpha) + (res[i-1] * (1 - alpha))
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_10 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max()
+    min_low_10 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()
+    tenkan_1d = (max_high_10 + min_low_10) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max()
+    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()
+    kijun_1d = (max_high_26 + min_low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max()
+    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()
+    senkou_b_1d = ((max_high_52 + min_low_52) / 2)
+    
+    # Align 1d Ichimoku to 6h timeframe (wait for 1d bar to close)
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d.values)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d.values)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d.values)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d.values)
+    
+    # 6m Ichimoku for entry signals (TK cross)
+    period_tenkan_6h = 9
+    period_kijun_6h = 26
+    max_high_9 = pd.Series(high).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).max()
+    min_low_9 = pd.Series(low).rolling(window=period_tenkan_6h, min_periods=period_tenkan_6h).min()
+    tenkan_6h = (max_high_9 + min_low_9) / 2
+    
+    max_high_26 = pd.Series(high).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).max()
+    min_low_26 = pd.Series(low).rolling(window=period_kijun_6h, min_periods=period_kijun_6h).min()
+    kijun_6h = (max_high_26 + min_low_26) / 2
+    
+    # Volume confirmation (24-period average = 4 days)
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p-1, len(arr)):
+                res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    
-    jaw = smoothed_moving_average(close, 13)
-    jaw = smoothed_moving_average(jaw, 8)  # additional smoothing
-    teeth = smoothed_moving_average(close, 8)
-    teeth = smoothed_moving_average(teeth, 5)
-    lips = smoothed_moving_average(close, 5)
-    lips = smoothed_moving_average(lips, 3)
-    
-    # TRIX: triple EMA + rate of change
-    def ema_array(arr, span):
-        return pd.Series(arr).ewm(span=span, adjust=False, min_periods=span).mean().values
-    
-    ema1 = ema_array(close, 15)
-    ema2 = ema_array(ema1, 15)
-    ema3 = ema_array(ema2, 15)
-    trix = np.full_like(close, np.nan)
-    # TRIX = 100 * (EMA3 today - EMA3 yesterday) / EMA3 yesterday
-    trix[1:] = 100 * (ema3[1:] - ema3[:-1]) / ema3[:-1]
-    
-    # Align Alligator components to daily (already on daily, but ensure alignment)
-    # Actually, Alligator is calculated on daily close, so no alignment needed for the values themselves
-    # But we need to ensure we don't use incomplete data
+    vol_ma = mean_arr(volume, 24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 30)  # Need enough for Alligator smoothing and weekly EMA
+    start_idx = max(52, 26, 24) + 5  # Need enough history
     
     for i in range(start_idx, n):
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(trix[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or \
+           np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or \
+           np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = bullish alignment
-        # Jaw > Teeth > Lips = bearish alignment
-        bullish_aligned = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_aligned = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        # Determine cloud top and bottom (Senkou Span A and B)
+        cloud_top = max(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bottom = min(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
         
-        # Weekly trend filter: price above/below weekly EMA50
-        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
+        # TK cross on 6h
+        tk_cross_bullish = tenkan_6h[i] > kijun_6h[i]
+        tk_cross_bearish = tenkan_6h[i] < kijun_6h[i]
         
-        # TRIX momentum confirmation
-        trix_rising = trix[i] > trix[i-1]
-        trix_falling = trix[i] < trix[i-1]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: Alligator bullish aligned + weekly uptrend + TRIX rising
-            if bullish_aligned and weekly_uptrend and trix_rising:
+            # Long: price breaks above cloud, TK bullish, volume confirmation
+            if close[i] > cloud_top and tk_cross_bullish and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator bearish aligned + weekly downtrend + TRIX falling
-            elif bearish_aligned and weekly_downtrend and trix_falling:
+            # Short: price breaks below cloud, TK bearish, volume confirmation
+            elif close[i] < cloud_bottom and tk_cross_bearish and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator loses alignment OR weekly trend turns down OR TRIX turns falling
-            if not bullish_aligned or not weekly_uptrend or not trix_rising:
+            # Long exit: price drops below cloud base OR TK turns bearish
+            if close[i] < cloud_bottom or not tk_cross_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator loses alignment OR weekly trend turns up OR TRIX turns rising
-            if not bearish_aligned or not weekly_downtrend or not trix_falling:
+            # Short exit: price rises above cloud top OR TK turns bullish
+            if close[i] > cloud_top or not tk_cross_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
