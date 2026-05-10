@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Donchian20_Trend_Volume
-# Hypothesis: 4h breakout above/below 20-period Donchian channel with daily EMA50 trend filter and volume confirmation.
-# Uses ATR-based trailing stop to capture trends while limiting drawdown. Designed for low trade frequency (<30/year)
-# to avoid fee drag. Works in bull/bear via daily trend filter and volatility-adjusted exits.
+# 1d_1w_Donchian20_Breakout_Trend_Volume
+# Hypothesis: 1-day Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Works in bull/bear via weekly trend filter. Low trade frequency target (~15/year) to avoid fee drag.
+# Uses weekly EMA50 for trend direction and Donchian channels for breakout signals.
 
-name = "4h_1d_Donchian20_Trend_Volume"
-timeframe = "4h"
+name = "1d_1w_Donchian20_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,59 +17,47 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Weekly EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # 4h Donchian channel (20-period)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ATR for volatility and trailing stop
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Daily Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     # Warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(high_20[i]) or
-            np.isnan(low_20[i]) or
-            np.isnan(atr[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from daily EMA50
+        # Trend filter from weekly EMA50
         bullish_trend = close[i] > ema_50_aligned[i]
         bearish_trend = close[i] < ema_50_aligned[i]
         
@@ -77,39 +65,27 @@ def generate_signals(prices):
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above 20-period high in bullish trend with volume surge
-            if close[i] > high_20[i] and bullish_trend and volume_surge:
+            # Long: breakout above upper Donchian in bullish trend with volume surge
+            if close[i] > highest_high[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-                highest_high_since_entry = high[i]
-            # Short: breakdown below 20-period low in bearish trend with volume surge
-            elif close[i] < low_20[i] and bearish_trend and volume_surge:
+            # Short: breakdown below lower Donchian in bearish trend with volume surge
+            elif close[i] < lowest_low[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
-                lowest_low_since_entry = low[i]
         else:
             if position == 1:
-                # Update highest high since entry
-                if high[i] > highest_high_since_entry:
-                    highest_high_since_entry = high[i]
-                
-                # Trailing stop: exit if price drops 2.5*ATR from highest high
-                if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+                # Exit long when price crosses below lower Donchian
+                if close[i] < lowest_low[i]:
                     signals[i] = 0.0
                     position = 0
-                    highest_high_since_entry = 0.0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Update lowest low since entry
-                if low[i] < lowest_low_since_entry:
-                    lowest_low_since_entry = low[i]
-                
-                # Trailing stop: exit if price rises 2.5*ATR from lowest low
-                if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+                # Exit short when price crosses above upper Donchian
+                if close[i] > highest_high[i]:
                     signals[i] = 0.0
                     position = 0
-                    lowest_low_since_entry = 0.0
                 else:
                     signals[i] = -0.25
     
