@@ -1,116 +1,108 @@
 #!/usr/bin/env python3
-# 1d_KAMA_With_1wTrend_Filter
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) trend following on daily timeframe with weekly trend filter.
-# Uses price efficiency ratio to adapt smoothing - fast in trends, slow in ranging markets.
-# Weekly trend filter ensures we only trade in direction of higher timeframe trend.
-# Target: 15-25 trades/year to minimize fee drag on 1d timeframe.
+# 6h_Donchian_20_1dTrend_WeeklyPivot_Filter
+# Hypothesis: Donchian(20) breakout on 6h with 1d trend filter (EMA50) and weekly pivot direction filter.
+# Only take longs when price > weekly pivot and shorts when price < weekly pivot.
+# Weekly pivot acts as a regime filter to avoid counter-trend trades in strong trends.
+# Target: 15-35 trades/year to stay well under fee drag limits.
 
-name = "1d_KAMA_With_1wTrend_Filter"
-timeframe = "1d"
+name = "6h_Donchian_20_1dTrend_WeeklyPivot_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if len(close) == 1 else None
-    
-    if volatility is None:
-        # Calculate volatility as sum of absolute changes over er_length period
-        volatility = np.full_like(change, np.nan)
-        for i in range(len(change)):
-            if i < er_length:
-                volatility[i] = np.nan
-            else:
-                volatility[i] = np.sum(np.abs(np.diff(close[i-er_length:i+1])))
-    
-    # Avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
-    # For first er_length periods, set ER to 0
-    er[:er_length] = 0
-    
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-            
-    return kama
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # Weekly trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
+    
+    # Align 1d trend to 6h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # Weekly pivot (from 1w data as HTF ref)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema50_1w
-    trend_1w_down = close_1w < ema50_1w
     
-    # Align weekly trend to daily
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Weekly pivot point: (H + L + C) / 3
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     
-    # Calculate KAMA on daily data
-    kama = calculate_kama(close, er_length=10, fast_ema=2, slow_ema=30)
+    # Align weekly pivot to 6h
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Donchian(20) channels
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(n):
+        if i >= lookback - 1:
+            start_idx = i - lookback + 1
+            highest_high[i] = np.max(high[start_idx:i+1])
+            lowest_low[i] = np.min(low[start_idx:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = max(50, lookback - 1)  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(kama[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above KAMA with weekly uptrend
-            if (close[i] > kama[i] and close[i-1] <= kama[i-1] and
-                trend_1w_up_aligned[i] > 0.5):
+            # Long: price breaks above Donchian upper band, 1d uptrend, price > weekly pivot
+            if (high[i] > highest_high[i] and
+                trend_1d_up_aligned[i] > 0.5 and
+                close[i] > weekly_pivot_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA with weekly downtrend
-            elif (close[i] < kama[i] and close[i-1] >= kama[i-1] and
-                  trend_1w_down_aligned[i] > 0.5):
+            # Short: price breaks below Donchian lower band, 1d downtrend, price < weekly pivot
+            elif (low[i] < lowest_low[i] and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  close[i] < weekly_pivot_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below KAMA or weekly trend turns down
-            if (close[i] < kama[i] and close[i-1] >= kama[i-1] or
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit: price breaks below Donchian lower band or 1d trend turns down
+            if (low[i] < lowest_low[i] or
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above KAMA or weekly trend turns up
-            if (close[i] > kama[i] and close[i-1] <= kama[i-1] or
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit: price breaks above Donchian upper band or 1d trend turns up
+            if (high[i] > highest_high[i] or
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
