@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume_v5
+# 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume_v6
 # Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
-# Uses tighter volume confirmation (3x avg) and stricter trend filter to reduce trades and improve win rate.
+# Uses tighter volume confirmation (4x avg) and stricter trend filter to reduce trades and improve win rate.
 # Designed to capture breakouts with trend alignment and volume, using conservative sizing and strict entry.
-# Expected trade count: ~20-40 per year per symbol to avoid fee drag.
+# Expected trade count: ~15-25 per year per symbol to avoid fee drag.
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume_v5"
+name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -92,8 +92,8 @@ def generate_signals(prices):
         uptrend = close_1d_aligned[i] > ema_1d_aligned[i]
         downtrend = close_1d_aligned[i] < ema_1d_aligned[i]
         
-        # Volume confirmation (3.0x average for tighter filter)
-        volume_surge = volume[i] > 3.0 * vol_ma[i]
+        # Volume confirmation (4.0x average for tighter filter)
+        volume_surge = volume[i] > 4.0 * vol_ma[i]
         
         # Volatility filter
         if not vol_filter[i]:
