@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_RSI_Stochastic_BullBear_Trap
-Hypothesis: In strong trends, price often pulls back to key momentum zones (RSI 40-60) before continuing. Combine with Stochastic to identify overextended pullbacks. Enter long when RSI>50 and Stochastic crosses up from oversold in uptrend; short when RSI<50 and Stochastic crosses down from overbought in downtrend. Use 1-day ADX trend filter to avoid chop. Works in bull/bear via trend filter. Target: 20-30 trades/year.
+1d_KAMA_Trend_RSI_ChopFilter
+Hypothesis: On 1d timeframe, trade KAMA trend direction confirmed by RSI and filtered by Choppiness Index regime. Uses weekly trend filter for multi-timeframe alignment. KAMA adapts to market noise, reducing whipsaws in choppy markets. RSI provides momentum confirmation, while Choppiness Index avoids trend-following in ranging markets. Designed for low trade frequency (<25/year) to minimize fee drag, with discrete position sizing (0.25) to control drawdown. Works in both bull and bear markets via adaptive trend filter and regime detection.
 """
 
-name = "4h_RSI_Stochastic_BullBear_Trap"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,93 +14,137 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate ADX(14) on daily
-    plus_dm = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
-                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
-    minus_dm = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
-                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
-    tr = np.maximum(high_1d[1:] - low_1d[1:], 
-                    np.maximum(np.abs(high_1d[1:] - high_1d[:-1]), 
-                               np.abs(low_1d[1:] - low_1d[:-1])))
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    plus_di_1d = 100 * pd.Series(plus_dm).ewm(span=14, adjust=False).mean().values / np.concatenate([[np.nan], atr_1d[:-1]])
-    minus_di_1d = 100 * pd.Series(minus_dm).ewm(span=14, adjust=False).mean().values / np.concatenate([[np.nan], atr_1d[:-1]])
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = pd.Series(dx_1d).ewm(span=14, adjust=False).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Get 4h data for RSI and Stochastic
+    # Get daily data for KAMA, RSI, and Choppiness Index
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    
+    # KAMA calculation (adaptive moving average)
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum of |close[t] - close[t-1]| over 10 periods
+    # Avoid division by zero
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, n):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     # RSI(14)
-    delta = np.diff(close, prepend=close[0])
+    delta = np.diff(close)
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
+    # Wilder's smoothing
+    avg_gain = np.full_like(gain, np.nan)
+    avg_loss = np.full_like(loss, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
     rsi = 100 - (100 / (1 + rs))
     
-    # Stochastic(14,3,3)
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    k_percent = 100 * (close - lowest_low) / (highest_high - lowest_low + 1e-10)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # Choppiness Index (14-period)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(np.roll(high, 1) - low)
+    tr3 = np.abs(np.roll(low, 1) - high)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Avoid look-ahead: roll shifts forward, so we fix first element
+    tr[0] = tr1[0]
+    atr_sum = np.convolve(tr, np.ones(14), mode='full')[:n]  # Sum of TR over 14 periods
+    # Highest high and lowest low over 14 periods
+    highest_high = np.zeros_like(high)
+    lowest_low = np.zeros_like(low)
+    for i in range(n):
+        start = max(0, i - 13)
+        highest_high[i] = np.max(high[start:i+1])
+        lowest_low[i] = np.min(low[start:i+1])
+    # Chop = 100 * log10(sum(TR14) / (HH14 - LL14)) / log10(14)
+    denominator = highest_high - lowest_low
+    # Avoid division by zero
+    chop = np.full_like(close, np.nan)
+    mask = denominator > 0
+    chop[mask] = 100 * np.log10(atrs_sum[mask] / denominator[mask]) / np.log10(14)
+    
+    # Align weekly EMA50 to daily
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 14 periods for RSI/Stoch, plus 1 for DM calculation
-    start_idx = 15
+    # Warmup: need KAMA (10), RSI (14), Chop (14), weekly EMA (50)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(k_percent[i]) or
-            np.isnan(d_percent[i]) or
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(rsi[i]) or
+            np.isnan(chop[i]) or
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > 25
+        # Trend filter: price vs weekly EMA50
+        uptrend_1w = close[i] > ema50_1w_aligned[i]
+        downtrend_1w = close[i] < ema50_1w_aligned[i]
+        
+        # KAMA direction: price above/below KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # RSI conditions: avoid extremes, look for momentum
+        rsi_bullish = 50 < rsi[i] < 70  # Not overbought, bullish momentum
+        rsi_bearish = 30 < rsi[i] < 50  # Not oversold, bearish momentum
+        
+        # Choppiness filter: only trend-follow when trending (Chop < 38.2)
+        trending_market = chop[i] < 38.2
         
         if position == 0:
-            if trending:
-                # Long: RSI > 50 (bullish momentum) and Stochastic crosses up from oversold
-                if rsi[i] > 50 and k_percent[i-1] <= 20 and k_percent[i] > 20 and k_percent[i] > d_percent[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: RSI < 50 (bearish momentum) and Stochastic crosses down from overbought
-                elif rsi[i] < 50 and k_percent[i-1] >= 80 and k_percent[i] < 80 and k_percent[i] < d_percent[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price above KAMA, uptrend, bullish RSI, trending market
+            if price_above_kama and uptrend_1w and rsi_bullish and trending_market:
+                signals[i] = 0.25
+                position = 1
+            # Short: price below KAMA, downtrend, bearish RSI, trending market
+            elif price_below_kama and downtrend_1w and rsi_bearish and trending_market:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: RSI < 40 (loss of momentum) or Stochastic overbought
-            if rsi[i] < 40 or (k_percent[i] > 80 and d_percent[i] > 80):
+            # Long exit: price below KAMA or trend fails or choppy market
+            if price_below_kama or not uptrend_1w or chop[i] >= 61.8:  # Chop > 61.8 = ranging
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI > 60 (loss of bearish momentum) or Stochastic oversold
-            if rsi[i] > 60 or (k_percent[i] < 20 and d_percent[i] < 20):
+            # Short exit: price above KAMA or trend fails or choppy market
+            if price_above_kama or not downtrend_1w or chop[i] >= 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
