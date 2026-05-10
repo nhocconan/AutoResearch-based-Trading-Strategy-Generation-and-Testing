@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_TrueRangeBreakout_ATR1_DailyTrend
-Hypothesis: Go long when price closes above previous bar's high + ATR(14) and daily close > daily EMA34.
-Go short when price closes below previous bar's low - ATR(14) and daily close < daily EMA34.
-Exit when price crosses back below daily EMA34 (for longs) or above (for shorts).
-Uses ATR-based breakout to capture momentum with volatility scaling, and daily EMA for trend filter.
-Designed for 4h timeframe to target 20-40 trades/year per symbol. Works in both bull and bear markets
-by following the higher timeframe trend and using volatility-adjusted breakouts.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Go long when price touches Camarilla S1 (support) on 12h and closes above it with volume > 1.5x average, and daily trend is up (close > EMA34). Go short when price touches R1 (resistance) and closes below it with volume > 1.5x average, and daily trend is down (close < EMA34). Exit when price reverts to the Camarilla pivot (midpoint). Uses Camarilla levels from daily timeframe for structure, volume confirmation for conviction, and daily EMA for trend filter. Designed for 12h timeframe to target 15-30 trades/year per symbol. Works in bull markets by buying dips in uptrend and in bear markets by selling rallies in downtrend, avoiding ranging markets via volume filter.
 """
 
-name = "4h_TrueRangeBreakout_ATR1_DailyTrend"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,30 +14,39 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility scaling
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = np.inf
-    tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
-    for i in range(14, n):
-        if i == 14:
-            atr[i] = np.mean(tr[1:15])
-        else:
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # Calculate average volume for confirmation (50-period SMA)
+    vol_avg = np.full(n, np.nan)
+    for i in range(50, n):
+        vol_avg[i] = np.mean(volume[i-50:i])
     
-    # Calculate daily EMA34 for trend filter (using HTF data)
+    # Calculate Camarilla levels from daily timeframe
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Camarilla: Pivot = (H+L+C)/3, Range = H-L
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    cp_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    pivot_1d = cp_1d  # use as exit level
+    
+    # Align to 12h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    
+    # Calculate daily EMA34 for trend filter
     ema_34_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 34:
         ema_34_1d[33] = np.mean(close_1d[:34])
@@ -54,36 +58,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(15, 34)  # Ensure ATR and EMA are ready
+    start_idx = max(50, 34)  # Ensure volume average and EMA are ready
     
     for i in range(start_idx, n):
-        if np.isnan(atr[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(vol_avg[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: Close breaks above previous high + ATR(14) and daily uptrend
-            if close[i] > high[i-1] + atr[i] and close[i] > ema_34_1d_aligned[i]:
+            # Long: price touches S1 and closes above it with volume confirmation and daily uptrend
+            if low[i] <= s1_1d_aligned[i] and close[i] > s1_1d_aligned[i] and volume[i] > 1.5 * vol_avg[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below previous low - ATR(14) and daily downtrend
-            elif close[i] < low[i-1] - atr[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: price touches R1 and closes below it with volume confirmation and daily downtrend
+            elif high[i] >= r1_1d_aligned[i] and close[i] < r1_1d_aligned[i] and volume[i] > 1.5 * vol_avg[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Close crosses back below daily EMA34
-            if close[i] < ema_34_1d_aligned[i]:
+            # Exit: price reverts to daily pivot (mean reversion to mean)
+            if close[i] > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Close crosses back above daily EMA34
-            if close[i] > ema_34_1d_aligned[i]:
+            # Exit: price reverts to daily pivot
+            if close[i] < pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
