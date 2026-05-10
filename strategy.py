@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Camarilla pivot levels from 1d are strong support/resistance. Breakout above R1 or below S1 with 1d trend filter and volume confirmation. Uses 12h timeframe to reduce trade frequency and avoid fee drag. Works in bull markets by buying breakouts above R1 in uptrends, and in bear markets by selling breakdowns below S1 in downtrends. Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
-"""
+# 1h_RSI_TFS_Trend_Filter
+# Hypothesis: RSI(14) with 4h/1d trend filter and volume confirmation. Long when RSI crosses above 40 in uptrend (4h/1d EMA50), short when RSI crosses below 60 in downtrend. Volume confirmation filters low-probability entries. Works in bull by buying pullbacks, in bear by selling rallies. Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+# Uses 4h EMA50 for trend, 1d EMA50 for higher timeframe trend confirmation, and 1d volume spike for entry confirmation.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_RSI_TFS_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,81 +20,105 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot levels, trend filter, and volume confirmation
+    # RSI(14)
+    rsi_period = 14
+    rsi = np.full(n, np.nan)
+    if n >= rsi_period:
+        delta = np.diff(close)
+        up = np.where(delta > 0, delta, 0.0)
+        down = np.where(delta < 0, -delta, 0.0)
+        roll_up = np.full(n, np.nan)
+        roll_down = np.full(n, np.nan)
+        roll_up[rsi_period-1] = np.mean(up[:rsi_period])
+        roll_down[rsi_period-1] = np.mean(down[:rsi_period])
+        for i in range(rsi_period, n):
+            roll_up[i] = (roll_up[i-1] * (rsi_period-1) + up[i]) / rsi_period
+            roll_down[i] = (roll_down[i-1] * (rsi_period-1) + down[i]) / rsi_period
+        rs = np.where(roll_down != 0, roll_up / roll_down, 0)
+        rsi[rsi_period-1:] = 100 - (100 / (1 + rs))
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 50:
+        ema50_4h[49] = np.mean(close_4h[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_4h)):
+            ema50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema50_4h[i-1]
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # 1d EMA50 for higher timeframe trend confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    
-    # Camarilla pivot levels: R1, S1 from previous day
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + 1.1 * camarilla_range / 12
-    s1 = close_1d - 1.1 * camarilla_range / 12
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Wait for EMA34 to be ready
+    start_idx = max(rsi_period, 50)  # Ensure RSI and EMA50 ready
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or \
+           np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h periods in 1d
+        # Volume confirmation: current 1h volume > 1.5x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 24.0  # 24x 1h periods in 1d
         volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Trend determination: price vs 1d EMA34
-        is_uptrend = close[i] > ema34_1d_aligned[i]
-        is_downtrend = close[i] < ema34_1d_aligned[i]
+        # Trend determination: price vs 4h EMA50 and 1d EMA50
+        is_uptrend = close[i] > ema50_4h_aligned[i] and close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_4h_aligned[i] and close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Long: Breakout above R1 in uptrend with volume
-            if (close[i] > r1_aligned[i] and
+            # Long: RSI crosses above 40 in uptrend with volume confirmation
+            if (i > start_idx and 
+                rsi[i-1] <= 40 and rsi[i] > 40 and
                 is_uptrend and
                 volume_confirm):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Breakdown below S1 in downtrend with volume
-            elif (close[i] < s1_aligned[i] and
+            # Short: RSI crosses below 60 in downtrend with volume confirmation
+            elif (i > start_idx and 
+                  rsi[i-1] >= 60 and rsi[i] < 60 and
                   is_downtrend and
                   volume_confirm):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: Price returns below R1 or trend changes to downtrend
-            if (close[i] < r1_aligned[i] or
-                not is_uptrend):
+            # Exit: RSI crosses below 50 or trend changes to downtrend
+            if (i > start_idx and 
+                (rsi[i] < 50 or not is_uptrend)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: Price returns above S1 or trend changes to uptrend
-            if (close[i] > s1_aligned[i] or
-                not is_downtrend):
+            # Exit: RSI crosses above 50 or trend changes to uptrend
+            if (i > start_idx and 
+                (rsi[i] > 50 or not is_downtrend)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
