@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_1w_Camarilla_R3S3_Breakout_TrendFilter
-# Hypothesis: Breakouts from weekly Camarilla R3/S3 levels on 1d chart with 1w EMA trend filter and volume spike.
-# Camarilla levels provide institutional support/resistance. Breakouts with volume confirm institutional interest.
-# Weekly EMA filter ensures trading in direction of higher timeframe trend. Targets 10-25 trades/year to minimize fee drag.
-# Works in bull/bear by aligning with weekly trend direction.
+# 6h_Ichimoku_Cloud_Filter_1dTrend_VolumeBreakout
+# Hypothesis: Ichimoku Cloud (TK Cross + Cloud twist) on 6h with 1d EMA trend filter and volume breakout.
+# In bull: price above cloud + TK cross up + 1d uptrend + volume spike = long.
+# In bear: price below cloud + TK cross down + 1d downtrend + volume spike = short.
+# Cloud acts as dynamic support/resistance; TK cross signals momentum shift.
+# Works in both regimes by aligning with higher timeframe trend. Targets 15-30 trades/year.
 
-name = "1d_1w_Camarilla_R3S3_Breakout_TrendFilter"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Filter_1dTrend_VolumeBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,72 +24,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Camarilla levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Ichimoku components (9, 26, 52)
+    tenkan = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+              pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    kijun = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+             pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous week
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # Using previous week's OHLC to avoid look-ahead
-    wk_high = df_1w['high'].values
-    wk_low = df_1w['low'].values
-    wk_close = df_1w['close'].values
+    # Daily EMA for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    camarilla_r3 = wk_close + (wk_high - wk_low) * 1.1 / 2
-    camarilla_s3 = wk_close - (wk_high - wk_low) * 1.1 / 2
-    
-    # Align weekly levels to daily timeframe (available after weekly bar closes)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    
-    # Weekly EMA for trend filter (34-period)
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Volume confirmation (20-period MA on daily)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (24-period MA on 6h)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Warmup for volume MA and weekly EMA
+    start_idx = max(9, 26, 52, 50, 24) + 26  # Warmup for Ichimoku + daily EMA + volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
+            np.isnan(senkou_b[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # Ichimoku signals
+        tk_cross = tenkan[i] > kijun[i]  # bullish TK cross
+        price_above_cloud = close[i] > max(senkou_a[i], senkou_b[i])
+        price_below_cloud = close[i] < min(senkou_a[i], senkou_b[i])
         
-        # Volume confirmation (1.5x average volume)
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Daily trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: price breaks above weekly R3 with uptrend and volume spike
-            if close[i] > r3_aligned[i] and uptrend and volume_confirm:
+            # Long entry: price above cloud + TK cross up + 1d uptrend + volume spike
+            if price_above_cloud and tk_cross and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below weekly S3 with downtrend and volume spike
-            elif close[i] < s3_aligned[i] and downtrend and volume_confirm:
+            # Short entry: price below cloud + TK cross down + 1d downtrend + volume spike
+            elif price_below_cloud and not tk_cross and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns below weekly R3 or trend reverses
-            if close[i] < r3_aligned[i] or not uptrend:
+            # Long exit: price falls below cloud or TK cross down
+            if price_below_cloud or not tk_cross:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns above weekly S3 or trend reverses
-            if close[i] > s3_aligned[i] or not downtrend:
+            # Short exit: price rises above cloud or TK cross up
+            if price_above_cloud or tk_cross:
                 signals[i] = 0.0
                 position = 0
             else:
