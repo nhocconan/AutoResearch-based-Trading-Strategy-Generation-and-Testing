@@ -1,10 +1,13 @@
-# 12h_Donchian_Breakout_Trend_With_Volume_Filter
-# Hypothesis: Uses 12h Donchian(20) breakout with trend confirmation (price above/below 12h EMA50) and volume filter (volume > 1.5x average volume) to capture strong trends.
-# Designed for low trade frequency (target: 20-50 trades/year) with strong trend persistence in both bull and bear markets.
-# Uses daily (1d) EMA200 as higher timeframe trend filter to avoid counter-trend trades.
+#!/usr/bin/env python3
+# 4h_CCI_Trend_Filter_12hEMA50
+# Hypothesis: Uses CCI(20) on 4h to detect momentum extremes and 12h EMA(50) as trend filter.
+# Enters long when CCI crosses above -100 (bullish momentum) with price above 12h EMA50.
+# Enters short when CCI crosses below +100 (bearish momentum) with price below 12h EMA50.
+# Exits when CCI returns to neutral zone (-100 to +100) or trend filter fails.
+# Designed for 20-40 trades/year on 4h with strong trend persistence in both bull and bear markets.
 
-name = "12h_Donchian_Breakout_Trend_With_Volume_Filter"
-timeframe = "12h"
+name = "4h_CCI_Trend_Filter_12hEMA50"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,70 +16,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # CCI(20) calculation: (Typical Price - SMA(TP,20)) / (0.015 * Mean Deviation)
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
     
-    # 12h EMA50 for trend filter
-    ema50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    sma_tp_20 = tp_series.rolling(window=20, min_periods=20).mean()
+    mean_deviation = tp_series.rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=False
+    )
     
-    # Volume filter: volume > 1.5x average volume (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Avoid division by zero
+    cci = np.where(mean_deviation != 0, (tp_series - sma_tp_20) / (0.015 * mean_deviation), 0)
     
-    # 1d EMA200 for higher timeframe trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient warmup for all indicators
+    start_idx = 60  # Ensure sufficient warmup for CCI and EMA
     
     for i in range(start_idx, n):
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema50[i]) or np.isnan(ema200_1d_aligned[i])):
+        if np.isnan(cci[i]) or np.isnan(ema_50_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # CCI signals: long when crosses above -100, short when crosses below +100
+        cci_long_signal = cci[i] > -100 and (i == start_idx or cci[i-1] <= -100)
+        cci_short_signal = cci[i] < 100 and (i == start_idx or cci[i-1] >= 100)
+        
         if position == 0:
-            # Long: Price breaks above Donchian high + above EMA50 + volume filter + 1d uptrend (price > EMA200)
-            if (close[i] > donch_high[i] and close[i] > ema50[i] and 
-                volume_filter[i] and close[i] > ema200_1d_aligned[i]):
+            # Long: CCI bullish momentum + price above 12h EMA50 (uptrend)
+            if cci_long_signal and close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low + below EMA50 + volume filter + 1d downtrend (price < EMA200)
-            elif (close[i] < donch_low[i] and close[i] < ema50[i] and 
-                  volume_filter[i] and close[i] < ema200_1d_aligned[i]):
+            # Short: CCI bearish momentum + price below 12h EMA50 (downtrend)
+            elif cci_short_signal and close[i] < ema_50_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price breaks below Donchian low or below EMA50 (trend weakness)
-            if close[i] < donch_low[i] or close[i] < ema50[i]:
+            # Exit: CCI returns to neutral or trend fails
+            if cci[i] >= -100 and cci[i] <= 100 or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price breaks above Donchian high or above EMA50 (trend weakness)
-            if close[i] > donch_high[i] or close[i] > ema50[i]:
+            # Exit: CCI returns to neutral or trend fails
+            if cci[i] >= -100 and cci[i] <= 100 or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
