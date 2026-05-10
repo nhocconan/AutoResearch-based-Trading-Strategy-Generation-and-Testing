@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: 6-hour breakouts from daily Camarilla R3/S3 levels with daily trend filter (EMA34) and volume confirmation.
-# Uses R3/S3 (wider bands) for fewer, higher-quality breaks; daily EMA34 ensures trend alignment; volume confirms strength.
-# Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets by following the trend.
+# 12h_ParabolicSAR_VolumeTrend
+# Hypothesis: 12-hour Parabolic SAR signals combined with volume trend confirmation and 1-day EMA filter.
+# Parabolic SAR provides trend-following entry/exit points; volume trend confirms momentum strength; 
+# Daily EMA50 filters for higher-timeframe trend alignment to avoid counter-trend trades.
+# Designed for 12h to achieve 12-37 trades/year with controlled risk in both bull and bear markets.
 
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_ParabolicSAR_VolumeTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,30 +23,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA34 trend filter and Camarilla levels
+    # Daily data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Daily EMA50 for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels (based on previous day) - R3/S3 for wider bands
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R3 = c + (range_ * 1.1000 / 4)   # R3 level
-        S3 = c - (range_ * 1.1000 / 4)   # S3 level
-        return R3, S3
-    
-    R3 = np.full_like(close_1d, np.nan)
-    S3 = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        R3[i], S3[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-    
-    # Daily volume confirmation: 20-period average
+    # Volume trend: 20-period average (daily)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -54,10 +40,66 @@ def generate_signals(prices):
         return res
     vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align daily indicators to 6h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Parabolic SAR calculation
+    def calculate_psar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+        n = len(high)
+        psar = np.zeros(n)
+        trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
+        af = np.zeros(n)
+        ep = np.zeros(n)  # extreme point
+        
+        # Initialize
+        psar[0] = low[0]
+        trend[0] = 1
+        af[0] = af_start
+        ep[0] = high[0]
+        
+        for i in range(1, n):
+            if trend[i-1] == 1:  # uptrend
+                psar[i] = psar[i-1] + af[i-1] * (ep[i-1] - psar[i-1])
+                # Ensure PSAR doesn't exceed prior two lows
+                if i >= 2:
+                    psar[i] = min(psar[i], low[i-1], low[i-2])
+                
+                if low[i] > psar[i]:  # continue uptrend
+                    trend[i] = 1
+                    if high[i] > ep[i-1]:
+                        ep[i] = high[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+                else:  # reverse to downtrend
+                    trend[i] = -1
+                    psar[i] = ep[i-1]  # SAR becomes prior EP
+                    ep[i] = low[i]
+                    af[i] = af_start
+            else:  # downtrend
+                psar[i] = psar[i-1] + af[i-1] * (psar[i-1] - ep[i-1])
+                # Ensure PSAR doesn't fall below prior two highs
+                if i >= 2:
+                    psar[i] = max(psar[i], high[i-1], high[i-2])
+                
+                if high[i] < psar[i]:  # continue downtrend
+                    trend[i] = -1
+                    if low[i] < ep[i-1]:
+                        ep[i] = low[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+                else:  # reverse to uptrend
+                    trend[i] = 1
+                    psar[i] = ep[i-1]  # SAR becomes prior EP
+                    ep[i] = high[i]
+                    af[i] = af_start
+        
+        return psar, trend
+    
+    psar, psar_trend = calculate_psar(high, low)
+    
+    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
@@ -66,32 +108,31 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, above daily EMA34, strong volume
-            if close[i] > R3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: PSAR bullish (close above SAR), above daily EMA50, volume above average
+            if close[i] > psar[i] and close[i] > ema_50_1d_aligned[i] and volume[i] > vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, below daily EMA34, strong volume
-            elif close[i] < S3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: PSAR bearish (close below SAR), below daily EMA50, volume above average
+            elif close[i] < psar[i] and close[i] < ema_50_1d_aligned[i] and volume[i] > vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S3 or below daily EMA34
-            if close[i] < S3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: PSAR turns bearish (close below SAR) or below daily EMA50
+            if close[i] < psar[i] or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R3 or above daily EMA34
-            if close[i] > R3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: PSAR turns bullish (close above SAR) or above daily EMA50
+            if close[i] > psar[i] or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
