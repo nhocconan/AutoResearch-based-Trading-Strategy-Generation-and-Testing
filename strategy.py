@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Weekly_Pivot_D1_Trend_Filter
-# Hypothesis: Combining weekly pivot points (from Monday open) with daily trend filter on 6h timeframe.
-# Weekly pivot provides key institutional levels (PP, R1, S1, R2, S2) that act as support/resistance.
-# Daily trend filter (EMA34) ensures we trade in the direction of higher timeframe momentum.
-# Only take longs when price is above weekly PP and daily EMA34, shorts when below both.
-# Entry on touch of weekly S1 (for longs) or R1 (for shorts) with confirmation from next bar.
-# This structure should work in both bull and bear markets by adapting to weekly pivot levels.
-# Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag on 6h timeframe.
+# 12h_Williams_Alligator_Elder_Ray_Volume_Confirmation
+# Hypothesis: Williams Alligator (Jaws, Teeth, Lips) identifies trend direction,
+# Elder Ray (Bull/Bear Power) confirms momentum, and volume spike filters false signals.
+# Works in both bull and bear markets by only trading in the direction of the Alligator alignment.
+# Target: 12-30 trades/year on 12h timeframe to minimize fee drag.
 
-name = "6h_Weekly_Pivot_D1_Trend_Filter"
-timeframe = "6h"
+name = "12h_Williams_Alligator_Elder_Ray_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,93 +21,74 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Daily trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Williams Alligator: SMAs of median price
+    median_price = (high + low) / 2
+    jaws_period, teeth_period, lips_period = 13, 8, 5
+    jaws_shift, teeth_shift, lips_shift = 8, 5, 3
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    jaws = pd.Series(median_price).rolling(window=jaws_period, min_periods=jaws_period).mean().shift(jaws_shift).values
+    teeth = pd.Series(median_price).rolling(window=teeth_period, min_periods=teeth_period).mean().shift(teeth_shift).values
+    lips = pd.Series(median_price).rolling(window=lips_period, min_periods=lips_period).mean().shift(lips_shift).values
     
-    # Align daily trend to 6h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Alligator alignment: jaws < teeth < lips = downtrend, jaws > teeth > lips = uptrend
+    alligator_up = (jaws > teeth) & (teeth > lips)
+    alligator_down = (jaws < teeth) & (teeth < lips)
     
-    # Weekly pivot points (using Monday's OHLC)
-    # We'll calculate weekly pivot using the first day of the week (Monday)
-    # For simplicity, we use the weekly high/low/close from the 1d data
-    # but we need to group by week. Instead, we use a rolling window of 5 days
-    # as approximation for weekly data (5 trading days)
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Weekly high, low, close (using last 5 days)
-    weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
-    
-    # Calculate weekly pivot points
-    # PP = (H + L + C) / 3
-    # R1 = 2*PP - L
-    # S1 = 2*PP - H
-    # R2 = PP + (H - L)
-    # S2 = PP - (H - L)
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    
-    # Align weekly pivot points to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # Volume confirmation: 1.5x 20-period average
+    vol_ma = np.zeros_like(volume)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma[i] = vol_sum / 20
+        else:
+            vol_ma[i] = np.nan
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for all indicators
+    start_idx = max(jaws_period + jaws_shift, teeth_period + teeth_shift, lips_period + lips_shift, 13, 20) + 5
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i])):
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches or goes below S1 and closes back above it, with daily uptrend
-            # We look for reversal from S1 support
-            if (low[i] <= s1_aligned[i] and close[i] > s1_aligned[i] and
-                trend_1d_up_aligned[i] > 0.5):
+            # Long: Alligator aligned up AND Bull Power > 0 AND volume confirmation
+            if alligator_up[i] and (bull_power[i] > 0) and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches or goes above R1 and closes back below it, with daily downtrend
-            elif (high[i] >= r1_aligned[i] and close[i] < r1_aligned[i] and
-                  trend_1d_down_aligned[i] > 0.5):
+            # Short: Alligator aligned down AND Bear Power < 0 AND volume confirmation
+            elif alligator_down[i] and (bear_power[i] < 0) and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below S2 or daily trend turns down
-            if (low[i] < s2_aligned[i] or
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: Alligator alignment breaks down OR Bull Power becomes negative
+            if not alligator_up[i] or (bull_power[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above R2 or daily trend turns up
-            if (high[i] > r2_aligned[i] or
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: Alligator alignment breaks up OR Bear Power becomes positive
+            if not alligator_down[i] or (bear_power[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
