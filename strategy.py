@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_Volume_Trend_Filter_v3
-# Hypothesis: Donchian(20) breakouts on 4h chart capture medium-term momentum. 
-# Trend filtered by 1d EMA34 to avoid counter-trend trades. Volume confirmation (2x MA) ensures breakout strength.
-# Works in bull markets by catching uptrend breakouts and in bear markets by catching downtrend breakdowns.
-# Designed for low trade frequency (~20-50/year) to minimize fee drag.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Daily Camarilla pivot levels (R1/S1) act as key intraday support/resistance. 
+# Breaking above R1 in a daily uptrend (price > EMA34) or below S1 in a daily downtrend 
+# indicates momentum. Volume spike (>2x 20-period MA) confirms breakout validity. 
+# Works in bull markets by buying breakouts above R1 and in bear markets by selling 
+# breakdowns below S1. Uses tight entry conditions to limit trades (~30-50/year) 
+# and avoid fee drag. Includes trend-based exit to prevent whipsaws.
 
-name = "4h_Donchian_Breakout_Volume_Trend_Filter_v3"
+name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,18 +25,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Calculate daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Donchian channels (20-period) on 4h
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    daily_range = daily_high - daily_low
+    # Camarilla formulas: R1 = close + 1.1/12 * range, S1 = close - 1.1/12 * range
+    camarilla_multiplier = 1.1 / 12
+    daily_r1 = daily_close + camarilla_multiplier * daily_range
+    daily_s1 = daily_close - camarilla_multiplier * daily_range
+    
+    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
     
     # Volume confirmation (20-period MA on 4h = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -42,21 +54,21 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and Donchian/volume (20)
+    # Warmup: need daily EMA34 (34) and volume MA (20)
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(high_20[i]) or 
-            np.isnan(low_20[i]) or 
+            np.isnan(daily_r1_aligned[i]) or 
+            np.isnan(daily_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter
+        # Daily trend filter
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
@@ -64,24 +76,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above 20-period high + volume
-            if uptrend and close[i] > high_20[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above daily R1 + volume spike
+            if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below 20-period low + volume
-            elif downtrend and close[i] < low_20[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below daily S1 + volume spike
+            elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below 20-period low (trailing stop)
-            if not uptrend or close[i] < low_20[i]:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < daily_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above 20-period high (trailing stop)
-            if not downtrend or close[i] > high_20[i]:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > daily_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
