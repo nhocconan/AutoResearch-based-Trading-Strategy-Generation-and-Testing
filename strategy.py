@@ -1,174 +1,152 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 """
-6h_Teir3_Confluence_Strategy
-Hypothesis: Combine 6h price action with 1d structure using Confluence of:
-1. 6h RSI(14) extreme reversal (RSI < 30 for long, > 70 for short)
-2. 1d Supertrend(10,3) for trend filter (only trade in direction of daily trend)
-3. 6h volume spike (> 2x 20-period average) for confirmation
-This avoids overtrading by requiring multiple timeframe alignment and extreme conditions.
-Works in bull/bear by following daily trend. Target: 15-35 trades/year.
+1h_HTF_Trend_Filter_Entry
+Hypothesis: Use 4h ADX and 1d EMA50 for trend direction, enter on 1h pullbacks to EMA21 with volume confirmation.
+In strong trends (ADX>25), price pulls back to EMA21 before continuing. Works in bull/bear by following HTF trend.
+Target: 15-30 trades/year (60-120 total) to minimize fee drag.
 """
 
-name = "6h_Teir3_Confluence_Strategy"
-timeframe = "6h"
+name = "1h_HTF_Trend_Filter_Entry"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtrader_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Supertrend trend filter
+    # 4h data for ADX trend strength
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Calculate ADX (14) on 4h
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            up = high[i] - high[i-1]
+            down = low[i-1] - low[i]
+            plus_dm[i] = up if up > down and up > 0 else 0
+            minus_dm[i] = down if down > up and down > 0 else 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Wilder's smoothing
+        atr = np.zeros_like(high)
+        plus_di = np.zeros_like(high)
+        minus_di = np.zeros_like(high)
+        
+        if len(high) >= period:
+            atr[period-1] = np.mean(tr[1:period])
+            plus_di[period-1] = np.mean(plus_dm[1:period]) / atr[period-1] * 100
+            minus_di[period-1] = np.mean(minus_dm[1:period]) / atr[period-1] * 100
+            
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_di[i] = (plus_di[i-1] * (period-1) + plus_dm[i]) / atr[i] * 100
+                minus_di[i] = (minus_di[i-1] * (period-1) + minus_dm[i]) / atr[i] * 100
+        
+        dx = np.zeros_like(high)
+        adx = np.zeros_like(high)
+        for i in range(2*period-1, len(high)):
+            dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100 if (plus_di[i] + minus_di[i]) != 0 else 0
+        
+        if len(high) >= 2*period:
+            adx[2*period-1] = np.mean(dx[period:2*period])
+            for i in range(2*period, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
+    
+    adx_4h = calculate_adx(high_4h, low_4h, close_4h, 14)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    
+    # 1d data for EMA50 trend direction
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Supertrend (ATR=10, multiplier=3)
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # EMA50 on 1d
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # ATR(10)
-    atr_period = 10
-    atr = np.full_like(tr, np.nan)
-    if len(tr) >= atr_period:
-        atr[atr_period-1] = np.nanmean(tr[1:atr_period+1])  # Skip first NaN
-        for i in range(atr_period, len(tr)):
-            if not np.isnan(tr[i]) and not np.isnan(atr[i-1]):
-                atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Supertrend calculation
-    supertrend = np.full_like(close_1d, np.nan)
-    direction = np.full_like(close_1d, np.nan)  # 1 for uptrend, -1 for downtrend
+    # 1h EMA21 for entry
+    ema21 = np.full(n, np.nan)
+    if n >= 21:
+        ema21[20] = np.mean(close[:21])
+        alpha = 2 / (21 + 1)
+        for i in range(21, n):
+            ema21[i] = alpha * close[i] + (1 - alpha) * ema21[i-1]
     
-    if len(close_1d) >= atr_period and not np.isnan(atr[-1]):
-        # Initialize
-        hl2 = (high_1d + low_1d) / 2
-        upperband = hl2 + 3 * atr
-        lowerband = hl2 - 3 * atr
-        
-        for i in range(atr_period, len(close_1d)):
-            if np.isnan(upperband[i-1]) or np.isnan(lowerband[i-1]) or np.isnan(close_1d[i]):
-                continue
-                
-            # Upper and lower band logic
-            if close_1d[i-1] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-            else:
-                upperband[i] = hl2[i] + 3 * atr[i]
-                
-            if close_1d[i-1] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            else:
-                lowerband[i] = hl2[i] - 3 * atr[i]
-            
-            # Supertrend and direction
-            if i == atr_period:
-                if close_1d[i] > upperband[i]:
-                    supertrend[i] = upperband[i]
-                    direction[i] = -1
-                else:
-                    supertrend[i] = lowerband[i]
-                    direction[i] = 1
-            else:
-                if supertrend[i-1] == upperband[i-1]:
-                    if close_1d[i] <= upperband[i]:
-                        supertrend[i] = lowerband[i]
-                        direction[i] = 1
-                    else:
-                        supertrend[i] = upperband[i]
-                        direction[i] = -1
-                else:  # supertrend[i-1] == lowerband[i-1]
-                    if close_1d[i] >= lowerband[i]:
-                        supertrend[i] = lowerband[i]
-                        direction[i] = 1
-                    else:
-                        supertrend[i] = upperband[i]
-                        direction[i] = -1
-    
-    # 6h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    rsi_period = 14
-    avg_gain = np.full_like(gain, np.nan)
-    avg_loss = np.full_like(loss, np.nan)
-    
-    if len(gain) >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[:rsi_period])
-        avg_loss[rsi_period-1] = np.mean(loss[:rsi_period])
-        for i in range(rsi_period, len(gain)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 6h volume spike (> 2x 20-period average)
-    vol_ma20 = np.full_like(volume, np.nan)
-    if len(volume) >= 20:
+    # 1h volume confirmation
+    vol_ma20 = np.full(n, np.nan)
+    if n >= 20:
         vol_ma20[19] = np.mean(volume[:20])
-        for i in range(20, len(volume)):
+        for i in range(20, n):
             vol_ma20[i] = (vol_ma20[i-1] * 19 + volume[i]) / 20
-    volume_spike = volume > (2 * vol_ma20)
-    
-    # Align 1d Supertrend direction to 6h
-    direction_aligned = align_htf_to_ltf(prices, df_1d, direction)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Wait for indicators
+    start_idx = max(50, 21)  # Wait for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(direction_aligned[i]) or np.isnan(vol_ma20[i]):
+        if np.isnan(adx_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(ema21[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        trend_up = direction_aligned[i] == 1
-        trend_down = direction_aligned[i] == -1
-        vol_spike = volume_spike[i]
+        # Trend filters
+        strong_trend = adx_4h_aligned[i] > 25
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Entry conditions: pullback to EMA21 with volume
+        near_ema21 = abs(close[i] - ema21[i]) / ema21[i] < 0.01  # Within 1% of EMA21
+        volume_confirm = volume[i] > vol_ma20[i] * 1.5
         
         if position == 0:
-            # Long: RSI oversold + uptrend + volume spike
-            if rsi_oversold and trend_up and vol_spike:
-                signals[i] = 0.25
+            # Long: uptrend, strong trend, pullback to EMA21
+            if strong_trend and uptrend and near_ema21 and volume_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short: RSI overbought + downtrend + volume spike
-            elif rsi_overbought and trend_down and vol_spike:
-                signals[i] = -0.25
+            # Short: downtrend, strong trend, pullback to EMA21
+            elif strong_trend and downtrend and near_ema21 and volume_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit: RSI overbought or trend turns down
-            if rsi[i] > 70 or direction_aligned[i] != 1:
+            # Exit: trend breaks or price moves too far from EMA21
+            if not (uptrend and strong_trend) or abs(close[i] - ema21[i]) / ema21[i] > 0.02:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit: RSI oversold or trend turns up
-            if rsi[i] < 30 or direction_aligned[i] != -1:
+            # Exit: trend breaks or price moves too far from EMA21
+            if not (downtrend and strong_trend) or abs(close[i] - ema21[i]) / ema21[i] > 0.02:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
+
+EOF
