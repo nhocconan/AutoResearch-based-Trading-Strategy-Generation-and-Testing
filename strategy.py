@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_1dTrend_Volume
-Hypothesis: Trading breakouts at the outer Camarilla levels (R4/S4) from daily pivot with volume confirmation and 1-day trend filter captures strong momentum moves in both bull and bear markets. The outer levels (R4/S4) represent stronger breakout zones than R3/S3, reducing false signals and improving win rate. Timeframe: 6h balances trade frequency and signal quality for 4-hour trend alignment.
+1h_VWAP_Breakout_4hTrend_1dVolFilter
+Hypothesis: Combining 1h VWAP breakouts with 4h trend filter and 1d volume confirmation captures institutional momentum moves while filtering noise. VWAP acts as dynamic support/resistance, and requiring alignment across timeframes reduces false signals. Works in both bull/bear by following the higher timeframe trend.
 """
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "1h_VWAP_Breakout_4hTrend_1dVolFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,90 +17,84 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h EMA34 for trend
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # Calculate Camarilla levels for current day (using previous day's OHLC)
-    # Standard Camarilla formula
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # First value uses current day's high as placeholder
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate 1d volume SMA20 for volume filter
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Calculate Camarilla levels (focusing on R4/S4 for breakout)
-    R4 = prev_close + (prev_high - prev_low) * 1.1
-    S4 = prev_close - (prev_high - prev_low) * 1.1
-    
-    # Align Camarilla levels to 6h timeframe
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Get 1d data for EMA trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 6h data for signal generation
-    close = prices['close'].values
+    # 1h data for VWAP and signal generation
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Calculate VWAP (typical price * volume cumulative)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / vwap_denominator
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA34 (34 periods)
-    start_idx = 34
+    # Warmup: need 4h EMA34 (34 periods) and 1d volume SMA (20 periods)
+    start_idx = 34  # 4h EMA needs 34 periods
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or
-            np.isnan(S4_aligned[i])):
+        if (np.isnan(ema34_4h_aligned[i]) or 
+            np.isnan(vol_sma20_1d_aligned[i]) or
+            np.isnan(vwap[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs 1d EMA34
-        uptrend_1d = close[i] > ema34_1d_aligned[i]
-        downtrend_1d = close[i] < ema34_1d_aligned[i]
+        # Trend filter: price vs 4h EMA34
+        uptrend_4h = close[i] > ema34_4h_aligned[i]
+        downtrend_4h = close[i] < ema34_4h_aligned[i]
         
-        # Volume filter: current volume > 1.5x 20-period EMA
-        vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-        volume_filter = volume[i] > vol_ema20[i] * 1.5
+        # Volume filter: current 1h volume > 1.5x 1d average volume (scaled)
+        # Approximate 1d volume per 1h bar
+        vol_filter = volume[i] > (vol_sma20_1d_aligned[i] / 24.0) * 1.5
         
         if position == 0:
-            # Long breakout: price breaks above R4 with volume and uptrend
-            if high[i] > R4_aligned[i] and uptrend_1d and volume_filter:
-                signals[i] = 0.25
+            # Long: price crosses above VWAP with uptrend and volume
+            if close[i] > vwap[i] and uptrend_4h and vol_filter:
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price breaks below S4 with volume and downtrend
-            elif low[i] < S4_aligned[i] and downtrend_1d and volume_filter:
-                signals[i] = -0.25
+            # Short: price crosses below VWAP with downtrend and volume
+            elif close[i] < vwap[i] and downtrend_4h and vol_filter:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price reaches midpoint between R4 and S4 or trend fails
-            midpoint = (R4_aligned[i] + S4_aligned[i]) / 2
-            if low[i] <= midpoint or not uptrend_1d:
+            # Long exit: price crosses below VWAP or trend fails
+            if close[i] < vwap[i] or not uptrend_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price reaches midpoint between R4 and S4 or trend fails
-            midpoint = (R4_aligned[i] + S4_aligned[i]) / 2
-            if high[i] >= midpoint or not downtrend_1d:
+            # Short exit: price crosses above VWAP or trend fails
+            if close[i] > vwap[i] or not downtrend_4h:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
