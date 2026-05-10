@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend
-Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
-Camarilla levels act as daily support/resistance; breakouts with volume and trend alignment capture directional moves.
-Works in bull/bear by filtering trades in direction of daily trend.
-Target: 12-37 trades/year (50-150 total) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakouts of Camarilla R1/S1 levels with volume confirmation and daily trend filter.
+Uses volume spike detection and RSI to avoid false breakouts. Designed for 15-30 trades/year.
+Works in bull/bear by only taking trades in direction of daily EMA trend.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,11 +31,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Camarilla levels from prior day: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    # Camarilla levels from prior day
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # 1d EMA50 for trend filter
+    # 1d EMA50 trend filter
     ema50_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
         ema50_1d[49] = np.mean(close_1d[:50])
@@ -44,17 +43,34 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # 1d volume SMA20 for volume confirmation
+    # 1d RSI14 for momentum filter
+    rsi14_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 14:
+        delta = np.diff(close_1d)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close_1d)
+        avg_loss = np.zeros_like(close_1d)
+        avg_gain[13] = np.mean(gain[:14])
+        avg_loss[13] = np.mean(loss[:14])
+        for i in range(14, len(close_1d)):
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
+            rs = avg_gain[i] / (avg_loss[i] + 1e-10)
+            rsi14_1d[i] = 100 - (100 / (1 + rs))
+    
+    # 1d volume SMA20 for volume spike detection
     vol_sma20_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
         vol_sma20_1d[19] = np.mean(volume_1d[:20])
         for i in range(20, len(volume_1d)):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    rsi14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi14_1d)
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
@@ -63,41 +79,44 @@ def generate_signals(prices):
     start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi14_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 12h volume from 1d (scaled)
-        vol_12h_scaled = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h bars in 1d
-        volume_confirm = volume[i] > 1.5 * vol_12h_scaled
+        # Volume confirmation: current 4h volume > 2.0x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
+        volume_confirm = volume[i] > 2.0 * vol_1d_scaled
         
-        # Trend and price relative to Camarilla levels
+        # Trend and momentum filters
         is_uptrend = close[i] > ema50_1d_aligned[i]
         is_downtrend = close[i] < ema50_1d_aligned[i]
+        rsi_not_overbought = rsi14_1d_aligned[i] < 70
+        rsi_not_oversold = rsi14_1d_aligned[i] > 30
+        
         price_above_r1 = close[i] > r1_aligned[i]
         price_below_s1 = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
+            # Long: price breaks above R1, in uptrend, not overbought, with volume spike
+            if price_above_r1 and is_uptrend and rsi_not_overbought and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
+            # Short: price breaks below S1, in downtrend, not oversold, with volume spike
+            elif price_below_s1 and is_downtrend and rsi_not_oversold and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+            # Exit: price falls back below R1, trend turns down, or RSI overbought
+            if not price_above_r1 or not is_uptrend or rsi14_1d_aligned[i] >= 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+            # Exit: price rises back above S1, trend turns up, or RSI oversold
+            if not price_below_s1 or not is_downtrend or rsi14_1d_aligned[i] <= 30:
                 signals[i] = 0.0
                 position = 0
             else:
