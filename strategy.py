@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Keltner_Channel_1dTrend_Volume
-Hypothesis: Keltner Channel breakout with 1d EMA34 trend filter and volume confirmation.
-Keltner Channel uses ATR-based bands to identify volatility breakouts.
-In trending markets, price tends to stay outside channels; in ranging markets, it reverts to mean.
-Trend filter ensures we only trade in direction of higher timeframe trend.
-Volume confirmation filters weak breakouts. Works in both bull (breakouts above upper band) and bear (breakouts below lower band).
+12h_Donchian_Breakout_1dTrend_Volume
+Hypothesis: Donchian channel breakout with 1d EMA34 trend filter and volume confirmation.
+Trades in direction of higher timeframe trend with volume confirmation to filter false breakouts.
+Works in both bull (breakouts above upper band) and bear (breakouts below lower band).
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "4h_Keltner_Channel_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -47,65 +45,53 @@ def generate_signals(prices):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # ATR for Keltner Channel (20-period)
-    atr_period = 20
-    atr = np.full(n, np.nan)
-    if n >= atr_period:
-        tr = np.maximum(np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1])), np.abs(low[1:] - close[:-1]))
-        tr = np.concatenate([[np.nan], tr])
-        atr[atr_period-1] = np.nanmean(tr[1:atr_period+1])
-        for i in range(atr_period, n):
-            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Donchian Channel (20-period)
+    donchian_period = 20
+    upper_band = np.full(n, np.nan)
+    lower_band = np.full(n, np.nan)
     
-    # EMA20 for Keltner Channel middle line
-    ema20 = np.full(n, np.nan)
-    if n >= 20:
-        ema20[19] = np.mean(close[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, n):
-            ema20[i] = alpha * close[i] + (1 - alpha) * ema20[i-1]
-    
-    # Keltner Channel bands
-    keltner_mult = 2.0
-    upper_band = ema20 + keltner_mult * atr
-    lower_band = ema20 - keltner_mult * atr
+    for i in range(donchian_period - 1, n):
+        upper_band[i] = np.max(high[i - donchian_period + 1:i + 1])
+        lower_band[i] = np.min(low[i - donchian_period + 1:i + 1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # warmup for EMA calculations
+    start_idx = max(34, 20)  # warmup for EMA and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(ema20[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
-        # Approximate 4h volume from 1d: 1d volume / 6 (since 24h/4h = 6)
-        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0
-        volume_confirm = volume[i] > 1.5 * vol_4h_approx
+        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled to 12h)
+        # Approximate 12h volume from 1d: 1d volume / 2 (since 24h/12h = 2)
+        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0
+        volume_confirm = volume[i] > 1.5 * vol_12h_approx
         
         if position == 0:
-            # Long: Price breaks above upper Keltner band with uptrend and volume confirmation
+            # Long: Price breaks above upper Donchian band with uptrend and volume confirmation
             if close[i] > upper_band[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Keltner band with downtrend and volume confirmation
+            # Short: Price breaks below lower Donchian band with downtrend and volume confirmation
             elif close[i] < lower_band[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price re-enters Keltner Channel (below middle line) or trend reversal
-            if close[i] < ema20[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: Price re-enters Donchian Channel (below middle) or trend reversal
+            mid_band = (upper_band[i] + lower_band[i]) / 2
+            if close[i] < mid_band or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Keltner Channel (above middle line) or trend reversal
-            if close[i] > ema20[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: Price re-enters Donchian Channel (above middle) or trend reversal
+            mid_band = (upper_band[i] + lower_band[i]) / 2
+            if close[i] > mid_band or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
