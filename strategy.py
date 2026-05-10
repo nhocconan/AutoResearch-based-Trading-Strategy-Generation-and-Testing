@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_ZeroLag_Volume_Spike_Cam
-Hypothesis: TRIX(12) zero-lag with volume spike and 1d trend filter captures momentum bursts in both bull and bear markets.
-Uses zero-lag filtering to reduce lag, volume confirmation for conviction, and 1d EMA for trend alignment.
-Targets 30-40 trades/year with discrete sizing to minimize fee drag.
+6h_WeeklyPivot_Donchian_Breakout
+Hypothesis: Use weekly pivot points (from 1w HTF) to determine directional bias, 
+then trade Donchian channel breakouts (20-period) on 6h chart only when aligned 
+with weekly pivot bias. Volume confirmation filters out weak breakouts.
+Works in both bull and bear markets by following weekly pivot trend and using 
+volatility-adjusted breakouts with volume filter. Targets 15-25 trades/year per 
+symbol with discrete position sizing (0.25) to minimize fee drag.
 """
 
-name = "4h_TRIX_ZeroLag_Volume_Spike_Cam"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Donchian_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,93 +27,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate TRIX(12) with zero-lag using EMA(12) triple
-    ema1 = np.full(n, np.nan)
-    ema2 = np.full(n, np.nan)
-    ema3 = np.full(n, np.nan)
-    if n >= 12:
-        alpha = 2 / (12 + 1)
-        # First EMA
-        ema1[11] = np.mean(close[:12])
-        for i in range(12, n):
-            ema1[i] = alpha * close[i] + (1 - alpha) * ema1[i-1]
-        # Second EMA of first EMA
-        ema2[23] = np.mean(ema1[12:24])
-        for i in range(24, n):
-            ema2[i] = alpha * ema1[i] + (1 - alpha) * ema2[i-1]
-        # Third EMA of second EMA
-        ema3[35] = np.mean(ema2[24:36])
-        for i in range(36, n):
-            ema3[i] = alpha * ema2[i] + (1 - alpha) * ema3[i-1]
-        # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-        trix = np.full(n, np.nan)
-        for i in range(37, n):
-            if ema3[i-1] != 0:
-                trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+    # Calculate Donchian channel (20-period) - highest high and lowest low
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # Zero-lag TRIX: TRIX + (TRIX - delayed TRIX) where delayed = TRIX lagged by half cycle
-    # Approximate zero-lag by using current TRIX and TRIX from 6 periods ago
-    trix_zl = np.full(n, np.nan)
-    if n >= 43:
-        for i in range(43, n):
-            delayed_trix = trix[i-6] if not np.isnan(trix[i-6]) else 0
-            trix_zl[i] = 2 * trix[i] - delayed_trix
+    # Calculate ATR(14) for volume filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = np.inf
+    tr3[0] = np.inf
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
+        else:
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    # Volume spike: current volume > 2.0 x volume EMA(20)
-    vol_ema = np.full(n, np.nan)
-    if n >= 20:
-        alpha_vol = 2 / (20 + 1)
-        vol_ema[19] = np.mean(volume[:20])
-        for i in range(20, n):
-            vol_ema[i] = alpha_vol * volume[i] + (1 - alpha_vol) * vol_ema[i-1]
-    vol_spike = volume > 2.0 * vol_ema
+    # Calculate volume SMA(20) for volume filter
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
     
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 34:
-        alpha_1d = 2 / (34 + 1)
-        ema_34_1d[33] = np.mean(close_1d[:34])
-        for i in range(34, len(close_1d)):
-            ema_34_1d[i] = alpha_1d * close_1d[i] + (1 - alpha_1d) * ema_34_1d[i-1]
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get weekly data for pivot points (calculate once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_pivot = np.full(len(weekly_close), np.nan)
+    weekly_r1 = np.full(len(weekly_close), np.nan)
+    weekly_s1 = np.full(len(weekly_close), np.nan)
+    
+    for i in range(len(weekly_close)):
+        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
+            weekly_pivot[i] = (weekly_high[i] + weekly_low[i] + weekly_close[i]) / 3.0
+            weekly_r1[i] = 2 * weekly_pivot[i] - weekly_low[i]
+            weekly_s1[i] = 2 * weekly_pivot[i] - weekly_high[i]
+    
+    # Align weekly pivot points to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(44, 21)  # Ensure TRIX zero-lag and volume EMA are ready
+    start_idx = max(21, 20)  # Ensure Donchian and volume filters are ready
     
     for i in range(start_idx, n):
-        if np.isnan(trix_zl[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(atr[i]) or np.isnan(vol_sma[i]) or np.isnan(weekly_pivot_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_spike_now = vol_spike[i] if i < len(vol_spike) else False
+        # Determine weekly bias: above pivot = bullish bias, below pivot = bearish bias
+        weekly_bias = 1 if close[i] > weekly_pivot_aligned[i] else -1
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 0:
-            # Long: Zero-lag TRIX crosses above zero with volume spike and uptrend
-            if trix_zl[i] > 0 and trix_zl[i-1] <= 0 and vol_spike_now and close[i] > ema_34_1d_aligned[i]:
+            # Long: Break above Donchian high with bullish weekly bias and volume confirmation
+            if close[i] > donchian_high[i] and weekly_bias == 1 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Zero-lag TRIX crosses below zero with volume spike and downtrend
-            elif trix_zl[i] < 0 and trix_zl[i-1] >= 0 and vol_spike_now and close[i] < ema_34_1d_aligned[i]:
+            # Short: Break below Donchian low with bearish weekly bias and volume confirmation
+            elif close[i] < donchian_low[i] and weekly_bias == -1 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Zero-lag TRIX crosses below zero
-            if trix_zl[i] < 0 and trix_zl[i-1] >= 0:
+            # Exit: Close crosses back below Donchian low
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Zero-lag TRIX crosses above zero
-            if trix_zl[i] > 0 and trix_zl[i-1] <= 0:
+            # Exit: Close crosses back above Donchian high
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
