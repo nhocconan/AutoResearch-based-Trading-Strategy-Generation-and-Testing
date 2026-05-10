@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 12h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
-# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 12-period MA) confirms institutional participation.
-# Designed for 12h timeframe targeting 12-37 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
+# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: Daily breakout at weekly Camarilla R1/S1 levels with weekly trend filter and volume confirmation.
+# Uses weekly trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 20-period MA) confirms institutional participation.
+# Designed for 1d timeframe targeting 7-25 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,54 +17,54 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla levels (using previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    camarilla_r1 = np.full(len(df_1d), np.nan)
-    camarilla_s1 = np.full(len(df_1d), np.nan)
+    camarilla_r1 = np.full(len(df_1w), np.nan)
+    camarilla_s1 = np.full(len(df_1w), np.nan)
     
-    for i in range(1, len(df_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
+    for i in range(1, len(df_1w)):
+        prev_high = high_1w[i-1]
+        prev_low = low_1w[i-1]
+        prev_close = close_1w[i-1]
         diff = prev_high - prev_low
         
         camarilla_r1[i] = prev_close + diff * 1.1 / 6
         camarilla_s1[i] = prev_close - diff * 1.1 / 6
     
-    # Align daily indicators to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align weekly indicators to daily timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # Volume average (12-period for 12h = 6 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume average (20-period for daily)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for daily EMA50 + vol MA
+    # Warmup: need enough history for weekly EMA50 + vol MA
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or
+        if (np.isnan(ema_50_1w_aligned[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
             np.isnan(vol_ma[i])):
@@ -73,10 +73,10 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Determine trend: daily close > EMA50
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        # Determine trend: weekly close > EMA50
+        close_1w_aligned = align_htf_to_ltf(prices, df_1w, df_1w['close'].values)
+        uptrend = close_1w_aligned[i] > ema_50_1w_aligned[i]
+        downtrend = close_1w_aligned[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation (2x average for significance)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
