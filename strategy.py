@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_LongTerm_Trend_Follow_with_Daily_Filter
-# Hypothesis: In crypto markets, strong multi-day trends persist despite short-term noise.
-# This strategy uses 60-period EMA on 6h as primary trend filter, confirmed by 1d EMA34 direction.
-# Entries occur on pullbacks to the 6h EMA60 with volume confirmation, exploiting the tendency
-# of trends to resume after consolidation. Works in both bull and bear markets by following
-# the dominant trend on higher timeframe. Low trade frequency expected due to strict
-# alignment of 6EMA60 pullback, 1D trend filter, and volume spike requirements.
+# 4h_EquiVolume_RSI_Trend
+# Hypothesis: On 4h timeframe, combine EquiVolume-weighted RSI with 1d EMA trend filter and volume confirmation.
+# EquiVolume weights price by volume to identify institutional interest. RSI(14) > 55 with rising EquiVolume indicates bullish momentum.
+# RSI(14) < 45 with falling EquiVolume indicates bearish momentum. 1d EMA50 filter ensures trades align with higher timeframe trend.
+# Volume confirmation (current volume > 1.5x 20-period average) reduces false signals.
+# Designed for low trade frequency (20-40/year) to minimize fee flood in choppy markets.
 
-name = "6h_LongTerm_Trend_Follow_with_Daily_Filter"
-timeframe = "6h"
+name = "4h_EquiVolume_RSI_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,15 +24,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h EMA60 for primary trend and dynamic support/resistance
-    ema60 = pd.Series(close).ewm(span=60, adjust=False, min_periods=60).mean().values
+    # EquiVolume calculation: typical price * volume
+    typical_price = (high + low + close) / 3.0
+    equivolume = typical_price * volume
     
-    # 1d EMA34 for higher timeframe trend filter (updated daily)
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)  # aligned to 6h, waits for daily close
+    # RSI(14) on EquiVolume
+    rsi_period = 14
+    delta = np.diff(equivolume, prepend=equivolume[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume confirmation: 20-period average on 6h
+    # Use Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation (20-period average)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -42,42 +49,46 @@ def generate_signals(prices):
         return res
     vol_ma = mean_arr(volume, 20)
     
+    # HTF: 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean()
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 20)  # need EMA60 and vol MA ready
+    start_idx = max(100, 50)  # Ensure sufficient history
     
     for i in range(start_idx, n):
-        if np.isnan(ema60[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
-        price_to_ema = close[i] - ema60[i]
+        rsi_val = rsi[i]
         
         if position == 0:
-            # Long setup: price above EMA60 (bullish bias), 1D uptrend, pulling back to EMA60 with volume
-            if close[i] > ema60[i] and ema34_1d_aligned[i] > ema34_1d_aligned[i-1] and price_to_ema < 0 and vol_confirm:
-                # Enter long on pullback to EMA60 with volume confirmation
+            # Long: RSI > 55, rising EquiVolume (proxy: RSI rising), above 1d EMA50, volume confirmation
+            if rsi_val > 55 and rsi[i] > rsi[i-1] and close[i] > ema_50_1d_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short setup: price below EMA60 (bearish bias), 1D downtrend, pulling back to EMA60 with volume
-            elif close[i] < ema60[i] and ema34_1d_aligned[i] < ema34_1d_aligned[i-1] and price_to_ema > 0 and vol_confirm:
-                # Enter short on pullback to EMA60 with volume confirmation
+            # Short: RSI < 45, falling EquiVolume (proxy: RSI falling), below 1d EMA50, volume confirmation
+            elif rsi_val < 45 and rsi[i] < rsi[i-1] and close[i] < ema_50_1d_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below EMA60 OR 1D trend turns down
-            if close[i] < ema60[i] or ema34_1d_aligned[i] < ema34_1d_aligned[i-1]:
+            # Long exit: RSI < 50 or breaks below 1d EMA50
+            if rsi_val < 50 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above EMA60 OR 1D trend turns up
-            if close[i] > ema60[i] or ema34_1d_aligned[i] > ema34_1d_aligned[i-1]:
+            # Short exit: RSI > 50 or breaks above 1d EMA50
+            if rsi_val > 50 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
