@@ -1,11 +1,12 @@
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-# Hypothesis: 12h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
-# Uses 1d trend for bias to avoid whipsaws in sideways markets, 12h for entry timing.
-# Targets 12-37 trades/year to minimize fee drag. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
-# Added volume confirmation to reduce false breakouts.
+#!/usr/bin/env python3
+# 4h_PullbackToEMA_Trend_Reversal_Signal
+# Hypothesis: Buy pullbacks to 12h EMA50 in uptrends, sell pullbacks to 12h EMA50 in downtrends.
+# Uses 12h EMA50 as dynamic support/resistance and 4h RSI for oversold/overbought entries.
+# Designed to work in both bull and bear markets by trading reversals with trend bias.
+# Targets ~30 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_PullbackToEMA_Trend_Reversal_Signal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,49 +15,36 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 trend
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    # 12h EMA50 trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema50_12h
+    trend_12h_down = close_12h < ema50_12h
     
-    # Align 1d trend to 12h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align 12h trend to 4h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
     
-    # 1d data for Camarilla pivot levels (using previous day's OHLC)
-    close_1d_arr = df_1d['close'].values
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    
-    # Shift to get previous day's values (avoid look-ahead)
-    prev_close = np.concatenate([[close_1d_arr[0]], close_1d_arr[:-1]])
-    prev_high = np.concatenate([[high_1d_arr[0]], high_1d_arr[:-1]])
-    prev_low = np.concatenate([[low_1d_arr[0]], low_1d_arr[:-1]])
-    
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume filter: current volume > 1.5 * 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    # 4h RSI for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,50 +52,40 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 1.5
-        
         if position == 0:
-            # Long: price breaks above Camarilla R1 with uptrend and volume spike
-            if (close[i] > camarilla_r1_aligned[i] and
-                trend_1d_up_aligned[i] > 0.5 and
-                volume_filter):
+            # Long: pullback to 12h EMA50 in uptrend with RSI oversold
+            if (low[i] <= ema50_12h[i] * 1.005 and  # within 0.5% of EMA
+                trend_12h_up_aligned[i] > 0.5 and
+                rsi[i] < 30):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with downtrend and volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and
-                  trend_1d_down_aligned[i] > 0.5 and
-                  volume_filter):
+            # Short: pullback to 12h EMA50 in downtrend with RSI overbought
+            elif (high[i] >= ema50_12h[i] * 0.995 and  # within 0.5% of EMA
+                  trend_12h_down_aligned[i] > 0.5 and
+                  rsi[i] > 70):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to Camarilla pivot (central level) or trend fails
-            camarilla_pivot = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
-            camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(prev_close, camarilla_pivot))[i] if not np.isnan(prev_high[i]) else camarilla_pivot
-            
-            if (close[i] < camarilla_pivot_aligned or
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: RSI overbought or price breaks below 12h EMA50
+            if (rsi[i] > 70 or
+                close[i] < ema50_12h[i] * 0.995):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to Camarilla pivot or trend fails
-            camarilla_pivot = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
-            camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(prev_close, camarilla_pivot))[i] if not np.isnan(prev_high[i]) else camarilla_pivot
-            
-            if (close[i] > camarilla_pivot_aligned or
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: RSI oversold or price breaks above 12h EMA50
+            if (rsi[i] < 30 or
+                close[i] > ema50_12h[i] * 1.005):
                 signals[i] = 0.0
                 position = 0
             else:
