@@ -1,87 +1,90 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_Pullback
-Hypothesis: 1-day KAMA trend with RSI pullback entries.
-KAMA adapts to market noise, reducing whipsaws in sideways markets.
-RSI pullback (30-40 for long, 60-70 for short) enters during retracements in the trend.
-Designed for low trade frequency (target: 10-25 trades/year) to minimize fee drag.
-Works in bull markets via trend following and in bear markets via short entries on pullbacks.
+12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike
+Hypothesis: Using 12h timeframe with Camarilla R3/S3 breakout, 1-day EMA34 trend filter, and volume spike.
+Designed to work in both bull and bear markets by using higher timeframe structure (12h) to reduce trades,
+avoid whipsaw, and capture meaningful moves. Target: 12-30 trades per year to minimize fee drag.
 """
 
-name = "1d_KAMA_Trend_RSI_Pullback"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    # Get daily data for Camarilla and EMA (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Calculate Camarilla pivot levels from previous day
+    high_prev = df_1d['high'].values
+    low_prev = df_1d['low'].values
+    close_prev = df_1d['close'].values
+    
+    # Camarilla formulas: R3 = C + (H-L)*1.25, S3 = C - (H-L)*1.25
+    camarilla_r3 = close_prev + (high_prev - low_prev) * 1.25
+    camarilla_s3 = close_prev - (high_prev - low_prev) * 1.25
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Get price and volume
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # ER (Efficiency Ratio) = |change| / sum(|changes|)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close))
-    er = np.zeros_like(change)
-    for i in range(2, len(change)):
-        if np.sum(abs_change[i-9:i+1]) > 0:
-            er[i] = np.abs(change[i]) / np.sum(abs_change[i-9:i+1])
-        else:
-            er[i] = 0
-    # Smooth ER with constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Calculate RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Volume filter: current volume > 1.8x 20-period EMA of volume
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema20 * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for KAMA and RSI
-    start_idx = 30
+    # Warmup: need EMA34 (34 days)
+    start_idx = 34
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]):
+        # Skip if any critical values are NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA and RSI pulling back from oversold (30-40)
-            if close[i] > kama[i] and 30 <= rsi[i] <= 40:
+            # Long: break above R3 with uptrend and volume
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI pulling back from overbought (60-70)
-            elif close[i] < kama[i] and 60 <= rsi[i] <= 70:
+            # Short: break below S3 with downtrend and volume
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA or RSI overbought (>70)
-            if close[i] < kama[i] or rsi[i] > 70:
+            # Long exit: price back below S3 or trend change (close below EMA)
+            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA or RSI oversold (<30)
-            if close[i] > kama[i] or rsi[i] < 30:
+            # Short exit: price back above R3 or trend change (close above EMA)
+            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
