@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Williams_Alligator_Triple_Cross
-# Hypothesis: Williams Alligator (Jaw 13, Teeth 8, Lips 5 SMAs) on 6h timeframe with 1d trend filter.
-# Long when Lips > Teeth > Jaw (bullish alignment) and price above 1d EMA50.
-# Short when Lips < Teeth < Jaw (bearish alignment) and price below 1d EMA50.
-# Exit when alignment breaks or price crosses 1d EMA50 in opposite direction.
-# Designed to catch trends in both bull and bear markets by aligning with higher timeframe trend.
-# Target: 15-35 trades/year (~60-140 total over 4 years) to stay within optimal trade frequency for 6h.
+# 12h_Camarilla_Pivot_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: 12h price breaks Camarilla R3/S3 levels from daily pivot, filtered by 1w EMA trend (21) and volume spikes.
+# Designed to capture strong breakouts with trend alignment while avoiding false signals in chop.
+# Works in bull/bear by following weekly trend. Target: 12-30 trades/year (~50-120 total over 4 years).
 
-name = "6h_Williams_Alligator_Triple_Cross"
-timeframe = "6h"
+name = "12h_Camarilla_Pivot_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,58 +20,92 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator on 6h: Jaw (13), Teeth (8), Lips (5) - all SMAs
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    
-    # 1d EMA trend filter (50-period)
+    # Daily high/low/close for Camarilla pivot (use previous day's values)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate Camarilla levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
+    R3 = pivot + (range_ * 1.1 / 2.0)  # R3 = pivot + 1.1*(H-L)/2
+    S3 = pivot - (range_ * 1.1 / 2.0)  # S3 = pivot - 1.1*(H-L)/2
+    
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Weekly EMA trend filter (21-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 21:
+        return np.zeros(n)
+    
+    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.5 * vol_ma)
+    
+    # Session filter: 08:00-20:00 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour  # pre-compute before loop
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup for all indicators
+    start_idx = 100  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw (bullish) or Lips < Teeth < Jaw (bearish)
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        
         if position == 0:
-            # Long: bullish alignment and price above 1d EMA50
-            if bullish_alignment and close[i] > ema_50_1d_aligned[i]:
+            # Long: price breaks above R3, weekly EMA uptrend, volume confirmation, session active
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema_21_1w_aligned[i] and 
+                volume_filter[i] and 
+                session_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish alignment and price below 1d EMA50
-            elif bearish_alignment and close[i] < ema_50_1d_aligned[i]:
+            # Short: price breaks below S3, weekly EMA downtrend, volume confirmation, session active
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema_21_1w_aligned[i] and 
+                  volume_filter[i] and 
+                  session_filter[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: bearish alignment OR price crosses below 1d EMA50
-            if bearish_alignment or close[i] < ema_50_1d_aligned[i]:
+            # Exit: price breaks below S3 OR weekly EMA turns down
+            if (close[i] < S3_aligned[i] or 
+                close[i] < ema_21_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: bullish alignment OR price crosses above 1d EMA50
-            if bullish_alignment or close[i] > ema_50_1d_aligned[i]:
+            # Exit: price breaks above R3 OR weekly EMA turns up
+            if (close[i] > R3_aligned[i] or 
+                close[i] > ema_21_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
