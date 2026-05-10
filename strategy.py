@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 # 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from 1d Camarilla R3/S3 levels on 4h with 1d EMA34 trend filter and volume confirmation.
-# The 1d timeframe provides stable support/resistance levels; EMA34 filters trend direction; volume confirms breakout.
-# Designed for 4h to achieve 19-50 trades/year, avoiding overtrading while capturing institutional levels.
-# Works in bull markets (breakouts above R3) and bear markets (breakdowns below S3).
+# Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
+# Designed for 4h to achieve 20-50 trades/year. Works in bull/bear via trend filter and volume confirmation.
 
 name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
@@ -32,10 +30,7 @@ def generate_signals(prices):
     
     # Camarilla levels (based on previous day)
     def calculate_camarilla(h, l, c):
-        # Typical price for the day
-        typical = (h + l + c) / 3.0
         range_ = h - l
-        # Camarilla levels
         R3 = c + (range_ * 1.1000 / 4)
         S3 = c - (range_ * 1.1000 / 4)
         return R3, S3
