@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Daily Camarilla pivot levels (R1/S1) act as key support/resistance. 
-# Price breaking above R1 in a daily uptrend (EMA34) or below S1 in a daily downtrend 
-# signals momentum. Volume spike (>2x 20-period MA) confirms breakout strength. 
-# Designed to work in bull markets by riding uptrends and in bear markets by 
-# following downtrends. Tight conditions target 20-50 trades/year to avoid fee drag.
+# 6h_Fractal_Pivot_Reversal_v1
+# Hypothesis: Williams fractals on 1d identify swing points. Price rejecting at fractal with volume spike indicates reversal. Fade at R3/S3 pivot levels in ranging markets, breakout continuation at R4/S4 in trending markets. Uses 12h EMA50 for trend filter. Designed for low frequency (12-37 trades/year) to avoid fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Fractal_Pivot_Reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,75 +20,112 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend filter
+    # Get 1d data for fractals and pivots
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Calculate daily Camarilla pivot levels
+    # Williams fractals on 1d (need 2-bar confirmation after center)
+    bearish, bullish = compute_williams_fractals(
+        df_1d['high'].values,
+        df_1d['low'].values,
+    )
+    bearish_fractal = align_htf_to_ltf(prices, df_1d, bearish, additional_delay_bars=2)
+    bullish_fractal = align_htf_to_ltf(prices, df_1d, bullish, additional_delay_bars=2)
+    
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    
+    # Daily pivot levels (standard)
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
-    # Camarilla formulas
-    daily_range = daily_high - daily_low
-    daily_pivot = (daily_high + daily_low + daily_close) / 3
-    daily_r1 = daily_close + (daily_range * 1.1 / 12)
-    daily_s1 = daily_close - (daily_range * 1.1 / 12)
+    pivot = (daily_high + daily_low + daily_close) / 3
+    r3 = pivot + 2 * (daily_high - daily_low)
+    s3 = pivot - 2 * (daily_high - daily_low)
+    r4 = pivot + 3 * (daily_high - daily_low)
+    s4 = pivot - 3 * (daily_high - daily_low)
     
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume confirmation (20-period MA on 4h = ~3.3 days)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (50-period on 6h = ~12.5 days)
+    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need fractals (5), EMA50 (50), volume MA (50)
+    start_idx = max(50, 50)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(daily_r1_aligned[i]) or 
-            np.isnan(daily_s1_aligned[i]) or 
+        if (np.isnan(bearish_fractal[i]) or 
+            np.isnan(bullish_fractal[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Volume confirmation (strict: >2.0x MA to reduce false signals)
+        # Volume confirmation (spike > 2.0x MA)
         volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above daily R1 + volume
-            if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
+            # Long setup: bullish fractal rejection at S3/S4 + volume + not strong downtrend
+            long_setup = (bullish_fractal[i] and 
+                         (close[i] < s3_aligned[i] * 1.005 or close[i] < s4_aligned[i] * 1.005) and
+                         volume_confirm and
+                         not downtrend)  # Avoid strong downtrend
+            
+            # Short setup: bearish fractal rejection at R3/R4 + volume + not strong uptrend
+            short_setup = (bearish_fractal[i] and 
+                          (close[i] > r3_aligned[i] * 0.995 or close[i] > r4_aligned[i] * 0.995) and
+                          volume_confirm and
+                          not uptrend)  # Avoid strong uptrend
+            
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below daily S1 + volume
-            elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
+                
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < daily_r1_aligned[i]:
+            # Long exit: bearish fractal at resistance or trend breakdown
+            if bearish_fractal[i] and close[i] > r3_aligned[i] * 0.995:
+                signals[i] = 0.0
+                position = 0
+            elif not uptrend:  # Trend breakdown
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
+                
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > daily_s1_aligned[i]:
+            # Short exit: bullish fractal at support or trend breakdown
+            if bullish_fractal[i] and close[i] < s3_aligned[i] * 1.005:
+                signals[i] = 0.0
+                position = 0
+            elif not downtrend:  # Trend breakdown
                 signals[i] = 0.0
                 position = 0
             else:
