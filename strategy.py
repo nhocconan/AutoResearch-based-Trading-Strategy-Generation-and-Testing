@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Uses 4h timeframe with 1d timeframe for trend confirmation.
-# Enters long when price breaks above daily R3 in uptrend (close > EMA50) with volume > 2x 20-period average.
-# Enters short when price breaks below daily S3 in downtrend (close < EMA50) with volume confirmation.
-# Exits when price returns to opposite level (S3 for long, R3 for short) or trend reverses.
-# Uses daily EMA50 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 20-50 trades per year on 4h timeframe with position size 0.25 to minimize fee drag.
+# 1D_RSI50_Trend_With_W1_SupportResistance
+# Hypothesis: Uses daily RSI(50) as trend filter with weekly support/resistance from prior weekly high/low.
+# Enters long when RSI crosses above 50 and price breaks above prior weekly high with volume > 1.5x 20-day average.
+# Enters short when RSI crosses below 50 and price breaks below prior weekly low with volume > 1.5x 20-day average.
+# Exits when RSI crosses back below/above 50 or price returns to opposite weekly level.
+# Uses RSI(50) as neutral trend filter to avoid whipsaws and works in both bull/bear markets.
+# Targets 8-20 trades per year on daily timeframe with position size 0.25 to minimize fee drag.
 
-name = "4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1D_RSI50_Trend_With_W1_SupportResistance"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,80 +17,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivots and EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for support/resistance levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 1d EMA(50) for trend direction
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly high and low (from completed weekly bar)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    pivot_range = prev_high - prev_low
-    r3_level = prev_close + 1.1 * pivot_range
-    s3_level = prev_close - 1.1 * pivot_range
+    # Align weekly levels to daily timeframe (available after weekly bar closes)
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Align pivot levels to 4h timeframe (available after 1d bar closes)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
+    # Calculate daily RSI(50) for trend filter
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/50, adjust=False, min_periods=50).mean()
+    avg_loss = loss.ewm(alpha=1/50, adjust=False, min_periods=50).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Volume filter: volume > 2x 20-period average on 4h chart
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and volume MA
+    start_idx = 50  # Warmup for RSI
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # RSI trend filter
+        rsi_above_50 = rsi_values[i] > 50
+        rsi_below_50 = rsi_values[i] < 50
+        rsi_crossed_up = rsi_values[i] > 50 and rsi_values[i-1] <= 50
+        rsi_crossed_down = rsi_values[i] < 50 and rsi_values[i-1] >= 50
         
         if position == 0:
-            # Long entry: price breaks above R3 in uptrend with volume spike
-            if (close[i] > r3_aligned[i] and 
-                price_above_ema and 
+            # Long entry: RSI crosses above 50 and price breaks above weekly high with volume
+            if (rsi_crossed_up and 
+                close[i] > weekly_high_aligned[i] and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 in downtrend with volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  price_below_ema and 
+            # Short entry: RSI crosses below 50 and price breaks below weekly low with volume
+            elif (rsi_crossed_down and 
+                  close[i] < weekly_low_aligned[i] and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to S3 or trend reverses to downtrend
-            if (close[i] < s3_aligned[i] or 
-                price_below_ema):
+            # Long exit: RSI crosses below 50 or price returns to weekly low
+            if (rsi_crossed_down or 
+                close[i] < weekly_low_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to R3 or trend reverses to uptrend
-            if (close[i] > r3_aligned[i] or 
-                price_above_ema):
+            # Short exit: RSI crosses above 50 or price returns to weekly high
+            if (rsi_crossed_up or 
+                close[i] > weekly_high_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
