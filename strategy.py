@@ -1,13 +1,11 @@
-# 6h_ElderRay_BullBearPower_Trend
-# Hypothesis: Elder Ray (Bull/Bear Power) with 60-day EMA trend filter and volume confirmation.
-# Bull Power = High - EMA13, Bear Power = EMA13 - Low. Long when Bull Power > 0 and rising, Bear Power < 0 and falling in uptrend.
-# Short when Bear Power < 0 and falling, Bull Power > 0 and rising in downtrend.
-# Uses 1d EMA60 for trend filter and 1d volume spike for confirmation to reduce whipsaws.
-# Works in bull markets by buying dips with bullish momentum, and in bear markets by selling rallies with bearish momentum.
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Camarilla pivot levels from 1d are strong support/resistance. Breakout above R1 or below S1 with 1d trend filter and volume confirmation. Uses 12h timeframe to reduce trade frequency and avoid fee drag. Works in bull markets by buying breakouts above R1 in uptrends, and in bear markets by selling breakdowns below S1 in downtrends. Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+"""
 
-name = "6h_ElderRay_BullBearPower_Trend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,87 +22,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Elder Ray components: Bull Power and Bear Power using EMA13
-    period_ema13 = 13
-    ema13 = np.full(n, np.nan)
-    if n >= period_ema13:
-        ema13[period_ema13-1] = np.mean(close[:period_ema13])
-        alpha = 2 / (period_ema13 + 1)
-        for i in range(period_ema13, n):
-            ema13[i] = alpha * close[i] + (1 - alpha) * ema13[i-1]
-    
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
-    
-    # 1d EMA60 for trend filter
+    # 1d data for Camarilla pivot levels, trend filter, and volume confirmation
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema60_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 60:
-        ema60_1d[59] = np.mean(close_1d[:60])
-        alpha = 2 / (60 + 1)
-        for i in range(60, len(close_1d)):
-            ema60_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema60_1d[i-1]
-    ema60_1d_aligned = align_htf_to_ltf(prices, df_1d, ema60_1d)
+    volume_1d = df_1d['volume'].values
+    
+    # Camarilla pivot levels: R1, S1 from previous day
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * camarilla_range / 12
+    s1 = close_1d - 1.1 * camarilla_range / 12
+    
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # 1d volume SMA20 for volume confirmation
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period_ema13, 60)  # Ensure EMA13 and 1d indicators ready
+    start_idx = 34  # Wait for EMA34 to be ready
     
     for i in range(start_idx, n):
-        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
-           np.isnan(ema60_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x average 1d volume (scaled)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 4.0  # 4x 6h periods in 1d
+        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h periods in 1d
         volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Trend determination: price vs 1d EMA60
-        is_uptrend = close[i] > ema60_1d_aligned[i]
-        is_downtrend = close[i] < ema60_1d_aligned[i]
+        # Trend determination: price vs 1d EMA34
+        is_uptrend = close[i] > ema34_1d_aligned[i]
+        is_downtrend = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 and rising, Bear Power < 0, in uptrend with volume
-            if (bull_power[i] > 0 and 
-                i > start_idx and bull_power[i] > bull_power[i-1] and
-                bear_power[i] < 0 and
+            # Long: Breakout above R1 in uptrend with volume
+            if (close[i] > r1_aligned[i] and
                 is_uptrend and
                 volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and falling, Bull Power > 0, in downtrend with volume
-            elif (bear_power[i] > 0 and  # Bear Power is positive when EMA13 > Low (bearish)
-                  i > start_idx and bear_power[i] > bear_power[i-1] and  # Rising bear power = more bearish
-                  bull_power[i] > 0 and
+            # Short: Breakdown below S1 in downtrend with volume
+            elif (close[i] < s1_aligned[i] and
                   is_downtrend and
                   volume_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power turns negative or trend changes
-            if (bull_power[i] <= 0 or 
+            # Exit: Price returns below R1 or trend changes to downtrend
+            if (close[i] < r1_aligned[i] or
                 not is_uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power turns negative or trend changes
-            if (bear_power[i] <= 0 or 
+            # Exit: Price returns above S1 or trend changes to uptrend
+            if (close[i] > s1_aligned[i] or
                 not is_downtrend):
                 signals[i] = 0.0
                 position = 0
