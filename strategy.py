@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1D_Weekly_Camarilla_R1_S1_Breakout_With_Volume
-# Hypothesis: Daily Camarilla pivot levels act as key support/resistance in both bull and bear markets.
-# Breakouts above R1 or below S1 with volume confirmation indicate strong momentum.
-# Weekly trend filter (price above/below weekly EMA50) ensures alignment with higher timeframe trend.
-# Designed for low trade frequency (~10-25/year) with discrete sizing (0.25) to minimize fee drag.
-# Works in bull markets (breakouts with trend) and bear markets (breakouts against trend).
+# 6H_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike
+# Hypothesis: Camarilla pivot levels from daily chart provide key intraday support/resistance.
+# Breakouts above R3 or below S3 with volume > 2x 20-period average indicate strong momentum.
+# Daily trend filter (close > EMA50) ensures alignment with higher timeframe trend.
+# Designed for low trade frequency (~15-25/year) with discrete sizing (0.25) to minimize fee drag.
+# Works in bull markets (breakouts with trend) and bear markets (short breakdowns against trend).
 
-name = "1D_Weekly_Camarilla_R1_S1_Breakout_With_Volume"
-timeframe = "1d"
+name = "6H_Camarilla_R3_S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,22 +24,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # R1 = close + (high - low) * 1.1 / 12
-    # S1 = close - (high - low) * 1.1 / 12
-    camarilla_range = high - low
-    r1 = close + camarilla_range * 1.1 / 12
-    s1 = close - camarilla_range * 1.1 / 12
-    
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume confirmation: volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_threshold = vol_ma * 2.0
     
-    # Weekly trend filter: EMA 50 on weekly data
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels: R3, S3, R4, S4
+    # Camarilla formulas: 
+    # R4 = close + ((high - low) * 1.1/2)
+    # R3 = close + ((high - low) * 1.1/4)
+    # S3 = close - ((high - low) * 1.1/4)
+    # S4 = close - ((high - low) * 1.1/2)
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + (range_1d * 1.1 / 4)
+    s3_1d = close_1d - (range_1d * 1.1 / 4)
+    r4_1d = close_1d + (range_1d * 1.1 / 2)
+    s4_1d = close_1d - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 6t timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Daily trend filter: EMA 50
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -47,31 +62,34 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_threshold[i]) or np.isnan(ema_50_1w_aligned[i]):
+        if np.isnan(vol_threshold[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        is_uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        is_downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        
         if position == 0:
-            # Long entry: Price breaks above R1 + volume confirmation + weekly uptrend
-            if close[i] > r1[i] and volume[i] > vol_threshold[i] and close[i] > ema_50_1w_aligned[i]:
+            # Long entry: Price breaks above R3 with volume spike and daily uptrend
+            if close[i] > r3_1d_aligned[i] and volume[i] > vol_threshold[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 + volume confirmation + weekly downtrend
-            elif close[i] < s1[i] and volume[i] > vol_threshold[i] and close[i] < ema_50_1w_aligned[i]:
+            # Short entry: Price breaks below S3 with volume spike and daily downtrend
+            elif close[i] < s3_1d_aligned[i] and volume[i] > vol_threshold[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S1 or weekly trend turns down
-            if close[i] < s1[i] or close[i] < ema_50_1w_aligned[i]:
+            # Long exit: Price breaks below S3 or daily trend turns down
+            if close[i] < s3_1d_aligned[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above R1 or weekly trend turns up
-            if close[i] > r1[i] or close[i] > ema_50_1w_aligned[i]:
+            # Short exit: Price breaks above R3 or daily trend turns up
+            if close[i] > r3_1d_aligned[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
