@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1d_Weekly_RSI_Reversal_With_Volume_Confirmation
-# Hypothesis: Uses weekly RSI(14) to detect overbought/oversold conditions on the weekly chart,
-# combined with daily volume spikes to confirm reversals. Enters long when weekly RSI < 30 and
-# daily volume > 1.5x 20-day average volume. Enters short when weekly RSI > 70 and volume spike.
-# Exits when RSI returns to neutral zone (40-60). Designed for low-frequency, high-conviction
-# trades to avoid overtrading and work in both bull and bear markets by catching extremes.
+# 6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Uses Camarilla R3/S3 levels from 1d as breakout levels with 1d EMA34 trend filter and volume spike confirmation.
+# Enters long when price breaks above R3 with volume spike and 1d EMA34 uptrend.
+# Enters short when price breaks below S3 with volume spike and 1d EMA34 downtrend.
+# Exits when price returns to the Camarilla center (P) level or trend reverses.
+# Designed for 15-30 trades/year on 6h to avoid overtrading and work in both bull and bear markets.
 
-name = "1d_Weekly_RSI_Reversal_With_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,91 +19,79 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 20-day average volume for volume spike filter
-    vol_avg_20 = np.zeros(n)
-    vol_sum = 0.0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i - 20]
-        if i >= 19:  # Start from index 19 (20th element)
-            vol_avg_20[i] = vol_sum / 20.0
+    # Calculate volume spike: volume > 1.5 * 20-period average
+    vol_ma = np.zeros(n)
+    vol_ma[19] = np.mean(volume[0:20])
+    for i in range(20, n):
+        vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20
+    volume_spike = volume > (vol_ma * 1.5)
     
-    # Get weekly data for RSI calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    # 1d EMA(34) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly RSI(14)
-    delta = np.diff(close_1w)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # 1d Camarilla levels (R3, S3, P)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    avg_gain = np.zeros_like(close_1w)
-    avg_loss = np.zeros_like(close_1w)
+    camarilla_p = np.zeros(len(df_1d))
+    camarilla_r3 = np.zeros(len(df_1d))
+    camarilla_s3 = np.zeros(len(df_1d))
     
-    # Initial average gain/loss
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(len(df_1d)):
+        range_1d = high_1d[i] - low_1d[i]
+        camarilla_p[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
+        camarilla_r3[i] = camarilla_p[i] + (range_1d * 1.1 / 4)
+        camarilla_s3[i] = camarilla_p[i] - (range_1d * 1.1 / 4)
     
-    # Wilder's smoothing
-    for i in range(14, len(close_1w)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.zeros_like(close_1w)
-    rsi_1w = np.zeros_like(close_1w)
-    for i in range(14, len(close_1w)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi_1w[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi_1w[i] = 100.0  # Avoid division by zero
-    
-    # Align weekly RSI to daily timeframe
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient warmup for volume average
+    start_idx = 40  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_1w_aligned[i]) or np.isnan(vol_avg_20[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_p_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike condition: current volume > 1.5x 20-day average
-        volume_spike = volume[i] > 1.5 * vol_avg_20[i]
-        
         if position == 0:
-            # Long: Oversold weekly RSI + volume spike
-            if rsi_1w_aligned[i] < 30 and volume_spike:
+            # Long: Price breaks above R3 with volume spike and 1d EMA34 uptrend
+            if close[i] > camarilla_r3_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought weekly RSI + volume spike
-            elif rsi_1w_aligned[i] > 70 and volume_spike:
+            # Short: Price breaks below S3 with volume spike and 1d EMA34 downtrend
+            elif close[i] < camarilla_s3_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI returns to neutral zone (40-60)
-            if rsi_1w_aligned[i] >= 40:
+            # Exit: Price returns to P level or trend reversal (price below EMA)
+            if close[i] < camarilla_p_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI returns to neutral zone (40-60)
-            if rsi_1w_aligned[i] <= 60:
+            # Exit: Price returns to P level or trend reversal (price above EMA)
+            if close[i] > camarilla_p_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
