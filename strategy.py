@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
 Hypothesis: Go long when price breaks above daily Camarilla R1 level with volume > 1.5x average and daily close > daily EMA34.
 Go short when price breaks below daily Camarilla S1 level with volume > 1.5x average and daily close < daily EMA34.
 Exit when price re-enters the daily Camarilla H-L range (S1 to R1).
-Uses daily trend filter to avoid counter-trend trades. Designed for 12h timeframe to target 12-37 trades/year.
+Uses daily trend filter to avoid counter-trend trades. Designed for 4h timeframe to target 20-50 trades/year.
 Daily Camarilla levels provide daily support/resistance; volume confirms breakout strength.
 Works in bull/bear markets by following the higher timeframe trend.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,9 +30,13 @@ def generate_signals(prices):
     # Calculate daily EMA34 for trend filter (using HTF data)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    # Calculate EMA with proper smoothing
     ema_34_1d = np.full(len(close_1d), np.nan)
-    for i in range(34, len(close_1d)):
-        ema_34_1d[i] = np.mean(close_1d[i-34:i])  # Simple MA for efficiency
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])  # Initialize with SMA
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume average (20 periods)
@@ -62,7 +66,7 @@ def generate_signals(prices):
         r1_1d = close_1d + rng_1d * 1.1 / 12
         s1_1d = close_1d - rng_1d * 1.1 / 12
         
-        # Align to 12h timeframe
+        # Align to 4h timeframe
         r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
         s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
         
