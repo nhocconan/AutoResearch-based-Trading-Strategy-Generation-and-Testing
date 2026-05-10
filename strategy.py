@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_Volume_Trend_12h
-# Hypothesis: Donchian channel breakouts with volume confirmation and 12h trend filter capture strong momentum moves while avoiding false breakouts in choppy markets.
-# The 12h EMA filter ensures we only trade in the direction of the higher timeframe trend, improving win rate.
-# Volume confirmation ensures breakouts are supported by participation.
-# Designed for low trade frequency (20-40/year) to minimize fee drag.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance zones.
+# Price breaking above R1 or below S1 with volume confirmation and aligned daily trend (EMA34) 
+# captures high-probability breakouts. Designed for low trade frequency (15-25/year) to minimize fee drift.
 
-name = "4h_Donchian_Breakout_Volume_Trend_12h"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,14 +22,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donch_period = 20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_upper = high_series.rolling(window=donch_period, min_periods=donch_period).max()
-    donch_lower = low_series.rolling(window=donch_period, min_periods=donch_period).min()
+    # === Daily HTF Data (loaded ONCE) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Volume confirmation (20-period average)
+    # Camarilla levels from previous day's range
+    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # Where C, H, L are daily close, high, low
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    camarilla_width = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d + camarilla_width
+    s1_1d = close_1d - camarilla_width
+    
+    # Align Camarilla levels to 12h timeframe (wait for daily bar to close)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === 12h Indicators ===
+    # Volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -39,20 +54,14 @@ def generate_signals(prices):
         return res
     vol_ma = mean_arr(volume, 20)
     
-    # 12h EMA trend filter (trained on 12h data, aligned to 4h)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20) + 5  # Need enough history for EMA and volume
     
     for i in range(start_idx, n):
-        if np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(ema_12h_aligned[i]):
+        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or \
+           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +70,24 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long breakout: price closes above upper Donchian AND volume confirmation AND 12h uptrend
-            if close[i] > donch_upper[i] and vol_confirm and close[i] > ema_12h_aligned[i]:
+            # Long: break above R1 with volume and daily uptrend
+            if close[i] > r1_1d_aligned[i] and vol_confirm and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price closes below lower Donchian AND volume confirmation AND 12h downtrend
-            elif close[i] < donch_lower[i] and vol_confirm and close[i] < ema_12h_aligned[i]:
+            # Short: break below S1 with volume and daily downtrend
+            elif close[i] < s1_1d_aligned[i] and vol_confirm and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below lower Donchian OR 12h trend turns down
-            if close[i] < donch_lower[i] or close[i] < ema_12h_aligned[i]:
+            # Long exit: price returns to EMA34 or breaks below S1 (invalidates breakout)
+            if close[i] < ema34_1d_aligned[i] or close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above upper Donchian OR 12h trend turns up
-            if close[i] > donch_upper[i] or close[i] > ema_12h_aligned[i]:
+            # Short exit: price returns to EMA34 or breaks above R1
+            if close[i] > ema34_1d_aligned[i] or close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
