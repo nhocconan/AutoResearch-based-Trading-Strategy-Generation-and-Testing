@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_Volume_Trend
-# Hypothesis: Keltner Channel breakouts with volume confirmation and 1d EMA trend filter provide high-probability entries.
-# Works in bull markets via upper band breakouts and in bear markets via lower band breakdowns.
-# Uses discrete position sizing (0.25) to limit overtrading and fee drag. Targets 20-40 trades/year.
+# 4h_MR_Pattern_Exit
+# Hypothesis: Mean-reversion at Bollinger Band extremes with RSI filter and 1d trend alignment provides edge in both bull and bear markets.
+# Uses Bollinger Bands (20,2) for entry, RSI(14) for momentum filter, and 1d EMA(50) for trend alignment.
+# Exits occur when price crosses the opposite Bollinger Band or trend reverses.
+# Designed for low trade frequency (target: 20-40/year) with discrete sizing (0.25) to minimize fee drag.
 
-name = "4h_Keltner_Breakout_Volume_Trend"
+name = "4h_MR_Pattern_Exit"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,13 +23,20 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20-period EMA, 2x ATR)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema_20 + 2 * atr
-    kc_lower = ema_20 - 2 * atr
+    # Bollinger Bands (20-period SMA, 2 std dev)
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma_20 + 2 * std_20
+    bb_lower = sma_20 - 2 * std_20
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # 1d trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
@@ -36,17 +44,14 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation: 20-period average volume
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or \
-           np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or \
+           np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,28 +64,25 @@ def generate_signals(prices):
         is_uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
         is_downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Volume condition: current volume > 1.5x 20-period average
-        volume_condition = volume[i] > 1.5 * vol_ma_20[i]
-        
         if position == 0:
-            # Long entry: price breaks above Keltner upper in uptrend with volume
-            if is_uptrend and close[i] > kc_upper[i] and volume_condition:
+            # Long entry: price at lower BB, RSI < 40, in uptrend
+            if close[i] <= bb_lower[i] and rsi[i] < 40 and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Keltner lower in downtrend with volume
-            elif is_downtrend and close[i] < kc_lower[i] and volume_condition:
+            # Short entry: price at upper BB, RSI > 60, in downtrend
+            elif close[i] >= bb_upper[i] and rsi[i] > 60 and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to EMA20 or trend turns down
-            if close[i] < ema_20[i] or is_downtrend:
+            # Long exit: price crosses upper BB or trend turns down
+            if close[i] >= bb_upper[i] or is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to EMA20 or trend turns up
-            if close[i] > ema_20[i] or is_uptrend:
+            # Short exit: price crosses lower BB or trend turns up
+            if close[i] <= bb_lower[i] or is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
