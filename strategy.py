@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_RSI_Extremes_Volume_Trend
-# Hypothesis: RSI extremes (below 30 for long, above 70 for short) combined with volume confirmation and daily trend filter (EMA50) captures mean reversion in ranging markets and momentum in trending markets. The daily trend filter prevents counter-trend trades, while volume confirms genuine interest. Designed for 4h timeframe to balance trade frequency and signal quality, targeting 20-40 trades per year to minimize fee drag.
+# 12h_Williams_Alligator_Filtered_1wTrend_Volume
+# Hypothesis: Williams Alligator (3 SMAs) defines trend structure on 12h; trades only in direction of weekly trend with volume confirmation. Uses Alligator's jaw/teeth/lips to filter whipsaws. Designed for low frequency (15-30 trades/year) to minimize fee decay, works in both bull and bear via trend alignment.
 
-name = "4h_RSI_Extremes_Volume_Trend"
-timeframe = "4h"
+name = "12h_Williams_Alligator_Filtered_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,30 +20,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # RSI(14) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(0).values
+    # Williams Alligator on 12h: SMAs of median price
+    median_price = (high + low) / 2.0
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Daily trend: EMA50 on daily close
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    # Alligator alignment: bullish when lips > teeth > jaw
+    alligator_bullish = (lips > teeth) & (teeth > jaw)
+    alligator_bearish = (lips < teeth) & (teeth < jaw)
     
-    # Align daily trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Weekly trend: EMA50 on weekly close
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema50_1w
+    trend_1w_down = close_1w < ema50_1w
+    
+    # Align weekly trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
     # Volume confirmation: 20-period average
     volume_s = pd.Series(volume)
@@ -53,12 +53,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(trend_1d_up_aligned[i]) or 
-            np.isnan(trend_1d_down_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,26 +69,30 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: RSI oversold (<30) with daily uptrend and volume
-            if (rsi[i] < 30 and trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: Alligator bullish + weekly uptrend + volume
+            if (alligator_bullish[i] and 
+                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI overbought (>70) with daily downtrend and volume
-            elif (rsi[i] > 70 and trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: Alligator bearish + weekly downtrend + volume
+            elif (alligator_bearish[i] and 
+                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when RSI returns to neutral (50) or trend fails
-            if (rsi[i] >= 50 or trend_1d_up_aligned[i] < 0.5):
+            # Exit when Alligator turns bearish or weekly trend fails
+            if (not alligator_bullish[i] or 
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when RSI returns to neutral (50) or trend fails
-            if (rsi[i] <= 50 or trend_1d_down_aligned[i] < 0.5):
+            # Exit when Alligator turns bullish or weekly trend fails
+            if (not alligator_bearish[i] or 
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
