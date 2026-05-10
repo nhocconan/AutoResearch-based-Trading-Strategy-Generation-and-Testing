@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""
-12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike
-Hypothesis: 12-hour timeframe with daily Camarilla R3/S3 breakout, EMA34 trend filter, and volume spike.
-Lower trade frequency reduces fee drag while capturing significant breakouts in both bull and bear markets.
-Target: 15-30 trades/year for robustness.
-"""
+# 4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn
+# Hypothesis: Camarilla pivot breakout (R3/S3) with 1-day EMA34 trend filter and volume spike.
+# Works in both bull/bear markets by using Camarilla levels for breakout entries and EMA34 for trend direction.
+# Target: 25-40 trades/year to avoid fee drag.
+# Version: Optimized for BTC/ETH performance with stricter volume filter and trend confirmation
 
-name = "12h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -35,10 +33,14 @@ def generate_signals(prices):
     close_prev = df_1d['close'].values
     
     # Camarilla formulas
+    # R4 = C + ((H-L) * 1.5000)
+    # R3 = C + ((H-L) * 1.2500)
+    # S3 = C - ((H-L) * 1.2500)
+    # S4 = C - ((H-L) * 1.5000)
     camarilla_r3 = close_prev + (high_prev - low_prev) * 1.25
     camarilla_s3 = close_prev - (high_prev - low_prev) * 1.25
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -48,7 +50,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 2.0x 20-period EMA
+    # Volume filter: current volume > 2.0x 20-period EMA (stricter for BTC/ETH)
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ema20 * 2.0
     
