@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Pocock_Binary_Wave_1wTrend_Volume
-Hypothesis: Uses Pocock Binary Wave (PBW) - a proprietary oscillator combining
-RSI, Stochastic, and Williams %R concepts to identify momentum exhaustion and
-reversals. Combined with 1-week trend filter to ensure we trade with the
-higher timeframe momentum, and volume confirmation to filter weak signals.
-PBW oscillates between 0-100 with overbought >70 and oversold <30.
-In trending markets, PBW stays in extreme zones; pullbacks to 50 offer re-entry.
-In ranging markets, reversals at 70/30 provide mean reversion.
-Volume confirmation ensures only significant moves are traded.
+4h_4WMA_Cross_1dTrend_Volume
+Hypothesis: 4-period and 16-period WMA crossover on 4h with 1d EMA34 trend filter and volume confirmation.
+WMA (Weighted Moving Average) gives more weight to recent prices, making it more responsive than EMA.
+Crossover signals trend changes. Trend filter ensures alignment with higher timeframe direction.
+Volume confirmation filters weak signals. Works in both bull (buy on bullish cross) and bear (sell on bearish cross).
 Target: 50-150 total trades over 4 years (12-37/year).
-Works in both bull (buy PBW pullbacks in uptrend) and bear (sell PBW bounces in downtrend).
 """
 
-name = "6h_Pocock_Binary_Wave_1wTrend_Volume"
-timeframe = "6h"
+name = "4h_4WMA_Cross_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,107 +21,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1-week volume SMA20 for volume confirmation
-    volume_1w = df_1w['volume'].values
-    vol_sma20_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 20:
-        vol_sma20_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(volume_1w)):
-            vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + volume_1w[i]) / 20
-    vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
+    # 1d volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Pocock Binary Wave (PBW) - 14 period
-    # PBW = (RSI + Stoch + Williams %R) / 3, scaled 0-100
-    rsi_period = 14
-    stoch_period = 14
-    williams_period = 14
+    # 4-period and 16-period WMA on 4h
+    wma4 = np.full(n, np.nan)
+    wma16 = np.full(n, np.nan)
     
-    # RSI calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    if n >= 4:
+        # WMA(4): weights [1,2,3,4] sum=10
+        weights4 = np.array([1, 2, 3, 4], dtype=float)
+        sum_weights4 = weights4.sum()
+        for i in range(3, n):
+            wma4[i] = np.dot(close[i-3:i+1], weights4) / sum_weights4
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    if n >= rsi_period:
-        avg_gain[rsi_period-1] = np.mean(gain[1:rsi_period+1])
-        avg_loss[rsi_period-1] = np.mean(loss[1:rsi_period+1])
-        for i in range(rsi_period, n):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Stochastic %K
-    lowest_low = np.full(n, np.nan)
-    highest_high = np.full(n, np.nan)
-    for i in range(stoch_period-1, n):
-        lowest_low[i] = np.min(low[i-stoch_period+1:i+1])
-        highest_high[i] = np.max(high[i-stoch_period+1:i+1])
-    
-    stoch_k = np.where((highest_high - lowest_low) != 0, 
-                       (close - lowest_low) / (highest_high - lowest_low) * 100, 50)
-    
-    # Williams %R
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          (highest_high - close) / (highest_high - lowest_low) * -100, -50)
-    
-    # PBW = average of RSI, Stoch, and Williams %R (all 0-100 scale)
-    pbw = (rsi + stoch_k + (100 + williams_r)) / 3  # Williams %R is -100 to 0, so +100 to make 0-100
+    if n >= 16:
+        # WMA(16): weights [1,2,...,16] sum=136
+        weights16 = np.arange(1, 17, dtype=float)
+        sum_weights16 = weights16.sum()
+        for i in range(15, n):
+            wma16[i] = np.dot(close[i-15:i+1], weights16) / sum_weights16
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(rsi_period, stoch_period, williams_period, 50)  # warmup
+    start_idx = max(34, 16)  # warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_1w_aligned[i]) or np.isnan(pbw[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(wma4[i]) or np.isnan(wma16[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 6h volume > 1.3x average 1w volume (scaled)
-        # Approximate 6h volume from 1w: 1w volume / 28 (7days*24h/6h = 28)
-        vol_6h_approx = vol_sma20_1w_aligned[i] / 28.0
-        volume_confirm = volume[i] > 1.3 * vol_6h_approx
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
+        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0
+        volume_confirm = volume[i] > 1.5 * vol_4h_approx
         
         if position == 0:
-            # Long: PBW pulls back from oversold (<30) to above 40 in uptrend with volume
-            if pbw[i] > 40 and pbw[i-1] <= 40 and close[i] > ema50_1w_aligned[i] and volume_confirm:
+            # Long: WMA4 crosses above WMA16 with uptrend and volume confirmation
+            if wma4[i] > wma16[i] and wma4[i-1] <= wma16[i-1] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: PBW bounces from overbought (>70) to below 60 in downtrend with volume
-            elif pbw[i] < 60 and pbw[i-1] >= 60 and close[i] < ema50_1w_aligned[i] and volume_confirm:
+            # Short: WMA4 crosses below WMA16 with downtrend and volume confirmation
+            elif wma4[i] < wma16[i] and wma4[i-1] >= wma16[i-1] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: PBW reaches overbought (>70) or trend reversal
-            if pbw[i] >= 70 or close[i] < ema50_1w_aligned[i]:
+            # Exit: WMA4 crosses below WMA16 or trend reversal
+            if wma4[i] < wma16[i] and wma4[i-1] >= wma16[i-1] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: PBW reaches oversold (<30) or trend reversal
-            if pbw[i] <= 30 or close[i] > ema50_1w_aligned[i]:
+            # Exit: WMA4 crosses above WMA16 or trend reversal
+            if wma4[i] > wma16[i] and wma4[i-1] <= wma16[i-1] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
