@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_With_RSI_And_Chop_Filter
-Hypothesis: KAMA trend direction filters RSI extremes with chop filter to avoid whipsaw.
-Uses weekly timeframe for regime detection to work in both bull and bear markets.
-Target: 10-20 trades/year per symbol with strict entry conditions to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Breakout above Camarilla R1 or below S1 with 1d EMA34 trend filter and volume confirmation on 12h timeframe.
+Designed to work in both bull and bear markets by following 1d trend and using volatility-adjusted breakouts.
+Target: 12-37 trades/year per symbol to stay within fee drag limits.
 """
 
-name = "1d_KAMA_Trend_Filter_With_RSI_And_Chop_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,128 +24,96 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA(10) for trend
-    def kama(close, period=10):
-        change = np.abs(np.diff(close, n=period))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-        kama = np.full_like(close, np.nan)
-        kama[period] = close[period]
-        for i in range(period+1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
-    
-    kama_val = kama(close, 10)
-    
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    for i in range(14, len(close)):
-        if i == 14:
-            avg_gain[i] = np.mean(gain[1:15])
-            avg_loss[i] = np.mean(loss[1:15])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Chop filter using weekly data
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # True Range for chop calculation
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(np.roll(high_1w, 1) - close_1w)
-    tr3 = np.abs(np.roll(low_1w, 1) - close_1w)
+    # Calculate ATR(14) for volatility measurement
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = np.inf
     tr3[0] = np.inf
-    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Chop calculation: (sum of TR / (max(high) - min(low))) * 100
-    chop = np.full(len(close_1w), np.nan)
-    for i in range(14, len(close_1w)):
-        atr_sum = np.sum(tr_1w[i-14:i+1])
-        max_high = np.max(high_1w[i-14:i+1])
-        min_low = np.min(low_1w[i-14:i+1])
-        range_val = max_high - min_low
-        if range_val != 0:
-            chop[i] = (atr_sum / range_val) * 100
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[1:15])
         else:
-            chop[i] = 50
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
     
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Calculate volume SMA(20) for volume filter
+    vol_sma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_sma[i] = np.mean(volume[i-20:i])
+    
+    # Calculate 1d EMA34 for trend filter (using HTF data)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(15, 15)  # Ensure RSI and KAMA are ready
+    start_idx = max(21, 34)  # Ensure volume SMA and EMA are ready
     
     for i in range(start_idx, n):
-        if np.isnan(kama_val[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(vol_sma[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Chop filter: only trade when market is trending (CHOP < 38.2) or ranging (CHOP > 61.8)
-        # In trending markets: follow KAMA direction
-        # In ranging markets: fade extreme RSI
-        if chop_aligned[i] < 38.2:  # Trending market
-            if position == 0:
-                # Go with KAMA trend
-                if close[i] > kama_val[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama_val[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif position == 1:
-                # Exit long when price crosses below KAMA
-                if close[i] < kama_val[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short when price crosses above KAMA
-                if close[i] > kama_val[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        elif chop_aligned[i] > 61.8:  # Ranging market
-            if position == 0:
-                # Fade RSI extremes
-                if rsi[i] < 30:  # Oversold - go long
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 70:  # Overbought - go short
-                    signals[i] = -0.25
-                    position = -1
-            elif position == 1:
-                # Exit long when RSI returns to neutral
-                if rsi[i] > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short when RSI returns to neutral
-                if rsi[i] < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:  # Neutral chop - stay flat
+        # Calculate Camarilla levels from previous day
+        if i >= 2:  # Need at least 2 bars (previous day's data on 12h chart)
+            # Previous day's OHLC (assuming 2 bars per day on 12h chart)
+            prev_day_start = max(0, i - 2)
+            prev_day_high = np.max(high[prev_day_start:i])
+            prev_day_low = np.min(low[prev_day_start:i])
+            prev_day_close = close[i-1]
+            
+            # Camarilla levels
+            range_val = prev_day_high - prev_day_low
+            # Use volatility-adjusted breakout thresholds
+            volatility_factor = np.clip(atr[i] / (prev_day_high - prev_day_low + 1e-10), 0.5, 2.0)
+            r1 = prev_day_close + (range_val * 1.1 / 12) * volatility_factor
+            s1 = prev_day_close - (range_val * 1.1 / 12) * volatility_factor
+        else:
+            # Not enough data for Camarilla calculation
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+            continue
+        
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * vol_sma[i]
+        
+        if position == 0:
+            # Long: Break above R1 with uptrend and volume confirmation
+            if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Short: Break below S1 with downtrend and volume confirmation
+            elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
+                signals[i] = -0.25
+                position = -1
+        
+        elif position == 1:
+            # Exit: Close crosses back below 1d EMA34
+            if close[i] < ema_34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit: Close crosses back above 1d EMA34
+            if close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
