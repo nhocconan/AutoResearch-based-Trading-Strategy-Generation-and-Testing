@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Channel_Breakout_12hTrend_Volume
-# Hypothesis: 6-hour breakouts from Keltner Channel (ATR-based) with 12h trend filter and volume confirmation.
-# Uses 12h EMA50 for trend direction and 12h ATR(10) for channel width. Volume requires 1.5x 20-period average.
-# Designed for 6h to achieve 12-37 trades/year. Works in both bull and bear markets by following higher timeframe trend.
+# 12h_Three_Line_Breakout_1dTrend_Volume
+# Hypothesis: 12-hour breakouts from daily 3-line breakout reversal levels with daily trend filter (EMA34) and volume confirmation.
+# Daily EMA34 filters trend direction to avoid counter-trend trades; daily 3-line breakout levels provide precise entry/exit;
+# Volume confirmation ensures breakout strength. Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
 
-name = "6h_Keltner_Channel_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "12h_Three_Line_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,41 +22,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter and Keltner Channel
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Daily data for EMA34 trend filter and 3-line breakout levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 12h ATR(10) for Keltner Channel width
-    tr1 = high_12h - low_12h
-    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period TR
-    atr_10_12h = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 3-line breakout levels (based on previous day)
+    def calculate_3line(h, l, c):
+        # 3-line breakout: uses high/low of previous day as support/resistance
+        # Resistance = previous day's high
+        # Support = previous day's low
+        return h, l
     
-    # Keltner Channel: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
-    keltner_upper = ema_50_12h + 2.0 * atr_10_12h
-    keltner_lower = ema_50_12h - 2.0 * atr_10_12h
+    resistance = np.full_like(close_1d, np.nan)
+    support = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        resistance[i], support[i] = calculate_3line(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # Volume confirmation: 20-period average
+    # Daily volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume, 20)
+    vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align 12h indicators to 6h timeframe (wait for 12h bar to close)
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_12h, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_12h, keltner_lower)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
+    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    resistance_aligned = align_htf_to_ltf(prices, df_1d, resistance)
+    support_aligned = align_htf_to_ltf(prices, df_1d, support)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,32 +65,32 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or \
-           np.isnan(keltner_lower_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(resistance_aligned[i]) or np.isnan(support_aligned[i]) or \
+           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Keltner Upper, above 12h EMA50, strong volume
-            if close[i] > keltner_upper_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Long: price breaks above resistance, above daily EMA34, strong volume
+            if close[i] > resistance_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Keltner Lower, below 12h EMA50, strong volume
-            elif close[i] < keltner_lower_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Short: price breaks below support, below daily EMA34, strong volume
+            elif close[i] < support_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below Keltner Lower or below 12h EMA50
-            if close[i] < keltner_lower_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: price drops below support or below daily EMA34
+            if close[i] < support_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above Keltner Upper or above 12h EMA50
-            if close[i] > keltner_upper_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: price rises above resistance or above daily EMA34
+            if close[i] > resistance_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
