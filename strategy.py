@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume
-# Hypothesis: Weekly R4/S4 levels from weekly pivot points act as strong breakout levels.
-# Price breaking above weekly R4 in a daily uptrend or below weekly S4 in a daily downtrend
-# indicates strong momentum. Volume confirmation filters false breakouts.
-# Weekly timeframe provides stronger structural levels than daily, reducing false signals.
-# Works in bull markets by riding uptrends and in bear markets by following downtrends.
+# 12h_Pivot_Breakout_1dTrend_Volume_Confirm
+# Hypothesis: Daily pivot points (R1/S1) provide key support/resistance. Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. Volume confirmation filters false breakouts. Uses 12h timeframe for lower frequency (12-37 trades/year target) to reduce fee drag. Works in bull markets by riding uptrends and in bear markets by following downtrends.
 
-name = "6h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Pivot_Breakout_1dTrend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,12 +20,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels (R4/S4)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -38,38 +29,32 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate weekly pivot levels and R4/S4
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate daily pivot levels (standard formula)
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    weekly_r4 = weekly_r3 + (weekly_high - weekly_low)
-    weekly_s4 = weekly_s3 - (weekly_high - weekly_low)
+    pivot_point = (daily_high + daily_low + daily_close) / 3
+    daily_r1 = 2 * pivot_point - daily_low
+    daily_s1 = 2 * pivot_point - daily_high
     
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4)
+    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
+    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
     
-    # Volume confirmation (50-period MA on 6h = ~12.5 days)
-    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    # Volume confirmation (20-period MA on 12h = ~10 days)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34), weekly pivot (5), volume MA (50)
-    start_idx = max(34, 5, 50)
+    # Warmup: need daily EMA34 (34) and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(weekly_r4_aligned[i]) or 
-            np.isnan(weekly_s4_aligned[i]) or 
+            np.isnan(daily_r1_aligned[i]) or 
+            np.isnan(daily_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,28 +65,28 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (>1.5x MA to balance sensitivity and filtering)
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R4 + volume
-            if uptrend and close[i] > weekly_r4_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above daily R1 + volume
+            if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S4 + volume
-            elif downtrend and close[i] < weekly_s4_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below daily S1 + volume
+            elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below weekly R4
-            if not uptrend or close[i] < weekly_r4_aligned[i]:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < daily_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above weekly S4
-            if not downtrend or close[i] > weekly_s4_aligned[i]:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > daily_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
