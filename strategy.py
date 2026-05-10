@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
-# 12h_Weekly_Pullback_1dTrend_Volume
-# Hypothesis: In higher timeframe (12h), pullbacks to 1-day EMA34 during weekly trend (aligned with 1-week EMA50) with volume confirmation capture mean-reversion moves in both bull and bear markets. Weekly trend filter avoids counter-trend trades, while 1d EMA34 acts as dynamic support/resistance. Volume spike ensures institutional participation. Designed for low trade frequency (~15-30/year) to minimize fee drag on 12h chart.
+# 1h_TRIX_Momentum_4hTrend_Volume
+# Hypothesis: TRIX (triple EMA) momentum on 1h captures short-term trends, while 4h EMA50 provides trend filter and volume confirms breakouts.
+# Works in bull (momentum continuations) and bear (mean reversion at extremes) with tight entries to avoid overtrading.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 
-name = "12h_Weekly_Pullback_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_TRIX_Momentum_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,36 +21,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 (dynamic support/resistance)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # 4h EMA50 trend
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = close_4h > ema50_4h
+    trend_4h_down = close_4h < ema50_4h
     
-    # 1d EMA34
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    # 1w EMA50 trend
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema50_1w
-    trend_1w_down = close_1w < ema50_1w
+    # TRIX on 1h: triple EMA of ROC
+    # TRIX = EMA(EMA(EMA(ROC, 12), 12), 12)
+    close_series = pd.Series(close)
+    roc = close_series.pct_change(periods=12)  # Rate of change over 12 periods
+    ema1 = roc.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.values
     
-    # Align 1d EMA34 to 12h
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Align 1w trend to 12h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
-    
-    # Volume spike: current > 2.0 * 30-period average (12h chart)
+    # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=30, min_periods=30).mean().values
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,8 +55,8 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(trend_1w_up_aligned[i]) or 
-            np.isnan(trend_1w_down_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(trix[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,33 +66,33 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: pullback to 1d EMA34 support during 1w uptrend with volume spike
-            if (low[i] <= ema34_1d_aligned[i] and 
-                trend_1w_up_aligned[i] > 0.5 and volume_spike):
-                signals[i] = 0.25
+            # Long: TRIX crosses above zero with 4h uptrend and volume spike
+            if (trix[i] > 0 and trix[i-1] <= 0 and 
+                trend_4h_up_aligned[i] > 0.5 and volume_spike):
+                signals[i] = 0.20
                 position = 1
-            # Short: pullback to 1d EMA34 resistance during 1w downtrend with volume spike
-            elif (high[i] >= ema34_1d_aligned[i] and 
-                  trend_1w_down_aligned[i] > 0.5 and volume_spike):
-                signals[i] = -0.25
+            # Short: TRIX crosses below zero with 4h downtrend and volume spike
+            elif (trix[i] < 0 and trix[i-1] >= 0 and 
+                  trend_4h_down_aligned[i] > 0.5 and volume_spike):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price moves above 1d EMA34 (taking profit) or trend fails
-            if (close[i] > ema34_1d_aligned[i] or 
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit: TRIX crosses below zero or trend fails
+            if (trix[i] < 0 and trix[i-1] >= 0) or \
+               trend_4h_up_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price moves below 1d EMA34 (taking profit) or trend fails
-            if (close[i] < ema34_1d_aligned[i] or 
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit: TRIX crosses above zero or trend fails
+            if (trix[i] > 0 and trix[i-1] <= 0) or \
+               trend_4h_down_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
