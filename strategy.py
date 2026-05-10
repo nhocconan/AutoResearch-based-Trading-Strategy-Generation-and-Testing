@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Daily breakouts from weekly Camarilla R1/S1 levels with weekly trend filter (EMA34) and volume confirmation.
-# Weekly EMA34 filters trend direction to avoid counter-trend trades; weekly Camarilla levels provide precise entry/exit;
-# Volume confirmation ensures breakout strength. Designed for 1d to achieve 15-30 trades/year, suitable for both bull and bear markets.
-# Uses weekly higher timeframe for trend context, reducing trade frequency and improving generalization.
+# 6h_Keltner_Channel_Breakout_12hTrend_Volume
+# Hypothesis: 6-hour breakouts from Keltner Channel (ATR-based) with 12h trend filter and volume confirmation.
+# Uses 12h EMA50 for trend direction and 12h ATR(10) for channel width. Volume requires 1.5x 20-period average.
+# Designed for 6h to achieve 12-37 trades/year. Works in both bull and bear markets by following higher timeframe trend.
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Keltner_Channel_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,76 +22,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA34 trend filter and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 12h data for trend filter and Keltner Channel
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels (based on previous week)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
-        return R1, S1
+    # 12h ATR(10) for Keltner Channel width
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR
+    atr_10_12h = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    R1 = np.full_like(close_1w, np.nan)
-    S1 = np.full_like(close_1w, np.nan)
-    for i in range(1, len(close_1w)):
-        R1[i], S1[i] = calculate_camarilla(high_1w[i-1], low_1w[i-1], close_1w[i-1])
+    # Keltner Channel: Upper = EMA + 2*ATR, Lower = EMA - 2*ATR
+    keltner_upper = ema_50_12h + 2.0 * atr_10_12h
+    keltner_lower = ema_50_12h - 2.0 * atr_10_12h
     
-    # Weekly volume confirmation: 20-period average
+    # Volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume_1w, 20)
+    vol_ma_20 = mean_arr(volume, 20)
     
-    # Align weekly indicators to daily timeframe (wait for weekly bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    # Align 12h indicators to 6h timeframe (wait for 12h bar to close)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    keltner_upper_aligned = align_htf_to_ltf(prices, df_12h, keltner_upper)
+    keltner_lower_aligned = align_htf_to_ltf(prices, df_12h, keltner_lower)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Need enough history for indicators
+    start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(keltner_upper_aligned[i]) or \
+           np.isnan(keltner_lower_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, above weekly EMA34, strong volume
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: price breaks above Keltner Upper, above 12h EMA50, strong volume
+            if close[i] > keltner_upper_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below weekly EMA34, strong volume
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: price breaks below Keltner Lower, below 12h EMA50, strong volume
+            elif close[i] < keltner_lower_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1 or below weekly EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+            # Long exit: price drops below Keltner Lower or below 12h EMA50
+            if close[i] < keltner_lower_aligned[i] or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 or above weekly EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
+            # Short exit: price rises above Keltner Upper or above 12h EMA50
+            if close[i] > keltner_upper_aligned[i] or close[i] > ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
