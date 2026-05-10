@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
-# Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend
-# continues with momentum. We use 1d EMA34 for trend filter and volume confirmation
-# to avoid false breakouts. This strategy works in bull markets (follows uptrends)
-# and bear markets (follows downtrends) by only trading in direction of 1d trend.
-# Target: 12-37 trades per year to minimize fee drag.
+# 4h_VDC_Scalper
+# Hypothesis: Volume-Price Divergence with Confluence detects institutional accumulation/distribution.
+# Combines volume divergence (price makes new high/low but volume fails to confirm) with
+# RSI extreme readings and 4h EMA20 trend filter. Works in both bull and bear markets by
+# fading exhaustion moves. Uses volume confirmation to filter false signals.
+# Target: 25-40 trades/year to minimize fee drag.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_VDC_Scalper"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,69 +24,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate Camarilla levels from previous day
-    # R1 = close + (high - low) * 1.12 / 12
-    # S1 = close - (high - low) * 1.12 / 12
-    camarilla_r1 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.12 / 12
-    camarilla_s1 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.12 / 12
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
-    
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Price extremes for divergence detection
+    highest_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    lowest_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
+    
+    # Volume divergence signals
+    vol_div_bear = (high == highest_high) & (volume < volume_ma * 0.8)
+    vol_div_bull = (low == lowest_low) & (volume < volume_ma * 0.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA34 (34), Camarilla (needs 1d), volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need RSI (14), volume MA (20), price extremes (10)
+    start_idx = max(14, 20, 10)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(volume_ma[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 1d trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
-        
         if position == 0:
-            # Long entry: uptrend + price breaks above R1 + volume
-            if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
+            # Long entry: bullish volume divergence + RSI oversold
+            if vol_div_bull[i] and rsi[i] < 30:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below S1 + volume
-            elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
+            # Short entry: bearish volume divergence + RSI overbought
+            elif vol_div_bear[i] and rsi[i] > 70:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters R1-S1 range
-            if not uptrend or close[i] < camarilla_r1_aligned[i]:
+            # Long exit: RSI overbought or bearish divergence
+            if rsi[i] > 70 or vol_div_bear[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters R1-S1 range
-            if not downtrend or close[i] > camarilla_s1_aligned[i]:
+            # Short exit: RSI oversold or bullish divergence
+            if rsi[i] < 30 or vol_div_bull[i]:
                 signals[i] = 0.0
                 position = 0
             else:
