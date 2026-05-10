@@ -1,10 +1,11 @@
-# Solution: 4h_KAMA_Direction_RSI_Overbought_Oversold
-# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) to determine trend direction from 1d timeframe.
-# Enters long when price crosses above KAMA in an uptrend with RSI < 30 (oversold) and volume confirmation.
-# Enters short when price crosses below KAMA in a downtrend with RSI > 70 (overbought) and volume confirmation.
-# Designed for low trade frequency to avoid fee drag, with trend-following bias and mean-reversion entries.
+#!/usr/bin/env python3
+# 4h_Donchian_Breakout_Trend_Volume
+# Hypothesis: Donchian(20) breakout in direction of 1d EMA(34) trend with volume confirmation.
+# Uses tight entry conditions (breakout + trend + volume) to limit trades and avoid fee drag.
+# Works in bull markets via breakouts and in bear via short breakdowns. Trend filter avoids whipsaws.
+# Target: 20-50 trades/year per symbol.
 
-name = "4h_KAMA_Direction_RSI_Overbought_Oversold"
+name = "4h_Donchian_Breakout_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,33 +23,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for KAMA trend direction
+    # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    # Calculate KAMA (ER=10, fast=2, slow=30)
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    vol = np.sum(np.abs(np.diff(close_1d, prepend=close_1d[0])), axis=0) if len(close_1d) > 1 else 0
-    er = np.where(vol != 0, change / vol, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # EMA(34) for trend direction
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Align KAMA to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # RSI(14) for overbought/oversold conditions
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian(20) channels
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        upper[i] = np.max(high[i - lookback + 1:i + 1])
+        lower[i] = np.min(low[i - lookback + 1:i + 1])
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,42 +48,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient warmup for all indicators
+    start_idx = max(34, 20)  # warmup for EMA and Donchian
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_34_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above KAMA, RSI < 30 (oversold), volume confirmation
-            if (close[i] > kama_aligned[i] and 
-                close[i-1] <= kama_aligned[i-1] and 
-                rsi[i] < 30 and 
+            # Long: breakout above upper band, uptrend (close > EMA), volume confirmation
+            if (close[i] > upper[i] and 
+                close[i] > ema_34_aligned[i] and 
                 volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA, RSI > 70 (overbought), volume confirmation
-            elif (close[i] < kama_aligned[i] and 
-                  close[i-1] >= kama_aligned[i-1] and 
-                  rsi[i] > 70 and 
+            # Short: breakdown below lower band, downtrend (close < EMA), volume confirmation
+            elif (close[i] < lower[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below KAMA (trend reversal)
-            if close[i] < kama_aligned[i] and close[i-1] >= kama_aligned[i-1]:
+            # Exit: breakdown below lower band
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above KAMA (trend reversal)
-            if close[i] > kama_aligned[i] and close[i-1] <= kama_aligned[i-1]:
+            # Exit: breakout above upper band
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
