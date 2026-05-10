@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
-# Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume confirmation.
-# Uses dynamic volume threshold (1.5x) and tighter exit conditions to reduce trade frequency and improve win rate.
-# Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 4h_Donchian_Breakout_20_20_Volume_Trend
+# Hypothesis: 4-hour breakouts from 20-period Donchian channels with volume confirmation and trend filter (EMA20). 
+# Donchian breakouts capture momentum; volume ensures breakout strength; EMA20 filter avoids counter-trend trades.
+# Designed for 4h to achieve 20-50 trades/year, suitable for both bull and bear markets.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_20_20_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,43 +22,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # 4h Donchian channel (20-period)
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window - 1, len(arr)):
+            res[i] = np.max(arr[i - window + 1:i + 1])
+        return res
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window - 1, len(arr)):
+            res[i] = np.min(arr[i - window + 1:i + 1])
+        return res
     
-    # Camarilla levels (based on previous day)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
-        return R1, S1
+    upper = rolling_max(high, 20)
+    lower = rolling_min(low, 20)
     
-    R1 = np.full_like(close_1d, np.nan)
-    S1 = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+    # 4h EMA20 for trend filter
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Daily volume confirmation: 20-period average
+    # 4h volume MA (20-period)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    vol_ma_20 = mean_arr(volume, 20)
     
-    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # 1h EMA50 for higher timeframe trend filter (optional but improves robustness)
+    df_1h = get_htf_data(prices, '1h')
+    close_1h = df_1h['close'].values
+    ema_50_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_50_1h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,32 +62,33 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or \
+           np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i]) or \
+           np.isnan(ema_50_1h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, above daily EMA34, strong volume (1.5x)
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Long: price breaks above upper Donchian, above EMA20, strong volume, and above 1h EMA50
+            if close[i] > upper[i] and close[i] > ema_20[i] and volume[i] > 1.5 * vol_ma_20[i] and close[i] > ema_50_1h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below daily EMA34, strong volume (1.5x)
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Short: price breaks below lower Donchian, below EMA20, strong volume, and below 1h EMA50
+            elif close[i] < lower[i] and close[i] < ema_20[i] and volume[i] > 1.5 * vol_ma_20[i] and close[i] < ema_50_1h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1 or below daily EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: price drops below lower Donchian or below EMA20
+            if close[i] < lower[i] or close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 or above daily EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: price rises above upper Donchian or above EMA20
+            if close[i] > upper[i] or close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
