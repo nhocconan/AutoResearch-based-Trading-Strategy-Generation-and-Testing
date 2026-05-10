@@ -1,12 +1,11 @@
-# %%
 #!/usr/bin/env python3
 """
-6h_ADX_ElderRay_1DTrend_Filter
-Hypothesis: On 6h timeframe, use daily trend direction (via EMA34) to filter Elder Ray (bull/bear power) signals, with ADX > 25 to ensure trending conditions. This avoids false signals in range and captures momentum in both bull and bear markets. The daily trend filter ensures we only trade in the direction of the higher timeframe trend, improving win rate. Target: 20-40 trades/year.
+4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2
+Hypothesis: On 4h timeframe, trade breakouts of Camarilla R3/S3 levels with 12h EMA50 trend filter and volume spike confirmation. This version adds a minimum hold period of 3 bars (12 hours) to reduce churn and ensure trades capture meaningful moves, improving generalization to bear markets. Target: 25-40 trades/year.
 """
 
-name = "6h_ADX_ElderRay_1DTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,108 +17,118 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Get 6h data for Elder Ray and ADX
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    # Camarilla formulas
+    R3 = close_prev + (high_prev - low_prev) * 1.1 / 4
+    S3 = close_prev - (high_prev - low_prev) * 1.1 / 4
+    
+    # Align Camarilla levels to 4h timeframe (need previous day's levels)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Get 4h data for volume and price
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray (6h)
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
-    
-    # ADX calculation (14 period)
-    # +DM, -DM, TR
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    high_shift[0] = high[0]
-    low_shift[0] = low[0]
-    
-    plus_dm = np.where((high - high_shift) > (low_shift - low), np.maximum(high - high_shift, 0), 0)
-    minus_dm = np.where((low_shift - low) > (high - high_shift), np.maximum(low_shift - low, 0), 0)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - high_shift), np.abs(low - low_shift)))
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    def WilderSmooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period_adx = 14
-    if len(tr) < period_adx:
-        return np.zeros(n)
-    
-    atr = WilderSmooth(tr, period_adx)
-    plus_di = 100 * WilderSmooth(plus_dm, period_adx) / atr
-    minus_di = 100 * WilderSmooth(minus_dm, period_adx) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = WilderSmooth(dx, period_adx)
-    
-    # Align daily trend to 6h
-    uptrend_1d = close > ema34_1d_aligned
-    downtrend_1d = close < ema34_1d_aligned
+    # Volume spike: current volume > 2x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_spike = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0  # Track bars since last entry to enforce min hold
     
-    # Warmup: need EMA13 (13), ADX (14*2=28 for smoothing), and daily EMA34
-    start_idx = 35
+    # Warmup: need 12h EMA (50) and Camarilla (need 2 days for shift)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema13[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(adx[i]) or
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or 
+            np.isnan(R3_aligned[i]) or
+            np.isnan(S3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
+            else:
+                bars_since_entry = 0
             continue
         
-        # Conditions
-        strong_trend = adx[i] > 25
-        bullish_momentum = bull_power[i] > 0
-        bearish_momentum = bear_power[i] < 0
+        # Increment bars since entry if in a position
+        if position != 0:
+            bars_since_entry += 1
+        
+        # Trend filter: price vs 12h EMA50
+        uptrend_12h = close[i] > ema50_12h_aligned[i]
+        downtrend_12h = close[i] < ema50_12h_aligned[i]
         
         if position == 0:
-            # Long: daily uptrend, ADX strong, bullish momentum
-            if uptrend_1d[i] and strong_trend and bullish_momentum:
+            # Require minimum 3 bars since last entry (if any) - but since flat, this is 0
+            # Long: break above R3 in uptrend with volume spike
+            if high[i] > R3_aligned[i] and uptrend_12h and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: daily downtrend, ADX strong, bearish momentum
-            elif downtrend_1d[i] and strong_trend and bearish_momentum:
+                bars_since_entry = 0
+            # Short: break below S3 in downtrend with volume spike
+            elif low[i] < S3_aligned[i] and downtrend_12h and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+                bars_since_entry = 0
         elif position == 1:
-            # Long exit: trend weakens or momentum fades
-            if not (uptrend_1d[i] and strong_trend and bullish_momentum):
-                signals[i] = 0.0
-                position = 0
+            # Long exit: price drops below S3 or trend fails OR min hold met and reversal signal
+            if bars_since_entry >= 3:
+                # After minimum hold, exit on any reversal signal
+                if low[i] < S3_aligned[i] or not uptrend_12h:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # Before minimum hold, only exit on strong reversal
+                if low[i] < S3_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend weakens or momentum fades
-            if not (downtrend_1d[i] and strong_trend and bearish_momentum):
-                signals[i] = 0.0
-                position = 0
+            # Short exit: price rises above R3 or trend fails OR min hold met and reversal signal
+            if bars_since_entry >= 3:
+                # After minimum hold, exit on any reversal signal
+                if high[i] > R3_aligned[i] or not downtrend_12h:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # Before minimum hold, only exit on strong reversal
+                if high[i] > R3_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
-# %%
