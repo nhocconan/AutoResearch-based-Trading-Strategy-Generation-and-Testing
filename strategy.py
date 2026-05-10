@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1d_KAMA_RSI_ChopFilter
-# Hypothesis: Daily KAMA trend direction + RSI extremes + Choppiness regime filter.
-# KAMA adapts to market noise, reducing whipsaws in sideways markets. RSI >70 or <30 triggers mean-reversion entries only when market is choppy (CHOP > 61.8), avoiding strong trends.
-# Designed for 1d to achieve 7-25 trades/year with low frequency, suitable for both bull and bear markets by avoiding trend-following in chop and fading extremes in range.
+# 6h_ADX_Trend_RSI_Momentum
+# Hypothesis: Combine ADX trend strength with RSI momentum on 6h timeframe. ADX > 25 indicates strong trend, RSI > 55 for long, RSI < 45 for short.
+# Uses 12h EMA50 as higher-timeframe trend filter to avoid counter-trend trades. Volume confirmation ensures breakout strength.
+# Designed for 6h to achieve 50-150 total trades over 4 years, suitable for both bull and bear markets by following strong trends.
 
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_ADX_Trend_RSI_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,117 +17,138 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly data for trend filter (optional, can be removed if not needed)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - trend component
-    def kama(close, er_len=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(close, n=er_len))
-        volatility = np.sum(np.abs(np.diff(close)), axis=1)
-        er = np.zeros_like(close)
-        er[er_len:] = change[er_len-1:] / np.maximum(volatility[er_len-1:], 1e-10)
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    kama_vals = kama(close, 10, 2, 30)
+    # ADX calculation (14-period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = high[0] - low[0]  # First value
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        atr = np.zeros_like(tr)
+        dm_plus_smooth = np.zeros_like(dm_plus)
+        dm_minus_smooth = np.zeros_like(dm_minus)
+        
+        # Initial average
+        atr[period-1] = np.mean(tr[:period])
+        dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
+        dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
+        
+        # Wilder's smoothing
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
+            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
+        
+        # Directional Indicators
+        plus_di = 100 * dm_plus_smooth / atr
+        minus_di = 100 * dm_minus_smooth / atr
+        
+        # DX and ADX
+        dx = np.zeros_like(close)
+        dx[period:] = 100 * np.abs(plus_di[period:] - minus_di[period:]) / (plus_di[period:] + minus_di[period:])
+        
+        adx = np.zeros_like(close)
+        adx[2*period-1] = np.mean(dx[period:2*period])
+        for i in range(2*period, len(dx)):
+            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # RSI (14)
-    def rsi(close, period=14):
+    adx = calculate_adx(high, low, close)
+    
+    # RSI calculation (14-period)
+    def calculate_rsi(close, period=14):
         delta = np.diff(close)
+        delta = np.insert(delta, 0, 0)
         gain = np.where(delta > 0, delta, 0)
         loss = np.where(delta < 0, -delta, 0)
+        
         avg_gain = np.zeros_like(close)
         avg_loss = np.zeros_like(close)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        
+        # Initial average
+        avg_gain[period-1] = np.mean(gain[:period])
+        avg_loss[period-1] = np.mean(loss[:period])
+        
+        # Wilder's smoothing
+        for i in range(period, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
         rsi = 100 - (100 / (1 + rs))
         return rsi
     
-    rsi_vals = rsi(close, 14)
+    rsi = calculate_rsi(close)
     
-    # Choppiness Index (14)
-    def choppiness_index(high, low, close, period=14):
-        atr = np.zeros_like(close)
-        for i in range(1, len(close)):
-            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        # Sum of True Range over period
-        sum_atr = np.zeros_like(close)
-        for i in range(period, len(close)):
-            sum_atr[i] = np.sum(atr[i-period+1:i+1])
-        # Highest high and lowest low over period
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        # Chop calculation
-        chop = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            if max_high[i] != min_low[i]:
-                chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(period)
-            else:
-                chop[i] = 50  # avoid division by zero
-        return chop
-    
-    chop_vals = choppiness_index(high, low, close, 14)
+    # Volume confirmation: 20-period average
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p - 1, len(arr)):
+                res[i] = np.mean(arr[i - p + 1:i + 1])
+        return res
+    vol_ma_20 = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # enough for all indicators
+    start_idx = 100  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kama_vals[i]) or np.isnan(rsi_vals[i]) or np.isnan(chop_vals[i]):
+        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(adx[i]) or \
+           np.isnan(rsi[i]) or np.isnan(vol_ma_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Only trade in choppy market (CHOP > 61.8 = ranging)
-        if chop_vals[i] > 61.8:
-            if position == 0:
-                # Long: RSI < 30 (oversold) and price > KAMA (weak uptrend bias)
-                if rsi_vals[i] < 30 and close[i] > kama_vals[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short: RSI > 70 (overbought) and price < KAMA (weak downtrend bias)
-                elif rsi_vals[i] > 70 and close[i] < kama_vals[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif position == 1:
-                # Long exit: RSI > 50 or price < KAMA
-                if rsi_vals[i] > 50 or close[i] < kama_vals[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Short exit: RSI < 50 or price > KAMA
-                if rsi_vals[i] < 50 or close[i] > kama_vals[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-        else:
-            # In trending market, stay flat or follow KAMA trend (optional)
-            if position != 0:
+        if position == 0:
+            # Long: ADX > 25 (strong trend), RSI > 55 (bullish momentum), price above 12h EMA50 (uptrend), strong volume
+            if adx[i] > 25 and rsi[i] > 55 and close[i] > ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_ma_20[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: ADX > 25 (strong trend), RSI < 45 (bearish momentum), price below 12h EMA50 (downtrend), strong volume
+            elif adx[i] > 25 and rsi[i] < 45 and close[i] < ema_50_12h_aligned[i] and volume[i] > 1.5 * vol_ma_20[i]:
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Long exit: ADX < 20 (weak trend) or RSI < 50 (loss of momentum) or price below 12h EMA50
+            if adx[i] < 20 or rsi[i] < 50 or close[i] < ema_50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Short exit: ADX < 20 (weak trend) or RSI > 50 (loss of momentum) or price above 12h EMA50
+            if adx[i] < 20 or rsi[i] > 50 or close[i] > ema_50_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
