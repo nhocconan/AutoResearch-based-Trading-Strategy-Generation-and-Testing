@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1w1d_Trend_With_Volume_Confirmation
-# Hypothesis: Use weekly EMA50 as primary trend filter and daily EMA20 as entry filter on 12h timeframe.
-# Long when weekly trend is up and price is above daily EMA20 with volume confirmation.
-# Short when weekly trend is down and price is below daily EMA20 with volume confirmation.
-# Designed for low trade frequency (~15-25 trades/year) to minimize fee drag and work in both bull and bear markets.
+# 4h_12h_EMA50_Pullback_With_Volume_Confirmation
+# Hypothesis: Buy pullbacks to 12h EMA50 in uptrends and sell pullbacks to 12h EMA50 in downtrends.
+# Uses volume spike (>1.5x 20-period average) for entry confirmation and RSI (20-80) to avoid extremes.
+# Designed to work in both bull and bear markets by trading reversals with trend bias.
+# Targets ~25-35 trades/year to minimize fee drag.
 
-name = "12h_1w1d_Trend_With_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_12h_EMA50_Pullback_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,39 +19,37 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for primary trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Weekly EMA50 trend
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema50_1w
-    trend_1w_down = close_1w < ema50_1w
+    # 12h EMA50 trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema50_12h
+    trend_12h_down = close_12h < ema50_12h
     
-    # Daily data for entry filter and volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Align 12h trend to 4h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
     
-    # Daily EMA20 for entry
-    close_1d = df_1d['close'].values
-    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # 4h RSI for entry filtering (avoid overbought/oversold extremes)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Daily volume average (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    
-    # Align weekly trend to 12h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
-    
-    # Align daily EMA20 and volume average to 12h
-    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Volume spike filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,41 +57,42 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(ema20_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or
-            np.isnan(volume[i])):
+        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly uptrend, price above daily EMA20, volume above average
-            if (close[i] > ema20_1d_aligned[i] and
-                trend_1w_up_aligned[i] > 0.5 and
-                volume[i] > vol_avg_1d_aligned[i]):
+            # Long: pullback to 12h EMA50 in uptrend with volume confirmation and RSI not extreme
+            if (low[i] <= ema50_12h[i] * 1.005 and  # within 0.5% of EMA
+                trend_12h_up_aligned[i] > 0.5 and
+                rsi[i] >= 20 and rsi[i] <= 80 and
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend, price below daily EMA20, volume above average
-            elif (close[i] < ema20_1d_aligned[i] and
-                  trend_1w_down_aligned[i] > 0.5 and
-                  volume[i] > vol_avg_1d_aligned[i]):
+            # Short: pullback to 12h EMA50 in downtrend with volume confirmation and RSI not extreme
+            elif (high[i] >= ema50_12h[i] * 0.995 and  # within 0.5% of EMA
+                  trend_12h_down_aligned[i] > 0.5 and
+                  rsi[i] >= 20 and rsi[i] <= 80 and
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below daily EMA20 or weekly trend turns down
-            if (close[i] < ema20_1d_aligned[i] or
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit: RSI overbought or price breaks below 12h EMA50
+            if (rsi[i] > 80 or
+                close[i] < ema50_12h[i] * 0.995):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above daily EMA20 or weekly trend turns up
-            if (close[i] > ema20_1d_aligned[i] or
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit: RSI oversold or price breaks above 12h EMA50
+            if (rsi[i] < 20 or
+                close[i] > ema50_12h[i] * 1.005):
                 signals[i] = 0.0
                 position = 0
             else:
