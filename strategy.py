@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1w1d_Camarilla_R3_S3_Breakout_WeeklyTrend_Volume
-# Hypothesis: 6h Camarilla R3/S3 breakout with weekly trend filter (price > weekly EMA50) and volume confirmation.
-# Enters long when price breaks above R3 in bullish weekly trend with volume surge, short when breaks below S3 in bearish weekly trend.
-# Uses weekly timeframe for trend filter to avoid whipsaws in both bull and bear markets.
-# Targets low trade frequency (12-37/year) to minimize fee drag.
+# 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Uses daily Camarilla R1/S1 levels for breakout direction, filtered by 1-day EMA34 trend and volume spike.
+# Enters long when price breaks above R1 in bullish trend (close > EMA34) with volume > 1.5x 20-period average.
+# Enters short when price breaks below S1 in bearish trend (close < EMA34) with volume confirmation.
+# Exits when price closes back inside the previous day's range (between prior day's low and high).
+# Designed for low trade frequency (<30/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "6h_1w1d_Camarilla_R3_S3_Breakout_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,97 +16,97 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Calculate 1-day EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate daily data for Camarilla levels (R3, S3)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate Camarilla for each day
+    # Calculate daily Camarilla levels (R1, S1)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_vals = df_1d['close'].values
     
-    # Camarilla R3 = close + 1.1*(high-low)*2
-    # Camarilla S3 = close - 1.1*(high-low)*2
-    r3 = close_1d + 1.1 * (high_1d - low_1d) * 2
-    s3 = close_1d - 1.1 * (high_1d - low_1d) * 2
+    # Camarilla R1 = close + 1.1*(high-low)/12
+    # Camarilla S1 = close - 1.1*(high-low)/12
+    r1 = close_1d_vals + 1.1 * (high_1d - low_1d) / 12
+    s1 = close_1d_vals - 1.1 * (high_1d - low_1d) / 12
     
-    # Align R3 and S3 to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align R1 and S1 to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume confirmation (2.0x 20-period average)
+    # Previous day's high and low for exit condition (price inside prior day's range)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    # Set first value to NaN to avoid using uninitialized roll
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
+    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(ema_34_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(prev_high_aligned[i]) or
+            np.isnan(prev_low_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        bullish_trend = close_1w[i] > ema_50[i]  # Use raw weekly close for trend
-        bearish_trend = close_1w[i] < ema_50[i]
+        # Trend filter from 1-day EMA34
+        bullish_trend = close[i] > ema_34_aligned[i]
+        bearish_trend = close[i] < ema_34_aligned[i]
         
-        # Volume confirmation (2.0x average)
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (1.5x average)
+        volume_surge = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above R3 in bullish weekly trend with volume
-            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
+            # Long: breakout above R1 in bullish trend with volume
+            if close[i] > r1_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S3 in bearish weekly trend with volume
-            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
+            # Short: breakdown below S1 in bearish trend with volume
+            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: price closes below S1 (reversion to mean)
-                # Calculate S1 for exit
-                s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-                s1_aligned_exit = align_htf_to_ltf(prices, df_1d, s1)
-                if not np.isnan(s1_aligned_exit[i]) and close[i] < s1_aligned_exit[i]:
+                # Long exit: price closes back inside previous day's range
+                if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price closes above R1 (reversion to mean)
-                # Calculate R1 for exit
-                r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-                r1_aligned_exit = align_htf_to_ltf(prices, df_1d, r1)
-                if not np.isnan(r1_aligned_exit[i]) and close[i] > r1_aligned_exit[i]:
+                # Short exit: price closes back inside previous day's range
+                if close[i] <= prev_high_aligned[i] and close[i] >= prev_low_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
