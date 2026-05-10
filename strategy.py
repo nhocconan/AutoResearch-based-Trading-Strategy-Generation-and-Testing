@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-Hypothesis: Camarilla R3/S3 levels from 1d act as strong support/resistance in trending markets.
-In trending markets (determined by 1w EMA34), price tends to break through R3/S3 with momentum.
-Long when price breaks above R3 in uptrend with volume confirmation.
-Short when price breaks below S3 in downtrend with volume confirmation.
-Uses 12h timeframe for lower frequency (target: 50-150 trades over 4 years) to minimize fee drag.
-Works in both bull (breakouts above resistance) and bear (breakdowns below support).
+4h_TRIX_VolumeSpike_1dTrend
+Hypothesis: TRIX (12) crossing above/below zero with volume spikes and 1d EMA34 trend filter.
+TRIX filters noise and identifies momentum shifts. Volume spikes confirm breakout strength.
+In trending markets (1d EMA34), we take TRIX signals in trend direction.
+Works in bull (TRIX up in uptrend) and bear (TRIX down in downtrend).
+Target: 20-50 trades/year to minimize fee drag.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,19 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w EMA34 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 34:
-        ema34_1w[33] = np.mean(close_1w[:34])
-        alpha = 2 / (34 + 1)
-        for i in range(34, len(close_1w)):
-            ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # 1d volume SMA20 for volume confirmation
+    # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # 1d volume SMA20 for volume spike detection
     volume_1d = df_1d['volume'].values
     vol_sma20_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
@@ -48,57 +46,70 @@ def generate_signals(prices):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # 1d OHLC for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # TRIX calculation (12-period)
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then % change
+    ema1 = np.full(len(close), np.nan)
+    ema2 = np.full(len(close), np.nan)
+    ema3 = np.full(len(close), np.nan)
+    trix = np.full(len(close), np.nan)
     
-    # Camarilla levels: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4)
-    # S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    camarilla_width = (high_1d - low_1d) * 1.1
-    r3_1d = close_1d + camarilla_width / 4.0
-    s3_1d = close_1d - camarilla_width / 4.0
-    
-    # Align Camarilla levels to 12h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    if len(close) >= 12:
+        # First EMA
+        ema1[11] = np.mean(close[:12])
+        alpha = 2 / (12 + 1)
+        for i in range(12, len(close)):
+            ema1[i] = alpha * close[i] + (1 - alpha) * ema1[i-1]
+        
+        # Second EMA of EMA1
+        ema2[23] = np.mean(ema1[12:24])  # Start at index 23 (24th element)
+        for i in range(24, len(close)):
+            ema2[i] = alpha * ema1[i] + (1 - alpha) * ema2[i-1]
+        
+        # Third EMA of EMA2
+        ema3[35] = np.mean(ema2[24:36])  # Start at index 35 (36th element)
+        for i in range(36, len(close)):
+            ema3[i] = alpha * ema2[i] + (1 - alpha) * ema3[i-1]
+        
+        # TRIX = % change of ema3
+        for i in range(36, len(close)):
+            if ema3[i-1] != 0:
+                trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 1)  # Need EMA34 and at least one Camarilla level
+    start_idx = max(36, 1)  # Need TRIX and EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or \
-           np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
+        if np.isnan(trix[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled to 12h)
-        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h periods in 1d
-        volume_confirm = volume[i] > 1.5 * vol_12h_approx
+        # Volume spike: current volume > 2x average 1d volume (scaled to 4h)
+        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h periods in 1d
+        volume_spike = volume[i] > 2.0 * vol_4h_approx
         
         if position == 0:
-            # Long: Price breaks above R3 in uptrend with volume confirmation
-            if close[i] > r3_1d_aligned[i] and close[i] > ema34_1w_aligned[i] and volume_confirm:
+            # Long: TRIX crosses above zero with volume spike in uptrend
+            if trix[i] > 0 and trix[i-1] <= 0 and volume_spike and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 in downtrend with volume confirmation
-            elif close[i] < s3_1d_aligned[i] and close[i] < ema34_1w_aligned[i] and volume_confirm:
+            # Short: TRIX crosses below zero with volume spike in downtrend
+            elif trix[i] < 0 and trix[i-1] >= 0 and volume_spike and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price falls back below R3 or trend reversal
-            if close[i] < r3_1d_aligned[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit: TRIX crosses below zero or trend reversal
+            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price rises back above S3 or trend reversal
-            if close[i] > s3_1d_aligned[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit: TRIX crosses above zero or trend reversal
+            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
