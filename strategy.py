@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 6H_1D_Stochastic_Trend_Follow
-# Hypothesis: In strong daily trends, stochastic oscillator identifies pullback entries.
-# Long when daily trend is up (close > EMA50) and stochastic %K crosses above 20 (oversold bounce).
-# Short when daily trend is down (close < EMA50) and stochastic %K crosses below 80 (overbought rejection).
-# Uses 1d stochastic(14,3,3) for entry timing and 1d EMA50 for trend filter.
-# Works in bull/bear by following daily trend direction. Target: 15-25 trades/year per symbol.
+# 4H_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1, S1) on 1d act as intraday support/resistance.
+# In strong daily trends (close > EMA34), buy breakouts above R1 with volume confirmation.
+# In strong daily downtrends (close < EMA34), sell breakdowns below S1 with volume confirmation.
+# Uses 1d EMA34 for trend filter and volume spike (1.5x 20-period average) for confirmation.
+# Designed to work in both bull and bear markets by following daily trend direction.
+# Target: 20-40 trades/year per symbol.
 
-name = "6H_1D_Stochastic_Trend_Follow"
-timeframe = "6h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,6 +21,9 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
     # Get daily data
     df_1d = get_htf_data(prices, '1d')
@@ -30,28 +34,31 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
+    # Daily EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily Stochastic(14,3,3)
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    k_raw = 100 * (close_1d - lowest_low) / (highest_high - lowest_low)
-    k_raw = np.where((highest_high - lowest_low) == 0, 50, k_raw)  # avoid division by zero
-    k = pd.Series(k_raw).ewm(span=3, adjust=False, min_periods=3).mean().values
-    d = pd.Series(k).ewm(span=3, adjust=False, min_periods=3).mean().values  # %D line
+    # Calculate Camarilla levels for previous day
+    # R1 = close + 1.1*(high - low)/12
+    # S1 = close - 1.1*(high - low)/12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Trend: bullish if close > EMA50, bearish if close < EMA50
-    bullish_trend = close_1d > ema50_1d
-    bearish_trend = close_1d < ema50_1d
+    # Trend: bullish if close > EMA34, bearish if close < EMA34
+    bullish_trend = close_1d > ema34_1d
+    bearish_trend = close_1d < ema34_1d
     
-    # Align to 6h
-    k_aligned = align_htf_to_ltf(prices, df_1d, k)
-    d_aligned = align_htf_to_ltf(prices, df_1d, d)
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Volume spike: 1.5x 20-period average
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * vol_ma20
+    
+    # Align to 4h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
     bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,8 +68,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(k_aligned[i]) or np.isnan(d_aligned[i]) or
-            np.isnan(ema50_aligned[i]) or np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
+            np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +78,29 @@ def generate_signals(prices):
         
         bullish = bullish_aligned[i] > 0.5
         bearish = bearish_aligned[i] > 0.5
+        vol_spike = volume_spike_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: bullish trend + stochastic crosses above 20 (oversold bounce)
-            if bullish and k_aligned[i] > 20 and k_aligned[i-1] <= 20:
+            # Enter long: bullish trend + price breaks above R1 + volume spike
+            if bullish and high[i] > camarilla_r1_aligned[i] and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish trend + stochastic crosses below 80 (overbought rejection)
-            elif bearish and k_aligned[i] < 80 and k_aligned[i-1] >= 80:
+            # Enter short: bearish trend + price breaks below S1 + volume spike
+            elif bearish and low[i] < camarilla_s1_aligned[i] and vol_spike:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish trend or stochastic crosses below 50 (momentum loss)
-            if bearish or (k_aligned[i] < 50 and k_aligned[i-1] >= 50):
+            # Exit long: bearish trend or price breaks below S1
+            if bearish or low[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish trend or stochastic crosses above 50 (momentum loss)
-            if bullish or (k_aligned[i] > 50 and k_aligned[i-1] <= 50):
+            # Exit short: bullish trend or price breaks above R1
+            if bullish or high[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
