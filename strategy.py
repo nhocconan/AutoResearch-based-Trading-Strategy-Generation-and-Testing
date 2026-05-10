@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Camarilla pivot R1/S1 levels from 1d timeframe act as strong support/resistance.
-# Breakout above R1 with bullish 1d trend (price > EMA34) triggers long; breakdown below S1 with bearish 1d trend triggers short.
-# Volume confirmation (volume > 1.5x 20-period EMA) filters false breakouts.
-# Works in bull markets via breakouts above resistance and in bear via breakdowns below support.
-# Target: 20-50 trades/year on 4h timeframe.
+# 4h_KAMA_Trend_Reversal_RSI_Filter
+# Hypothesis: KAMA adapts to market noise, providing reliable trend direction with less whipsaw.
+# Entry: KAMA direction + RSI extreme + volume confirmation.
+# Exit: Opposite KAMA direction or RSI normalization.
+# Works in bull markets via trend continuation and in bear via mean reversion at extremes.
+# Low trade frequency expected due to triple confirmation.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+name = "4h_KAMA_Trend_Reversal_RSI_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,73 +14,76 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    c = close
-    h = high
-    l = low
-    r4 = c + (range_val * 1.1 / 2)
-    r3 = c + (range_val * 1.1/4)
-    r2 = c + (range_val * 1.1/6)
-    r1 = c + (range_val * 1.1/12)
-    s1 = c - (range_val * 1.1/12)
-    s2 = c - (range_val * 1.1/6)
-    s3 = c - (range_val * 1.1/4)
-    s4 = c - (range_val * 1.1/2)
-    return r4, r3, r2, r1, s1, s2, s3, s4
+def calculate_kama(close, er_length=10, fast=2, slow=30):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.subtract.accumulate(change))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = np.power(er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1), 2)
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, period=14):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivot and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 40:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels on daily timeframe
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d KAMA for trend filter
+    kama_1d = calculate_kama(df_1d['close'].values)
+    kama_1d_slope = np.diff(kama_1d, prepend=kama_1d[0])
+    kama_1d_up = kama_1d_slope > 0
     
-    r4_1d, r3_1d, r2_1d, r1_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla(
-        high_1d, low_1d, close_1d
-    )
+    # Align 1d KAMA trend to 4h
+    kama_1d_up_aligned = align_htf_to_ltf(prices, df_1d, kama_1d_up.astype(float))
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # Align 1d indicators to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Get 4h data for entry signals
+    # Get 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.5x 20-period EMA
+    # Calculate 4h KAMA for entry signals
+    kama_4h = calculate_kama(close)
+    kama_4h_slope = np.diff(kama_4h, prepend=kama_4h[0])
+    
+    # Calculate RSI
+    rsi = calculate_rsi(close)
+    
+    # Volume filter: current volume > 1.3x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
+    volume_filter = volume > vol_ema20 * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Camarilla (1) + EMA34 (34) + vol EMA (20)
-    start_idx = max(1, 34, 20)
+    # Warmup: need KAMA (30) + RSI (14) + vol EMA (20)
+    start_idx = max(30, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
+        if (np.isnan(kama_4h[i]) or 
+            np.isnan(kama_1d_up_aligned[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(vol_ema20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,24 +91,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND 1d trend bullish (price > EMA34) AND volume confirmation
-            if close[i] > r1_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_filter[i]:
+            # Long: 1d KAMA up AND 4h KAMA turning up AND RSI < 30 (oversold) AND volume
+            if (kama_1d_up_aligned[i] > 0.5 and 
+                kama_4h_slope[i] > 0 and 
+                rsi[i] < 30 and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND 1d trend bearish (price < EMA34) AND volume confirmation
-            elif close[i] < s1_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_filter[i]:
+            # Short: 1d KAMA down AND 4h KAMA turning down AND RSI > 70 (overbought) AND volume
+            elif (kama_1d_up_aligned[i] <= 0.5 and 
+                  kama_4h_slope[i] < 0 and 
+                  rsi[i] > 70 and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 (reversal signal)
-            if close[i] < s1_1d_aligned[i]:
+            # Long exit: 1d KAMA down OR 4h KAMA turning down OR RSI > 50
+            if (kama_1d_up_aligned[i] <= 0.5 or 
+                kama_4h_slope[i] < 0 or 
+                rsi[i] > 50):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 (reversal signal)
-            if close[i] > r1_1d_aligned[i]:
+            # Short exit: 1d KAMA up OR 4h KAMA turning up OR RSI < 50
+            if (kama_1d_up_aligned[i] > 0.5 or 
+                kama_4h_slope[i] > 0 or 
+                rsi[i] < 50):
                 signals[i] = 0.0
                 position = 0
             else:
