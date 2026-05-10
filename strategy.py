@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pullback_Reversal_12hTrend
-# Hypothesis: In both bull and bear markets, price reverses at key Camarilla pivot levels (H3/L3)
-# when aligned with 12h trend. Entries occur on pullbacks to H3 (short) or L3 (long) with
-# volume confirmation and 12h EMA50 trend filter. Designed for low trade frequency (20-30/year)
-# to minimize fee drag and improve generalization across market regimes.
+# 1d_Weekly_Camarilla_Reversal
+# Hypothesis: In both bull and bear markets, price reverts to weekly Camarilla pivot levels (S3, R3).
+# Entries occur when price touches these levels on the daily timeframe with volume confirmation
+# and weekly trend filter (price relative to weekly EMA200). Exits on opposite level touch.
+# Designed for low trade frequency (10-20/year) to minimize fee drift.
 
-name = "4h_Camarilla_Pullback_Reversal_12hTrend"
-timeframe = "4h"
+name = "1d_Weekly_Camarilla_Reversal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,32 +23,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # 12h EMA50 for trend (smooth, lag-appropriate)
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Get weekly data for trend filter and Camarilla levels
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # Weekly EMA200 for trend filter
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Camarilla levels: H3/L3 (most significant for reversals)
-    # H3 = close + 1.1 * range / 6
-    # L3 = close - 1.1 * range / 6
-    camarilla_h3 = prev_close + 1.1 * prev_range / 6
-    camarilla_l3 = prev_close - 1.1 * prev_range / 6
+    # Weekly Camarilla levels: based on prior week's range
+    # H = high, L = low, C = close of prior week
+    H = high_1w
+    L = low_1w
+    C = close_1w
+    RANGE = H - L
+    # Camarilla formulas
+    R3 = C + (RANGE * 1.1 / 2)
+    S3 = C - (RANGE * 1.1 / 2)
+    # Align to daily timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
     
-    # Align daily levels to 4h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # Volume confirmation (20-period average on 4h = ~10 days)
+    # Volume confirmation (20-day average)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -60,11 +58,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20) + 5  # need enough history for calculations
+    start_idx = max(200, 20)  # need weekly EMA200 and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or \
-           np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
+           np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,24 +72,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: price pulls back to L3 with volume, above 12h EMA50 (uptrend)
-            if close[i] <= camarilla_l3_aligned[i] and volume_confirm and close[i] > ema_12h_aligned[i]:
+            # Long: price touches or crosses below S3 with volume, above weekly EMA200
+            if low[i] <= S3_aligned[i] and volume_confirm and close[i] > ema_200_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price pulls back to H3 with volume, below 12h EMA50 (downtrend)
-            elif close[i] >= camarilla_h3_aligned[i] and volume_confirm and close[i] < ema_12h_aligned[i]:
+            # Short: price touches or crosses above R3 with volume, below weekly EMA200
+            elif high[i] >= R3_aligned[i] and volume_confirm and close[i] < ema_200_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below L3 or breaks below 12h EMA50
-            if close[i] < camarilla_l3_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Long exit: price touches or crosses above R3
+            if high[i] >= R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above H3 or breaks above 12h EMA50
-            if close[i] > camarilla_h3_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Short exit: price touches or crosses below S3
+            if low[i] <= S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
