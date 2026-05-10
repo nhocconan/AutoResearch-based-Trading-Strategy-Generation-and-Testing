@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) on 1d act as support/resistance; breakouts with
-# 1d trend and volume filter capture strong moves. 12h timeframe reduces trade frequency
-# to avoid fee drag, works in bull (breakouts) and bear (mean reversion at extremes).
+# 6H_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance; breakouts with 1d trend and volume filter capture strong moves.
+# Works in bull (breakouts) and bear (mean reversion at extremes) with tight entries to avoid overtrading.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6H_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -33,21 +31,21 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 12h
+    # Align 1d trend to 6h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Camarilla levels from previous 1d bar
+    # Camarilla levels from previous 1d bar (R3/S3 = stronger levels)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     range_1d = high_1d - low_1d
-    R1 = close_1d + 1.1 * range_1d / 12
-    S1 = close_1d - 1.1 * range_1d / 12
+    R3 = close_1d + 1.1 * range_1d / 4
+    S3 = close_1d - 1.1 * range_1d / 4
     
-    # Align Camarilla levels to 12h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to 6h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
@@ -60,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,20 +68,20 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: break above R1 with 1d uptrend and volume spike
-            if (close[i] > R1_aligned[i] and 
+            # Long: break above R3 with 1d uptrend and volume spike
+            if (close[i] > R3_aligned[i] and 
                 trend_1d_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 with 1d downtrend and volume spike
-            elif (close[i] < S1_aligned[i] and 
+            # Short: break below S3 with 1d downtrend and volume spike
+            elif (close[i] < S3_aligned[i] and 
                   trend_1d_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below S1 or trend fails
-            if (close[i] < S1_aligned[i] or 
+            # Exit: close below S3 or trend fails
+            if (close[i] < S3_aligned[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -91,8 +89,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above R1 or trend fails
-            if (close[i] > R1_aligned[i] or 
+            # Exit: close above R3 or trend fails
+            if (close[i] > R3_aligned[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
