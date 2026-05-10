@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1D_WickReversal_LiquiditySweep
-# Hypothesis: Trade reversals after liquidity sweeps (wick closes beyond recent high/low but price closes back within range) on daily timeframe.
-# Long when: price makes new 20-day low but closes above prior day's low (bullish rejection).
-# Short when: price makes new 20-day high but closes below prior day's high (bearish rejection).
-# Uses weekly trend filter: only trade in direction of weekly EMA50 trend.
-# Works in bull/bear by following higher timeframe trend and using price action rejection for entry.
-# Target: 15-25 trades/year per symbol.
+# 4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Breakouts at Camarilla R3/S3 levels with 1d trend filter and volume spike.
+# Long when price breaks above R3 in 1d uptrend with volume > 2x average.
+# Short when price breaks below S3 in 1d downtrend with volume > 2x average.
+# Uses Camarilla levels from daily data for institutional reference points.
+# Works in bull/bear by following trend and using volume to confirm breakout strength.
+# Target: 20-40 trades/year per symbol.
 
-name = "1D_WickReversal_LiquiditySweep"
-timeframe = "1d"
+name = "4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +17,88 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Daily range and wick detection
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # Volume average (20-period)
+    volume_s = pd.Series(volume)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Wick reversal conditions
-    bullish_wick = (low <= lowest_low) & (close > low)  # New low but closed off low
-    bearish_wick = (high >= highest_high) & (close < high)  # New high but closed off high
-    
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Daily data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = close_1w > ema50_1w
-    weekly_downtrend = close_1w < ema50_1w
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly trend to daily
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    # Calculate Camarilla levels for each day
+    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    # Daily trend filter (EMA50)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_uptrend = close_1d > ema50_1d
+    daily_downtrend = close_1d < ema50_1d
+    
+    # Align all daily data to 4h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = lookback
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
+        if (np.isnan(vol_ma[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(daily_uptrend_aligned[i]) or 
+            np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        weekly_up = weekly_uptrend_aligned[i] > 0.5
-        weekly_down = weekly_downtrend_aligned[i] > 0.5
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_spike = vol_ratio > 2.0
+        
+        daily_up = daily_uptrend_aligned[i] > 0.5
+        daily_down = daily_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: weekly uptrend + bullish wick rejection
-            if weekly_up and bullish_wick[i]:
-                signals[i] = 0.25
-                position = 1
-            # Enter short: weekly downtrend + bearish wick rejection
-            elif weekly_down and bearish_wick[i]:
-                signals[i] = -0.25
-                position = -1
+            # Enter long: daily uptrend + price breaks above R3 + volume spike
+            if daily_up and volume_spike:
+                if close[i] > camarilla_r3_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+            # Enter short: daily downtrend + price breaks below S3 + volume spike
+            elif daily_down and volume_spike:
+                if close[i] < camarilla_s3_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         
         elif position == 1:
-            # Exit conditions: trend reverses or opposite wick forms
-            if not weekly_up or bearish_wick[i]:
+            # Exit long: price breaks below S3 or trend changes
+            if close[i] < camarilla_s3_aligned[i] or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit conditions: trend reverses or opposite wick forms
-            if not weekly_down or bullish_wick[i]:
+            # Exit short: price breaks above R3 or trend changes
+            if close[i] > camarilla_r3_aligned[i] or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
