@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_1dTrend_Filter_VolumeConfirm
-# Hypothesis: 4-hour trend following using KAMA on price with daily trend filter (EMA34) and volume confirmation.
-# KAMA adapts to market noise, reducing whipsaws in ranging markets. Daily EMA34 ensures trades align with higher timeframe trend.
-# Volume confirmation filters weak breakouts. Designed for 4h to achieve 20-50 trades/year, suitable for both bull and bear markets.
+# 6h_ElderRay_BullBearPower_12hTrend_Volume
+# Hypothesis: Elder Ray (Bull/Bear Power) on 6h with 12h EMA trend filter and volume confirmation. Bull Power > 0 and Bear Power < 0 indicate bullish/bearish momentum. 12h EMA ensures trend alignment. Volume confirms strength. Designed for 6h to achieve 50-150 total trades over 4 years (12-37/year). Works in bull/bear via trend filter.
 
-name = "4h_KAMA_Trend_1dTrend_Filter_VolumeConfirm"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,45 +15,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA34 trend filter and volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # 12h data for trend filter and volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    volume_12h = df_12h['volume'].values
     
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 12h EMA34 for trend filter
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Daily volume confirmation: 20-period average
+    # 12h volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    vol_ma_20_12h = mean_arr(volume_12h, 20)
     
-    # KAMA on 4h close
-    def kama(close, er_length=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close, prepend=close[0]))
-        volatility = np.abs(np.diff(close)).cumsum() - np.abs(np.diff(close, prepend=close[0])).cumsum()
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(close)
-        kama[0] = close[0]
-        for i in range(1, len(close)):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        return kama
+    # Elder Ray on 6h: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    kama_val = kama(close)
-    
-    # Align daily indicators to 4h timeframe (wait for 1d bar to close)
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align 12h indicators to 6h timeframe (wait for 12h bar to close)
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    vol_ma_20_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,31 +54,31 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or np.isnan(kama_val[i]):
+        if np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ma_20_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above KAMA, above daily EMA34, strong volume
-            if close[i] > kama_val[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: Bull Power > 0, above 12h EMA34, strong volume
+            if bull_power[i] > 0 and close[i] > ema_34_12h_aligned[i] and volume[i] > 2.0 * vol_ma_20_12h_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, below daily EMA34, strong volume
-            elif close[i] < kama_val[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: Bear Power < 0, below 12h EMA34, strong volume
+            elif bear_power[i] < 0 and close[i] < ema_34_12h_aligned[i] and volume[i] > 2.0 * vol_ma_20_12h_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below KAMA or below daily EMA34
-            if close[i] < kama_val[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: Bull Power <= 0 or below 12h EMA34
+            if bull_power[i] <= 0 or close[i] < ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above KAMA or above daily EMA34
-            if close[i] > kama_val[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: Bear Power >= 0 or above 12h EMA34
+            if bear_power[i] >= 0 or close[i] > ema_34_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
