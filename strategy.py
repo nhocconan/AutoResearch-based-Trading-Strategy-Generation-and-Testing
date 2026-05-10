@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_Engulfing_1dTrend_Volume
-Hypothesis: On 4h timeframe, bullish/bearish engulfing candles aligned with 1d EMA50 trend and volume spike provide high-probability entries. 
-Engulfing patterns signal strong momentum shifts, and when combined with daily trend and volume confirmation, they work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
-Uses 1d EMA50 for trend filter and 1d volume spike for confirmation. Targets 20-40 trades per year to minimize fee drag.
+4h_Parabolic_SAR_EMA_Trend
+Hypothesis: Parabolic SAR provides clear trend direction with built-in trailing stop.
+In trending markets (determined by EMA50), price respects SAR levels.
+Long when price > SAR and price > EMA50 with volume confirmation.
+Short when price < SAR and price < EMA50 with volume confirmation.
+Exit when price crosses SAR (trend reversal) or volume confirmation fails.
+Designed for 4h timeframe to capture intermediate trends with minimal whipsaw.
+Targets 80-150 trades over 4 years (20-37/year) to balance opportunity and cost.
+Works in bull (follow SAR uptrend) and bear (follow SAR downtrend).
 """
 
-name = "4h_Engulfing_1dTrend_Volume"
+name = "4h_Parabolic_SAR_EMA_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,13 +24,55 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
+    # Parabolic SAR calculation
+    # Start with long assumption
+    psar = np.zeros(n)
+    psar[0] = low[0]
+    bull = True  # True for long, False for short
+    af = 0.02    # acceleration factor
+    max_af = 0.2
+    ep = high[0] if bull else low[0]  # extreme point
+    
+    for i in range(1, n):
+        if bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR doesn't penetrate previous two lows
+            if i >= 2:
+                psar[i] = min(psar[i], low[i-1], low[i-2])
+            # Check for trend reversal
+            if low[i] < psar[i]:
+                bull = False
+                psar[i] = ep  # SAR becomes previous EP
+                af = 0.02
+                ep = low[i]
+            else:
+                # Continue trend
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            # Ensure SAR doesn't penetrate previous two highs
+            if i >= 2:
+                psar[i] = max(psar[i], high[i-1], high[i-2])
+            # Check for trend reversal
+            if high[i] > psar[i]:
+                bull = True
+                psar[i] = ep  # SAR becomes previous EP
+                af = 0.02
+                ep = high[i]
+            else:
+                # Continue trend
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
+    
+    # EMA50 for trend filter (using 1d HTF)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema50_1d = np.full(len(close_1d), np.nan)
@@ -36,14 +83,17 @@ def generate_signals(prices):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d volume average for spike detection
+    # Volume confirmation: 4h volume > 1.5x average 4h volume (using 1d SMA20 scaled)
     volume_1d = df_1d['volume'].values
-    vol_avg_1d = np.full(len(volume_1d), np.nan)
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
-        vol_avg_1d[19] = np.mean(volume_1d[:20])
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
         for i in range(20, len(volume_1d)):
-            vol_avg_1d[i] = np.mean(volume_1d[i-19:i+1])
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+            vol_sma20_1d[i] = alpha * volume_1d[i] + (1 - alpha) * vol_sma20_1d[i-1]
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    # Scale daily volume average to 4h (6 periods of 4h in 1d)
+    vol_4h_avg = vol_sma20_1d_aligned / 6.0
+    volume_confirm = volume > 1.5 * vol_4h_avg
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -51,51 +101,34 @@ def generate_signals(prices):
     start_idx = 50  # Need EMA50 warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]):
+        if np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_4h_avg[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume spike: current 4h volume > 2x average 1d volume (scaled)
-        # 6 four-hour periods in 1 day, so divide daily average by 6
-        vol_4h_avg = vol_avg_1d_aligned[i] / 6.0
-        volume_spike = volume[i] > 2.0 * vol_4h_avg
-        
-        # Bullish engulfing: current green candle fully engulfs previous red candle
-        bullish_engulf = (close[i] > open_price[i]) and \
-                         (open_price[i-1] > close[i-1]) and \
-                         (close[i] >= open_price[i-1]) and \
-                         (open_price[i] <= close[i-1])
-        
-        # Bearish engulfing: current red candle fully engulfs previous green candle
-        bearish_engulf = (close[i] < open_price[i]) and \
-                         (open_price[i-1] < close[i-1]) and \
-                         (open_price[i] >= close[i-1]) and \
-                         (close[i] <= open_price[i-1])
-        
         if position == 0:
-            # Long: bullish engulfing in uptrend with volume spike
-            if bullish_engulf and close[i] > ema50_1d_aligned[i] and volume_spike:
+            # Long: Price above SAR and above EMA50 with volume confirmation
+            if close[i] > psar[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulfing in downtrend with volume spike
-            elif bearish_engulf and close[i] < ema50_1d_aligned[i] and volume_spike:
+            # Short: Price below SAR and below EMA50 with volume confirmation
+            elif close[i] < psar[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: trend reversal or opposite engulfing
-            if close[i] < ema50_1d_aligned[i] or bearish_engulf:
-                signals[i] = 0.0
-                position = 0
-            else:
+            # Long: Continue if price above SAR and EMA50, else exit
+            if close[i] > psar[i] and close[i] > ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
-        elif position == -1:
-            # Exit: trend reversal or opposite engulfing
-            if close[i] > ema50_1d_aligned[i] or bullish_engulf:
+            else:
                 signals[i] = 0.0
                 position = 0
-            else:
+        elif position == -1:
+            # Short: Continue if price below SAR and EMA50, else exit
+            if close[i] < psar[i] and close[i] < ema50_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+                position = 0
     
     return signals
