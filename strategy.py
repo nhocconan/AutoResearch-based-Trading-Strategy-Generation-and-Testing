@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12h Camarilla R1/S1 breakout in direction of 1d EMA50 trend with volume confirmation.
-Trades on 12h timeframe to limit frequency (target: 12-37 trades/year). Works in bull/bear by following 1d trend.
+4h_Bollinger_Band_Momentum_1dTrend_Volume
+Hypothesis: 4h Bollinger Band breakout in direction of 1d EMA200 trend with volume confirmation.
+Bollinger Bands provide dynamic support/resistance that adapts to volatility.
+EMA200 trend filter ensures alignment with long-term direction, working in both bull and bear markets.
+Volume confirmation reduces false breakouts. Target: 20-40 trades/year.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Bollinger_Band_Momentum_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,32 +25,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA50 for trend filter
+    # 1d EMA200 for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_50_1d[i-1]
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_200_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        ema_200_1d[199] = np.mean(close_1d[:200])
+        alpha = 2 / (200 + 1)
+        for i in range(200, len(close_1d)):
+            ema_200_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_200_1d[i-1]
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Camarilla pivot levels (1d) - using prior day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_r1 = np.zeros(len(close_1d))
-    camarilla_s1 = np.zeros(len(close_1d))
-    for i in range(len(close_1d)):
-        if i == 0:
-            camarilla_r1[i] = close_1d[0]
-            camarilla_s1[i] = close_1d[0]
-        else:
-            camarilla_r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.0833
-            camarilla_s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.0833
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Bollinger Bands (20, 2.0) on 4h
+    bb_period = 20
+    bb_mult = 2.0
+    sma = np.full(n, np.nan)
+    std = np.full(n, np.nan)
+    for i in range(bb_period, n):
+        sma[i] = np.mean(close[i-bb_period:i])
+        std[i] = np.std(close[i-bb_period:i])
+    upper_band = sma + bb_mult * std
+    lower_band = sma - bb_mult * std
     
     # Volume spike: current volume > 1.5x average volume (20-period)
     vol_sma = np.full(n, np.nan)
@@ -58,10 +55,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # EMA + volume warmup
+    start_idx = max(bb_period, 20, 200)  # Bollinger + volume + trend warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,24 +68,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 0:
-            # Long: Break above R1 and above 1d EMA50
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_50_1d_aligned[i] and volume_confirm:
+            # Long: Break above upper band and above 1d EMA200
+            if close[i] > upper_band[i] and close[i] > ema_200_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 and below 1d EMA50
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_50_1d_aligned[i] and volume_confirm:
+            # Short: Break below lower band and below 1d EMA200
+            elif close[i] < lower_band[i] and close[i] < ema_200_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below 1d EMA50
-            if close[i] < ema_50_1d_aligned[i]:
+            # Exit: Close below middle band (SMA)
+            if close[i] < sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above 1d EMA50
-            if close[i] > ema_50_1d_aligned[i]:
+            # Exit: Close above middle band (SMA)
+            if close[i] > sma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
