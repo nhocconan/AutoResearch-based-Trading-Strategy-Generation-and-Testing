@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses daily Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA trend filter and volume confirmation.
-# Designed for low trade frequency (15-30/year) to minimize fee drag. Works in bull/bear markets by aligning with 1d trend.
-# Position size 0.25 to balance risk and return.
+# 4h_TRIX_ZeroCross_Volume_Trend_Filter
+# Hypothesis: Uses TRIX (triple EMA) zero-cross for momentum with volume confirmation and 12h trend filter.
+# TRIX filters noise and detects sustained momentum. Works in bull/bear by aligning with 12h trend.
+# Entry: TRIX crosses zero with volume > 1.5x 20-period average and 12h trend alignment.
+# Exit: TRIX crosses zero in opposite direction. Position size 0.25 to limit drawdown.
+# Target: 20-40 trades/year to avoid fee drag.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_ZeroCross_Volume_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +19,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (using previous day's data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R1 = Close + (High - Low) * 1.1/6
-    # S1 = Close - (High - Low) * 1.1/6
-    # Using previous day's data to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate TRIX (15-period triple EMA) on close
+    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
+    close_series = pd.Series(close)
+    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = (ema3.diff() / ema3.shift(1)) * 100  # Percentage change
     
-    # Calculate R1 and S1 (tighter levels than R2/S2)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # Get 1d data for trend filter
-    # Calculate 1d EMA(34) for trend direction
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h EMA(50) for trend direction
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # Calculate volume average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -54,41 +45,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Warmup for volume MA and 1d EMA
+    # Warmup: need enough data for TRIX calculation and volume MA
+    start_idx = max(45, 20)  # 3*15 for triple EMA + 20 for volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(trix.iloc[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1d
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 12h
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Stronger volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.8
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        
+        # TRIX zero-cross signals
+        trix_now = trix.iloc[i]
+        trix_prev = trix.iloc[i-1]
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation and 1d uptrend
-            if close[i] > r1_aligned[i] and volume_confirm and uptrend:
+            # Long entry: TRIX crosses above zero with volume confirmation and 12h uptrend
+            if trix_prev <= 0 and trix_now > 0 and volume_confirm and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation and 1d downtrend
-            elif close[i] < s1_aligned[i] and volume_confirm and downtrend:
+            # Short entry: TRIX crosses below zero with volume confirmation and 12h downtrend
+            elif trix_prev >= 0 and trix_now < 0 and volume_confirm and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or trend turns down
-            if close[i] < r1_aligned[i] or not uptrend:
+            # Long exit: TRIX crosses below zero
+            if trix_prev >= 0 and trix_now < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or trend turns up
-            if close[i] > s1_aligned[i] or not downtrend:
+            # Short exit: TRIX crosses above zero
+            if trix_prev <= 0 and trix_now > 0:
                 signals[i] = 0.0
                 position = 0
             else:
