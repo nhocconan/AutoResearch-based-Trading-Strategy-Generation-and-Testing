@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4h_4H_Aroon_Downtrend_Short_Only
-# Hypothesis: In bear markets, Aroon Down > 70 on 4h signals strong downtrends.
-# Combine with 1d EMA50 trend filter to avoid counter-trend shorts.
-# Volume confirmation ensures momentum behind the move.
-# Short-only strategy works in both bull (selective shorts in pullbacks) and bear (strong trends).
-# Target: 20-40 trades/year to minimize fee drag.
+# 1d_Donchian_Breakout_20_1wTrend_Volume
+# Hypothesis: On daily timeframe, price breaking Donchian(20) channels with weekly trend filter and volume confirmation captures sustained moves in both bull and bear markets. Weekly trend avoids counter-trend trades, volume reduces false breakouts. Designed for low frequency (10-25 trades/year) to minimize fee drag.
 
-name = "4h_4H_Aroon_Downtrend_Short_Only"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_20_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,48 +12,49 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    # Daily Donchian channels (20-day)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Aroon Down (25-period) on 4h
-    period = 25
-    aroon_down = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        window_low = low[i - period + 1:i + 1]
-        lowest_low_idx = np.argmin(window_low)
-        periods_since_low = period - 1 - lowest_low_idx
-        aroon_down[i] = ((period - periods_since_low) / period) * 100
+    # Weekly trend: EMA50 on weekly close
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema50_1w
+    trend_1w_down = close_1w < ema50_1w
     
-    # Align 1d trend to 4h
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align weekly trend to daily
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    # Volume confirmation: 6-period (1.5-day) average on 4h
+    # Volume confirmation: 10-day average
     volume_s = pd.Series(volume)
-    vol_ma = volume_s.rolling(window=6, min_periods=6).mean().values
+    vol_ma = volume_s.rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, -1: short
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    # Start after we have enough data
+    start_idx = 60
     
     for i in range(start_idx, n):
-        if (np.isnan(aroon_down[i]) or 
-            np.isnan(trend_1d_down_aligned[i]) or 
+        # Skip if data not ready
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -68,17 +65,30 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter short: Aroon Down > 70 + 1d downtrend + volume
-            if (aroon_down[i] > 70 and 
-                trend_1d_down_aligned[i] > 0.5 and 
-                volume_confirm):
+            # Enter long: break above Donchian high with weekly uptrend and volume
+            if (close[i] > donchian_high[i] and 
+                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
+                signals[i] = 0.25
+                position = 1
+            # Enter short: break below Donchian low with weekly downtrend and volume
+            elif (close[i] < donchian_low[i] and 
+                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
+        elif position == 1:
+            # Exit when price returns to Donchian low or trend fails
+            if (close[i] < donchian_low[i] or 
+                trend_1w_up_aligned[i] < 0.5):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
         elif position == -1:
-            # Exit when Aroon Down < 30 or trend changes
-            if (aroon_down[i] < 30 or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit when price returns to Donchian high or trend fails
+            if (close[i] > donchian_high[i] or 
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
