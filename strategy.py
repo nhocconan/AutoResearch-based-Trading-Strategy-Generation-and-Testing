@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Confluence_Breakout
-# Hypothesis: Use 4h trend and 1d momentum as directional filters, with 1h breakout entries.
-# Works in bull/bear: 4h trend filters direction, 1d momentum filters strength, 1h breakout captures entries.
-# Target: 15-30 trades/year by requiring confluence of multiple timeframes.
+# 6h_MultiTimeframe_CCI_Divergence
+# Hypothesis: Combines 6h CCI (20) for overbought/oversold signals with 1d ADX (14) for trend strength.
+# Long when CCI < -100 (oversold) and 1d ADX > 25 (trending up); short when CCI > 100 (overbought) and 1d ADX > 25 (trending down).
+# Uses volume confirmation (current bar volume > 20-period average) to avoid false signals.
+# Designed for 6h timeframe to capture medium-term reversals in both bull and bear markets.
+# Target: 20-40 trades/year per symbol.
 
-name = "1h_4h1d_Confluence_Breakout"
-timeframe = "1h"
+name = "6h_MultiTimeframe_CCI_Divergence"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mts_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,87 +24,115 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h trend: EMA50
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_4h_up = close_4h > ema50_4h
-    trend_4h_down = close_4h < ema50_4h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # CCI (20) calculation
+    typical_price = (high + low + close) / 3.0
+    tp_mean = pd.Series(typical_price).rolling(window=20, min_periods=20).mean().values
+    tp_std = pd.Series(typical_price).rolling(window=20, min_periods=20).std().values
+    # Avoid division by zero
+    cci = np.divide(typical_price - tp_mean, 0.015 * tp_std, out=np.full_like(typical_price, np.nan), where=tp_std!=0)
     
-    # 1d momentum: RSI14
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    
-    # 1h breakout: Donchian20
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: 1.5x average volume
+    # Volume confirmation: current volume > 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma
+    volume_confirm = volume > vol_ma
+    
+    # 1d ADX (14) calculation for trend strength
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period TR is just high-low
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    
+    # Smooth TR, DM+, DM- using Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    def wilder_smoothing(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(arr[:period])
+        # Subsequent values: smoothed = prev_smoothed - (prev_smoothed/period) + current
+        for i in range(period, len(arr)):
+            result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    atr = wilder_smoothing(tr, 14)
+    dm_plus_smooth = wilder_smoothing(dm_plus, 14)
+    dm_minus_smooth = wilder_smoothing(dm_minus, 14)
+    
+    # Directional Indicators
+    di_plus = np.divide(dm_plus_smooth, atr, out=np.full_like(dm_plus_smooth, np.nan), where=atr!=0) * 100
+    di_minus = np.divide(dm_minus_smooth, atr, out=np.full_like(dm_minus_smooth, np.nan), where=atr!=0) * 100
+    
+    # DX and ADX
+    dx = np.divide(np.abs(di_plus - di_minus), (di_plus + di_minus), out=np.full_like(di_plus, np.nan), where=(di_plus + di_minus)!=0) * 100
+    adx = np.full_like(dx, np.nan)
+    # ADX is smoothed DX
+    for i in range(14, len(dx)):
+        if np.isnan(adx[i-1]):
+            adx[i] = np.nanmean(dx[i-13:i+1])  # First ADX is average of first 14 DX
+        else:
+            adx[i] = (adx[i-1] * 13 + dx[i]) / 14  # Wilder smoothing
+    
+    # Align 1d ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure enough data for all indicators
+    start_idx = 40  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(rsi_1d_aligned[i]) or np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(cci[i]) or np.isnan(adx_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h uptrend, 1d bullish momentum (RSI>50), 1h breaks above Donchian high with volume
-            if (trend_4h_up_aligned[i] > 0.5 and
-                rsi_1d_aligned[i] > 50 and
-                high[i] > donchian_high[i] and
-                volume_filter[i]):
-                signals[i] = 0.20
+            # Long: CCI oversold (< -100), ADX > 25 (trending up), volume confirmation
+            if (cci[i] < -100 and
+                adx_aligned[i] > 25 and
+                volume_confirm[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend, 1d bearish momentum (RSI<50), 1h breaks below Donchian low with volume
-            elif (trend_4h_down_aligned[i] > 0.5 and
-                  rsi_1d_aligned[i] < 50 and
-                  low[i] < donchian_low[i] and
-                  volume_filter[i]):
-                signals[i] = -0.20
+            # Short: CCI overbought (> 100), ADX > 25 (trending down), volume confirmation
+            elif (cci[i] > 100 and
+                  adx_aligned[i] > 25 and
+                  volume_confirm[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: 4h trend turns down OR price breaks below Donchian low
-            if (trend_4h_up_aligned[i] < 0.5 or
-                low[i] < donchian_low[i]):
+            # Exit: CCI crosses above -100 (leaving oversold) or ADX drops below 20 (weakening trend)
+            if (cci[i] > -100 or
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: 4h trend turns up OR price breaks above Donchian high
-            if (trend_4h_down_aligned[i] < 0.5 or
-                high[i] > donchian_high[i]):
+            # Exit: CCI crosses below 100 (leaving overbought) or ADX drops below 20
+            if (cci[i] < 100 or
+                adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
