@@ -1,10 +1,11 @@
-#/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakout above 12h Camarilla R1 or below S1 with volume surge and 1d EMA34 trend confirmation.
+#!/usr/bin/env python3
+# 6h_WeeklyPivotBreakout_1dTrend_Volume
+# Hypothesis: Breakout above weekly pivot R2 or below S2 with volume surge and 1d EMA trend confirmation.
+# Weekly pivots provide stronger institutional levels than daily; 1d trend filter ensures alignment with higher timeframe momentum.
 # Works in bull/bear by requiring trend alignment, reducing false breakouts. Targets 15-30 trades/year.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_WeeklyPivotBreakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,47 +17,55 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h OHLC for Camarilla calculation
+    # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Camarilla levels using previous period's range
-    # R1 = Close + 1.1*(High-Low)/12, S1 = Close - 1.1*(High-Low)/12
-    high_prev = np.roll(high, 1)
-    low_prev = np.roll(low, 1)
-    close_prev = np.roll(close, 1)
+    # Calculate weekly pivot points using previous week's OHLC
+    # Pivot = (H + L + C) / 3
+    # R2 = Pivot + (H - L)
+    # S2 = Pivot - (H - L)
+    high_prev = np.roll(df_1w['high'].values, 1)
+    low_prev = np.roll(df_1w['low'].values, 1)
+    close_prev = np.roll(df_1w['close'].values, 1)
     high_prev[0] = np.nan
     low_prev[0] = np.nan
     close_prev[0] = np.nan
     
-    camarilla_r1 = close_prev + 1.1 * (high_prev - low_prev) / 12
-    camarilla_s1 = close_prev - 1.1 * (high_prev - low_prev) / 12
+    pivot = (high_prev + low_prev + close_prev) / 3
+    weekly_r2 = pivot + (high_prev - low_prev)
+    weekly_s2 = pivot - (high_prev - low_prev)
     
     # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume average (20-period = ~10 days of 12h bars)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (24-period = ~6 days of 6h bars)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    # Warmup: need Camarilla (needs 1 bar) + EMA34 (34) + volume MA (20)
+    # Warmup: need weekly pivot (needs 1 week) + EMA34 (34) + volume MA (24)
     start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1[i]) or
-            np.isnan(camarilla_s1[i]) or
+        if (np.isnan(weekly_r2[i]) or
+            np.isnan(weekly_s2[i]) or
             np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -73,38 +82,38 @@ def generate_signals(prices):
         # Volume confirmation (1.5x average)
         volume_surge = volume[i] > 1.5 * vol_ma[i]
         
-        # Breakout above Camarilla R1 or breakdown below S1
-        breakout_r1 = close[i] > camarilla_r1[i]
-        breakdown_s1 = close[i] < camarilla_s1[i]
+        # Breakout above weekly R2 or breakdown below S2
+        breakout_r2 = close[i] > weekly_r2[i]
+        breakdown_s2 = close[i] < weekly_s2[i]
         
         if position == 0:
             bars_since_entry = 0
-            # Long: Breakout above Camarilla R1 with volume surge and 1d uptrend
-            if breakout_r1 and volume_surge and uptrend:
+            # Long: Breakout above weekly R2 with volume surge and 1d uptrend
+            if breakout_r2 and volume_surge and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Camarilla S1 with volume surge and 1d downtrend
-            elif breakdown_s1 and volume_surge and downtrend:
+            # Short: Breakdown below weekly S2 with volume surge and 1d downtrend
+            elif breakdown_s2 and volume_surge and downtrend:
                 signals[i] = -0.25
                 position = -1
         else:
             bars_since_entry += 1
-            # Enforce minimum holding period of 2 bars (24 hours)
+            # Enforce minimum holding period of 2 bars (12 hours)
             if bars_since_entry < 2:
                 signals[i] = signals[i-1]  # maintain position
                 continue
             
             if position == 1:
-                # Long exit: price breaks below Camarilla S1 or trend changes
-                if close[i] < camarilla_s1[i] or not uptrend:
+                # Long exit: price breaks below weekly S2 or trend changes
+                if close[i] < weekly_s2[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price breaks above Camarilla R1 or trend changes
-                if close[i] > camarilla_r1[i] or not downtrend:
+                # Short exit: price breaks above weekly R2 or trend changes
+                if close[i] > weekly_r2[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
