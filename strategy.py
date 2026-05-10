@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Stochastic_RSI_Breakout
-# Hypothesis: Stochastic RSI identifies overbought/oversold conditions during low volatility squeezes.
-# A breakout from a Bollinger Bandwidth squeeze with Stochastic RSI crossing above 80 (overbought) or below 20 (oversold)
-# and volume confirmation signals a strong directional move. Uses 1d EMA trend filter for higher reliability.
-# Designed for low trade frequency (20-40/year) to minimize fee drift.
+# 1d_Pullback_to_200SMA_with_200MA_Volume_Spike
+# Hypothesis: On the daily chart, buy when price pulls back to the 200-day SMA during an uptrend
+# (defined as price above 200-day SMA) with volume confirmation (volume > 2x 20-day average).
+# Sell when price closes above the 20-day EMA (taking profits on short-term strength).
+# Short when price rallies to the 200-day SMA during a downtrend (price below 200-day SMA)
+# with volume confirmation, and cover when price closes below the 20-day EMA.
+# The 200-day SMA acts as dynamic support/resistance, and volume spikes confirm institutional interest.
+# Designed for low trade frequency (10-25/year) to minimize fee dust.
 
-name = "4h_Stochastic_RSI_Breakout"
-timeframe = "4h"
+name = "1d_Pullback_to_200SMA_with_200MA_Volume_Spike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,116 +26,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bandwidth for squeeze detection (20, 2)
-    bb_period = 20
-    bb_mult = 2
-    close_series = pd.Series(close)
-    bb_ma = close_series.ewm(span=bb_period, adjust=False, min_periods=bb_period).mean()
-    bb_std = close_series.ewm(span=bb_period, adjust=False, min_periods=bb_period).std()
-    bb_upper = bb_ma + bb_mult * bb_std
-    bb_lower = bb_ma - bb_mult * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_ma  # Normalized bandwidth
+    # 200-day SMA for trend and support/resistance
+    sma_200 = pd.Series(close).rolling(window=200, min_periods=200).mean().values
     
-    # Bollinger Bandwidth rank (50-period) to identify squeeze (<20th percentile)
-    bbw_series = pd.Series(bb_width.values)
-    bbw_rank = bbw_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False
-    )
-    squeeze_condition = bbw_rank < 0.2  # Below 20th percentile = low volatility squeeze
+    # 20-day EMA for entry/exit timing
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Stochastic RSI (14, 14, 3, 3)
-    rsi_period = 14
-    stoch_period = 14
-    k_smooth = 3
-    d_smooth = 3
+    # 20-day volume average for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # RSI calculation
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Stochastic of RSI
-    rsi_min = rsi.rolling(window=stoch_period, min_periods=stoch_period).min()
-    rsi_max = rsi.rolling(window=stoch_period, min_periods=stoch_period).max()
-    stoch_rsi = (rsi - rsi_min) / (rsi_max - rsi_min) * 100
-    # Replace division by zero with 50 (neutral)
-    stoch_rsi = stoch_rsi.replace([np.inf, -np.inf], 50)
-    
-    # Smooth K and D
-    k = stoch_rsi.ewm(alpha=1/k_smooth, adjust=False, min_periods=k_smooth).mean()
-    d = k.ewm(alpha=1/d_smooth, adjust=False, min_periods=d_smooth).mean()
-    
-    # Volume confirmation (20-period average)
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
-        return res
-    vol_ma = mean_arr(volume, 20)
-    
-    # 1d EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Weekly trend filter (1w) - use only uptrend/downtrend, no counter-trend
+    df_1w = get_htf_data(prices, '1w')
+    sma_50_1w = pd.Series(df_1w['close']).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 50)  # Enough history for indicators
+    start_idx = 200  # Need 200 days for SMA200
     
     for i in range(start_idx, n):
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or \
-           np.isnan(k.iloc[i]) or np.isnan(d.iloc[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(ema_1d_aligned[i]) or \
-           np.isnan(squeeze_condition.iloc[i]):
+        # Skip if any data is not ready
+        if np.isnan(sma_200[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma_20[i]) or np.isnan(sma_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Extract values
-        bb_up = bb_upper[i]
-        bb_low = bb_lower[i]
-        k_val = k.iloc[i]
-        d_val = d.iloc[i]
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
-        squeeze_val = squeeze_condition.iloc[i]
-        trend_filter = ema_1d_aligned[i]
+        # Volume confirmation: volume > 2x 20-day average
+        vol_confirm = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
         
         if position == 0:
-            # Long: price breaks above upper BB, Stochastic RSI K crosses above D (bullish crossover),
-            # during squeeze, with volume confirmation and above 1d EMA
-            if (close[i] > bb_up and 
-                k_val > d_val and k_val < 80 and  # Avoid extreme overbought
-                squeeze_val and vol_confirm and 
-                close[i] > trend_filter):
+            # Long: price near 200-day SMA (within 1%), uptrend (price > SMA200), weekly uptrend, volume spike
+            if (abs(close[i] - sma_200[i]) / sma_200[i] < 0.01 and 
+                close[i] > sma_200[i] and 
+                close[i] > sma_50_1w_aligned[i] and 
+                vol_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower BB, Stochastic RSI K crosses below D (bearish crossover),
-            # during squeeze, with volume confirmation and below 1d EMA
-            elif (close[i] < bb_low and 
-                  k_val < d_val and k_val > 20 and  # Avoid extreme oversold
-                  squeeze_val and vol_confirm and 
-                  close[i] < trend_filter):
+            # Short: price near 200-day SMA (within 1%), downtrend (price < SMA200), weekly downtrend, volume spike
+            elif (abs(close[i] - sma_200[i]) / sma_200[i] < 0.01 and 
+                  close[i] < sma_200[i] and 
+                  close[i] < sma_50_1w_aligned[i] and 
+                  vol_confirm):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below middle BB OR Stochastic RSI crosses below 50 (momentum loss)
-            bb_mid = (bb_up + bb_low) / 2
-            if close[i] < bb_mid or k_val < 50:
+            # Long exit: price closes above 20-day EMA (take profit on short-term strength)
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above middle BB OR Stochastic RSI crosses above 50
-            bb_mid = (bb_up + bb_low) / 2
-            if close[i] > bb_mid or k_val > 50:
+            # Short exit: price closes below 20-day EMA (take profit on short-term weakness)
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
