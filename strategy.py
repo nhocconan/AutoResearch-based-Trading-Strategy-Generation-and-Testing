@@ -1,13 +1,15 @@
+# -*- coding: utf-8 -*-
+# -*- mode: python -*-
 #!/usr/bin/env python3
-# 4H_Pivot_Reversal_With_Volume_Spike
-# Hypothesis: Mean reversion at daily Camarilla pivot levels (S1/R1) with volume spike confirmation.
-# Long when: price touches S1 from below + volume > 2x average + price closes above S1.
-# Short when: price touches R1 from above + volume > 2x average + price closes below R1.
-# Exit when: price crosses the daily pivot point (PP) in opposite direction.
-# Uses 1d Camarilla levels for structure, 4h for execution. Works in ranging markets (2025+).
-# Target: 20-30 trades/year per symbol. Low frequency to avoid fee drag.
 
-name = "4H_Pivot_Reversal_With_Volume_Spike"
+# 4H_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Trade breakouts at Camarilla R1/S1 levels using 1d trend filter and volume confirmation.
+# Long when: price breaks above R1, 1d EMA34 trend up, volume > 2x average.
+# Short when: price breaks below S1, 1d EMA34 trend down, volume > 2x average.
+# Exit when: price retouches the Camarilla Pivot (central level).
+# Target: 20-35 trades/year per symbol. Works in bull/bear by following 1d trend.
+
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,40 +27,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume average (20-period)
+    # 4h price data
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     volume_s = pd.Series(volume)
+    
+    # Volume average (20-period)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # 1d data for Camarilla pivot levels
+    # 1d data for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels: S1, R1, PP
-    # PP = (H + L + C) / 3
-    # S1 = C - (H - L) * 1.1 / 12
-    # R1 = C + (H - L) * 1.1 / 12
-    pp = (prev_high + prev_low + prev_close) / 3
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    # Camarilla formula
+    R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    Pivot = (high_1d + low_1d + close_1d) / 3
     
-    # Align daily levels to 4h timeframe (no look-ahead, uses previous day's close)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    # Align Camarilla levels to 4h
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    Pivot_4h = align_htf_to_ltf(prices, df_1d, Pivot)
+    
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
+    
+    # Align 1d trend to 4h
+    trend_1d_up_4h = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_4h = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Start after volume MA warmup
-        # Skip if any data not ready
-        if (np.isnan(vol_ma[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i])):
+    # Start after we have enough data
+    start_idx = 40
+    
+    for i in range(start_idx, n):
+        # Skip if data not ready
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(Pivot_4h[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(trend_1d_up_4h[i]) or np.isnan(trend_1d_down_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,27 +83,30 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         volume_confirm = vol_ratio > 2.0
         
+        trend_up = trend_1d_up_4h[i] > 0.5
+        trend_down = trend_1d_down_4h[i] > 0.5
+        
         if position == 0:
-            # Long setup: price touches S1 from below with volume, closes above S1
-            if (low[i] <= s1_aligned[i] and close[i] > s1_aligned[i] and volume_confirm):
+            # Enter long: break above R1 + 1d uptrend + volume
+            if close[i] > R1_4h[i] and trend_up and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short setup: price touches R1 from above with volume, closes below R1
-            elif (high[i] >= r1_aligned[i] and close[i] < r1_aligned[i] and volume_confirm):
+            # Enter short: break below S1 + 1d downtrend + volume
+            elif close[i] < S1_4h[i] and trend_down and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: price crosses below pivot point (mean reversion complete)
-            if close[i] < pp_aligned[i]:
+            # Exit when price retouches Pivot (mean reversion to center)
+            if close[i] <= Pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: price crosses above pivot point
-            if close[i] > pp_aligned[i]:
+            # Exit when price retouches Pivot
+            if close[i] >= Pivot_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
