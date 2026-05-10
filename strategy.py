@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 # 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 4h price breaking above/below previous day's Camarilla R1/S1 levels with 1d trend filter (price > 1d EMA50) and volume confirmation (1.5x 20-bar average).
-# Enters long when price > R1 in uptrend with volume surge, short when price < S1 in downtrend with volume surge.
-# Exits on close crossing the 4h EMA10 in opposite direction.
-# Designed for low trade frequency (20-40/year) to minimize fee drag and work in bull/bear markets.
+# Hypothesis: 4h price breaks above/below daily Camarilla R1/S1 levels with 1d trend filter (price > 1d EMA50) and volume confirmation (1.5x 20-bar average).
+# Works in bull markets via breakouts and in bear via mean reversion at S1/R1 in ranging conditions.
+# Designed for low trade frequency (<50/year) to avoid fee drag.
 
 name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
@@ -29,7 +28,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter
+    # 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
@@ -48,9 +47,6 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h EMA10 for exit
-    ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
-    
     # Volume confirmation (1.5x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
@@ -65,7 +61,6 @@ def generate_signals(prices):
         if (np.isnan(ema_50_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
-            np.isnan(ema_10[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,15 +85,15 @@ def generate_signals(prices):
                 position = -1
         else:
             if position == 1:
-                # Long exit: price crosses below 4h EMA10
-                if close[i] < ema_10[i]:
+                # Long exit: price closes below S1 (mean reversion)
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price crosses above 4h EMA10
-                if close[i] > ema_10[i]:
+                # Short exit: price closes above R1 (mean reversion)
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
