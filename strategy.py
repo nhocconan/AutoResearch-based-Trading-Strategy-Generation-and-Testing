@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
-# Hypothesis: Price breaking Camarilla R1/S1 levels on 12h chart with 1-day trend filter and volume spike.
-# R1/S1 are the most relevant levels for intraday breakouts. Daily trend filter ensures alignment with
-# intermediate-term direction. Volume spike confirms institutional participation. Designed for low trade frequency.
-# Targets 20-40 trades per year on 12h timeframe.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Price breaking Camarilla R3/S3 levels on 4h chart with 1-day trend filter and volume spike.
+# Camarilla levels act as strong support/resistance; breakouts with volume and daily trend filter
+# capture sustained moves. Daily trend filter ensures alignment with dominant market direction.
+# Volume spike confirms institutional participation. Designed for low trade frequency to minimize fee drag.
+# Targets 20-50 trades per year on 4h timeframe.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla pivot calculation
+    # Get daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,34 +34,30 @@ def generate_signals(prices):
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous day
-    # Camarilla: R1 = C + (H-L)*1.083/2, S1 = C - (H-L)*1.083/2
-    # where C = (H+L+CLOSE)/3 of previous day
-    
-    # Calculate daily typical price and range for Camarilla
     typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
     range_hl = df_1d['high'] - df_1d['low']
     
-    # Camarilla R1 and S1 levels
-    r1 = typical_price + range_hl * 1.083 / 2
-    s1 = typical_price - range_hl * 1.083 / 2
+    # Camarilla R3 and S3 levels
+    r3 = typical_price + range_hl * 1.25 / 2
+    s3 = typical_price - range_hl * 1.25 / 2
     
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
     
-    # Volume confirmation (12-period MA on 12h chart ≈ 6 days)
-    volume_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume confirmation (6-period MA on 4h chart ≈ 1 day)
+    volume_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA (34), volume MA (12), and Camarilla (need at least 1 day)
-    start_idx = max(34, 12)
+    # Warmup: need daily EMA (34), volume MA (6), and Camarilla (need at least 1 day)
+    start_idx = max(34, 6)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +68,31 @@ def generate_signals(prices):
         downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.8
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         # Breakout conditions
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above R1 + daily uptrend + volume spike
+            # Long entry: price breaks above R3 + daily uptrend + volume spike
             if breakout_long and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 + daily downtrend + volume spike
+            # Short entry: price breaks below S3 + daily downtrend + volume spike
             elif breakout_short and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks back below R1 or daily trend turns down
-            if close[i] < r1_aligned[i] or not uptrend:
+            # Long exit: price breaks back below R3 or daily trend turns down
+            if close[i] < r3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks back above S1 or daily trend turns up
-            if close[i] > s1_aligned[i] or not downtrend:
+            # Short exit: price breaks back above S3 or daily trend turns up
+            if close[i] > s3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
