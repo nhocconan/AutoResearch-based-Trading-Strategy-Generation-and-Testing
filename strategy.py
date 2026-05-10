@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""
-12H_Volume_Regime_Filtered_Breakout
-Hypothesis: Combines price breakouts above/below 20-period high/low on 12h chart
-with volume confirmation (>1.5x 20-period average) and a chop regime filter
-(CHOP > 61.8 = range, only trade breakouts when CHOP < 38.2 = trending).
-Designed for low-frequency, high-conviction trades in both bull and bear markets.
-Target: 15-30 trades/year, position size 0.25.
-"""
+# 4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Uses 4h timeframe with 1d timeframe for trend confirmation via EMA(34).
+# Enters long when price breaks above daily R1 in uptrend (close > EMA34) with volume > 2x 20-period average.
+# Enters short when price breaks below daily S1 in downtrend (close < EMA34) with volume confirmation.
+# Exits when price returns to opposite level (S1 for long, R1 for short) or trend reverses.
+# Uses daily EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
+# Targets 20-50 trades per year on 4h timeframe with position size 0.25 to minimize fee drag.
 
-name = "12H_Volume_Regime_Filtered_Breakout"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,60 +25,72 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Get 1d data for Camarilla pivots and EMA trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Choppiness Index (14-period)
-    atr = pd.Series(np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), np.abs(low - np.roll(close, 1)))).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10((atr * 14) / (highest_high - lowest_low)) / np.log10(14)
+    # Calculate 1d EMA(34) for trend direction
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: 1.5x 20-period average
+    # Calculate Camarilla pivot levels from previous 1d bar
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    pivot_range = prev_high - prev_low
+    r1_level = prev_close + 1.1 * (pivot_range / 12)  # R1 = C + 1.1*(H-L)/12
+    s1_level = prev_close - 1.1 * (pivot_range / 12)  # S1 = C - 1.1*(H-L)/12
+    
+    # Align pivot levels to 4h timeframe (available after 1d bar closes)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_level)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_level)
+    
+    # Volume filter: volume > 2x 20-period average on 4h chart
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Warmup for indicators
+    start_idx = max(50, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(chop[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: only trade in trending markets (CHOP < 38.2)
-        is_trending = chop[i] < 38.2
+        # Trend filter: price above/below 1d EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long entry: break above 20-period high with volume spike in trending market
-            if (close[i] > high_max[i] and 
-                volume[i] > vol_threshold[i] and 
-                is_trending):
+            # Long entry: price breaks above R1 in uptrend with volume spike
+            if (close[i] > r1_aligned[i] and 
+                price_above_ema and 
+                volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below 20-period low with volume spike in trending market
-            elif (close[i] < low_min[i] and 
-                  volume[i] > vol_threshold[i] and 
-                  is_trending):
+            # Short entry: price breaks below S1 in downtrend with volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  price_below_ema and 
+                  volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below 20-period low or trend ends
-            if (close[i] < low_min[i] or 
-                chop[i] >= 38.2):
+            # Long exit: price returns to S1 or trend reverses to downtrend
+            if (close[i] < s1_aligned[i] or 
+                price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above 20-period high or trend ends
-            if (close[i] > high_max[i] or 
-                chop[i] >= 38.2):
+            # Short exit: price returns to R1 or trend reverses to uptrend
+            if (close[i] > r1_aligned[i] or 
+                price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
