@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Keltner_MeanReversion_4hTrend
-# Hypothesis: In 1h timeframe, price often reverts to the mean during range-bound periods, but only when aligned with the 4h trend. 
-# Uses Keltner Channel (20, 1.5) for mean reversion signals and 4h EMA50 for trend filter. 
-# Long when price touches lower KC in 4h uptrend, short when price touches upper KC in 4h downtrend. 
-# Volume filter (>1.5x 20-period MA) confirms momentum. 
-# Session filter (08-20 UTC) reduces noise. 
-# Target: 15-30 trades/year per symbol via tight entry conditions.
+# 6h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume
+# Hypothesis: Weekly R4/S4 levels from weekly pivot points act as strong breakout levels.
+# Price breaking above weekly R4 in a daily uptrend or below weekly S4 in a daily downtrend
+# indicates strong momentum. Volume confirmation filters false breakouts.
+# Weekly timeframe provides stronger structural levels than daily, reducing false signals.
+# Works in bull markets by riding uptrends and in bear markets by following downtrends.
 
-name = "1h_Keltner_MeanReversion_4hTrend"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,75 +24,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot levels (R4/S4)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # 1h Keltner Channel (20, 1.5)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
-    atr = pd.Series(np.abs(high - low)).rolling(window=20, min_periods=20).mean()
-    upper_kc = ema_20 + 1.5 * atr
-    lower_kc = ema_20 - 1.5 * atr
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (20-period MA)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    # Calculate weekly pivot levels and R4/S4
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    weekly_r4 = weekly_r3 + (weekly_high - weekly_low)
+    weekly_s4 = weekly_s3 - (weekly_high - weekly_low)
+    
+    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4)
+    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4)
+    
+    # Volume confirmation (50-period MA on 6h = ~12.5 days)
+    volume_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA50_4h (50), EMA20 (20), ATR (20), volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: need daily EMA34 (34), weekly pivot (5), volume MA (50)
+    start_idx = max(34, 5, 50)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(ema_20[i]) or 
-            np.isnan(upper_kc[i]) or 
-            np.isnan(lower_kc[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(weekly_r4_aligned[i]) or 
+            np.isnan(weekly_s4_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 4h trend filter
-        uptrend_4h = close[i] > ema_50_4h_aligned[i]
-        downtrend_4h = close[i] < ema_50_4h_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation
+        # Volume confirmation (>1.5x MA to balance sensitivity and filtering)
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: 4h uptrend + price touches lower KC + volume + session
-            if uptrend_4h and close[i] <= lower_kc[i] and volume_confirm and in_session[i]:
-                signals[i] = 0.20
+            # Long entry: uptrend + price breaks above weekly R4 + volume
+            if uptrend and close[i] > weekly_r4_aligned[i] and volume_confirm:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: 4h downtrend + price touches upper KC + volume + session
-            elif downtrend_4h and close[i] >= upper_kc[i] and volume_confirm and in_session[i]:
-                signals[i] = -0.20
+            # Short entry: downtrend + price breaks below weekly S4 + volume
+            elif downtrend and close[i] < weekly_s4_aligned[i] and volume_confirm:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 4h trend breaks or price crosses above EMA20
-            if not uptrend_4h or close[i] >= ema_20[i]:
+            # Long exit: trend breaks or price re-enters below weekly R4
+            if not uptrend or close[i] < weekly_r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: 4h trend breaks or price crosses below EMA20
-            if not downtrend_4h or close[i] <= ema_20[i]:
+            # Short exit: trend breaks or price re-enters above weekly S4
+            if not downtrend or close[i] > weekly_s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
