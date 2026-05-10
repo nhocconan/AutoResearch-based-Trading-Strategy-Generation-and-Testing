@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12H_1D_Adaptive_RSI_Divergence
-# Hypothesis: On 12h timeframe, RSI divergence from price at extreme levels (oversold/overbought)
-# combined with 1d trend filter captures reversals in both bull and bear markets.
-# Uses 1d EMA50 for trend direction and 12h RSI(14) with bullish/bearish divergence detection.
-# Divergence occurs when price makes new high/low but RSI does not, indicating weakening momentum.
-# Works in trending markets by catching pullbacks and in ranging markets by catching reversals.
-# Target: 20-30 trades/year per symbol with low turnover to minimize fee drag.
+# 4H_1D_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Camarilla R3/S3 levels from 1d act as strong reversal points when confirmed by daily trend and volume spikes.
+# Long when price breaks above R3 in a daily uptrend with volume spike.
+# Short when price breaks below S3 in a daily downtrend with volume spike.
+# Uses 1d EMA34 for trend filter and volume > 1.5x 20-period average for confirmation.
+# Works in bull/bear by following daily trend direction. Target: 20-40 trades/year per symbol.
 
-name = "12H_1D_Adaptive_RSI_Divergence"
-timeframe = "12h"
+name = "4H_1D_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,61 +16,63 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA50 for trend filter
+    # Calculate Camarilla levels for 1d
+    # R4 = close + 1.5*(high - low)
+    # R3 = close + 1.1*(high - low)
+    # S3 = close - 1.1*(high - low)
+    # S4 = close - 1.5*(high - low)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * hl_range
+    s3 = close_1d - 1.1 * hl_range
+    
+    # Daily EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Trend: bullish if close > EMA50, bearish if close < EMA50
-    bullish_trend = close_1d > ema50_1d
-    bearish_trend = close_1d < ema50_1d
+    # Trend: bullish if close > EMA34, bearish if close < EMA34
+    bullish_trend = close_1d > ema34_1d
+    bearish_trend = close_1d < ema34_1d
     
-    # Align trend to 12h
+    # Volume spike: volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma20 = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > 1.5 * vol_ma20
+    
+    # Align to 4h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
     bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
-    
-    # Calculate RSI on 12h data
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Initialize before smoothing period
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Lookback period for divergence detection
-    lookback = 10
+    # Start after we have enough data
+    start_idx = 50
     
-    for i in range(lookback, n):
-        # Skip if trend data not ready
-        if (np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(rsi[i])):
+    for i in range(start_idx, n):
+        # Skip if data not ready
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
+            np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,45 +80,29 @@ def generate_signals(prices):
         
         bullish = bullish_aligned[i] > 0.5
         bearish = bearish_aligned[i] > 0.5
+        vol_spike = volume_spike_aligned[i] > 0.5
         
         if position == 0:
-            # Check for bullish divergence: price makes lower low, RSI makes higher low
-            if bullish:
-                # Find lowest price in lookback window
-                lookback_low_idx = np.argmin(low[i-lookback:i+1])
-                abs_low_idx = i - lookback + lookback_low_idx
-                
-                # Current price is new low compared to lookback period
-                if low[i] <= low[abs_low_idx] and abs_low_idx < i:
-                    # Check if RSI at current point is higher than RSI at lookback low
-                    if rsi[i] > rsi[abs_low_idx] and rsi[i] < 40:  # Oversold condition
-                        signals[i] = 0.25
-                        position = 1
-            
-            # Check for bearish divergence: price makes higher high, RSI makes lower high
-            elif bearish:
-                # Find highest price in lookback window
-                lookback_high_idx = np.argmax(high[i-lookback:i+1])
-                abs_high_idx = i - lookback + lookback_high_idx
-                
-                # Current price is new high compared to lookback period
-                if high[i] >= high[abs_high_idx] and abs_high_idx < i:
-                    # Check if RSI at current point is lower than RSI at lookback high
-                    if rsi[i] < rsi[abs_high_idx] and rsi[i] > 60:  # Overbought condition
-                        signals[i] = -0.25
-                        position = -1
+            # Enter long: price breaks above R3, bullish trend, volume spike
+            if high[i] > r3_aligned[i] and bullish and vol_spike:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price breaks below S3, bearish trend, volume spike
+            elif low[i] < s3_aligned[i] and bearish and vol_spike:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: bearish trend or RSI becomes overbought
-            if bearish or rsi[i] > 70:
+            # Exit long: price breaks below S3 or bearish trend
+            if low[i] < s3_aligned[i] or bearish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish trend or RSI becomes oversold
-            if bullish or rsi[i] < 30:
+            # Exit short: price breaks above R3 or bullish trend
+            if high[i] > r3_aligned[i] or bullish:
                 signals[i] = 0.0
                 position = 0
             else:
