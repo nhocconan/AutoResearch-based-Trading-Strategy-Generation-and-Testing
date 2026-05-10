@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6H_1W_1D_OrderBlock_Reversal_Trend
-# Hypothesis: On 6h timeframe, identify institutional order blocks from weekly candles and trade reversals
-# when price returns to these blocks with 1d trend confirmation. In bull markets, buy at demand zones;
-# in bear markets, sell at supply zones. Uses weekly structure for institutional levels and daily
-# trend filter to avoid counter-trend trades. Targets 15-35 trades/year per symbol.
+# 1d_1w_TRIX_Zero_Cross_Volume_Confirm
+# Hypothesis: Daily TRIX (triple smoothed EMA) zero-cross for trend direction with 1-week EMA trend filter and volume confirmation.
+# TRIX is effective in both trending and ranging markets; zero-cross indicates momentum shift.
+# Combined with weekly EMA for higher timeframe trend bias and volume to confirm breakout strength.
+# Designed for low trade frequency (<25/year) to minimize fee drag.
 
-name = "6H_1W_1D_OrderBlock_Reversal_Trend"
-timeframe = "6h"
+name = "1d_1w_TRIX_Zero_Cross_Volume_Confirm"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,103 +18,114 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Get daily data for TRIX calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
+    
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for order blocks (institutional supply/demand zones)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # Calculate TRIX (15-period triple EMA, then 1-period percent change)
+    close_1d = df_1d['close'].values
+    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix = pd.Series(ema3).pct_change() * 100  # percent change
+    trix_values = trix.values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Weekly EMA30 for trend filter
+    close_1w = df_1w['close'].values
+    ema30_1w = pd.Series(close_1w).ewm(span=30, adjust=False, min_periods=30).mean().values
     
-    # Weekly order blocks: bullish (demand) and bearish (supply) zones
-    # Bullish OB: prior bearish candle followed by bullish candle - use low of bearish candle as demand zone
-    # Bearish OB: prior bullish candle followed by bearish candle - use high of bullish candle as supply zone
-    weekly_open = df_1w['open'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # ATR for stoploss
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Identify bullish order blocks (demand zones)
-    weekly_bearish = weekly_close < weekly_open  # prior candle bearish
-    weekly_bullish = weekly_close > weekly_open  # current candle bullish
-    bullish_ob = weekly_bearish & weekly_bullish  # bearish then bullish = demand zone
-    ob_demand = np.where(bullish_ob, weekly_low, np.nan)  # low of bearish candle
+    # Volume confirmation (1.5x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Identify bearish order blocks (supply zones)
-    weekly_bullish_prior = weekly_close > weekly_open  # prior candle bullish
-    weekly_bearish_curr = weekly_close < weekly_open   # current candle bearish
-    bearish_ob = weekly_bullish_prior & weekly_bearish_curr  # bullish then bearish = supply zone
-    ob_supply = np.where(bearish_ob, weekly_high, np.nan)  # high of bullish candle
-    
-    # Forward fill to create persistent zones until next OB of same type
-    ob_demand_series = pd.Series(ob_demand)
-    ob_demand_ffilled = ob_demand_series.ffill().values
-    
-    ob_supply_series = pd.Series(ob_supply)
-    ob_supply_ffilled = ob_supply_series.ffill().values
-    
-    # Daily trend filter: EMA(34) on close
-    daily_close = df_1d['close'].values
-    ema_34 = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = daily_close > ema_34
-    
-    # Align weekly order blocks and daily trend to 6h
-    ob_demand_aligned = align_htf_to_ltf(prices, df_1w, ob_demand_ffilled)
-    ob_supply_aligned = align_htf_to_ltf(prices, df_1w, ob_supply_ffilled)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    # Align indicators to daily timeframe
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_values)
+    ema30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema30_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    # Start after we have enough data
-    start_idx = 100
+    # Warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(ob_demand_aligned[i]) or np.isnan(ob_supply_aligned[i]) or 
-            np.isnan(trend_up_aligned[i])):
+        # Skip if any critical values are NaN
+        if (np.isnan(trix_aligned[i]) or
+            np.isnan(ema30_1w_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
             continue
         
+        # TRIX zero-cross for momentum
+        trix_pos = trix_aligned[i] > 0
+        trix_neg = trix_aligned[i] < 0
+        
+        # Weekly EMA trend filter
+        bullish_trend = close[i] > ema30_1w_aligned[i]
+        bearish_trend = close[i] < ema30_1w_aligned[i]
+        
+        # Volume confirmation
+        volume_surge = volume[i] > 1.5 * vol_ma[i]
+        
         if position == 0:
-            # Enter long: price returns to weekly demand zone (bullish OB) with daily uptrend
-            if (close[i] <= ob_demand_aligned[i] * 1.005 and  # within 0.5% of demand zone
-                close[i] >= ob_demand_aligned[i] * 0.995 and
-                trend_up_aligned[i]):
+            # Long: TRIX positive in bullish weekly trend with volume surge
+            if trix_pos and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price returns to weekly supply zone (bearish OB) with daily downtrend
-            elif (close[i] <= ob_supply_aligned[i] * 1.005 and  # within 0.5% of supply zone
-                  close[i] >= ob_supply_aligned[i] * 0.995 and
-                  not trend_up_aligned[i]):
+                highest_high_since_entry = high[i]
+            # Short: TRIX negative in bearish weekly trend with volume surge
+            elif trix_neg and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
-        
-        elif position == 1:
-            # Exit long: price reaches supply zone or trend turns down
-            if (close[i] >= ob_supply_aligned[i] * 0.995 or  # reached supply zone
-                not trend_up_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit short: price reaches demand zone or trend turns up
-            if (close[i] <= ob_demand_aligned[i] * 1.005 or  # reached demand zone
-                trend_up_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                lowest_low_since_entry = low[i]
+        else:
+            if position == 1:
+                # Update highest high since entry
+                if high[i] > highest_high_since_entry:
+                    highest_high_since_entry = high[i]
+                
+                # Trailing stop: exit if price drops 3.0*ATR from highest high
+                if close[i] < highest_high_since_entry - 3.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    highest_high_since_entry = 0.0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Update lowest low since entry
+                if low[i] < lowest_low_since_entry:
+                    lowest_low_since_entry = low[i]
+                
+                # Trailing stop: exit if price rises 3.0*ATR from lowest low
+                if close[i] > lowest_low_since_entry + 3.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                    lowest_low_since_entry = 0.0
+                else:
+                    signals[i] = -0.25
     
     return signals
