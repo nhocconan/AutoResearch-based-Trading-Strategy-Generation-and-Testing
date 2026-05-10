@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: 4h breakout above/below daily Camarilla R3/S3 with 12h trend filter and volume confirmation.
-# Uses 12h trend (price > 12h EMA50) to filter trades in trending markets, volume surge for confirmation.
-# Designed for low trade frequency (<30/year) to avoid fee drag. Works in bull/bear via 12h trend filter.
+# 1h_4h1d_Camarilla_R1_S1_Breakout_RSI_Momentum
+# Hypothesis: 1h breakout above/below daily Camarilla R1/S1 with RSI momentum filter and volume confirmation.
+# Uses 4h trend filter (price > 4h EMA50) for bias. Designed for low trade frequency (<30/year) to avoid fee drag.
+# Works in bull/bear via 4h trend filter and momentum confirmation to avoid whipsaws.
 
-name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_4h1d_Camarilla_R1_S1_Breakout_RSI_Momentum"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,42 +17,51 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
     # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 4h OHLCV
+    # 1h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily high, low, close for Camarilla levels (R3/S3)
+    # 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    
+    # Daily high, low, close for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R3 = close + 1.1*(high-low)/4
-    # Camarilla S3 = close - 1.1*(high-low)/4
-    r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    # Camarilla R1 = close + 1.1*(high-low)/12
+    # Camarilla S1 = close - 1.1*(high-low)/12
+    r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align R3 and S3 to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align R1 and S1 to 1h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # RSI(14) for momentum filter
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation (2.5x 20-period average)
+    # Volume confirmation (2.0x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -63,46 +72,50 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or
+        if (np.isnan(ema_50_aligned[i]) or
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 12h EMA50
-        bullish_trend = close[i] > ema_50_12h_aligned[i]
-        bearish_trend = close[i] < ema_50_12h_aligned[i]
+        # Trend filter from 4h EMA50
+        bullish_trend = close[i] > ema_50_aligned[i]
+        bearish_trend = close[i] < ema_50_aligned[i]
         
-        # Volume confirmation (2.5x average)
-        volume_surge = volume[i] > 2.5 * vol_ma[i]
+        # Volume confirmation (2.0x average)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        
+        # RSI momentum: avoid overbought/oversold extremes
+        rsi_momentum_long = rsi[i] > 50 and rsi[i] < 70
+        rsi_momentum_short = rsi[i] < 50 and rsi[i] > 30
         
         if position == 0:
-            # Long: breakout above R3 in bullish trend with volume surge
-            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
-                signals[i] = 0.25
+            # Long: breakout above R1 in bullish trend with volume surge and RSI momentum
+            if close[i] > r1_aligned[i] and bullish_trend and volume_surge and rsi_momentum_long:
+                signals[i] = 0.20
                 position = 1
-            # Short: breakdown below S3 in bearish trend with volume surge
-            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
-                signals[i] = -0.25
+            # Short: breakdown below S1 in bearish trend with volume surge and RSI momentum
+            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge and rsi_momentum_short:
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit on opposite signal or trend reversal
             if position == 1:
-                # Exit if price breaks below S3 or trend turns bearish
-                if close[i] < s3_aligned[i] or not bullish_trend:
+                # Exit: close below R1 or RSI turns bearish
+                if close[i] < r1_aligned[i] or rsi[i] < 40:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit if price breaks above R3 or trend turns bullish
-                if close[i] > r3_aligned[i] or not bearish_trend:
+                # Exit: close above S1 or RSI turns bullish
+                if close[i] > s1_aligned[i] or rsi[i] > 60:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
