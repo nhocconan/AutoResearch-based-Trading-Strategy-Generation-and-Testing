@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_RSI_Pullback
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-RSI for pullback entries, and volume confirmation to filter false signals.
-KAMA adapts to market noise, reducing whipsaws in sideways markets.
-Works in bull markets by buying pullbacks in uptrends and in bear markets by selling rallies in downtrends.
-Target: 15-25 trades/year to stay within fee limits.
+6h_Adaptive_RSI_Trend_Volume
+Hypothesis: On 6h timeframe, use adaptive RSI (based on volatility) combined with 1-day EMA trend filter and volume spike for entries.
+In high volatility periods, RSI thresholds widen to capture trends; in low volatility, they narrow for mean reversion.
+This adapts to both bull and bear markets by adjusting sensitivity to market conditions.
+Target: 15-25 trades/year to minimize fee drag while maintaining edge.
 """
 
-name = "1d_KAMA_Trend_RSI_Pullback"
-timeframe = "1d"
+name = "6h_Adaptive_RSI_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,110 +17,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter (stronger filter than daily)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get daily data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate KAMA on daily close
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get price, volume
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_length = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
+    # Calculate ATR(14) for volatility measurement
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=er_length))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Pad the beginning with zeros
-    er = np.concatenate([np.zeros(er_length), er])
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Adaptive RSI thresholds based on ATR ratio (current ATR vs 50-period average)
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    atr_ratio = atr_14 / (atr_50 + 1e-10)
     
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # In high volatility (atr_ratio > 1.2): widen thresholds for trend following
+    # In low volatility (atr_ratio < 0.8): narrow thresholds for mean reversion
+    # Normal: use standard 30/70
+    rsi_long_threshold = np.where(atr_ratio > 1.2, 20,
+                     np.where(atr_ratio < 0.8, 40, 30))
+    rsi_short_threshold = np.where(atr_ratio > 1.2, 80,
+                      np.where(atr_ratio < 0.8, 60, 70))
     
-    # Align KAMA to daily (already same timeframe, but using for consistency)
-    kama_aligned = kama  # No alignment needed for same timeframe
-    
-    # Calculate RSI(14) for pullback identification
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.zeros_like(close_prices)
-        avg_loss = np.zeros_like(close_prices)
-        
-        # Initial average
-        if len(close_prices) > period:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            
-            # Wilder's smoothing
-            for i in range(period + 1, len(close_prices)):
-                avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period - 1) + loss[i-1]) / period
-        
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close, 14)
-    
-    # Volume filter: current volume > 1.5x 20-day EMA
+    # Volume filter: current volume > 2.0x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
-    
-    # Weekly trend filter: EMA 34 on weekly close
-    ema_34_1w = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    volume_filter = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup period: need enough data for KAMA, RSI, and weekly EMA
-    start_idx = max(30, 34)  # KAMA needs ~30, weekly EMA needs 34
+    # Warmup: need RSI(14), ATR(14,50), EMA34
+    start_idx = max(14, 50, 34)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(rsi_long_threshold[i]) or
+            np.isnan(rsi_short_threshold[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(atr_14[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: KAMA uptrend (price > KAMA) + RSI pullback (RSI < 40) + volume
-            if close[i] > kama_aligned[i] and rsi[i] < 40 and volume_filter[i]:
+            # Long: RSI below adaptive long threshold with uptrend and volume
+            if rsi[i] < rsi_long_threshold[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA downtrend (price < KAMA) + RSI pullback (RSI > 60) + volume
-            elif close[i] < kama_aligned[i] and rsi[i] > 60 and volume_filter[i]:
+            # Short: RSI above adaptive short threshold with downtrend and volume
+            elif rsi[i] > rsi_short_threshold[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price below KAMA or RSI overbought
-            if close[i] < kama_aligned[i] or rsi[i] > 70:
+            # Long exit: RSI crosses above 50 (momentum fade) or trend change
+            if rsi[i] > 50 or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price above KAMA or RSI oversold
-            if close[i] > kama_aligned[i] or rsi[i] < 30:
+            # Short exit: RSI crosses below 50 (momentum fade) or trend change
+            if rsi[i] < 50 or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
