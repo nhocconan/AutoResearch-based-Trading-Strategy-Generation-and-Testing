@@ -1,61 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Triple_RSI_Divergence_1dTrend_Volume
-# Hypothesis: Combines RSI divergence detection with higher-timeframe trend and volume confirmation.
-# Uses 3-period RSI for sensitivity to short-term exhaustion, confirmed by daily trend filter.
-# Works in bull markets by buying oversold dips in uptrends, and in bear markets by selling
-# overbought rallies in downtrends. Volume confirmation reduces false signals. Designed for
-# low frequency (~15-30 trades/year) to minimize fee drag on 6h timeframe.
+# 4h_KAMA_Direction_RSI_Trend_Chop_Filter
+# Hypothesis: KAMA adapts to market efficiency, capturing trends in bull and sideways moves in bear. RSI filters extremes, Choppiness index avoids whipsaws in low volatility. Designed for ~30-60 trades/year to minimize fee drag.
 
-name = "6h_Triple_RSI_Divergence_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_Trend_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI with given period."""
-    delta = np.diff(prices)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(prices)
-    avg_loss = np.zeros_like(prices)
-    
-    # Wilder's smoothing
-    avg_gain[period] = np.mean(gain[:period])
-    avg_loss[period] = np.mean(loss[:period])
-    
-    for i in range(period + 1, len(prices)):
-        avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def detect_divergence(price, rsi, lookback=10):
-    """Detect bullish and bearish divergence."""
-    bullish_div = np.zeros_like(price, dtype=bool)
-    bearish_div = np.zeros_like(price, dtype=bool)
-    
-    for i in range(lookback, len(price)):
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        if (price[i] < price[i-lookback] and 
-            rsi[i] > rsi[i-lookback]):
-            # Check if this is a meaningful low point
-            if np.all(price[i-lookback:i] >= price[i]) and np.all(rsi[i-lookback:i] <= rsi[i]):
-                bullish_div[i] = True
-        
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        if (price[i] > price[i-lookback] and 
-            rsi[i] < rsi[i-lookback]):
-            # Check if this is a meaningful high point
-            if np.all(price[i-lookback:i] <= price[i]) and np.all(rsi[i-lookback:i] >= rsi[i]):
-                bearish_div[i] = True
-    
-    return bullish_div, bearish_div
 
 def generate_signals(prices):
     n = len(prices)
@@ -72,8 +25,43 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 3-period RSI for sensitivity
-    rsi_3 = calculate_rsi(close, 3)
+    # KAMA on close (ER=10, fast=2, slow=30)
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(10))
+    volatility = close_series.diff().abs().rolling(10).sum()
+    er = change / volatility.replace(0, np.nan)
+    er = er.fillna(0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = [close[0]]
+    for i in range(1, len(close)):
+        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
+    kama = np.array(kama)
+    
+    # RSI(14)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
+    
+    # Choppiness Index (14)
+    atr = np.zeros(n)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(sum_atr14 / (highest_high - lowest_low)) / np.log10(14)
+    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
     
     # Daily trend: EMA34 on daily close
     close_1d = df_1d['close'].values
@@ -81,51 +69,44 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align daily trend to 6h
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
-    
-    # Volume confirmation: 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Detect RSI divergence
-    bullish_div, bearish_div = detect_divergence(close, rsi_3, lookback=8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi_3[i]) or 
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
-        
         if position == 0:
-            # Enter long: bullish RSI divergence with daily uptrend and volume
-            if (bullish_div[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: price above KAMA, RSI not overbought, chop not extreme, daily uptrend
+            if (close[i] > kama[i] and 
+                rsi[i] < 70 and 
+                chop[i] < 61.8 and 
+                trend_1d_up_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish RSI divergence with daily downtrend and volume
-            elif (bearish_div[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: price below KAMA, RSI not oversold, chop not extreme, daily downtrend
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 30 and 
+                  chop[i] < 61.8 and 
+                  trend_1d_down_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when bearish divergence appears or trend fails
-            if (bearish_div[i] or 
+            # Exit when price crosses below KAMA or trend fails
+            if (close[i] < kama[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -133,8 +114,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when bullish divergence appears or trend fails
-            if (bullish_div[i] or 
+            # Exit when price crosses above KAMA or trend fails
+            if (close[i] > kama[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
