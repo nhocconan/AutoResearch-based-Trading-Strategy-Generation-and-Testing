@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R4_S4_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from Camarilla R4/S4 levels on 12h with 1d trend filter (EMA50) and volume confirmation.
-# Camarilla R4/S4 represent stronger institutional levels than R3/S3, reducing false breakouts.
-# 1d EMA50 filters trend direction, volume confirms breakout strength.
-# Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 4h_Camarilla_R4_S4_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts from Camarilla R4/S4 levels on 4h with 1d trend filter (EMA34) and volume confirmation. R4/S4 levels represent stronger institutional support/resistance zones than R3/S3, offering higher probability breakouts with lower frequency to avoid overtrading. Designed for 4h to achieve 19-50 trades/year in both bull and bear markets by combining strong price levels, trend alignment, and volume confirmation.
 
-name = "12h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,21 +20,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels, EMA50 trend, and volume
+    # 1d data for Camarilla levels, EMA34 trend, and volume
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Camarilla levels (based on previous day) - using R4/S4 for stronger levels
+    # Camarilla levels (based on previous day)
     def calculate_camarilla(h, l, c):
         # Typical price for the day
         typical = (h + l + c) / 3.0
         range_ = h - l
         # Camarilla levels
-        R4 = c + (range_ * 1.1000 / 2)  # R4 level
-        S4 = c - (range_ * 1.1000 / 2)  # S4 level
+        R4 = c + (range_ * 1.1000 / 2)
+        S4 = c - (range_ * 1.1000 / 2)
         return R4, S4
     
     R4 = np.full_like(close_1d, np.nan)
@@ -45,8 +42,8 @@ def generate_signals(prices):
     for i in range(1, len(close_1d)):
         R4[i], S4[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume confirmation: 20-period average
     def mean_arr(arr, p):
@@ -60,41 +57,41 @@ def generate_signals(prices):
     # Align all indicators to lower timeframe (wait for 1d bar to close)
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
     S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 40  # Need enough history for indicators
     
     for i in range(start_idx, n):
         if np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or \
-           np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R4, above EMA50, strong volume
-            if close[i] > R4_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: price breaks above R4, above EMA34, strong volume
+            if close[i] > R4_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4, below EMA50, strong volume
-            elif close[i] < S4_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: price breaks below S4, below EMA34, strong volume
+            elif close[i] < S4_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S4 or below EMA50
-            if close[i] < S4_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Long exit: price drops below S4 or below EMA34
+            if close[i] < S4_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R4 or above EMA50
-            if close[i] > R4_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Short exit: price rises above R4 or above EMA34
+            if close[i] > R4_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
