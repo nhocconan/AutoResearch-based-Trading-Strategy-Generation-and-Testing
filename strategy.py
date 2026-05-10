@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Direction_RSI_Trend
-# Hypothesis: 12h timeframe with KAMA direction filter and RSI trend filter.
-# KAMA adapts to market conditions, reducing whipsaws in choppy markets.
-# RSI confirms momentum direction (RSI > 50 for long, RSI < 50 for short).
-# Designed for 12h timeframe to target 15-30 trades/year per symbol.
-# Works in bull/bear by requiring both KAMA and RSI to agree on trend.
+# 4h_Choppiness_Adjusted_Donchian_Breakout_Volume
+# Hypothesis: 4h Donchian breakout (20-period) filtered by 12h choppiness regime (Choppiness Index > 61.8 = range-bound, < 38.2 = trending).
+# In trending regimes (CHOP < 38.2), we take breakouts in the direction of the 12h EMA trend.
+# Volume confirmation (2x 24-period MA) filters weak breakouts. Designed to avoid false breakouts in chop.
+# Works in bull/bear by using trend filter + regime filter to avoid whipsaws. Target: 20-50 trades/year.
 
-name = "12h_KAMA_Direction_RSI_Trend"
-timeframe = "12h"
+name = "4h_Choppiness_Adjusted_Donchian_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,94 +15,117 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Get 1d data for KAMA and RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend and choppiness
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d KAMA (adaptive moving average)
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d RSI(14)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate 12h Choppiness Index (14-period)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align 1d indicators to 12h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # align to same length
+    
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Sum of ATR over 14 periods
+    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    
+    # Highest high and lowest low over 14 periods
+    hh = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+    
+    # Choppiness Index: 100 * log10(sum(ATR)/ (HH - LL)) / log10(14)
+    # Avoid division by zero
+    range_hl = hh - ll
+    chop = np.full_like(close_12h, np.nan)
+    mask = (range_hl > 0) & ~np.isnan(sum_atr)
+    chop[mask] = 100 * np.log10(sum_atr[mask] / range_hl[mask]) / np.log10(14)
+    
+    # Trend: 12h close > EMA50
+    uptrend_12h = close_12h > ema_50_12h
+    downtrend_12h = close_12h < ema_50_12h
+    
+    # Align 12h indicators to 4h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    chop_aligned = align_htf_to_ltf(prices, df_12h, chop)
+    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
+    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    
+    # 4h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (24-period for 4h = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for KAMA and RSI
-    start_idx = 30
+    # Warmup: need enough history for 12h EMA50 (50) and Donchian (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_aligned[i]) or
-            np.isnan(rsi_aligned[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(chop_aligned[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend: price > KAMA and RSI > 50 for long, price < KAMA and RSI < 50 for short
-        kama_trend = close[i] > kama_aligned[i]
-        rsi_bullish = rsi_aligned[i] > 50
-        kama_downtrend = close[i] < kama_aligned[i]
-        rsi_bearish = rsi_aligned[i] < 50
+        # Regime filter: only trade when market is trending (CHOP < 38.2)
+        if chop_aligned[i] >= 38.2:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Volume confirmation (2x average for significance)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price above KAMA and RSI bullish
-            if kama_trend and rsi_bullish:
+            # Long: Breakout above Donchian high in uptrend with volume surge
+            if close[i] > donchian_high[i] and uptrend_12h_aligned[i] > 0.5 and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI bearish
-            elif kama_downtrend and rsi_bearish:
+            # Short: Breakdown below Donchian low in downtrend with volume surge
+            elif close[i] < donchian_low[i] and downtrend_12h_aligned[i] > 0.5 and volume_surge:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: price below KAMA or RSI turns bearish
-                if not kama_trend or not rsi_bullish:
+                # Long exit: close below Donchian low or trend fails
+                if close[i] < donchian_low[i] or uptrend_12h_aligned[i] <= 0.5:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price above KAMA or RSI turns bullish
-                if not kama_downtrend or not rsi_bearish:
+                # Short exit: close above Donchian high or trend fails
+                if close[i] > donchian_high[i] or downtrend_12h_aligned[i] <= 0.5:
                     signals[i] = 0.0
                     position = 0
                 else:
