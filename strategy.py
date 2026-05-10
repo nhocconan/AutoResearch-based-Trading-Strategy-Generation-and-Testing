@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Liquidity_Vacuum_Reversal
-# Hypothesis: After extended moves, liquidity vacuums form where price moves with low volume, creating reversal opportunities.
-# Uses 12h trend filter, volume imbalance detection, and price rejection at extremes.
-# Works in bull/bear markets by fading exhausted moves during low-volume conditions.
+# 4h_TRIX_VolumeSpike_Trend_Filter
+# Hypothesis: TRIX (triple exponential average momentum) on 4h detects momentum shifts.
+# Combined with 1d EMA trend filter and volume spike to confirm direction.
+# Long when TRIX crosses above zero + 1d uptrend + volume spike.
+# Short when TRIX crosses below zero + 1d downtrend + volume spike.
+# Designed for low-to-moderate trade frequency (target: 20-50 trades/year) with strong momentum signals.
 
-name = "6h_Liquidity_Vacuum_Reversal"
-timeframe = "6h"
+name = "4h_TRIX_VolumeSpike_Trend_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,89 +20,78 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate TRIX on 4h close (15-period)
+    # EMA1 = EMA(close, 15)
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).values
+    # EMA2 = EMA(EMA1, 15)
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).values
+    # EMA3 = EMA(EMA2, 15)
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).values
+    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
+    trix = np.zeros(n)
+    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    trix[0] = 0
     
-    # Volume imbalance: current volume vs 20-period average
+    # Calculate daily EMA for trend filter (34-period)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation (20-period MA on 4h chart)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = np.where(volume_ma > 0, volume / volume_ma, 1.0)
-    
-    # Price position in recent range (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    range_width = highest_high - lowest_low
-    # Avoid division by zero
-    range_width = np.where(range_width == 0, 1e-10, range_width)
-    price_position = (close - lowest_low) / range_width  # 0 = at low, 1 = at high
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 20-period calculations
-    start_idx = 20
+    # Warmup: need TRIX (~15*3 for EMA chain), EMA34, volume MA
+    start_idx = max(45, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i]) or 
-            np.isnan(price_position[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: 12h EMA50
-        uptrend = close[i] > ema_50_12h_aligned[i]
-        downtrend = close[i] < ema_50_12h_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Liquidity vacuum conditions: low volume + price at extreme
-        low_volume = volume_ratio[i] < 0.6  # Volume significantly below average
-        at_high_extreme = price_position[i] > 0.85  # Near 20-period high
-        at_low_extreme = price_position[i] < 0.15   # Near 20-period low
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Price rejection signals: long wick at extreme
-        body_size = abs(close[i] - prices['open'].iloc[i])
-        total_range = high[i] - low[i]
-        upper_wick = high[i] - max(close[i], prices['open'].iloc[i])
-        lower_wick = min(close[i], prices['open'].iloc[i]) - low[i]
-        
-        # Avoid division by zero
-        if total_range == 0:
-            total_range = 1e-10
-        upper_wick_ratio = upper_wick / total_range
-        lower_wick_ratio = lower_wick / total_range
-        
-        rejection_at_high = upper_wick_ratio > 0.6  # Long upper wick
-        rejection_at_low = lower_wick_ratio > 0.6   # Long lower wick
+        # TRIX zero-cross signals
+        trix_cross_up = trix[i-1] <= 0 and trix[i] > 0
+        trix_cross_down = trix[i-1] >= 0 and trix[i] < 0
         
         if position == 0:
-            # Long: price rejecting low extreme in uptrend with low volume (liquidity vacuum)
-            if at_low_extreme and rejection_at_low and low_volume and uptrend:
+            # Long entry: TRIX crosses up + daily uptrend + volume spike
+            if trix_cross_up and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price rejecting high extreme in downtrend with low volume
-            elif at_high_extreme and rejection_at_high and low_volume and downtrend:
+            # Short entry: TRIX crosses down + daily downtrend + volume spike
+            elif trix_cross_down and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks above extreme or volume returns
-            if price_position[i] > 0.95 or volume_ratio[i] > 1.2:
+            # Long exit: TRIX crosses below zero or daily trend turns down
+            if trix[i] < 0 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks below extreme or volume returns
-            if price_position[i] < 0.05 or volume_ratio[i] > 1.2:
+            # Short exit: TRIX crosses above zero or daily trend turns up
+            if trix[i] > 0 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
