@@ -1,11 +1,13 @@
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Breakout at Camarilla R3/S3 levels on 12-hour chart with daily trend filter and volume confirmation.
-# In strong daily uptrend (price > daily EMA34), long at R3 breakout with target at S3 of next day.
-# In strong daily downtrend (price < daily EMA34), short at S3 breakdown with target at R3 of next day.
-# Uses volume confirmation to avoid low-liquidity whipsaws. Designed for 12h to achieve 12-37 trades/year.
+#!/usr/bin/env python3
+# 1d_Keltner_Breakout_Trend_Momentum
+# Hypothesis: On 1d timeframe, buy when price breaks above Keltner upper band with bullish momentum (MACD > 0),
+# sell when price breaks below Keltner lower band with bearish momentum (MACD < 0).
+# Uses 1w EMA50 as trend filter: only take longs in uptrend (price > weekly EMA50),
+# only take shorts in downtrend (price < weekly EMA50).
+# Designed for 1d to achieve 7-25 trades/year with low turnover and high edge.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Keltner_Breakout_Trend_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,86 +24,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter (EMA34) and Camarilla calculation
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Keltner Channel (20, 10) on 1d
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    # Calculate EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # EMA20 of typical price
+    tp_1d = (high_1d + low_1d + close_1d) / 3.0
+    ema_tp_20 = pd.Series(tp_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate Camarilla levels for each 1d bar (using current day's OHLC for breakout)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    rng = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * rng
-    s3_1d = close_1d - 1.1 * rng
+    # ATR10 of 1d
+    tr1 = np.maximum(high_1d[1:], low_1d[:-1]) - np.minimum(low_1d[1:], high_1d[:-1])
+    tr1 = np.concatenate([[np.nan], tr1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr2 = np.concatenate([[np.nan], tr2])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr3 = np.concatenate([[np.nan], tr3])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Volume confirmation: 24-period average volume on 1d (2 days of 12h data)
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
-        return res
-    vol_ma_24_1d = mean_arr(vol_1d, 24)
+    kel_upper = ema_tp_20 + 2 * atr_10
+    kel_lower = ema_tp_20 - 2 * atr_10
     
-    # Align 1d trend to 12h
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # MACD (12,26,9) on 1d close
+    ema_fast = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema_slow = pd.Series(close_1d).ewm(span=26, adjust=False, min_periods=26).mean().values
+    macd_line = ema_fast - ema_slow
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False, min_periods=9).mean().values
+    macd_hist = macd_line - signal_line
     
-    # Align 1d Camarilla levels to 12h (using current day's levels for breakout)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # Align 1w trend to 1d
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Align 1d volume MA to 12h
-    vol_ma_24_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_24_1d)
+    # Align 1d indicators to 1d (no alignment needed as already 1d, but for consistency)
+    kel_upper_aligned = align_htf_to_ltf(prices, df_1d, kel_upper)
+    kel_lower_aligned = align_htf_to_ltf(prices, df_1d, kel_lower)
+    macd_hist_aligned = align_htf_to_ltf(prices, df_1d, macd_hist)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 60  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or \
-           np.isnan(s3_1d_aligned[i]) or np.isnan(vol_ma_24_1d_aligned[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(kel_upper_aligned[i]) or \
+           np.isnan(kel_lower_aligned[i]) or np.isnan(macd_hist_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine daily trend
-        is_uptrend = close_1d[-1] > ema_34_1d[-1] if len(close_1d) > 0 else False  # Use last known daily close
-        is_downtrend = close_1d[-1] < ema_34_1d[-1] if len(close_1d) > 0 else False
-        
-        # Volume condition: current 12h volume > 1.5x 24-period 1d average
-        volume_condition = volume[i] > 1.5 * vol_ma_24_1d_aligned[i]
+        # Determine weekly trend
+        close_1w_series = pd.Series(close_1w)
+        close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w_series.values)
+        is_uptrend = close_1w_aligned[i] > ema_50_1w_aligned[i]
+        is_downtrend = close_1w_aligned[i] < ema_50_1w_aligned[i]
         
         if position == 0:
-            # Breakout at R3 in uptrend: long when price breaks above R3 resistance
-            if is_uptrend and close[i] > r3_1d_aligned[i] and volume_condition:
-                signals[i] = 0.25
+            # Long: price breaks above Keltner upper + bullish MACD + uptrend
+            if close[i] > kel_upper_aligned[i] and macd_hist_aligned[i] > 0 and is_uptrend:
+                signals[i] = 0.30
                 position = 1
-            # Breakdown at S3 in downtrend: short when price breaks below S3 support
-            elif is_downtrend and close[i] < s3_1d_aligned[i] and volume_condition:
-                signals[i] = -0.25
+            # Short: price breaks below Keltner lower + bearish MACD + downtrend
+            elif close[i] < kel_lower_aligned[i] and macd_hist_aligned[i] < 0 and is_downtrend:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price reaches S3 of next day (target) or daily trend turns down
-            # For simplicity, exit when price reaches S3 level (using same day's S3 as approximation)
-            if close[i] <= s3_1d_aligned[i] or is_downtrend:
+            # Long exit: price breaks below Keltner lower or trend turns down
+            if close[i] < kel_lower_aligned[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price reaches R3 of next day (target) or daily trend turns up
-            if close[i] >= r3_1d_aligned[i] or is_uptrend:
+            # Short exit: price breaks above Keltner upper or trend turns up
+            if close[i] > kel_upper_aligned[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
