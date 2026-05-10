@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Filter_1dTrend_20ATR
-Hypothesis: Use Ichimoku cloud from 1d as trend filter, Tenkan-Kijun cross on 6h for entry, with ATR volatility filter.
-Works in bull by following cloud direction, works in bear by shorting below cloud. Target: 12-30 trades/year.
+12h_TRIX_ZeroLag_Volume_Spike_1wTrend
+Hypothesis: TRIX zero-line cross in direction of weekly trend with volume confirmation.
+TRIX filters noise and captures momentum; weekly trend ensures alignment with higher timeframe.
+Works in bull/bear by following weekly trend. Target: 15-25 trades/year.
 """
 
-name = "6h_Ichimoku_Cloud_Filter_1dTrend_20ATR"
-timeframe = "6h"
+name = "12h_TRIX_ZeroLag_Volume_Spike_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,103 +19,97 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d Ichimoku components (Tenkan, Kijun, Senkou A/B)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1w EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    tenkan = np.full(len(high_1d), np.nan)
-    for i in range(period_tenkan - 1, len(high_1d)):
-        tenkan[i] = (np.max(high_1d[i - period_tenkan + 1:i + 1]) + np.min(low_1d[i - period_tenkan + 1:i + 1])) / 2
+    # TRIX calculation (15-period EMA applied 3 times)
+    # EMA1
+    ema1 = np.full(n, np.nan)
+    if n >= 15:
+        ema1[14] = np.mean(close[:15])
+        alpha1 = 2 / (15 + 1)
+        for i in range(15, n):
+            ema1[i] = alpha1 * close[i] + (1 - alpha1) * ema1[i-1]
+    # EMA2
+    ema2 = np.full(n, np.nan)
+    valid1 = ~np.isnan(ema1)
+    if np.sum(valid1) >= 15:
+        start = np.where(valid1)[0][14]
+        ema2[start] = np.mean(ema1[start-14:start+1])
+        alpha2 = 2 / (15 + 1)
+        for i in range(start+1, n):
+            if np.isnan(ema1[i]):
+                ema2[i] = np.nan
+            else:
+                ema2[i] = alpha2 * ema1[i] + (1 - alpha2) * ema2[i-1]
+    # EMA3
+    ema3 = np.full(n, np.nan)
+    valid2 = ~np.isnan(ema2)
+    if np.sum(valid2) >= 15:
+        start = np.where(valid2)[0][14]
+        ema3[start] = np.mean(ema2[start-14:start+1])
+        alpha3 = 2 / (15 + 1)
+        for i in range(start+1, n):
+            if np.isnan(ema2[i]):
+                ema3[i] = np.nan
+            else:
+                ema3[i] = alpha3 * ema2[i] + (1 - alpha3) * ema3[i-1]
+    # TRIX = (EMA3 - prev EMA3) / prev EMA3 * 100
+    trix = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
+            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    kijun = np.full(len(high_1d), np.nan)
-    for i in range(period_kijun - 1, len(high_1d)):
-        kijun[i] = (np.max(high_1d[i - period_kijun + 1:i + 1]) + np.min(low_1d[i - period_kijun + 1:i + 1])) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = np.full(len(high_1d), np.nan)
-    for i in range(len(high_1d)):
-        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
-            idx = i + 26
-            if idx < len(senkou_a):
-                senkou_a[idx] = (tenkan[i] + kijun[i]) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    senkou_b = np.full(len(high_1d), np.nan)
-    for i in range(period_senkou_b - 1, len(high_1d)):
-        val = (np.max(high_1d[i - period_senkou_b + 1:i + 1]) + np.min(low_1d[i - period_senkou_b + 1:i + 1])) / 2
-        idx = i + 26
-        if idx < len(senkou_b):
-            senkou_b[idx] = val
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
-    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
-    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # 6h ATR(20) for volatility filter
-    atr_period = 20
-    tr = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.nan], tr])
-    atr = np.full(n, np.nan)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr[i - atr_period + 1:i + 1])
+    # Volume spike: current volume > 2.0x average volume (30-period)
+    vol_sma = np.full(n, np.nan)
+    for i in range(30, n):
+        vol_sma[i] = np.mean(volume[i-30:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(52 + 26, atr_period)  # Senkou B needs 52+26 bars
+    start_idx = max(30, 45)  # volume SMA + TRIX warmup
     
     for i in range(start_idx, n):
-        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(trix[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
-        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
-        
-        # Ichimoku signal: Tenkan-Kijun cross
-        tk_cross = tenkan_6h[i] - kijun_6h[i]
-        tk_cross_prev = tenkan_6h[i-1] - kijun_6h[i-1] if i > 0 else 0
-        
-        # Volatility filter: only trade when ATR > 0.5 * ATR mean (avoid low volatility chop)
-        atr_mean = np.nanmean(atr[max(0, i-50):i+1])
-        vol_filter = atr[i] > 0.5 * atr_mean if not np.isnan(atr_mean) else True
+        # Volume confirmation
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun AND price above cloud
-            if tk_cross > 0 and tk_cross_prev <= 0 and close[i] > cloud_top and vol_filter:
+            # Long: TRIX crosses above zero and above weekly EMA34
+            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_34_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan crosses below Kijun AND price below cloud
-            elif tk_cross < 0 and tk_cross_prev >= 0 and close[i] < cloud_bottom and vol_filter:
+            # Short: TRIX crosses below zero and below weekly EMA34
+            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_34_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Tenkan crosses below Kijun OR price drops below cloud bottom
-            if tk_cross < 0 and tk_cross_prev >= 0 or close[i] < cloud_bottom:
+            # Exit: TRIX crosses below zero
+            if trix[i] < 0 and trix[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Tenkan crosses above Kijun OR price rises above cloud top
-            if tk_cross > 0 and tk_cross_prev <= 0 or close[i] > cloud_top:
+            # Exit: TRIX crosses above zero
+            if trix[i] > 0 and trix[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
