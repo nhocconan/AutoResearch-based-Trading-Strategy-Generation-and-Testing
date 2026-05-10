@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_Reversal_Momentum
-# Hypothesis: Price often reverses at Camarilla pivot levels (S3, S4, R3, R4) calculated from prior day's range.
-# In both bull and bear markets, these levels act as strong support/resistance.
-# Entry: Price closes beyond S3/R3 with volume confirmation and exits at S4/R4 or opposite S3/R3.
-# Uses 1d timeframe for pivot calculation and 4h for execution, targeting low trade frequency.
+# 4h_Supertrend_RSI_Combo
+# Hypothesis: In bull markets, Supertrend captures strong trends; in bear markets, RSI extremes with trend filter capture mean reversion.
+# Combines Supertrend for trend direction and RSI for entry timing, with volume confirmation to filter false signals.
+# Designed for low trade frequency (20-40/year) to minimize fee drag while capturing both trending and ranging markets.
 
-name = "4h_Camarilla_Pivot_Reversal_Momentum"
+name = "4h_Supertrend_RSI_Combo"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,75 +22,136 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    # Prior day's high, low, close
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Supertrend calculation
+    atr_period = 10
+    atr_multiplier = 3.0
     
-    # Calculate Camarilla levels for prior day
-    # R4 = Close + ((High - Low) * 1.5)
-    # R3 = Close + ((High - Low) * 1.25)
-    # S3 = Close - ((High - Low) * 1.25)
-    # S4 = Close - ((High - Low) * 1.5)
-    range_hl = prev_high - prev_low
-    r4 = prev_close + (range_hl * 1.5)
-    r3 = prev_close + (range_hl * 1.25)
-    s3 = prev_close - (range_hl * 1.25)
-    s4 = prev_close - (range_hl * 1.5)
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # No previous close for first bar
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Align Camarilla levels to 4h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Volume confirmation (20-period average on 4h)
-    def mean_arr(arr, p):
+    # ATR using Wilder's smoothing (equivalent to RMA)
+    def rma(arr, period):
         res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
+        if len(arr) >= period:
+            # First value is simple average
+            res[period-1] = np.mean(arr[:period])
+            # Subsequent values using Wilder's smoothing
+            for i in range(period, len(arr)):
+                res[i] = (arr[i] + (period-1) * res[i-1]) / period
         return res
-    vol_ma = mean_arr(volume, 20)
+    
+    atr = rma(tr, atr_period)
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + atr_multiplier * atr
+    basic_lb = (high + low) / 2 - atr_multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.full_like(close, np.nan)
+    final_lb = np.full_like(close, np.nan)
+    
+    for i in range(len(close)):
+        if np.isnan(basic_ub[i]) or np.isnan(basic_lb[i]):
+            continue
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if close[i-1] <= final_ub[i-1]:
+                final_ub[i] = min(basic_ub[i], final_ub[i-1])
+            else:
+                final_ub[i] = basic_ub[i]
+                
+            if close[i-1] >= final_lb[i-1]:
+                final_lb[i] = max(basic_lb[i], final_lb[i-1])
+            else:
+                final_lb[i] = basic_lb[i]
+    
+    # Supertrend
+    supertrend = np.full_like(close, np.nan)
+    for i in range(len(close)):
+        if np.isnan(final_ub[i]) or np.isnan(final_lb[i]):
+            continue
+        if i == 0:
+            supertrend[i] = final_ub[i]
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                if close[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                else:
+                    supertrend[i] = final_lb[i]
+            else:
+                if close[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                else:
+                    supertrend[i] = final_ub[i]
+    
+    # Supertrend trend direction (1 = uptrend, -1 = downtrend)
+    trend = np.where(close > supertrend, 1, -1)
+    
+    # RSI calculation
+    def rsi(arr, period=14):
+        delta = np.diff(arr, prepend=arr[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        # Wilder's smoothing for average gain and loss
+        avg_gain = rma(gain, period)
+        avg_loss = rma(loss, period)
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_val = 100 - (100 / (1 + rs))
+        return rsi_val
+    
+    rsi_vals = rsi(close, 14)
+    
+    # Get 1d data for volume average (longer-term volume context)
+    df_1d = get_htf_data(prices, '1d')
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = rma(vol_1d, 20)  # 20-day volume average
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # need volume MA and pivot levels
+    start_idx = max(50, 20) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
-           np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(supertrend[i]) or np.isnan(rsi_vals[i]) or \
+           np.isnan(trend[i]) or np.isnan(vol_ma_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.3x average
-        volume_confirm = volume[i] > 1.3 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume confirmation: current volume > 1.3x 20-day average
+        volume_confirm = vol_ma_1d_aligned[i] > 0 and volume[i] > 1.3 * vol_ma_1d_aligned[i]
         
         if position == 0:
-            # Long: price closes below S3 (support) with volume, expect reversal up
-            if close[i] < s3_aligned[i] and volume_confirm:
+            # Long: uptrend + RSI oversold + volume confirmation
+            if trend[i] == 1 and rsi_vals[i] < 30 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price closes above R3 (resistance) with volume, expect reversal down
-            elif close[i] > r3_aligned[i] and volume_confirm:
+            # Short: downtrend + RSI overbought + volume confirmation
+            elif trend[i] == -1 and rsi_vals[i] > 70 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches S4 (strong support) or moves back above S3
-            if close[i] <= s4_aligned[i] or close[i] >= s3_aligned[i]:
+            # Long exit: trend change or RSI overbought
+            if trend[i] == -1 or rsi_vals[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches R4 (strong resistance) or moves back below R3
-            if close[i] >= r4_aligned[i] or close[i] <= r3_aligned[i]:
+            # Short exit: trend change or RSI oversold
+            if trend[i] == 1 or rsi_vals[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
