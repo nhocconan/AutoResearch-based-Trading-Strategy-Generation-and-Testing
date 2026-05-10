@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses 12h timeframe with 1d Camarilla R1/S1 breakout, 1d EMA trend filter, and volume confirmation.
-# Targets fewer trades (~15-30/year) by using higher timeframe (12h) and strict volume threshold (2.0x).
-# Designed to work in both bull and bear markets by aligning with 1d trend direction.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Strict_v3
+# Hypothesis: Uses Camarilla R1/S1 breakout with strict volume confirmation (3x average) and 1d EMA34 trend filter.
+# Designed to reduce trade frequency to 10-25 trades/year by increasing volume threshold and adding momentum filter.
+# Works in bull/bear markets by aligning with higher timeframe trend and requiring strong volume confirmation.
+# Position size 0.25 for balanced risk management.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Strict_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,7 +28,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ATR for volatility filter (using 14-period)
+    # Calculate ATR for volatility filter
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -42,11 +43,11 @@ def generate_signals(prices):
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     
-    # Calculate R1 and S1 (tighter levels than R2/S2)
+    # Calculate R1 and S1 (tighter levels)
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
@@ -54,7 +55,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate volume average for confirmation (20-period)
+    # Calculate volume average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -73,17 +74,21 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Stronger volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
-        volatility_filter = atr[i] > 0  # Ensure valid ATR
+        # Strict volume confirmation (3x average) and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 3.0
+        volatility_filter = atr[i] > 0
+        
+        # Momentum filter: price must be away from EMA to avoid chop
+        price_vs_ema = abs(close[i] - ema_34_1d_aligned[i]) / ema_34_1d_aligned[i]
+        momentum_filter = price_vs_ema > 0.01  # At least 1% away from EMA
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation, 1d uptrend, and volatility
-            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
+            # Long entry: price breaks above R1 with strict volume confirmation, 1d uptrend, volatility, and momentum
+            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter and momentum_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation, 1d downtrend, and volatility
-            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
+            # Short entry: price breaks below S1 with strict volume confirmation, 1d downtrend, volatility, and momentum
+            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter and momentum_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
