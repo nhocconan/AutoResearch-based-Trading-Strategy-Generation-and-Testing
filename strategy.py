@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume
-# Hypothesis: Weekly pivot points (R4/S4) act as strong support/resistance. Price breaking above R4 in a daily uptrend or below S4 in a daily downtrend indicates strong momentum. Volume confirmation filters false breakouts. Designed for 6h timeframe to balance trade frequency (~20-50/year) and capture multi-day moves in both bull and bear markets.
+# 12h_KAMA_Trend_RSI_Filter
+# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
+# Combine with RSI for momentum confirmation and volume filter to reduce false signals.
+# Weekly trend filter ensures alignment with higher timeframe momentum.
+# Designed for low trade frequency (12-37/year) to minimize drag while capturing sustained moves.
 
-name = "6h_WeeklyPivot_R4S4_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_KAMA_Trend_RSI_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,78 +23,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels (R4/S4)
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Get daily data for trend filter
+    # Get daily data for KAMA and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA40 for trend filter
+    ema_40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
-    # Calculate weekly pivot levels (standard formula)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate KAMA (adaptive moving average) on daily
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(df_1d['close'], prepend=df_1d['close'][0]))
+    volatility = np.abs(np.diff(df_1d['close'])).rolling(window=10, min_periods=1).sum()
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.full_like(df_1d['close'], np.nan, dtype=float)
+    kama[0] = df_1d['close'].iloc[0]
+    for i in range(1, len(df_1d)):
+        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
+            kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
+    kama_values = kama
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_values)
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r4 = weekly_pivot + 3 * (weekly_high - weekly_low)  # R4 = PP + 3*(H-L)
-    weekly_s4 = weekly_pivot - 3 * (weekly_high - weekly_low)  # S4 = PP - 3*(H-L)
+    # Calculate RSI(14) on daily
+    delta = np.diff(df_1d['close'], prepend=df_1d['close'][0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4)
-    
-    # Volume confirmation (20-period MA on 6h = ~5 days)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (24-period MA on 12h = ~12 days)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need weekly EMA40 (40), KAMA/RSI (30), volume MA (24)
+    start_idx = max(40, 30, 24)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(weekly_r4_aligned[i]) or 
-            np.isnan(weekly_s4_aligned[i]) or 
+        if (np.isnan(ema_40_1w_aligned[i]) or 
+            np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_40_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_40_1w_aligned[i]
         
-        # Volume confirmation (>2.0x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # KAMA trend (price above/below KAMA)
+        kama_uptrend = close[i] > kama_aligned[i]
+        kama_downtrend = close[i] < kama_aligned[i]
+        
+        # RSI momentum (avoid extreme overbought/oversold)
+        rsi_momentum_long = (rsi_aligned[i] > 50) and (rsi_aligned[i] < 70)
+        rsi_momentum_short = (rsi_aligned[i] < 50) and (rsi_aligned[i] > 30)
+        
+        # Volume confirmation (>1.5x MA)
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R4 + volume
-            if uptrend and close[i] > weekly_r4_aligned[i] and volume_confirm:
+            # Long entry: weekly uptrend + price above KAMA + RSI bullish + volume
+            if weekly_uptrend and kama_uptrend and rsi_momentum_long and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S4 + volume
-            elif downtrend and close[i] < weekly_s4_aligned[i] and volume_confirm:
+            # Short entry: weekly downtrend + price below KAMA + RSI bearish + volume
+            elif weekly_downtrend and kama_downtrend and rsi_momentum_short and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R4
-            if not uptrend or close[i] < weekly_r4_aligned[i]:
+            # Long exit: weekly trend turns down OR price crosses below KAMA
+            if not weekly_uptrend or not kama_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S4
-            if not downtrend or close[i] > weekly_s4_aligned[i]:
+            # Short exit: weekly trend turns up OR price crosses above KAMA
+            if not weekly_downtrend or not kama_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
