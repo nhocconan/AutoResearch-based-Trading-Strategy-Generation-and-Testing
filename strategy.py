@@ -1,10 +1,11 @@
-#!/usr/bin/env python3
-# 4h_RSI_Divergence_1dTrend_Volume
-# Hypothesis: RSI divergence on 4h with 1d trend filter and volume confirmation. Works in both bull/bear markets by trading reversals at extremes.
-# Target: 25-40 trades/year to minimize fee drag on 4h timeframe.
+#/usr/bin/env python3
+# 6h_WeeklyPivot_Breakout_1dTrend_Volume
+# Hypothesis: Weekly pivot levels provide strong support/resistance. Breakouts above weekly R1 or below weekly S1
+# with 1d trend alignment and volume confirmation capture institutional moves. Works in bull/bear via trend filter.
+# Target: 12-30 trades/year on 6h timeframe to minimize fee drag.
 
-name = "4h_RSI_Divergence_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,48 +22,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA50)
+    # 1d trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 4h
+    # Align 1d trend to 6h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Initialize first 14 values
-    
-    # Volume confirmation (1.5x 20-period average)
+    # Volume confirmation (1.5x 24-period average)
     vol_ma = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma[i] = vol_sum / 20
+        if i >= 24:
+            vol_sum -= volume[i-24]
+        if i >= 23:
+            vol_ma[i] = vol_sum / 24
     volume_confirm = volume > (1.5 * vol_ma)
+    
+    # Calculate weekly pivot levels from previous week
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Shift to get previous week values
+    prev_high = np.roll(high_1w, 1)
+    prev_low = np.roll(low_1w, 1)
+    prev_close = np.roll(close_1w, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Weekly pivot point and support/resistance levels
+    pp = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pp - prev_low
+    s1 = 2 * pp - prev_high
+    r2 = pp + (prev_high - prev_low)
+    s2 = pp - (prev_high - prev_low)
+    
+    # Align weekly levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,33 +84,30 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Bullish RSI divergence: price makes lower low, RSI makes higher low
-            if (i >= 2 and low[i] < low[i-1] and low[i-1] < low[i-2] and
-                rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2] and
-                rsi[i] < 30 and  # Oversold condition
+            # Long: price breaks above weekly R1 with volume confirmation, 1d uptrend
+            if (high[i] > r1_aligned[i] and
                 trend_1d_up_aligned[i] > 0.5 and
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Bearish RSI divergence: price makes higher high, RSI makes lower high
-            elif (i >= 2 and high[i] > high[i-1] and high[i-1] > high[i-2] and
-                  rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2] and
-                  rsi[i] > 70 and  # Overbought condition
+            # Short: price breaks below weekly S1 with volume confirmation, 1d downtrend
+            elif (low[i] < s1_aligned[i] and
                   trend_1d_down_aligned[i] > 0.5 and
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI returns to neutral or trend turns down
-            if (rsi[i] > 50 or
+            # Exit: price breaks below weekly S1 or 1d trend turns down
+            if (low[i] < s1_aligned[i] or
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -105,8 +115,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI returns to neutral or trend turns up
-            if (rsi[i] < 50 or
+            # Exit: price breaks above weekly R1 or 1d trend turns up
+            if (high[i] > r1_aligned[i] or
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
