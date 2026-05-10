@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_1wTrend_Volume
-Hypothesis: Williams Alligator on 12h timeframe with 1w trend filter and volume confirmation.
-The Williams Alligator uses three smoothed moving averages (Jaw, Teeth, Lips) to identify trends.
-Price trading outside the Alligator's mouth indicates a trend; price inside indicates consolidation.
-We only trade when price is outside the mouth in the direction of the 1w trend, with volume confirmation.
-This filters out false breakouts in ranging markets. Works in both bull (buy signals during uptrends)
-and bear (sell signals during downtrends). Target: 50-150 total trades over 4 years (12-37/year).
+4h_RSI_MeanReversion_1dTrend_Volume
+Hypothesis: RSI mean reversion with daily trend filter and volume confirmation.
+In trending markets, price pulls back to RSI extremes (oversold in uptrend, overbought in downtrend) before continuing.
+Volume confirms the resumption of trend. Works in both bull (buy dips) and bear (sell rallies).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "12h_WilliamsAlligator_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,104 +20,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w EMA50 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema34_1d[i-1]
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Williams Alligator components (13,8,5 periods with future shifts)
-    # Jaw: 13-period SMMA, shifted by 8 bars
-    jaw_period = 13
-    jaw_shift = 8
-    jaw_raw = np.full(n, np.nan)
-    if n >= jaw_period:
-        jaw_raw[jaw_period-1] = np.mean(high[:jaw_period] + low[:jaw_period]) / 2
-        for i in range(jaw_period, n):
-            jaw_raw[i] = (jaw_raw[i-1] * (jaw_period-1) + (high[i] + low[i]) / 2) / jaw_period
-    jaw = np.full(n, np.nan)
-    if n >= jaw_period + jaw_shift:
-        jaw[jaw_shift:] = jaw_raw[:-jaw_shift] if jaw_shift > 0 else jaw_raw
+    # 1d volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Teeth: 8-period SMMA, shifted by 5 bars
-    teeth_period = 8
-    teeth_shift = 5
-    teeth_raw = np.full(n, np.nan)
-    if n >= teeth_period:
-        teeth_raw[teeth_period-1] = np.mean(high[:teeth_period] + low[:teeth_period]) / 2
-        for i in range(teeth_period, n):
-            teeth_raw[i] = (teeth_raw[i-1] * (teeth_period-1) + (high[i] + low[i]) / 2) / teeth_period
-    teeth = np.full(n, np.nan)
-    if n >= teeth_period + teeth_shift:
-        teeth[teeth_shift:] = teeth_raw[:-teeth_shift] if teeth_shift > 0 else teeth_raw
-    
-    # Lips: 5-period SMMA, shifted by 3 bars
-    lips_period = 5
-    lips_shift = 3
-    lips_raw = np.full(n, np.nan)
-    if n >= lips_period:
-        lips_raw[lips_period-1] = np.mean(high[:lips_period] + low[:lips_period]) / 2
-        for i in range(lips_period, n):
-            lips_raw[i] = (lips_raw[i-1] * (lips_period-1) + (high[i] + low[i]) / 2) / lips_period
-    lips = np.full(n, np.nan)
-    if n >= lips_period + lips_shift:
-        lips[lips_shift:] = lips_raw[:-lips_shift] if lips_shift > 0 else lips_raw
-    
-    # Volume confirmation: current 12h volume > 1.5x average 1w volume (scaled to 12h)
-    volume_1w = df_1w['volume'].values
-    vol_sma20_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 20:
-        vol_sma20_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(volume_1w)):
-            vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + volume_1w[i]) / 20
-    vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
+    # RSI(14)
+    rsi_period = 14
+    rsi = np.full(n, np.nan)
+    if n >= rsi_period:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        for i in range(rsi_period + 1, n):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i-1]) / rsi_period
+        
+        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+        rsi[rsi_period:] = 100 - (100 / (1 + rs[rsi_period:]))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(jaw_period + jaw_shift, teeth_period + teeth_shift, lips_period + lips_shift, 20)
+    start_idx = max(34, rsi_period + 1)
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_1w_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1w volume (scaled to 12h)
-        # Approximate 12h volume from 1w: 1w volume / (7*2) since 168h/12h = 14
-        vol_12h_approx = vol_sma20_1w_aligned[i] / 14.0
-        volume_confirm = volume[i] > 1.5 * vol_12h_approx
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
+        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0
+        volume_confirm = volume[i] > 1.5 * vol_4h_approx
         
         if position == 0:
-            # Long: Price above Alligator's mouth (Lips > Teeth > Jaw) with uptrend and volume confirmation
-            if lips[i] > teeth[i] and teeth[i] > jaw[i] and close[i] > ema50_1w_aligned[i] and volume_confirm:
+            # Long: RSI oversold (<30) in uptrend (price > EMA34) with volume confirmation
+            if rsi[i] < 30 and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below Alligator's mouth (Jaw > Teeth > Lips) with downtrend and volume confirmation
-            elif jaw[i] > teeth[i] and teeth[i] > lips[i] and close[i] < ema50_1w_aligned[i] and volume_confirm:
+            # Short: RSI overbought (>70) in downtrend (price < EMA34) with volume confirmation
+            elif rsi[i] > 70 and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price re-enters Alligator's mouth (Lips <= Teeth or Teeth <= Jaw) or trend reversal
-            if lips[i] <= teeth[i] or teeth[i] <= jaw[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit: RSI returns to neutral (>=50) or trend reversal
+            if rsi[i] >= 50 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Alligator's mouth (Jaw <= Teeth or Teeth <= Lips) or trend reversal
-            if jaw[i] <= teeth[i] or teeth[i] <= lips[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit: RSI returns to neutral (<=50) or trend reversal
+            if rsi[i] <= 50 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
