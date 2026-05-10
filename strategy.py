@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12H_Camarilla_R1_S1_Breakout_1dTrend
-Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend alignment capture directional moves. Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year) with low frequency to minimize fee drag. Uses volume > 1.8x 20-period average and EMA trend filter to avoid false breakouts. Works in both bull and bear markets by following 1d trend direction.
+4H_RSI_Divergence_With_Volume_Confirmation
+Hypothesis: Combines RSI divergence (bullish/bearish) with volume confirmation and 4h EMA50 trend filter to capture high-probability reversals. Designed for low trade frequency (<25/year) to minimize fee burn while maintaining edge in both bull and bear markets by trading against overextended moves in the direction of the higher timeframe trend.
 """
 
-name = "12H_Camarilla_R1_S1_Breakout_1dTrend"
-timeframe = "12h"
+name = "4H_RSI_Divergence_With_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,72 +22,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 4h EMA50 for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Previous 1d bar for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels from previous 1d bar
-    range_1d = high_1d - low_1d
-    s1 = close_1d - (range_1d * 1.08333)
-    r1 = close_1d + (range_1d * 1.08333)
-    
-    # Align to 12h timeframe (wait for 1d bar to close)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # 1d trend filter: EMA 34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: volume > 1.8x 20-period average (tight to reduce trades)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.8
+    vol_threshold = vol_ma * 1.5
+    
+    # RSI divergence detection (lookback 5 bars)
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(5, n):
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        if low[i] < low[i-5] and rsi[i] > rsi[i-5]:
+            # Confirm with higher low in price within lookback
+            if low[i] >= min(low[i-4:i+1]):
+                bullish_div[i] = True
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        if high[i] > high[i-5] and rsi[i] < rsi[i-5]:
+            # Confirm with lower high in price within lookback
+            if high[i] <= max(high[i-4:i+1]):
+                bearish_div[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for indicators
+    start_idx = max(50, 20)  # Warmup
     
     for i in range(start_idx, n):
-        if np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_50[i]) or np.isnan(rsi[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        is_uptrend = close[i] > ema_34_1d_aligned[i]
-        is_downtrend = close[i] < ema_34_1d_aligned[i]
+        # Determine trend
+        is_uptrend = close[i] > ema_50[i]
+        is_downtrend = close[i] < ema_50[i]
         
         if position == 0:
-            # Long entry: Price breaks above R1 + volume confirmation + 1d uptrend
-            if (close[i] > r1_aligned[i] and 
-                volume[i] > vol_threshold[i] and 
-                is_uptrend):
+            # Long entry: bullish divergence + volume confirmation + uptrend
+            if bullish_div[i] and volume[i] > vol_threshold[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 + volume confirmation + 1d downtrend
-            elif (close[i] < s1_aligned[i] and 
-                  volume[i] > vol_threshold[i] and 
-                  is_downtrend):
+            # Short entry: bearish divergence + volume confirmation + downtrend
+            elif bearish_div[i] and volume[i] > vol_threshold[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below S1 (opposite side)
-            if close[i] < s1_aligned[i]:
+            # Long exit: bearish divergence or trend break
+            if bearish_div[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above R1 (opposite side)
-            if close[i] > r1_aligned[i]:
+            # Short exit: bullish divergence or trend break
+            if bullish_div[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
