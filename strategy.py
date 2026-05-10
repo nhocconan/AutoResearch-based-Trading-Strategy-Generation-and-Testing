@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Trend_Reversal_Capture
-Hypothesis: In 6h timeframe, strong reversals often occur after exhaustion moves. 
-We capture these by: 1) Using 1d RSI(14) to identify overbought/oversold conditions on higher timeframe, 
-2) Waiting for price to reverse back toward the 6h VWAP as confirmation of exhaustion, 
-3) Entering on the close of the reversal bar with proper sizing. 
-Exit when price returns to the 1d RSI neutral zone (40-60). 
-This works in both bull and bear markets as it captures mean reversion within the trend.
+6h_WeeklyPivot_RangeReversion
+Hypothesis: Use weekly pivot points from 1w data to identify key support/resistance levels.
+In range-bound markets (identified by 1d Choppiness Index > 61.8), mean revert from S1/R1 and S2/R2 levels.
+In trending markets (Choppiness Index < 38.2), breakout trades from S2/R2 levels.
+This adapts to both bull/bear regimes via the 1d chop filter and uses weekly structure for level significance.
+Target: 15-30 trades/year on 6b timeframe.
 """
 
-name = "6h_Trend_Reversal_Capture"
+name = "6h_WeeklyPivot_RangeReversion"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,79 +21,136 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d RSI(14)
+    # Get daily data for chop filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points (using prior week)
+    high_prev = df_1w['high'].shift(1).values
+    low_prev = df_1w['low'].shift(1).values
+    close_prev = df_1w['close'].shift(1).values
+    
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev
+    s1 = 2 * pivot - high_prev
+    r2 = pivot + (high_prev - low_prev)
+    s2 = pivot - (high_prev - low_prev)
+    
+    # Align weekly pivots to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Calculate 1d Choppiness Index for regime detection
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with close_1d
     
-    for i in range(14, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # ATR(14)
+    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi_1d = 100 - (100 / (1 + rs))
+    # Sum of true ranges over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # Align 1d RSI to 6h timeframe (wait for 1d bar to close)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Choppiness Index: 100 * log10(tr_sum / (atr_14 * 14)) / log10(14)
+    chop_raw = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
     
-    # Calculate 6h VWAP (typical price * volume)
-    typical_price = (prices['high'] + prices['low'] + prices['close']) / 3
-    vwap_num = (typical_price * prices['volume']).cumsum()
-    vwap_den = prices['volume'].cumsum()
-    vwap = vwap_num / vwap_den
-    vwap = vwap.replace(0, np.nan).ffill().values  # forward fill initial NaN
+    # Align chop to 6h timeframe
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
     
-    # Price array
+    # Get 6h price data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need RSI (14 days) and enough data for VWAP
-    start_idx = 14
+    # Warmup: need weekly pivot (needs 1w bar), chop (14 periods)
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if RSI is not available
-        if np.isnan(rsi_1d_aligned[i]):
+        # Skip if any critical values are NaN
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        chop = chop_aligned[i]
+        
         if position == 0:
-            # Long setup: 1d RSI oversold (<30) AND price crosses above VWAP (bullish reversal)
-            if rsi_1d_aligned[i] < 30 and close[i] > vwap[i] and close[i-1] <= vwap[i-1]:
-                signals[i] = 0.25
-                position = 1
-            # Short setup: 1d RSI overbought (>70) AND price crosses below VWAP (bearish reversal)
-            elif rsi_1d_aligned[i] > 70 and close[i] < vwap[i] and close[i-1] >= vwap[i-1]:
-                signals[i] = -0.25
-                position = -1
+            # Range market: chop > 61.8 -> mean revert from S1/R1
+            if chop > 61.8:
+                # Long from S1 with rejection (low touches S1 but close above)
+                if low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short from R1 with rejection (high touches R1 but close below)
+                elif high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # Trending market: chop < 38.2 -> breakout from S2/R2
+            elif chop < 38.2:
+                # Long breakout above R2
+                if high[i] > r2_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short breakdown below S2
+                elif low[i] < s2_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: price returns to VWAP OR RSI reaches neutral (>50)
-            if close[i] <= vwap[i] or rsi_1d_aligned[i] > 50:
-                signals[i] = 0.0
-                position = 0
+            # Long exit conditions
+            if chop > 61.8:
+                # In range: exit at pivot or R1
+                if close[i] >= pivot_aligned[i] or close[i] >= r1_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # In trend: trail with S2 or exit if chop turns to range
+                if chop > 61.8 or low[i] < s2_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to VWAP OR RSI reaches neutral (<50)
-            if close[i] >= vwap[i] or rsi_1d_aligned[i] < 50:
-                signals[i] = 0.0
-                position = 0
+            # Short exit conditions
+            if chop > 61.8:
+                # In range: exit at pivot or S1
+                if close[i] <= pivot_aligned[i] or close[i] <= s1_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In trend: trail with R2 or exit if chop turns to range
+                if chop > 61.8 or high[i] > r2_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
