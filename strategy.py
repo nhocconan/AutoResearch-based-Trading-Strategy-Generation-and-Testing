@@ -1,12 +1,13 @@
-# #!/usr/bin/env python3
-# 4h_Donchian_20_Breakout_1dTrend_Volume
-# Hypothesis: 4h Donchian channel breakout with 1d EMA200 trend filter and volume confirmation.
-# Uses daily trend direction for signal bias, 4h for precise entry timing. Volume filter ensures
-# breakouts have conviction. Targets 20-50 trades/year to minimize fee drag.
-# Works in bull/bear by trading breakouts with trend alignment.
+#!/usr/bin/env python3
+# 1d_Weekly_Pivot_Breakout_Momentum
+# Hypothesis: Use weekly pivot points on 1d timeframe with momentum confirmation and volume filter.
+# Weekly pivots provide strong support/resistance levels. Price breaking above/below these levels
+# with momentum (price > 20-period EMA) and volume confirmation indicates institutional interest.
+# Works in bull markets (breakouts continue) and bear markets (mean reversion at pivots).
+# Targets 8-20 trades/year to minimize fee drag.
 
-name = "4h_Donchian_20_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_Breakout_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,39 +24,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # 1d EMA200 trend
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_1d_up = close_1d > ema200_1d
-    trend_1d_down = close_1d < ema200_1d
+    # Calculate weekly pivot points from previous week's OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Shift to get previous week's values (avoid look-ahead)
+    prev_high = np.concatenate([[high_1w[0]], high_1w[:-1]])
+    prev_low = np.concatenate([[low_1w[0]], low_1w[:-1]])
+    prev_close = np.concatenate([[close_1w[0]], close_1w[:-1]])
     
-    # Donchian channel (20-period) on 4h data
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Weekly pivot point and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
     
-    # Volume filter: current volume > 1.5 * 20-period average
+    # Align weekly levels to daily
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    
+    # Daily EMA20 for momentum filter
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Volume filter: current volume > 1.5 * 20-day average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = 40  # Ensure enough data for indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema20[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,32 +78,32 @@ def generate_signals(prices):
         volume_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: price breaks above Donchian high with uptrend and volume
-            if (close[i] > donchian_high[i] and
-                trend_1d_up_aligned[i] > 0.5 and
+            # Long: price breaks above weekly R1 with upward momentum and volume
+            if (close[i] > r1_aligned[i] and
+                close[i] > ema20[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low with downtrend and volume
-            elif (close[i] < donchian_low[i] and
-                  trend_1d_down_aligned[i] > 0.5 and
+            # Short: price breaks below weekly S1 with downward momentum and volume
+            elif (close[i] < s1_aligned[i] and
+                  close[i] < ema20[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to Donchian low or trend fails
-            if (close[i] < donchian_low[i] or
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: price returns to weekly pivot or momentum fails
+            if (close[i] < pivot_aligned[i] or
+                close[i] < ema20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to Donchian high or trend fails
-            if (close[i] > donchian_high[i] or
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: price returns to weekly pivot or momentum fails
+            if (close[i] > pivot_aligned[i] or
+                close[i] > ema20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
