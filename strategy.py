@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
 # Hypothesis: Breakout above 12h Camarilla R1 or below S1 with volume surge and 1d EMA34 trend confirmation.
 # Uses discrete position sizing (0.30) to reduce churn, adds minimum holding period (3 bars = 36h) to limit trades.
 # Targets 15-30 trades/year. Works in bull/bear by requiring trend alignment, reducing false breakouts.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
 timeframe = "12h"
 leverage = 1.0
 
