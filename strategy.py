@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-# 1D_1W_Camarilla_R3_S3_Breakout_Trend
-# Hypothesis: On daily timeframe, price breaks Camarilla R3/S3 levels with weekly trend filter and volume confirmation.
-# Long when price closes above R3 in weekly uptrend (weekly close > weekly EMA34).
-# Short when price closes below S3 in weekly downtrend (weekly close < weekly EMA34).
-# Uses daily Camarilla levels for entry and weekly EMA34 for trend filter.
-# Works in bull/bear by following weekly trend direction. Target: 15-25 trades/year per symbol.
+"""
+6h_ABI_Trend_Follow
+Hypothesis: Adaptive Bollinger Bands (BBands) with ATR-based width filtering
+identify trend exhaustion and continuation phases. In strong trends (ADX>25),
+price tends to ride the upper/lower BBand. Entries occur on pullbacks to the
+20-period EMA within the trend, with exits when price closes outside the
+Adaptive BBands. Uses 12h trend filter (EMA50) to ensure alignment with higher
+timeframe momentum. Works in bull/bear by following 12h trend direction.
+Target: 20-40 trades/year per symbol.
+"""
 
-name = "1D_1W_Camarilla_R3_S3_Breakout_Trend"
-timeframe = "1d"
+name = "6h_ABI_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,65 +20,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla levels for previous day
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    diff_1d = high_1d - low_1d
-    R3_1d = close_1d + 1.1 * diff_1d / 2
-    S3_1d = close_1d - 1.1 * diff_1d / 2
+    # 12h EMA50 for trend filter
+    close_12h_series = pd.Series(close_12h)
+    ema50_12h = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_trend_12h = close_12h > ema50_12h
+    bearish_trend_12h = close_12h < ema50_12h
     
-    close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
-    ema34_1w = close_1w_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Adaptive Bollinger Bands (6h)
+    # Base: 20-period SMA, width: ATR(14) * 2
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    bb_width = atr14 * 2
+    upper_band = sma20 + bb_width
+    lower_band = sma20 - bb_width
     
-    # Trend: bullish if weekly close > EMA34, bearish if weekly close < EMA34
-    bullish_trend_1w = close_1w > ema34_1w
-    bearish_trend_1w = close_1w < ema34_1w
+    # 6h EMA20 for pullback entries
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align all to daily timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend_1w.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend_1w.astype(float))
-    
-    # Volume confirmation: current volume > 1.5 * 20-day average
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume > 1.5 * vol_ma20
+    # Align 12h trend to 6h
+    bullish_aligned = align_htf_to_ltf(prices, df_12h, bullish_trend_12h.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_12h, bearish_trend_12h.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(sma20[i]) or np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(ema20[i]) or np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,26 +81,26 @@ def generate_signals(prices):
         bearish = bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: bullish weekly trend + price closes above R3 + volume confirmation
-            if bullish and close[i] > R3_aligned[i] and volume_ok[i]:
+            # Enter long: bullish 12h trend + price pulls back to EMA20 and closes above it
+            if bullish and close[i] > ema20[i] and close[i-1] <= ema20[i-1]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish weekly trend + price closes below S3 + volume confirmation
-            elif bearish and close[i] < S3_aligned[i] and volume_ok[i]:
+            # Enter short: bearish 12h trend + price pulls back to EMA20 and closes below it
+            elif bearish and close[i] < ema20[i] and close[i-1] >= ema20[i-1]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish trend or price closes below R3
-            if bearish or close[i] < R3_aligned[i]:
+            # Exit long: price closes below lower adaptive Bollinger Band
+            if close[i] < lower_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish trend or price closes above S3
-            if bullish or close[i] > S3_aligned[i]:
+            # Exit short: price closes above upper adaptive Bollinger Band
+            if close[i] > upper_band[i]:
                 signals[i] = 0.0
                 position = 0
             else:
