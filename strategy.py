@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Bounce_1dTrend_Filter
-# Hypothesis: Long when price bounces off Camarilla S1/S2 in uptrend (price > 1d EMA50), short when rejected at R1/R2 in downtrend.
-# Uses Camarilla levels from 1d chart with 1d EMA50 trend filter. Works in both bull/bear by following higher timeframe trend.
-# Designed for 12-37 trades/year to avoid fee drag.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Long when price breaks above Camarilla R1 with volume > 1.5x average in uptrend (price > 1d EMA34).
+# Short when price breaks below Camarilla S1 with volume > 1.5x average in downtrend (price < 1d EMA34).
+# Exit when price crosses opposite Camarilla level (S1 for long, R1 for short) or ATR-based stoploss hit.
+# Uses Camarilla pivot levels for institutional support/resistance, works in both bull and bear markets by following 1d trend.
+# Designed for 20-50 trades/year to avoid fee drag.
 
-name = "12h_Camarilla_Pivot_Bounce_1dTrend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,71 +24,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and EMA
+    # Calculate ATR(20) for stoploss
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    for i in range(20, n):
+        atr[i] = np.nanmean(tr[i-19:i+1])
+    
+    # Get 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Camarilla levels from previous day
-    typical = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_ = df_1d['high'] - df_1d['low']
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    # We need previous day's high, low, close
+    df_1d_open = df_1d['open'].values
+    df_1d_high = df_1d['high'].values
+    df_1d_low = df_1d['low'].values
+    df_1d_close = df_1d['close'].values
     
-    R4 = typical + range_ * 1.500
-    R3 = typical + range_ * 1.250
-    R2 = typical + range_ * 1.166
-    R1 = typical + range_ * 1.083
-    S1 = typical - range_ * 1.083
-    S2 = typical - range_ * 1.166
-    S3 = typical - range_ * 1.250
-    S4 = typical - range_ * 1.500
+    camarilla_R1 = np.full(len(df_1d), np.nan)
+    camarilla_S1 = np.full(len(df_1d), np.nan)
     
-    # Align to 12h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2.values)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2.values)
+    for i in range(1, len(df_1d)):
+        high_low = df_1d_high[i-1] - df_1d_low[i-1]
+        camarilla_R1[i] = df_1d_close[i-1] + high_low * 1.1 / 12
+        camarilla_S1[i] = df_1d_close[i-1] - high_low * 1.1 / 12
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    
+    # Volume average (20 periods)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.nanmean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 1  # Start after first bar to have previous levels
+    start_idx = 35  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Uptrend: look for bounce at S1 or S2
-            if close[i] > ema_50_1d_aligned[i]:
-                # Long if price touches/bounces off S1 or S2 with rejection of lower levels
-                if ((low[i] <= S1_aligned[i] and close[i] > S1_aligned[i]) or 
-                    (low[i] <= S2_aligned[i] and close[i] > S2_aligned[i])):
+            # Trade only in direction of 1d EMA34 trend
+            if close[i] > ema_34_1d_aligned[i]:  # Uptrend
+                # Long: Price breaks above Camarilla R1 with volume confirmation
+                if close[i] > camarilla_R1_aligned[i] and close[i-1] <= camarilla_R1_aligned[i-1] and volume[i] > 1.5 * vol_ma[i]:
                     signals[i] = 0.25
                     position = 1
-            # Downtrend: look for rejection at R1 or R2
-            else:
-                # Short if price touches/rejects R1 or R2 with failure to hold higher levels
-                if ((high[i] >= R1_aligned[i] and close[i] < R1_aligned[i]) or 
-                    (high[i] >= R2_aligned[i] and close[i] < R2_aligned[i])):
+            else:  # Downtrend
+                # Short: Price breaks below Camarilla S1 with volume confirmation
+                if close[i] < camarilla_S1_aligned[i] and close[i-1] >= camarilla_S1_aligned[i-1] and volume[i] > 1.5 * vol_ma[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: price breaks below S1 (failed support) or reaches R1 (profit target)
-            if close[i] < S1_aligned[i] or close[i] >= R1_aligned[i]:
+            # Exit: Price crosses below Camarilla S1 or stoploss hit
+            if close[i] < camarilla_S1_aligned[i] or (i > 0 and low[i] < camarilla_S1_aligned[i] - 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above R1 (failed resistance) or reaches S1 (profit target)
-            if close[i] > R1_aligned[i] or close[i] <= S1_aligned[i]:
+            # Exit: Price crosses above Camarilla R1 or stoploss hit
+            if close[i] > camarilla_R1_aligned[i] or (i > 0 and high[i] > camarilla_R1_aligned[i] + 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
