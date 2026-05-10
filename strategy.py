@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_WeeklyPivot_Breakout_DailyTrend_Volume
-# Hypothesis: Weekly pivot levels provide strong institutional support/resistance.
-# Price breaking above weekly R1 in a daily uptrend or below weekly S1 in a daily downtrend
+# 4h_1dEMA34_1wPivot_Breakout_Volume
+# Hypothesis: Weekly pivot levels (R1/S1) act as strong support/resistance. 
+# In trending markets (daily EMA34), breaking above R1 in uptrend or below S1 in downtrend
 # indicates momentum continuation. Volume confirmation filters false breakouts.
-# Timeframe 12h balances trade frequency (<400 total) with sufficient signal clarity.
-# Works in bull markets (follows uptrends) and bear markets (follows downtrends).
+# Works in bull/bear by only trading in direction of daily trend.
 
-name = "12h_WeeklyPivot_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_1dEMA34_1wPivot_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,12 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for trend filter
+    # Get daily data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -37,6 +31,11 @@ def generate_signals(prices):
     # Calculate daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Get weekly data for pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
     
     # Calculate weekly pivot levels (standard formula)
     weekly_high = df_1w['high'].values
@@ -50,7 +49,7 @@ def generate_signals(prices):
     weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation (20-period MA on 4h = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
