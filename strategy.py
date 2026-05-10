@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_TRIX_VolumeSpike_Regime - TRIX momentum with volume spike and Chop regime filter
-# Hypothesis: TRIX (Triple Exponential Average) captures momentum shifts. In trending markets,
-# TRIX crossovers signal strong moves. Combined with volume spikes (institutional interest)
-# and Chop regime filter (avoid ranging markets), this should work in both bull and bear
-# by only taking long signals when TRIX > 0 and short when TRIX < 0.
-# Target: 20-40 trades/year to minimize fee drag.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: Camarilla pivot levels provide institutional support/resistance.
+# In trending markets, price breaking above R1 in uptrend or below S1 in downtrend
+# continues with momentum. We use 4h EMA50 for trend filter and volume confirmation
+# to avoid false breakouts. Uses 1h only for entry timing to reduce trade frequency.
+# Target: 15-37 trades/year (60-150 over 4 years) with session filter (08-20 UTC).
 
-name = "4h_TRIX_VolumeSpike_Regime"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,81 +24,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for regime filter (Chop)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate TRIX (15,9,9) - standard settings
-    # TRIX = EMA(EMA(EMA(close, 15), 9), 9)
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
-    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix = (ema3.pct_change() * 100).values  # TRIX as percentage
+    # Get daily data for Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Calculate Chop index (14-period) for regime filter
-    # Chop = 100 * log10(sum(ATR, 14) / (max(high,14) - min(low,14))) / log10(14)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr.sum() / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) > 0, chop, 50)  # Avoid division by zero
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation (20-period MA)
+    # Calculate Camarilla levels from previous day
+    camarilla_r1 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.12 / 12
+    camarilla_s1 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.12 / 12
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
+    
+    # Volume confirmation (20-period MA on 1h = ~20 hours)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need TRIX (15+9+9=33), Chop (14), volume MA (20)
-    start_idx = max(33, 14, 20)
+    # Warmup: need 4h EMA50 (50), Camarilla (needs 1d), volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(chop[i]) or 
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: Chop > 61.8 = ranging (avoid), Chop < 38.2 = trending
-        trending_regime = chop[i] < 38.2
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # 4h trend filter
+        uptrend = close[i] > ema_50_4h_aligned[i]
+        downtrend = close[i] < ema_50_4h_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: TRIX > 0 (bullish momentum) + trending regime + volume spike
-            if trix[i] > 0 and trending_regime and volume_confirm:
-                signals[i] = 0.25
+            # Long entry: uptrend + price breaks above R1 + volume
+            if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: TRIX < 0 (bearish momentum) + trending regime + volume spike
-            elif trix[i] < 0 and trending_regime and volume_confirm:
-                signals[i] = -0.25
+            # Short entry: downtrend + price breaks below S1 + volume
+            elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: TRIX turns negative or regime changes to ranging
-            if trix[i] <= 0 or not trending_regime:
+            # Long exit: trend breaks or price re-enters R1-S1 range
+            if not uptrend or close[i] < camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: TRIX turns positive or regime changes to ranging
-            if trix[i] >= 0 or not trending_regime:
+            # Short exit: trend breaks or price re-enters R1-S1 range
+            if not downtrend or close[i] > camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
