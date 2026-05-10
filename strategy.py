@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# 4h_Bollinger_Bands_Reversal_20_2_1dTrend_Volume
-# Hypothesis: On 4h timeframe, mean-reversion at Bollinger Band extremes with daily trend filter and volume confirmation works in both bull and bear markets. Daily trend avoids counter-trend trades, volume reduces false signals. Bollinger Bands adapt to volatility, capturing reversals in trending and ranging markets. Designed for low frequency (~20-50 trades/year) to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
+# Hypothesis: Breakouts above Camarilla R1 or below S1 levels on 4h timeframe, filtered by daily EMA34 trend and volume confirmation, work in both bull and bear markets. The daily trend filter prevents counter-trend trades, while volume reduces false signals. Camarilla levels provide adaptive support/resistance based on prior day's range. Designed for low frequency (~20-50 trades/year) to minimize fee drag.
 
-name = "4h_Bollinger_Bands_Reversal_20_2_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,20 +20,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # Daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean().values
-    bb_std = close_series.rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
+    # Calculate Camarilla levels from previous day's OHLC
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # Set first value to NaN since no previous day exists
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
+    prev_close_1d[0] = np.nan
+    
+    camarilla_range = prev_high_1d - prev_low_1d
+    r1 = prev_close_1d + camarilla_range * 1.1 / 12
+    s1 = prev_close_1d - camarilla_range * 1.1 / 12
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Daily trend: EMA34 on daily close
-    close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
@@ -54,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -66,20 +82,20 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price at lower Bollinger Band with daily uptrend and volume
-            if (close[i] <= bb_lower[i] and 
+            # Enter long: price breaks above R1 with daily uptrend and volume
+            if (close[i] > r1_aligned[i] and 
                 trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price at upper Bollinger Band with daily downtrend and volume
-            elif (close[i] >= bb_upper[i] and 
+            # Enter short: price breaks below S1 with daily downtrend and volume
+            elif (close[i] < s1_aligned[i] and 
                   trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to middle Bollinger Band or trend fails
-            if (close[i] >= bb_mid[i] or 
+            # Exit when price returns below R1 or trend fails
+            if (close[i] < r1_aligned[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -87,8 +103,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to middle Bollinger Band or trend fails
-            if (close[i] <= bb_mid[i] or 
+            # Exit when price returns above S1 or trend fails
+            if (close[i] > s1_aligned[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
