@@ -1,11 +1,14 @@
-# The strategy is based on the 4-hour timeframe with 12-hour trend confirmation.
-# It uses Donchian channel breakouts combined with trend filters and volume confirmation.
-# The strategy aims to capture strong directional moves while avoiding whipsaws in ranging markets.
-# Position sizing is conservative to manage drawdown, and exits are based on mean reversion to the middle of the channel.
-# This approach has shown promise in backtests for capturing trends with controlled risk.
+#!/usr/bin/env python3
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: Uses 4h timeframe for trend and price context, 1h for precise entry timing. 
+# Enters long when price breaks above 4h R1 with volume confirmation and 4h uptrend (close > EMA34).
+# Enters short when price breaks below 4h S1 with volume confirmation and 4h downtrend (close < EMA34).
+# Exits when price returns to the 4h pivot point (CP) or reverses direction.
+# Uses 4h EMA34 for trend to reduce whipsaws and works in both bull/bear markets.
+# Targets 15-37 trades per year on 1h timeframe with position size 0.20.
 
-name = "4h_Donchian_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,66 +25,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend confirmation
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for Camarilla pivots and trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend direction
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 4h EMA(34) for trend direction
+    ema_34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Calculate Donchian channel (20-period) on 4h data
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (high_max + low_min) / 2
+    # Calculate Camarilla pivot levels from previous 4h bar
+    prev_high = np.roll(df_4h['high'].values, 1)
+    prev_low = np.roll(df_4h['low'].values, 1)
+    prev_close = np.roll(df_4h['close'].values, 1)
+    prev_high[0] = 0
+    prev_low[0] = 0
+    prev_close[0] = 0
+    
+    # Calculate Camarilla levels
+    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
+    CP = (prev_high + prev_low + prev_close) / 3
+    
+    # Align Camarilla levels to 1h
+    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
+    CP_aligned = align_htf_to_ltf(prices, df_4h, CP)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_confirm = volume > (vol_ma * 1.5)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and Donchian
+    start_idx = max(34, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(donchian_middle[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(CP_aligned[i]) or np.isnan(ema_34_4h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        price_above_ema = close[i] > ema_50_12h_aligned[i]
-        price_below_ema = close[i] < ema_50_12h_aligned[i]
+        # Apply session filter
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # Trend filter: price above/below 4h EMA34
+        price_above_ema = close[i] > ema_34_4h_aligned[i]
+        price_below_ema = close[i] < ema_34_4h_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above upper Donchian band with volume confirmation and uptrend
-            if (close[i] > high_max[i] and 
+            # Long entry: price breaks above R1 with volume confirmation and uptrend
+            if (close[i] > R1_aligned[i] and 
                 volume_confirm[i] and 
                 price_above_ema):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short entry: price breaks below lower Donchian band with volume confirmation and downtrend
-            elif (close[i] < low_min[i] and 
+            # Short entry: price breaks below S1 with volume confirmation and downtrend
+            elif (close[i] < S1_aligned[i] and 
                   volume_confirm[i] and 
                   price_below_ema):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price returns to the middle of the Donchian channel
-            if close[i] <= donchian_middle[i]:
+            # Long exit: price returns to pivot point or trend reverses
+            if (close[i] <= CP_aligned[i] or 
+                price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price returns to the middle of the Donchian channel
-            if close[i] >= donchian_middle[i]:
+            # Short exit: price returns to pivot point or trend reverses
+            if (close[i] >= CP_aligned[i] or 
+                price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
