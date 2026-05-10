@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Combo
-# Hypothesis: Combines Camarilla R3/S3 breakout (4h) with 1d EMA34 trend filter and volume confirmation.
-# Uses stricter entry conditions (volume > 2.5x avg) and exits on trend reversal (price crosses EMA34) to reduce trade frequency.
-# Designed for 4h to achieve 20-40 trades/year, suitable for both bull and bear markets via trend filter.
+# 6h_Ichimoku_Cloud_Trend_1d_Adx_Filter
+# Hypothesis: Uses Ichimoku cloud on 1d timeframe for trend direction and ADX(14) on 6h for trend strength.
+# Long when price above Kumo cloud, Tenkan > Kijun, and ADX > 25.
+# Short when price below Kumo cloud, Tenkan < Kijun, and ADX > 25.
+# Ichimoku provides dynamic support/resistance and trend direction; ADX filters for strong trends only.
+# Designed for 6h to achieve 12-37 trades/year, works in both bull and bear markets by following strong trends.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Combo"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Trend_1d_Adx_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,84 +16,144 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1d data for Camarilla levels, EMA34 trend, and volume
+    # 1d data for Ichimoku components
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Camarilla levels (based on previous day)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R3 = c + (range_ * 1.1000 / 4)
-        S3 = c - (range_ * 1.1000 / 4)
-        return R3, S3
+    # Ichimoku components (9, 26, 52 periods)
+    def calculate_ichimoku(h, l, c):
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        period9_high = np.maximum.accumulate(h)
+        period9_low = np.minimum.accumulate(l)
+        tenkan = (np.concatenate([np.full(8, np.nan), (period9_high[8:] + period9_low[8:]) / 2]))
+        
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        period26_high = np.maximum.accumulate(h)
+        period26_low = np.minimum.accumulate(l)
+        kijun = (np.concatenate([np.full(25, np.nan), (period26_high[25:] + period26_low[25:]) / 2]))
+        
+        # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+        senkou_a = (tenkan + kijun) / 2
+        
+        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods ahead
+        period52_high = np.maximum.accumulate(h)
+        period52_low = np.minimum.accumulate(l)
+        senkou_b = (np.concatenate([np.full(51, np.nan), (period52_high[51:] + period52_low[51:]) / 2]))
+        
+        # Chikou Span (Lagging Span): close shifted 26 periods behind
+        chikou = np.concatenate([np.full(26, np.nan), c[:-26]])
+        
+        return tenkan, kijun, senkou_a, senkou_b, chikou
     
-    R3 = np.full_like(close_1d, np.nan)
-    S3 = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        R3[i], S3[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d, chikou_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Kumo cloud boundaries (Senkou Span A and B)
+    # Kumo top is the higher of Senkou A and Senkou B
+    # Kumo bottom is the lower of Senkou A and Senkou B
+    kumo_top = np.maximum(senkou_a_1d, senkou_b_1d)
+    kumo_bottom = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    # Volume confirmation: 20-period average
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
-        return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    # ADX(14) on 6h for trend strength
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+        tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.concatenate([[high[0]], high[:-1]])) > 
+                          (np.concatenate([[low[0]], low[:-1]]) - low), 
+                          np.maximum(high - np.concatenate([[high[0]], high[:-1]]), 0), 0)
+        dm_minus = np.where((np.concatenate([[low[0]], low[:-1]]) - low) > 
+                           (high - np.concatenate([[high[0]], high[:-1]])), 
+                           np.maximum(np.concatenate([[low[0]], low[:-1]]) - low, 0), 0)
+        
+        # Smooth TR, DM+ and DM- using Wilder's smoothing (EMA with alpha=1/period)
+        def wilders_smoothing(data, period):
+            alpha = 1.0 / period
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                # First value is simple average
+                result[period-1] = np.mean(data[:period])
+                # Subsequent values: Wilder's smoothing
+                for i in range(period, len(data)):
+                    result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+            return result
+        
+        atr = wilders_smoothing(tr, period)
+        dm_plus_smooth = wilders_smoothing(dm_plus, period)
+        dm_minus_smooth = wilders_smoothing(dm_minus, period)
+        
+        # Directional Indicators
+        plus_di = 100 * dm_plus_smooth / atr
+        minus_di = 100 * dm_minus_smooth / atr
+        
+        # DX and ADX
+        dx = np.where((plus_di + minus_di) != 0, 
+                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = wilders_smoothing(dx, period)
+        
+        return adx
     
-    # Align all indicators to lower timeframe (wait for 1d bar to close)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    adx_6h = calculate_adx(high, low, close, 14)
+    
+    # Align Ichimoku components to 6h timeframe (wait for 1d bar to close)
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    kumo_top_aligned = align_htf_to_ltf(prices, df_1d, kumo_top)
+    kumo_bottom_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom)
+    chikou_aligned = align_htf_to_ltf(prices, df_1d, chikou_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 100  # Need enough history for Ichimoku (52 periods) and ADX
     
     for i in range(start_idx, n):
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
-           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or \
+           np.isnan(kumo_top_aligned[i]) or np.isnan(kumo_bottom_aligned[i]) or \
+           np.isnan(adx_6h[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        # ADX threshold for trend strength
+        if adx_6h[i] < 25:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3, above EMA34, strong volume (2.5x)
-            if close[i] > R3_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 2.5 * vol_ma_20_aligned[i]:
+            # Long: price above Kumo cloud, Tenkan > Kijun
+            if close[i] > kumo_top_aligned[i] and tenkan_aligned[i] > kijun_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, below EMA34, strong volume (2.5x)
-            elif close[i] < S3_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 2.5 * vol_ma_20_aligned[i]:
+            # Short: price below Kumo cloud, Tenkan < Kijun
+            elif close[i] < kumo_bottom_aligned[i] and tenkan_aligned[i] < kijun_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below EMA34 (trend change) or breaks below S3
-            if close[i] < ema_34_aligned[i] or close[i] < S3_aligned[i]:
+            # Long exit: price falls below Kumo cloud or Tenkan < Kijun
+            if close[i] < kumo_bottom_aligned[i] or tenkan_aligned[i] < kijun_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above EMA34 (trend change) or breaks above R3
-            if close[i] > ema_34_aligned[i] or close[i] > R3_aligned[i]:
+            # Short exit: price rises above Kumo cloud or Tenkan > Kijun
+            if close[i] > kumo_top_aligned[i] or tenkan_aligned[i] > kijun_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
