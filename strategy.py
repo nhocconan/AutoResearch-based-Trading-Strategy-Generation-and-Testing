@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_TRIX_ZeroLine_1dTrend_Volume
-Hypothesis: TRIX zero-line cross in direction of 1d EMA134 trend with volume confirmation.
-Works in bull/bear by following 1d trend. Target: 15-35 trades/year.
+12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+Hypothesis: 12h Camarilla R1/S1 breakout in direction of 1-week EMA50 trend with volume confirmation.
+Uses 12h timeframe to reduce trade frequency, targeting 12-37 trades/year. Works in bull/bear by following 1w trend.
 """
 
-name = "4h_TRIX_ZeroLine_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,36 +15,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX (15-period EMA of EMA of EMA, then ROC)
-    def ema(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        alpha = 2 / (period + 1)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = alpha * arr[i] + (1 - alpha) * result[i-1]
-        return result
+    # 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    ema1 = ema(close, 15)
-    ema2 = ema(ema1, 15)
-    ema3 = ema(ema2, 15)
-    trix = np.full_like(close, np.nan, dtype=float)
-    for i in range(1, len(ema3)):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]):
-            trix[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
-    
-    # 1d EMA134 for trend filter
+    # Camarilla pivot levels (1d)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_134_1d = ema(close_1d, 134)
-    ema_134_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_134_1d)
+    camarilla_r1 = np.zeros(len(close_1d))
+    camarilla_s1 = np.zeros(len(close_1d))
+    for i in range(len(close_1d)):
+        if i == 0:
+            camarilla_r1[i] = close_1d[0]
+            camarilla_s1[i] = close_1d[0]
+        else:
+            camarilla_r1[i] = close_1d[i-1] + (high_1d[i-1] - low_1d[i-1]) * 1.0833
+            camarilla_s1[i] = close_1d[i-1] - (high_1d[i-1] - low_1d[i-1]) * 1.0833
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike: current volume > 1.5x average volume (20-period)
     vol_sma = np.full(n, np.nan)
@@ -54,10 +59,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # TRIX + volume warmup
+    start_idx = max(50, 20)  # EMA + volume warmup
     
     for i in range(start_idx, n):
-        if np.isnan(trix[i]) or np.isnan(ema_134_1d_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,24 +72,24 @@ def generate_signals(prices):
         volume_confirm = volume[i] > 1.5 * vol_sma[i]
         
         if position == 0:
-            # Long: TRIX crosses above zero and above 1d EMA134
-            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_134_1d_aligned[i] and volume_confirm:
+            # Long: Break above R1 and above 1-week EMA50
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero and below 1d EMA134
-            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_134_1d_aligned[i] and volume_confirm:
+            # Short: Break below S1 and below 1-week EMA50
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses below zero
-            if trix[i] < 0 and trix[i-1] >= 0:
+            # Exit: Close below 1-week EMA50
+            if close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses above zero
-            if trix[i] > 0 and trix[i-1] <= 0:
+            # Exit: Close above 1-week EMA50
+            if close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
