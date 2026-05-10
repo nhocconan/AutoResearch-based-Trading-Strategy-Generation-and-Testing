@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R2_S2_Breakout_12hTrend_Volume
-# Hypothesis: 4h breakout of 12h Camarilla R2/S2 levels with 12h trend filter and volume confirmation.
-# Uses tighter levels (R2/S2) for stronger signals and 12h trend filter for better trend alignment.
+# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+# Hypothesis: 4h breakout of 12h Camarilla R3/S3 levels with 12h trend filter and volume confirmation.
+# Uses tighter levels (R3/S3) for stronger signals and 12h trend filter for better trend alignment.
 # Designed to work in both bull and bear markets by following the 12h trend direction.
-# Expected trade count: ~15-25 per year per symbol to avoid fee drag.
+# Expected trade count: ~10-20 per year per symbol to avoid fee drag.
 
-name = "4h_12h_Camarilla_R2_S2_Breakout_12hTrend_Volume"
+name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -56,12 +56,12 @@ def generate_signals(prices):
     prev_close[0] = np.nan
     
     range_prev = prev_high - prev_low
-    s2 = prev_close - 1.1 * range_prev / 6
-    r2 = prev_close + 1.1 * range_prev / 6
+    s3 = prev_close - 1.1 * range_prev / 4
+    r3 = prev_close + 1.1 * range_prev / 4
     
     # Align 12h levels to 4h timeframe
-    s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
     
     # Volume confirmation (20-period for 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -77,8 +77,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(s2_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
+        if (np.isnan(s3_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
             np.isnan(ema_12h_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(vol_filter[i])):
@@ -103,25 +103,25 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Breakout above R2 in uptrend with volume
-            if close[i] > r2_aligned[i] and uptrend and volume_surge:
+            # Long: Breakout above R3 in uptrend with volume
+            if close[i] > r3_aligned[i] and uptrend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below S2 in downtrend with volume
-            elif close[i] < s2_aligned[i] and downtrend and volume_surge:
+            # Short: Breakdown below S3 in downtrend with volume
+            elif close[i] < s3_aligned[i] and downtrend and volume_surge:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: close back below R2 or trend fails
-                if close[i] < r2_aligned[i] or not uptrend:
+                # Long exit: close back below R3 or trend fails
+                if close[i] < r3_aligned[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: close back above S2 or trend fails
-                if close[i] > s2_aligned[i] or not downtrend:
+                # Short exit: close back above S3 or trend fails
+                if close[i] > s3_aligned[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
