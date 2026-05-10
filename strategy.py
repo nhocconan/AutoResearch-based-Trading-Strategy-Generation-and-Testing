@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Reversal
-# Hypothesis: Breakout above 1d Camarilla R1 or below S1 with volume surge and 1d EMA34 trend confirmation.
-# Focus on 4h timeframe to reduce trade frequency and improve generalization. Uses discrete sizing (0.25).
-# Targets 20-40 trades/year. Works in bull/bear by requiring trend alignment, reducing false breakouts.
+# 4h_Vortex_BullBear_Filter
+# Hypothesis: Use Vortex Indicator on daily timeframe to filter 4h bull/bear regimes, then trade 4h breakouts of 20-bar high/low with volume confirmation.
+# Vortex identifies trend strength and direction; reduces false breakouts in choppy markets. Works in both bull and bear by aligning with higher-timeframe trend.
+# Targets 20-40 trades/year with discrete sizing (0.25) to minimize fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Reversal"
+name = "4h_Vortex_BullBear_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,48 +17,74 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get daily data for Vortex trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLC for Camarilla calculation
+    # 4h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 1d Camarilla levels using previous day's range
-    # R1 = Close + 1.1*(High-Low)/12, S1 = Close - 1.1*(High-Low)/12
-    high_prev = np.roll(df_1d['high'].values, 1)
-    low_prev = np.roll(df_1d['low'].values, 1)
-    close_prev = np.roll(df_1d['close'].values, 1)
-    high_prev[0] = np.nan
-    low_prev[0] = np.nan
-    close_prev[0] = np.nan
+    # Calculate Vortex Indicator on daily data
+    # VM+ = |today's high - yesterday's low|
+    # VM- = |today's low - yesterday's high|
+    # True Range = max(|high-low|, |high-prev close|, |low-prev close|)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    camarilla_r1 = close_prev + 1.1 * (high_prev - low_prev) / 12
-    camarilla_s1 = close_prev - 1.1 * (high_prev - low_prev) / 12
+    vm_plus = np.abs(high_1d - np.roll(low_1d, 1))
+    vm_minus = np.abs(low_1d - np.roll(high_1d, 1))
+    tr = np.maximum(np.abs(high_1d - low_1d),
+                    np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                               np.abs(low_1d - np.roll(close_1d, 1))))
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Handle first element (no previous day)
+    vm_plus[0] = 0
+    vm_minus[0] = 0
+    tr[0] = high_1d[0] - low_1d[0]  # approximate TR for first bar
     
-    # Volume average (20-period = ~20 days of 4h bars)
+    # Vortex values (14-period)
+    period = 14
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # Align Vortex to 4h timeframe (Vortex needs 2 extra bars for confirmation like swing points)
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus, additional_delay_bars=2)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus, additional_delay_bars=2)
+    
+    # Determine trend: VI+ > VI- = uptrend, VI- > VI+ = downtrend
+    # Align daily close for trend confirmation
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
+    
+    # 4h price channel: 20-period high/low for breakout
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation: 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     bars_since_entry = 0
     
-    # Warmup: need Camarilla (needs 1 day) + EMA34 (34) + volume MA (20)
-    start_idx = 34
+    # Warmup: need Vortex (14+2), price channel (20), volume MA (20)
+    start_idx = 20  # dominated by 20-period lookbacks
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1[i]) or
-            np.isnan(camarilla_s1[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
+        if (np.isnan(vi_plus_aligned[i]) or
+            np.isnan(vi_minus_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or
+            np.isnan(high_20[i]) or
+            np.isnan(low_20[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,26 +92,25 @@ def generate_signals(prices):
                 bars_since_entry = 0
             continue
         
-        # Determine trend from 1d EMA34
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-        uptrend = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        # Determine trend from Vortex
+        uptrend = vi_plus_aligned[i] > vi_minus_aligned[i]
+        downtrend = vi_minus_aligned[i] > vi_plus_aligned[i]
         
         # Volume confirmation (1.5x average)
         volume_surge = volume[i] > 1.5 * vol_ma[i]
         
-        # Breakout above Camarilla R1 or breakdown below S1
-        breakout_r1 = close[i] > camarilla_r1[i]
-        breakdown_s1 = close[i] < camarilla_s1[i]
+        # Breakout above 20-bar high or breakdown below 20-bar low
+        breakout_high = close[i] > high_20[i]
+        breakdown_low = close[i] < low_20[i]
         
         if position == 0:
             bars_since_entry = 0
-            # Long: Breakout above Camarilla R1 with volume surge and 1d uptrend
-            if breakout_r1 and volume_surge and uptrend:
+            # Long: Breakout above 20-bar high with volume surge and daily uptrend
+            if breakout_high and volume_surge and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Camarilla S1 with volume surge and 1d downtrend
-            elif breakdown_s1 and volume_surge and downtrend:
+            # Short: Breakdown below 20-bar low with volume surge and daily downtrend
+            elif breakdown_low and volume_surge and downtrend:
                 signals[i] = -0.25
                 position = -1
         else:
@@ -96,16 +121,16 @@ def generate_signals(prices):
                 continue
             
             if position == 1:
-                # Long exit: price breaks below Camarilla S1 or trend changes
-                if close[i] < camarilla_s1[i] or not uptrend:
+                # Long exit: price breaks below 20-bar low or trend changes to downtrend
+                if close[i] < low_20[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price breaks above Camarilla R1 or trend changes
-                if close[i] > camarilla_r1[i] or not downtrend:
+                # Short exit: price breaks above 20-bar high or trend changes to uptrend
+                if close[i] > high_20[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                     bars_since_entry = 0
