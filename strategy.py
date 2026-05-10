@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 12h_WeeklyPivot_R1S1_Breakout_1wTrend_VolumeConfirm
-# Hypothesis: Weekly pivot points (R1/S1) provide key weekly support/resistance. Price breaking above R1 in a weekly uptrend or below S1 in a weekly downtrend indicates momentum. Volume confirmation filters false breakouts. Uses 12h timeframe to reduce trade frequency and avoid overtrading. Works in bull markets by riding uptrends and in bear markets by following downtrends.
+# 1d_Donchian_Breakout_VolumeTrend_Filter
+# Hypothesis: Daily Donchian(20) breakouts with volume confirmation and weekly trend filter.
+# In bull markets, price breaks above upper band in uptrend; in bear markets, breaks below lower band in downtrend.
+# Volume > 1.5x 20-day average confirms breakout strength. Weekly EMA40 determines trend direction.
+# Designed for low trade frequency (~15-25/year) to minimize fee drag and improve generalization.
 
-name = "12h_WeeklyPivot_R1S1_Breakout_1wTrend_VolumeConfirm"
-timeframe = "12h"
+name = "1d_Donchian_Breakout_VolumeTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +23,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels and trend filter
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 40:
         return np.zeros(n)
     
-    # Calculate weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate weekly EMA40 for trend filter
+    ema_40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
-    # Calculate weekly pivot levels (standard formula)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate daily Donchian channels (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * pivot_point - weekly_low
-    weekly_s1 = 2 * pivot_point - weekly_high
-    
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation: 1.5x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need Donchian (20), volume MA (20), and weekly EMA (40)
+    start_idx = max(20, 20, 40)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or 
+            np.isnan(ema_40_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Weekly trend filter
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        uptrend = close[i] > ema_40_1w_aligned[i]
+        downtrend = close[i] < ema_40_1w_aligned[i]
         
-        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R1 + volume
-            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above Donchian high + volume
+            if uptrend and close[i] > donchian_high[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S1 + volume
-            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below Donchian low + volume
+            elif downtrend and close[i] < donchian_low[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < weekly_r1_aligned[i]:
+            # Long exit: trend breaks or price re-enters below Donchian high
+            if not uptrend or close[i] < donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > weekly_s1_aligned[i]:
+            # Short exit: trend breaks or price re-enters above Donchian low
+            if not downtrend or close[i] > donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
