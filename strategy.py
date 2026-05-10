@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 6h_1w1d_Ichimoku_CloudBreakout_Trend
-# Hypothesis: Ichimoku cloud breakout on 6h with weekly trend filter (price > weekly EMA50) and daily volume confirmation.
-# Works in bull/bear: cloud acts as dynamic support/resistance, weekly EMA ensures trend alignment, volume reduces false breaks.
-# Target: 60-120 total trades over 4 years (15-30/year). Uses discrete 0.25 position sizing.
+# 6h_12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: 6h breakout at daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
+# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 20-period MA) confirms institutional participation.
+# Designed for 6h timeframe targeting 12-37 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
 
-name = "6h_1w1d_Ichimoku_CloudBreakout_Trend"
+name = "6h_12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -14,17 +14,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get daily data for Ichimoku components
+    # Get daily data for trend and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     # 6h OHLCV
@@ -33,97 +28,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily Ichimoku components
+    # Calculate daily Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period_tenkan = 9
-    high_tenkan = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    low_tenkan = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan_sen = (high_tenkan + low_tenkan) / 2
+    camarilla_r3 = np.full(len(df_1d), np.nan)
+    camarilla_s3 = np.full(len(df_1d), np.nan)
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period_kijun = 26
-    high_kijun = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    low_kijun = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun_sen = (high_kijun + low_kijun) / 2
+    for i in range(1, len(df_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        diff = prev_high - prev_low
+        
+        camarilla_r3[i] = prev_close + diff * 1.1 / 4
+        camarilla_s3[i] = prev_close - diff * 1.1 / 4
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_a = (tenkan_sen + kijun_sen) / 2
+    # Align daily indicators to 6h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period_senkou_b = 52
-    high_senkou = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    low_senkou = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = (high_senkou + low_senkou) / 2
-    
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # For signal generation, we need current price relative to cloud
-    
-    # Align Ichimoku components to 6h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
-    
-    # Daily volume average for confirmation
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 24 * 6h = 6 days
+    # Volume average (20-period for 6h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough for Ichimoku (52 periods) + volume MA
-    start_idx = 60
+    # Warmup: need enough history for daily EMA50 + vol MA
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(tenkan_aligned[i]) or
-            np.isnan(kijun_aligned[i]) or
-            np.isnan(senkou_a_aligned[i]) or
-            np.isnan(senkou_b_aligned[i]) or
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine cloud top and bottom
-        cloud_top = max(senkou_a_aligned[i], senkou_b_aligned[i])
-        cloud_bottom = min(senkou_a_aligned[i], senkou_b_aligned[i])
+        # Determine trend: daily close > EMA50
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Weekly trend filter: price > weekly EMA50
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
-        
-        # Volume confirmation (1.5x average)
-        volume_surge = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (2x average for significance)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Price breaks above cloud in uptrend with volume
-            if close[i] > cloud_top and uptrend and volume_surge:
+            # Long: Breakout above Camarilla R3 in uptrend with volume spike
+            if close[i] > camarilla_r3_aligned[i] and uptrend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below cloud in downtrend with volume
-            elif close[i] < cloud_bottom and downtrend and volume_surge:
+            # Short: Breakdown below Camarilla S3 in downtrend with volume spike
+            elif close[i] < camarilla_s3_aligned[i] and downtrend and volume_surge:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: price falls below cloud or trend fails
-                if close[i] < cloud_bottom or not uptrend:
+                # Long exit: close below Camarilla R3 or trend fails
+                if close[i] < camarilla_r3_aligned[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price rises above cloud or trend fails
-                if close[i] > cloud_top or not downtrend:
+                # Short exit: close above Camarilla S3 or trend fails
+                if close[i] > camarilla_s3_aligned[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
