@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 1h_VWAP_RSI_Confluence_Strategy
-# Hypothesis: Combines VWAP mean reversion with RSI momentum on 1h timeframe, using 4h trend filter and volume confirmation. VWAP acts as dynamic support/resistance, RSI filters momentum strength, and 4h trend ensures alignment with higher timeframe momentum. Designed for 15-30 trades/year to avoid fee drag, effective in both trending and ranging markets.
+# 6h_RSI_Extremes_With_Volume_Regime
+# Hypothesis: RSI extremes (overbought/oversold) on 6h timeframe combined with volume confirmation and ADX regime filter identifies mean-reversion opportunities in both trending and ranging markets. Volume confirms momentum behind the move, while ADX avoids choppy conditions where mean reversion fails. Designed for low frequency (15-30 trades/year) to minimize fee drag.
 
-name = "1h_VWAP_RSI_Confluence_Strategy"
-timeframe = "1h"
+name = "6h_RSI_Extremes_With_Volume_Regime"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,44 +20,50 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP (typical price * volume) cumulative
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, 0.0)
-    
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    # Wilder's smoothing
-    alpha = 1.0 / 14.0
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    
-    for i in range(1, len(gain)):
-        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
-        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100.0)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    
-    # 4h trend filter: EMA20 on 4h close
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Daily data for ADX regime filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_4h_up = close_4h > ema20_4h
-    trend_4h_down = close_4h < ema20_4h
+    # 6h RSI (14-period)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Align 4h trend to 1h
-    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
-    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    # Daily ADX (14-period) for regime filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # True Range
+    tr1 = pd.Series(high_1d).diff()
+    tr2 = pd.Series(high_1d).diff()
+    tr3 = pd.Series(close_1d).diff()
+    tr1 = pd.Series(high_1d) - pd.Series(low_1d)
+    tr2 = abs(pd.Series(high_1d) - pd.Series(close_1d).shift(1))
+    tr3 = abs(pd.Series(low_1d) - pd.Series(close_1d).shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    
+    # Directional Movement
+    up_move = pd.Series(high_1d).diff()
+    down_move = pd.Series(low_1d).diff()
+    up_move = up_move.where(up_move > down_move, 0)
+    down_move = (-down_move).where(down_move > up_move, 0)
+    
+    plus_di = 100 * (up_move.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    minus_di = 100 * (down_move.ewm(alpha=1/14, adjust=False, min_periods=14).mean() / atr)
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    adx_values = adx.values
+    
+    # Align daily ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
     
     # Volume confirmation: 20-period average
     volume_s = pd.Series(volume)
@@ -67,53 +73,47 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vwap[i]) or np.isnan(rsi[i]) or
-            np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+        if (np.isnan(rsi_values[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: require above average volume
-        volume_confirm = volume[i] > vol_ma[i] * 1.2
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_confirm = vol_ratio > 1.5
+        
+        # Regime filter: only trade when ADX < 25 (ranging market)
+        ranging_market = adx_aligned[i] < 25
         
         if position == 0:
-            # Enter long: price below VWAP (mean reversion) + RSI oversold + 4h uptrend
-            if (close[i] < vwap[i] * 0.998 and  # 0.2% below VWAP
-                rsi[i] < 35 and
-                trend_4h_up_aligned[i] > 0.5 and
-                volume_confirm):
-                signals[i] = 0.20
+            # Enter long: RSI oversold with volume confirmation in ranging market
+            if (rsi_values[i] < 30 and volume_confirm and ranging_market):
+                signals[i] = 0.25
                 position = 1
-            # Enter short: price above VWAP + RSI overbought + 4h downtrend
-            elif (close[i] > vwap[i] * 1.002 and  # 0.2% above VWAP
-                  rsi[i] > 65 and
-                  trend_4h_down_aligned[i] > 0.5 and
-                  volume_confirm):
-                signals[i] = -0.20
+            # Enter short: RSI overbought with volume confirmation in ranging market
+            elif (rsi_values[i] > 70 and volume_confirm and ranging_market):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to VWAP or RSI overbought
-            if (close[i] > vwap[i] * 1.001 or  # 0.1% above VWAP
-                rsi[i] > 70):
+            # Exit when RSI returns to neutral or volume fails
+            if (rsi_values[i] > 50 or not volume_confirm):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to VWAP or RSI oversold
-            if (close[i] < vwap[i] * 0.999 or  # 0.1% below VWAP
-                rsi[i] < 30):
+            # Exit when RSI returns to neutral or volume fails
+            if (rsi_values[i] < 50 or not volume_confirm):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
