@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-# 6h_Keltner_MeanReversion_1dATR_Filter
-# Hypothesis: Mean reversion at Keltner channel extremes filtered by daily ATR volatility regime.
-# Long when price touches lower Keltner band (EMA20 - 2*ATR) with daily ATR > median (high volatility).
-# Short when price touches upper Keltner band (EMA20 + 2*ATR) with daily ATR > median.
-# Exit when price crosses EMA20. Works in both bull/bear markets by capturing overextended moves during high volatility.
+# 4h_LinearRegressionChannel_Breakout_1dTrend_Volume
+# Hypothesis: Uses linear regression channel (20-period) on 4h for breakout signals.
+# Long when price breaks above upper channel with volume > 1.5x average and price > daily EMA50.
+# Short when price breaks below lower channel with volume > 1.5x average and price < daily EMA50.
+# Exits when price crosses back below/above the 50-period linear regression (midline).
+# Designed for 20-40 trades/year to avoid overtrading and work in both bull and bear markets.
+# Linear regression adapts to volatility and trend, providing dynamic support/resistance.
 
-name = "6h_Keltner_MeanReversion_1dATR_Filter"
-timeframe = "6h"
+name = "4h_LinearRegressionChannel_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,83 +26,85 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 6h EMA20 and ATR(20)
-    close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # True Range and ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Keltner bands
-    upper_keltner = ema20 + 2.0 * atr
-    lower_keltner = ema20 - 2.0 * atr
-    
-    # Calculate daily ATR for volatility regime filter
+    # Calculate daily EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Daily ATR(20)
-    tr1_1d = high_1d[1:] - low_1d[1:]
-    tr2_1d = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3_1d = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))])
-    atr_1d = pd.Series(tr_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Linear regression channel (20-period) on 4h
+    def calculate_lr_channel(src, length):
+        if len(src) < length:
+            return np.full(len(src), np.nan), np.full(len(src), np.nan), np.full(len(src), np.nan)
+        
+        upper = np.full(len(src), np.nan)
+        lower = np.full(len(src), np.nan)
+        midline = np.full(len(src), np.nan)
+        
+        for i in range(length-1, len(src)):
+            y = src[i-length+1:i+1]
+            x = np.arange(length)
+            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+            
+            # Predictions at start and end of window
+            y_start = intercept  # at x=0
+            y_end = intercept + slope * (length - 1)  # at x=length-1
+            
+            # Standard deviation of residuals
+            y_pred = intercept + slope * x
+            residuals = y - y_pred
+            std_residuals = np.std(residuals)
+            
+            # Channel lines: midline ± 2 * std_residuals
+            midline[i] = (y_start + y_end) / 2
+            upper[i] = midline[i] + 2 * std_residuals
+            lower[i] = midline[i] - 2 * std_residuals
+        
+        return upper, lower, midline
     
-    # Daily ATR median for regime filter (using expanding window to avoid look-ahead)
-    atr_median_1d = np.full(len(atr_1d), np.nan)
-    for i in range(20, len(atr_1d)):
-        atr_median_1d[i] = np.nanmedian(atr_1d[20:i+1])
+    lr_upper, lr_lower, lr_midline = calculate_lr_channel(close, 20)
     
-    # Align daily ATR and median to 6h
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    atr_median_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_median_1d)
+    # Volume average (20 periods)
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure sufficient warmup
+    start_idx = max(20, 50)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or np.isnan(ema20[i]) or \
-           np.isnan(atr_1d_aligned[i]) or np.isnan(atr_median_1d_aligned[i]):
+        if np.isnan(lr_upper[i]) or np.isnan(lr_lower[i]) or np.isnan(lr_midline[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # High volatility regime: daily ATR above its median
-        high_vol = atr_1d_aligned[i] > atr_median_1d_aligned[i]
-        
         if position == 0:
-            # Long: Price at lower Keltner band in high volatility
-            if low[i] <= lower_keltner[i] and high_vol:
+            # Long: Breakout above upper channel with volume confirmation and uptrend
+            if close[i] > lr_upper[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price at upper Keltner band in high volatility
-            elif high[i] >= upper_keltner[i] and high_vol:
+            # Short: Breakout below lower channel with volume confirmation and downtrend
+            elif close[i] < lr_lower[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price crosses above EMA20 (mean reversion complete)
-            if close[i] >= ema20[i]:
+            # Exit: Price crosses below midline
+            if close[i] < lr_midline[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price crosses below EMA20 (mean reversion complete)
-            if close[i] <= ema20[i]:
+            # Exit: Price crosses above midline
+            if close[i] > lr_midline[i]:
                 signals[i] = 0.0
                 position = 0
             else:
