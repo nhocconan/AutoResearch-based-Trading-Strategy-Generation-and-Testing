@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dTrend_Volume
-Hypothesis: Elder Ray index (Bull Power = High - EMA, Bear Power = EMA - Low) with 13-period EMA.
-Use 1d EMA34 as trend filter. Enter long when Bull Power > 0 and rising in uptrend, short when Bear Power < 0 and falling in downtrend.
-Add volume confirmation (current volume > 1.5x 20 EMA volume). Target: 15-25 trades/year.
-Works in bull/bear via trend filter and momentum confirmation.
+12h_WeeklyPivot_R1_S4_Breakout_1wTrend_Volume
+Hypothesis: Use weekly trend filter (EMA34) with 1d Pivot R1/S4 breakout on 12h, requiring volume confirmation.
+Pivot levels provide high-probability reversal points. Weekly EMA filter ensures trading with weekly trend.
+Volume filter avoids false breakouts. Target: 15-25 trades/year, works in bull/bear via trend filter.
 """
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_R1_S4_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,76 +19,83 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get daily data for pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate Elder Ray components (13-period EMA)
+    # Calculate weekly EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    
+    # Calculate daily pivot points (using previous day)
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
+    
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev          # Resistance 1
+    s4 = pivot - 3 * (high_prev - low_prev)  # Support 4 (strong support)
+    
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Get 12h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = EMA13 - Low
-    bear_power = ema_13 - low
-    
-    # Volume filter: current volume > 1.5x 20-period EMA (moderate to balance frequency)
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.5
+    # Volume filter: current volume > 1.5x 30-period EMA (moderate to balance trades)
+    vol_ema30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    volume_filter = volume > vol_ema30 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA13 and 1d EMA34
+    # Warmup: need weekly EMA and previous day data
     start_idx = 35
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(ema_13[i]) or
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend: price vs EMA34
-        uptrend = close[i] > ema_34_aligned[i]
-        downtrend = close[i] < ema_34_aligned[i]
+        # Determine weekly trend: price vs weekly EMA34
+        uptrend = close[i] > ema_34_1w_aligned[i]
+        downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long: uptrend AND Bull Power > 0 AND Bull Power rising (current > previous) with volume
-            if (uptrend and bull_power[i] > 0 and 
-                i > 0 and bull_power[i] > bull_power[i-1] and volume_filter[i]):
+            # Long: uptrend AND price breaks above daily R1 with volume
+            if uptrend and high[i] > r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend AND Bear Power > 0 AND Bear Power rising (current > previous) with volume
-            elif (downtrend and bear_power[i] > 0 and 
-                  i > 0 and bear_power[i] > bear_power[i-1] and volume_filter[i]):
+            # Short: downtrend AND price breaks below daily S4 with volume
+            elif downtrend and low[i] < s4_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power <= 0 OR trend changes to downtrend
-            if bull_power[i] <= 0 or not uptrend:
+            # Long exit: price breaks below daily S4 OR trend changes to downtrend
+            if low[i] < s4_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power <= 0 OR trend changes to uptrend
-            if bear_power[i] <= 0 or not downtrend:
+            # Short exit: price breaks above daily R1 OR trend changes to uptrend
+            if high[i] > r1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
