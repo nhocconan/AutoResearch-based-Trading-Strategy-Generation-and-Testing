@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_RelativeStrength_Momentum
-Hypothesis: Use relative strength (RS) vs Bitcoin to capture momentum leadership in altcoins.
-Long when ETH/SOL shows RS strength (price outperforming BTC) with 60-period price above 200EMA and rising RSI.
-Short when RS weakness (underperforming BTC) with price below 200EMA and falling RSI.
-Works in bull/bear by following leadership shifts; RS filters out weak moves.
-Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Price breaks Camarilla R3/S3 levels (from 1d) with 1d trend filter (EMA50) and volume spike confirmation.
+Long when close > R3 and above 1d EMA50 with volume spike; short when close < S3 and below 1d EMA50 with volume spike.
+Works in bull/bear by trading breakouts in direction of higher timeframe trend.
+Target: 15-30 trades/year (60-120 total) to minimize fee drag.
 """
 
-name = "6h_RelativeStrength_Momentum"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,100 +17,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly BTC data for RS calculation
-    df_1w_btc = get_htf_data(prices, '1w')
-    btc_close = df_1w_btc['close'].values
+    # 1d data
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 60-period price change (momentum)
-    price_change_60 = np.full(n, np.nan)
-    for i in range(60, n):
-        price_change_60[i] = (close[i] - close[i-60]) / close[i-60]
+    # Calculate Camarilla levels from previous 1d bar
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    camarilla_range = high_1d - low_1d
+    r3 = close_1d + 1.1 * camarilla_range / 2
+    s3 = close_1d - 1.1 * camarilla_range / 2
     
-    # Calculate weekly BTC momentum for comparison
-    btc_change_60 = np.full(len(btc_close), np.nan)
-    for i in range(60, len(btc_close)):
-        btc_change_60[i] = (btc_close[i] - btc_close[i-60]) / btc_close[i-60]
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # Align BTC momentum to 6h
-    btc_change_60_aligned = align_htf_to_ltf(prices, df_1w_btc, btc_change_60)
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Relative Strength: asset momentum minus BTC momentum
-    rs_momentum = price_change_60 - btc_change_60_aligned
-    
-    # 200-period EMA for trend filter
-    ema200 = np.full(n, np.nan)
-    if n >= 200:
-        ema200[199] = np.mean(close[:200])
-        alpha = 2 / (200 + 1)
-        for i in range(200, n):
-            ema200[i] = alpha * close[i] + (1 - alpha) * ema200[i-1]
-    
-    # 14-period RSI for momentum confirmation
-    rsi = np.full(n, np.nan)
-    if n >= 14:
-        # Calculate first average gain/loss
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        
-        for i in range(14, n):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-            rs = avg_gain[i] / avg_loss[i] if avg_loss[i] != 0 else 0
-            rsi[i] = 100 - (100 / (1 + rs))
+    # Align 1d indicators to 12h (2 bars per day)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200
+    start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(rs_momentum[i]) or np.isnan(ema200[i]) or np.isnan(rsi[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Conditions for long: positive RS momentum, price above EMA200, RSI rising
-        long_condition = (rs_momentum[i] > 0 and 
-                         close[i] > ema200[i] and 
-                         rsi[i] > rsi[i-1])
+        # Volume confirmation: current 12h volume > 2x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 2.0  # 2x 12h bars in 1d
+        volume_confirm = volume[i] > 2.0 * vol_1d_scaled
         
-        # Conditions for short: negative RS momentum, price below EMA200, RSI falling
-        short_condition = (rs_momentum[i] < 0 and 
-                          close[i] < ema200[i] and 
-                          rsi[i] < rsi[i-1])
+        # Trend and price relative to Camarilla levels
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
+        price_above_r3 = close[i] > r3_aligned[i]
+        price_below_s3 = close[i] < s3_aligned[i]
         
         if position == 0:
-            if long_condition:
+            # Long: price breaks above R3, in uptrend, with volume spike
+            if price_above_r3 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            elif short_condition:
+            # Short: price breaks below S3, in downtrend, with volume spike
+            elif price_below_s3 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RS turns negative or price falls below EMA200
-            if rs_momentum[i] <= 0 or close[i] <= ema200[i]:
+            # Exit: price falls back below R3 or trend turns down
+            if not price_above_r3 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RS turns positive or price rises above EMA200
-            if rs_momentum[i] >= 0 or close[i] >= ema200[i]:
+            # Exit: price rises back above S3 or trend turns up
+            if not price_below_s3 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
