@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_CustomFilter
-# Hypothesis: Daily pivot points (R1/S1) provide key support/resistance. Price breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. Volume confirmation filters false breakouts. Tightened entry conditions (volume > 2.5x MA, stricter trend) to reduce trade frequency and avoid overtrading. Works in bull markets by riding uptrends and in bear markets by following downtrends.
+# 12h_Pivot_Breakout_TrendVolume_v1
+# Hypothesis: Daily pivot points (R1/S1) act as key support/resistance. Breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. Uses 12h timeframe for lower trade frequency, volume confirmation to filter false breakouts, and trend filter (daily EMA34) to align with higher timeframe bias. Designed to work in both bull and bear markets by following the daily trend.
 
-name = "4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike_CustomFilter"
-timeframe = "4h"
+name = "12h_Pivot_Breakout_TrendVolume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,19 +29,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily pivot levels (Camarilla formula)
+    # Calculate daily pivot levels (standard formula)
     daily_high = df_1d['high'].values
     daily_low = df_1d['low'].values
     daily_close = df_1d['close'].values
     
     pivot_point = (daily_high + daily_low + daily_close) / 3
-    daily_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    daily_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    daily_r1 = 2 * pivot_point - daily_low
+    daily_s1 = 2 * pivot_point - daily_high
     
     daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
     daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
     
-    # Volume confirmation (20-period MA on 4h = ~3.3 days)
+    # Volume confirmation (20-period MA on 12h = ~10 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -65,8 +65,8 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (stricter: >2.5x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.5
+        # Volume confirmation (2.0x MA to reduce false signals)
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
             # Long entry: uptrend + price breaks above daily R1 + volume
