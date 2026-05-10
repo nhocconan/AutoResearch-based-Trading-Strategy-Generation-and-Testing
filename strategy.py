@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_TRIX_Trend_Filter
-# Hypothesis: TRIX (Triple Exponential Average) captures momentum with reduced lag.
-# In both bull and bear markets, TRIX crossovers above/below zero with volume confirmation
-# and 1-week trend filter (price above/below 200-period EMA) capture sustained moves.
-# Uses 12h timeframe for low trade frequency (target: 15-30/year) to minimize fee drag.
+# 4h_Donchian_Breakout_Trend_Volume_With_Stops
+# Hypothesis: Donchian(20) breakouts with trend (1d EMA50) and volume confirmation work in both bull and bear markets.
+# Uses 4h timeframe with 1d/1h multi-timeframe filters. Stops via signal=0 on breakdown below Donchian low.
+# Target: 20-40 trades/year to minimize fee drag. Position size 0.25.
 
-name = "12h_TRIX_Trend_Filter"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_Trend_Volume_With_Stops"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,68 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # 1-week EMA200 for trend (smooth, lag-appropriate)
-    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # Calculate TRIX on 12h data
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    # TRIX: EMA(EMA(EMA(close, 15), 15), 15) - 1-period percent change
-    ema1 = pd.Series(close_12h).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix_raw = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100  # percent change
-    trix = np.concatenate([[np.nan], trix_raw])  # align with original length
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix)
+    # Get 1h data for volume confirmation (20-period average)
+    df_1h = get_htf_data(prices, '1h')
+    volume_1h = df_1h['volume'].values
+    vol_ma_1h = pd.Series(volume_1h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1h_aligned = align_htf_to_ltf(prices, df_1h, vol_ma_1h)
     
-    # Volume confirmation (20-period average on 12h = ~10 days)
-    def mean_arr(arr, p):
+    # Calculate Donchian channels (20-period) on 4h data
+    def rolling_max(arr, window):
         res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
         return res
-    vol_ma = mean_arr(volume, 20)
+    
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
+    
+    donchian_high = rolling_max(high, 20)
+    donchian_low = rolling_min(low, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20) + 5  # need enough history for calculations
+    start_idx = max(50, 20)  # need enough history for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(trix_aligned[i]) or np.isnan(ema_200_1w_aligned[i]) or \
-           np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema_1d_50_aligned[i]) or np.isnan(vol_ma_1h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume confirmation: current volume > 1.5x 1h average
+        volume_confirm = volume[i] > 1.5 * vol_ma_1h_aligned[i] if vol_ma_1h_aligned[i] > 0 else False
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume, above 1w EMA200 (uptrend)
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and volume_confirm and close[i] > ema_200_1w_aligned[i]:
+            # Long: price breaks above Donchian high with volume and above 1d EMA50 (uptrend)
+            if close[i] > donchian_high[i] and volume_confirm and close[i] > ema_1d_50_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume, below 1w EMA200 (downtrend)
-            elif trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and volume_confirm and close[i] < ema_200_1w_aligned[i]:
+            # Short: price breaks below Donchian low with volume and below 1d EMA50 (downtrend)
+            elif close[i] < donchian_low[i] and volume_confirm and close[i] < ema_1d_50_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero or price breaks below 1w EMA200
-            if trix_aligned[i] < 0 or close[i] < ema_200_1w_aligned[i]:
+            # Long: hold or exit
+            if close[i] < donchian_low[i]:  # exit on breakdown below Donchian low
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero or price breaks above 1w EMA200
-            if trix_aligned[i] > 0 or close[i] > ema_200_1w_aligned[i]:
+            # Short: hold or exit
+            if close[i] > donchian_high[i]:  # exit on breakout above Donchian high
                 signals[i] = 0.0
                 position = 0
             else:
