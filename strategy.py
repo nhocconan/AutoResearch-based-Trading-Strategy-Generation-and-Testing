@@ -1,12 +1,13 @@
-# 4H_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Buy at Camarilla R3 level in uptrend, sell at S3 level in downtrend with volume confirmation.
-# Uses 1d trend filter to ensure alignment with daily trend.
-# Camarilla levels provide institutional pivot points where price often reverses or breaks.
-# Works in both bull and bear markets by following daily trend and using volume to confirm breakout strength.
-# Target: 25-40 trades/year per symbol.
+#!/usr/bin/env python3
+# 1D_WeeklyTrend_Donchian20_Breakout
+# Hypothesis: Use weekly Donchian channel breakouts with daily trend filter to capture major moves.
+# Long when price breaks above weekly Donchian high (20-period) and daily close > daily EMA50.
+# Short when price breaks below weekly Donchian low (20-period) and daily close < daily EMA50.
+# Weekly trend acts as primary filter, reducing whipsaws in ranging markets.
+# Target: 15-25 trades/year per symbol, suitable for 1d timeframe.
 
-name = "4H_Camarilla_Pivot_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1D_WeeklyTrend_Donchian20_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,89 +16,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Volume average (20-period)
-    volume_s = pd.Series(volume)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    # Daily EMA50 for trend filter
+    close_s = pd.Series(close)
+    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly Donchian channel (20-period high/low)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate Camarilla levels for each day
-    # R3 = Close + (High - Low) * 1.1/2
-    # S3 = Close - (High - Low) * 1.1/2
-    cam_r3 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    cam_s3 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Calculate 20-period Donchian bands on weekly data
+    high_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Daily trend filter (EMA50)
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_uptrend = close_1d > ema50_1d
-    daily_downtrend = close_1d < ema50_1d
+    # Align weekly Donchian bands to daily timeframe
+    high_20_aligned = align_htf_to_ltf(prices, df_1w, high_20)
+    low_20_aligned = align_htf_to_ltf(prices, df_1w, low_20)
     
-    # Align daily data to 4h timeframe
-    cam_r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3)
-    cam_s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3)
-    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
-    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
+    # Daily trend filter: close > EMA50 for uptrend, < EMA50 for downtrend
+    daily_uptrend = close > ema50
+    daily_downtrend = close < ema50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
+    # Start after we have enough data for all indicators
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(cam_r3_aligned[i]) or np.isnan(cam_s3_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(daily_uptrend_aligned[i]) or
-            np.isnan(daily_downtrend_aligned[i])):
+        if (np.isnan(ema50[i]) or np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
-        
-        daily_up = daily_uptrend_aligned[i] > 0.5
-        daily_down = daily_downtrend_aligned[i] > 0.5
-        
         if position == 0:
-            # Enter long: daily uptrend + price breaks above R3 + volume confirmation
-            if daily_up and volume_confirm:
-                if close[i] > cam_r3_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short: daily downtrend + price breaks below S3 + volume confirmation
-            elif daily_down and volume_confirm:
-                if close[i] < cam_s3_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: weekly breakout above Donchian high + daily uptrend
+            if close[i] > high_20_aligned[i] and daily_uptrend[i]:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: weekly breakout below Donchian low + daily downtrend
+            elif close[i] < low_20_aligned[i] and daily_downtrend[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price drops below R3 or trend changes
-            if close[i] < cam_r3_aligned[i] or not daily_up:
+            # Exit long: price returns to weekly Donchian mid-point or trend reverses
+            mid_point = (high_20_aligned[i] + low_20_aligned[i]) / 2
+            if close[i] < mid_point or not daily_uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price rises above S3 or trend changes
-            if close[i] > cam_s3_aligned[i] or not daily_down:
+            # Exit short: price returns to weekly Donchian mid-point or trend reverses
+            mid_point = (high_20_aligned[i] + low_20_aligned[i]) / 2
+            if close[i] > mid_point or not daily_downtrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
