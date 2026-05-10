@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12h Camarilla R1/S1 breakout in direction of 1d EMA34 trend, with volume confirmation. 
-Camarilla levels from daily provide institutional support/resistance. EMA34 filter ensures trend alignment.
-Volume > 1.5x 20-period EMA confirms breakout strength. Targets 50-150 total trades over 4 years.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 4h Camarilla R1/S1 breakout in direction of 1d EMA34 trend, with volume confirmation.
+Uses daily Camarilla levels (institutional support/resistance) and EMA34 trend filter.
 Works in bull/bear by following higher timeframe trend and using institutional levels.
+Target: 20-50 trades/year on 4h to avoid fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -31,19 +31,14 @@ def generate_signals(prices):
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     # Calculate daily Camarilla levels (using previous day's OHLC)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), R2 = C + ((H-L)*1.1/6), 
-    # R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12), S2 = C - ((H-L)*1.1/6), 
-    # S3 = C - ((H-L)*1.1/4), S4 = C - ((H-L)*1.1/2)
-    # We'll use R1 and S1 for breakouts
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each day
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
