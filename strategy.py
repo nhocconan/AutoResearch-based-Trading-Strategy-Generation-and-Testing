@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_3_Bar_Reversal_1dTrend_Volume_Spike
-# Hypothesis: 3-bar reversal pattern (3 consecutive closes in same direction) with 1d EMA trend filter and volume spike.
-# Works in bull/bear markets by aligning with daily trend. Targets 20-40 trades/year to minimize fee drag.
-# Uses price action only - no lagging indicators - for robust signals.
+# 1d_Williams_VIX_Fix_1wTrend_VolumeFilter
+# Hypothesis: Williams VIX Fix (synthetic volatility) combined with 1-week EMA trend filter and volume confirmation.
+# VIX Fix measures market fear; extreme readings signal potential reversals. Works in both bull and bear markets
+# by aligning with higher timeframe trend. Uses volume spike for confirmation and targets 15-25 trades/year.
+# Williams VIX Fix formula: ((HighestClose - Low) / (HighestClose - HighestClose)) * 100, where HighestClose is
+# the highest close over the lookback period. Values > 80 indicate extreme fear (potential bottom).
 
-name = "4h_3_Bar_Reversal_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "1d_Williams_VIX_Fix_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,17 +19,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get daily EMA for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Williams VIX Fix with 22-day lookback (approx 1 month)
+    lookback = 22
+    highest_close = pd.Series(close).rolling(window=lookback, min_periods=lookback).max().values
+    vix_fix = ((highest_close - low) / (highest_close - highest_close + 1e-10)) * 100  # Avoid division by zero
+    vix_fix = np.where(highest_close == highest_close, 100, vix_fix)  # When close == highest_close
+    
+    # Get weekly EMA for trend filter
+    ema_21_1w = pd.Series(df_1w['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
     # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -35,54 +45,46 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20) + 2  # Warmup for daily EMA, volume MA, plus 2 for lookback
+    start_idx = max(lookback, 21, 20)  # Warmup for VIX Fix, weekly EMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(vix_fix[i]) or np.isnan(ema_21_1w_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_21_1w_aligned[i]
+        downtrend = close[i] < ema_21_1w_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # 3-bar reversal pattern: 3 consecutive closes moving in same direction
-        # Bullish: 3 higher closes
-        bullish_pattern = (close[i] > close[i-1] and 
-                          close[i-1] > close[i-2] and 
-                          close[i-2] > close[i-3])
-        # Bearish: 3 lower closes
-        bearish_pattern = (close[i] < close[i-1] and 
-                          close[i-1] < close[i-2] and 
-                          close[i-2] < close[i-3])
+        # VIX Fix signals: extreme fear (>80) = potential long, low fear (<20) = potential short
+        extreme_fear = vix_fix[i] > 80
+        low_fear = vix_fix[i] < 20
         
         if position == 0:
-            # Long entry: bullish 3-bar pattern + uptrend + volume spike
-            if bullish_pattern and uptrend and volume_confirm:
+            # Long entry: extreme fear + uptrend + volume spike
+            if extreme_fear and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish 3-bar pattern + downtrend + volume spike
-            elif bearish_pattern and downtrend and volume_confirm:
+            # Short entry: low fear + downtrend + volume spike
+            elif low_fear and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below the low of the 3-bar pattern or trend reversal
-            pattern_low = min(close[i-3], close[i-2], close[i-1])
-            if close[i] < pattern_low or not uptrend:
+            # Long exit: fear subsides or trend reversal
+            if vix_fix[i] < 50 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above the high of the 3-bar pattern or trend reversal
-            pattern_high = max(close[i-3], close[i-2], close[i-1])
-            if close[i] > pattern_high or not downtrend:
+            # Short exit: fear increases or trend reversal
+            if vix_fix[i] > 50 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
