@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
 # Hypothesis: 4h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
 # Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 24-period MA) confirms institutional participation.
 # Designed for 4h timeframe targeting 20-50 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,6 +52,7 @@ def generate_signals(prices):
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
     
     # Volume average (24-period for 4h = 4 days)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -67,6 +68,7 @@ def generate_signals(prices):
         if (np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(close_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,7 +76,6 @@ def generate_signals(prices):
             continue
         
         # Determine trend: daily close > EMA50
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
         uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
         downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
