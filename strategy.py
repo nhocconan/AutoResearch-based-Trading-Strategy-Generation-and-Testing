@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Improved
-# Hypothesis: Use 1d trend filter + Camarilla pivot levels from 1d for entry with volume confirmation on 4h.
-# Long when 1d close > 1d EMA34 and price breaks above R1 with volume; short when 1d close < 1d EMA34 and price breaks below S1 with volume.
-# Designed for low trade frequency (20-40/year) to avoid fee drift, works in bull/bear via trend filter.
+# 12h_1W_Trend_1D_Volume_Spike
+# Hypothesis: Use 1-week trend direction and 1-day volume spike for entry on 12h timeframe.
+# Long when weekly close > weekly EMA50 and daily volume > 2x 20-day average; enter on 12h pullback to EMA20.
+# Short when weekly close < weekly EMA50 and daily volume > 2x 20-day average; enter on 12h bounce to EMA20.
+# Designed for low trade frequency (12-37/year) to avoid fee drag, works in bull/bear via trend filter.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Improved"
-timeframe = "4h"
+name = "12h_1W_Trend_1D_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,79 +23,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    # 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d OHLC
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # 1w EMA50 trend
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema50_1w
+    trend_1w_down = close_1w < ema50_1w
     
-    # Align 1d indicators to 4h (wait for 1d bar to close)
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    # Volume filter: current volume > 1.5 * 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    # 1d volume spike filter: current volume > 2 * 20-day average
+    volume_1d = df_1d['volume'].values
+    volume_series_1d = pd.Series(volume_1d)
+    vol_ma_20_1d = volume_series_1d.rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2 * vol_ma_20_1d)
+    
+    # Align 1d volume spike to 12h
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    
+    # 12h EMA20 for entry timing
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(ema20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 1.5
-        
         if position == 0:
-            # Long: 1d uptrend + price breaks above R1 with volume
-            if (trend_1d_up_aligned[i] > 0.5 and 
-                close[i] > camarilla_r1_aligned[i] and
-                volume_filter):
+            # Long: 1w uptrend + volume spike + price near EMA20 with pullback
+            if (trend_1w_up_aligned[i] > 0.5 and 
+                vol_spike_1d_aligned[i] > 0.5 and
+                close[i] <= ema20[i] * 1.01 and  # within 1% above EMA20 (pullback)
+                close[i] >= ema20[i] * 0.99):    # within 1% below EMA20
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d downtrend + price breaks below S1 with volume
-            elif (trend_1d_down_aligned[i] > 0.5 and 
-                  close[i] < camarilla_s1_aligned[i] and
-                  volume_filter):
+            # Short: 1w downtrend + volume spike + price near EMA20 with bounce
+            elif (trend_1w_down_aligned[i] > 0.5 and 
+                  vol_spike_1d_aligned[i] > 0.5 and
+                  close[i] >= ema20[i] * 0.99 and  # within 1% below EMA20
+                  close[i] <= ema20[i] * 1.01):    # within 1% above EMA20
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: 1d trend fails or price returns to pivot
-            if (trend_1d_up_aligned[i] < 0.5 or 
-                close[i] < camarilla_r1_aligned[i]):
+            # Exit: 1w trend fails or volume spike ends
+            if (trend_1w_up_aligned[i] < 0.5 or 
+                vol_spike_1d_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: 1d trend fails or price returns to pivot
-            if (trend_1d_down_aligned[i] < 0.5 or 
-                close[i] > camarilla_s1_aligned[i]):
+            # Exit: 1w trend fails or volume spike ends
+            if (trend_1w_down_aligned[i] < 0.5 or 
+                vol_spike_1d_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
