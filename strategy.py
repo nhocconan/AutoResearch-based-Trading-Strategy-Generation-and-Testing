@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-# Hypothesis: Camarilla pivot levels provide institutional support/resistance levels.
-# In trending markets, price breaking above R1 in uptrend or below S1 in downtrend
-# continues with momentum. We use 4h EMA50 for trend filter and volume confirmation
-# to avoid false breakouts. Works in bull markets (follows uptrends) and bear
-# markets (follows downtrends) by only trading in direction of 4h trend.
-# Target: 15-37 trades/year to minimize fee drag on 1h timeframe.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from the daily chart provide institutional support/resistance.
+# In trending markets, price breaking above R1 in uptrend or below S1 in downtrend continues with momentum.
+# We use 1d EMA34 for trend filter and volume confirmation to avoid false breakouts.
+# Works in bull markets (follows uptrends) and bear markets (follows downtrends) by only trading in direction of 1d trend.
+# Target: 15-30 trades/year to minimize fee drag.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,19 +24,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Calculate daily data for Camarilla levels
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate Camarilla levels from previous day
     # R1 = close + (high - low) * 1.12 / 12
@@ -47,21 +41,18 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Volume confirmation (20-period MA on 1h = ~1 day)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    session_mask = (prices.index.hour >= 8) & (prices.index.hour <= 20)
+    # Volume confirmation (10-period MA on 12h = 5 days)
+    volume_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 4h EMA50 (50), Camarilla (needs 1d), volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: need 1d EMA34 (34), Camarilla (needs 1d), volume MA (10)
+    start_idx = max(34, 10)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(camarilla_r1_aligned[i]) or 
             np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
@@ -70,16 +61,9 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Skip outside session
-        if not session_mask[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # 4h trend filter
-        uptrend = close[i] > ema_50_4h_aligned[i]
-        downtrend = close[i] < ema_50_4h_aligned[i]
+        # 1d trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
@@ -87,11 +71,11 @@ def generate_signals(prices):
         if position == 0:
             # Long entry: uptrend + price breaks above R1 + volume
             if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
             # Short entry: downtrend + price breaks below S1 + volume
             elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: trend breaks or price re-enters R1-S1 range
@@ -99,13 +83,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
             # Short exit: trend breaks or price re-enters R1-S1 range
             if not downtrend or close[i] > camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
