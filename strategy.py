@@ -1,14 +1,13 @@
-#!/usr/bin/env python3
-# 4H_PriceAction_Breakout_Volume_Trend
-# Hypothesis: Price action breakout of previous 1d high/low with volume confirmation and trend filter on 4h.
-# Enters long when price breaks above previous 1d high with volume > 2x average and 4h close > 4h EMA50.
-# Enters short when price breaks below previous 1d low with volume > 2x average and 4h close < 4h EMA50.
-# Exits when price returns to the opposite level (previous 1d low for long, previous 1d high for short).
-# Uses 4h EMA50 for trend to filter false breakouts and works in both bull/bear markets.
-# Targets 20-50 trades per year on 4h timeframe with position size 0.25 to minimize fee drag.
+#/usr/bin/env python3
+# 6H_4H_EMA_Crossover_12H_Volume_Regime_Filter
+# Hypothesis: Uses 4h EMA cross for trend direction, filtered by 12h volume regime (low volatility) to avoid whipsaws.
+# Enters long when 4h EMA(9) crosses above EMA(21) and 12h volume regime is calm (volume < 1.5x 50-period average).
+# Enters short when 4h EMA(9) crosses below EMA(21) and 12h volume regime is calm.
+# Exits on opposite EMA cross. Uses 6h timeframe for execution. Targets 12-30 trades per year with position size 0.25.
+# Works in both bull/bear markets by using EMA cross with volatility filter to avoid false signals during high volatility.
 
-name = "4H_PriceAction_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6H_4H_EMA_Crossover_12H_Volume_Regime_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,74 +15,76 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prrices)
-    if n < 50:
+    n = len(prices)
+    if n < 100:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for previous day high/low
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for EMA crossover
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Previous 1d high and low
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 4h EMA(9) and EMA(21)
+    ema_9_4h = pd.Series(df_4h['close']).ewm(span=9, adjust=False, min_periods=9).mean().values
+    ema_21_4h = pd.Series(df_4h['close']).ewm(span=21, adjust=False, min_periods=21).mean().values
     
-    # Align to 4h timeframe (available after 1d bar closes)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
+    # Align EMA values to 6h timeframe
+    ema_9_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_9_4h)
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
     
-    # 4h EMA(50) for trend filter
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Get 12h data for volume regime filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    # Volume filter: volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    # Calculate 12h volume 50-period average
+    vol_ma_50_12h = pd.Series(df_12h['volume']).rolling(window=50, min_periods=50).mean().values
+    vol_threshold_12h = vol_ma_50_12h * 1.5  # Volume regime: calm when volume < 1.5x average
+    
+    # Align volume threshold to 6h timeframe
+    vol_threshold_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_threshold_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and volume MA
+    start_idx = max(50, 21)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(prev_high_aligned[i]) or np.isnan(prev_low_aligned[i]) or np.isnan(ema_50_4h[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_9_4h_aligned[i]) or np.isnan(ema_21_4h_aligned[i]) or np.isnan(vol_threshold_12h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter
-        price_above_ema = close[i] > ema_50_4h[i]
-        price_below_ema = close[i] < ema_50_4h[i]
+        # EMA crossover signals
+        ema_9_above_21 = ema_9_4h_aligned[i] > ema_21_4h_aligned[i]
+        ema_9_below_21 = ema_9_4h_aligned[i] < ema_21_4h_aligned[i]
+        
+        # Volume regime filter: calm market (low volatility)
+        vol_regime_calm = volume[i] < vol_threshold_12h_aligned[i]
         
         if position == 0:
-            # Long entry: break above previous 1d high with volume and uptrend
-            if (close[i] > prev_high_aligned[i] and 
-                volume[i] > vol_threshold[i] and 
-                price_above_ema):
+            # Long entry: EMA(9) crosses above EMA(21) in calm volume regime
+            if ema_9_above_21 and vol_regime_calm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: break below previous 1d low with volume and downtrend
-            elif (close[i] < prev_low_aligned[i] and 
-                  volume[i] > vol_threshold[i] and 
-                  price_below_ema):
+            # Short entry: EMA(9) crosses below EMA(21) in calm volume regime
+            elif ema_9_below_21 and vol_regime_calm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to previous 1d low
-            if close[i] < prev_low_aligned[i]:
+            # Long exit: EMA(9) crosses below EMA(21)
+            if ema_9_below_21:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to previous 1d high
-            if close[i] > prev_high_aligned[i]:
+            # Short exit: EMA(9) crosses above EMA(21)
+            if ema_9_above_21:
                 signals[i] = 0.0
                 position = 0
             else:
