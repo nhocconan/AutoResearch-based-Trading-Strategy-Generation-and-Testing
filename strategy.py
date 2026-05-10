@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from 20-period Donchian channels on 12h timeframe, 
-# filtered by 1d EMA34 trend direction and volume confirmation, capture 
-# sustained moves in both bull and bear markets. The 1d trend filter ensures 
-# we only trade in the direction of the higher timeframe trend, reducing 
-# whipsaw during reversals. Volume confirmation validates breakout strength.
-# Target: 20-50 trades per year with controlled risk.
+# 4h_Engulfing_Breakout_Trend_Momentum
+# Hypothesis: Combines bullish/bearish engulfing patterns with 4h RSI momentum and 1d EMA trend filter.
+# Engulfing patterns signal strong momentum shifts; RSI confirms overbought/oversold conditions are not extreme;
+# EMA filter ensures trades align with higher-timeframe trend. Works in bull markets by catching continuation
+# of uptrends after pullbacks, and in bear markets by catching continuation of downtrends after bounces.
+# Volume confirmation filters low-conviction signals. Designed for moderate trade frequency (~20-40/year).
 
-name = "12h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Engulfing_Breakout_Trend_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,6 +20,7 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    open_prices = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
@@ -34,28 +34,29 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate 20-period Donchian channels on 12h data
-    # Upper channel = rolling max of high over 20 periods
-    # Lower channel = rolling min of low over 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Calculate 4h RSI (14) for momentum filter
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34), Donchian (20), volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need daily EMA34 (34), RSI (14), volume MA (20)
+    start_idx = max(34, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or 
-            np.isnan(donchian_low[i]) or 
+            np.isnan(rsi_values[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,28 +67,43 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
+        # RSI momentum filter (not overbought/oversold)
+        rsi_not_extreme = (rsi_values[i] > 30) and (rsi_values[i] < 70)
+        
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
+        # Bullish engulfing: current green candle fully engulfs previous red candle
+        bullish_engulfing = (close[i] > open_prices[i]) and \
+                           (open_prices[i-1] > close[i-1]) and \
+                           (close[i] >= open_prices[i-1]) and \
+                           (open_prices[i] <= close[i-1])
+        
+        # Bearish engulfing: current red candle fully engulfs previous green candle
+        bearish_engulfing = (close[i] < open_prices[i]) and \
+                           (open_prices[i-1] < close[i-1]) and \
+                           (close[i] <= open_prices[i-1]) and \
+                           (open_prices[i] >= close[i-1])
+        
         if position == 0:
-            # Long entry: uptrend + price breaks above Donchian high + volume
-            if uptrend and close[i] > donchian_high[i] and volume_confirm:
+            # Long entry: uptrend + bullish engulfing + RSI not extreme + volume
+            if uptrend and bullish_engulfing and rsi_not_extreme and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below Donchian low + volume
-            elif downtrend and close[i] < donchian_low[i] and volume_confirm:
+            # Short entry: downtrend + bearish engulfing + RSI not extreme + volume
+            elif downtrend and bearish_engulfing and rsi_not_extreme and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below Donchian high
-            if not uptrend or close[i] < donchian_high[i]:
+            # Long exit: trend breaks or bearish engulfing forms
+            if not uptrend or bearish_engulfing:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above Donchian low
-            if not downtrend or close[i] > donchian_low[i]:
+            # Short exit: trend breaks or bullish engulfing forms
+            if not downtrend or bullish_engulfing:
                 signals[i] = 0.0
                 position = 0
             else:
