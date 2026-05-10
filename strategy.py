@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_Pivot_Reversal
-# Hypothesis: Combines Elder Ray (Bull/Bear Power) from 1d with 60-minute Pivot reversals.
-# Bull Power > 0 and Bear Power < 0 filter for trend alignment, while price rejection
-# at daily pivot levels (R1/S1) provides mean-reversion entries. Works in bull via
-# trend-following pullbacks and in bear via oversold/overbought reversals at key levels.
-# Low trade frequency expected due to dual-condition requirement.
+# 4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume
+# Hypothesis: Daily EMA50 trend filter reduces false breakouts, while tight Camarilla R1/S3
+# levels provide high-probability entries with volume confirmation. Designed for low
+# trade frequency (20-40/year) to minimize fee drag. Works in bull via breakouts with
+# trend, in bear via mean-reversion at extreme levels when trend aligns.
 
-name = "6h_ElderRay_Pivot_Reversal"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,63 +21,71 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Elder Ray and Pivot levels
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Daily EMA50 for trend
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # EMA13 for Elder Ray (standard setting)
-    ema13 = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Get daily data for Camarilla pivot levels
+    # Calculate typical price and range from previous day
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_hl = df_1d['high'] - df_1d['low']
+    # Camarilla R1 and S1 levels (tighter than R3/S3 for higher quality)
+    R1 = typical_price + (range_hl * 1.0833)
+    S1 = typical_price - (range_hl * 1.0833)
+    # Align daily levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1.values)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1.values)
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = df_1d['high'].values - ema13
-    bear_power = df_1d['low'].values - ema13
-    
-    # Daily Pivot Points (standard calculation)
-    pivot = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    r1 = 2 * pivot - df_1d['low']
-    s1 = 2 * pivot - df_1d['high']
-    
-    # Align 1d values to 6h timeframe
-    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
+    # Volume confirmation (20-period average on 4h = ~3.3 days)
+    vol_ma_period = 20
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p-1, len(arr)):
+                res[i] = np.mean(arr[i-p+1:i+1])
+        return res
+    vol_ma = mean_arr(volume, vol_ma_period)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # sufficient warmup for EMA13
+    start_idx = max(20, 50) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or \
-           np.isnan(bear_power_aligned[i]) or np.isnan(r1_aligned[i]) or \
-           np.isnan(s1_aligned[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation: current volume > 1.8x average (balanced for signal quality)
+        volume_confirm = volume[i] > 1.8 * vol_ma[i] if vol_ma[i] > 0 else False
+        
         if position == 0:
-            # Long: Bull Power > 0 (bullish bias) and price rejects S1 support
-            if bull_power_aligned[i] > 0 and close[i] <= s1_aligned[i] * 1.001 and close[i] > s1_aligned[i] * 0.999:
+            # Long: price breaks above R1 with volume, above daily EMA50 (uptrend)
+            if close[i] > R1_aligned[i] and volume_confirm and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bearish bias) and price rejects R1 resistance
-            elif bear_power_aligned[i] < 0 and close[i] >= r1_aligned[i] * 0.999 and close[i] <= r1_aligned[i] * 1.001:
+            # Short: price breaks below S1 with volume, below daily EMA50 (downtrend)
+            elif close[i] < S1_aligned[i] and volume_confirm and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative or price reaches pivot
-            if bull_power_aligned[i] <= 0 or close[i] >= pivot_aligned[i]:
+            # Long exit: price closes below S1 or breaks below daily EMA50
+            if close[i] < S1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive or price reaches pivot
-            if bear_power_aligned[i] >= 0 or close[i] <= pivot_aligned[i]:
+            # Short exit: price closes above R1 or breaks above daily EMA50
+            if close[i] > R1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
