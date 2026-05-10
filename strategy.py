@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1w1d_PriceChannel_Squeeze_Breakout
-# Hypothesis: Combines weekly Donchian channel breakouts with daily volatility squeeze and volume confirmation
-# to capture explosive moves in both bull and bear markets. Uses weekly trend filter to avoid counter-trend trades.
-# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
+# 1d_Trix_Trend_with_1w_Trend_Filter
+# Hypothesis: TRIX momentum on 1d (9-period) captures trend changes with low lag. 
+# Combined with 1w EMA trend filter to avoid counter-trend trades. 
+# Volume confirmation (1.5x 20-day average) filters false signals. 
+# Designed for low trade frequency (<25/year) to minimize fee drag, effective in both bull and bear markets.
 
-name = "12h_1w1d_PriceChannel_Squeeze_Breakout"
-timeframe = "12h"
+name = "1d_Trix_Trend_with_1w_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,127 +18,87 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channel (20-period) for breakout signals
+    # 1w trend filter (EMA34)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = close_1w > ema34_1w
+    trend_1w_down = close_1w < ema34_1w
     
-    # Calculate 20-period Donchian channels
-    upper_20 = np.full_like(high_1w, np.nan)
-    lower_20 = np.full_like(low_1w, np.nan)
+    # Align 1w trend to 1d
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    for i in range(19, len(high_1w)):
-        upper_20[i] = np.max(high_1w[i-19:i+1])
-        lower_20[i] = np.min(low_1w[i-19:i+1])
+    # TRIX on 1d (9-period)
+    # TRIX = EMA(EMA(EMA(close, 9), 9), 9)
+    ema1 = pd.Series(close).ewm(span=9, adjust=False, min_periods=9).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix = ema3.pct_change() * 100  # Percentage change
+    trix_values = trix.values
+    trix_up = trix_values > 0
+    trix_down = trix_values < 0
     
-    # Align weekly Donchian levels to 12h timeframe
-    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
-    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
-    
-    # Daily volatility squeeze (Bollinger Band Width < 20th percentile)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    close_1d = df_1d['close'].values
-    
-    # Calculate Bollinger Bands (20, 2.0)
-    ma_20 = np.full_like(close_1d, np.nan)
-    std_20 = np.full_like(close_1d, np.nan)
-    
-    for i in range(19, len(close_1d)):
-        ma_20[i] = np.mean(close_1d[i-19:i+1])
-        std_20[i] = np.std(close_1d[i-19:i+1])
-    
-    upper_bb = ma_20 + (2.0 * std_20)
-    lower_bb = ma_20 - (2.0 * std_20)
-    bb_width = (upper_bb - lower_bb) / ma_20
-    
-    # Calculate 50-period percentile of BB width (20th percentile threshold)
-    bb_width_pct = np.full_like(bb_width, np.nan)
-    for i in range(49, len(bb_width)):
-        if not np.isnan(bb_width[i]):
-            bb_width_pct[i] = np.percentile(bb_width[max(0, i-49):i+1], 20)
-    
-    squeeze = bb_width < bb_width_pct
-    
-    # Align daily squeeze to 12h timeframe
-    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
-    
-    # Daily volume confirmation (1.5x 20-period average)
-    vol_20 = np.full_like(volume, np.nan)
-    for i in range(19, len(volume)):
-        vol_20[i] = np.mean(volume[i-19:i+1])
-    
-    volume_confirm = volume > (1.5 * vol_20)
-    
-    # Weekly trend filter (price above/below 50-period EMA)
-    ema50_1w = np.full_like(close_1w, np.nan)
-    for i in range(49, len(close_1w)):
-        if i == 49:
-            ema50_1w[i] = np.mean(close_1w[:50])
+    # Volume confirmation (1.5x 20-day average)
+    vol_ma = np.zeros_like(volume)
+    vol_sum = 0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i >= 19:
+            vol_ma[i] = vol_sum / 20
         else:
-            ema50_1w[i] = (close_1w[i] * 2/51) + (ema50_1w[i-1] * 49/51)
-    
-    # Align weekly EMA to 12h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    weekly_uptrend = close_1w > ema50_1w
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend = close_1w < ema50_1w
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+            vol_ma[i] = np.nan
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 40  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or
-            np.isnan(squeeze_aligned[i]) or np.isnan(volume_confirm[i]) or
-            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(trix_up[i]) or np.isnan(trix_down[i]) or
+            np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above weekly upper Donchian during volatility squeeze with volume confirmation and weekly uptrend
-            if (high[i] > upper_20_aligned[i] and
-                squeeze_aligned[i] > 0.5 and
-                volume_confirm[i] and
-                weekly_uptrend_aligned[i] > 0.5):
+            # Long: TRIX positive with volume confirmation and 1w uptrend
+            if (trix_up[i] and
+                trend_1w_up_aligned[i] > 0.5 and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly lower Donchian during volatility squeeze with volume confirmation and weekly downtrend
-            elif (low[i] < lower_20_aligned[i] and
-                  squeeze_aligned[i] > 0.5 and
-                  volume_confirm[i] and
-                  weekly_downtrend_aligned[i] > 0.5):
+            # Short: TRIX negative with volume confirmation and 1w downtrend
+            elif (trix_down[i] and
+                  trend_1w_down_aligned[i] > 0.5 and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below weekly lower Donchian or weekly trend turns down
-            if (low[i] < lower_20_aligned[i] or
-                weekly_uptrend_aligned[i] < 0.5):
+            # Exit: TRIX turns negative or 1w trend turns down
+            if (not trix_up[i] or
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above weekly upper Donchian or weekly trend turns up
-            if (high[i] > upper_20_aligned[i] or
-                weekly_downtrend_aligned[i] < 0.5):
+            # Exit: TRIX turns positive or 1w trend turns up
+            if (not trix_down[i] or
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
