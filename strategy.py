@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-# 1H_RSI40_60_MeanReversion_4hTrendFilter
-# Hypothesis: Mean-revert on 1h RSI extremes (40/60) only when 4h trend is strong (ADX>25).
-# Long when RSI<40 in 4h uptrend, short when RSI>60 in 4h downtrend.
-# Uses 1d trend filter: only trade if 1h price is above/below daily VWAP to avoid counter-trend.
-# Target: 20-40 trades/year per symbol. Works in bull/bear by following 4h trend direction.
+# 6h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
+# Hypothesis: On 6h timeframe, trade breakouts of Camarilla R3/S3 levels when weekly trend is aligned and volume spikes.
+# Weekly trend: price above/below weekly EMA200 (long-term trend filter).
+# Entry: Long when price breaks above R3 with volume > 2x average and weekly uptrend.
+# Short when price breaks below S3 with volume > 2x average and weekly downtrend.
+# Exit: When price returns to Camarilla R1/S1 levels or volume drops below average.
+# Uses Camarilla levels from 1d timeframe for intraday structure.
+# Volume spike filters for institutional participation.
+# Weekly trend filter ensures we trade with the long-term trend, avoiding counter-trend whipsaws.
+# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
 
-name = "1H_RSI40_60_MeanReversion_4hTrendFilter"
-timeframe = "1h"
+name = "6h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +20,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,109 +28,93 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1h RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h trend strength (ADX)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # +DM and -DM
-    up_move = high_4h[1:] - high_4h[:-1]
-    down_move = low_4h[:-1] - low_4h[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Wilder's smoothing (14-period)
-    atr = np.zeros_like(tr)
-    if len(tr) > 0:
-        atr[0] = tr[0]
-        for i in range(1, len(tr)):
-            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # +DI and -DI
-    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / 
-                     pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
-    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / 
-                      pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align 4h ADX to 1h
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Daily VWAP filter
+    # Calculate Camarilla levels from 1d timeframe (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
-    vwap_1d = (pd.Series(typical_price_1d * df_1d['volume'].values).cumsum() / 
-               pd.Series(df_1d['volume'].values).cumsum()).values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla formulas
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 6h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Weekly trend filter: EMA200 on weekly timeframe
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_uptrend = close_1w > ema200_1w
+    weekly_downtrend = close_1w < ema200_1w
+    
+    # Align weekly trend to 6h
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    
+    # Volume average (24-period on 6h = 6 days)
+    volume_s = pd.Series(volume)
+    vol_ma = volume_s.rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 30
+    # Start after we have enough data for all indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or np.isnan(vwap_1d_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        rsi_val = rsi[i]
-        strong_trend = adx_aligned[i] > 25
-        price_above_vwap = close[i] > vwap_1d_aligned[i]
-        price_below_vwap = close[i] < vwap_1d_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_spike = vol_ratio > 2.0
+        
+        weekly_up = weekly_uptrend_aligned[i] > 0.5
+        weekly_down = weekly_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: RSI<40 (oversold) + 4h uptrend + price above daily VWAP
-            if rsi_val < 40 and strong_trend and price_above_vwap:
-                signals[i] = 0.20
+            # Enter long: weekly uptrend + price breaks above R3 + volume spike
+            if weekly_up and close[i] > R3_aligned[i] and volume_spike:
+                signals[i] = 0.25
                 position = 1
-            # Enter short: RSI>60 (overbought) + 4h downtrend + price below daily VWAP
-            elif rsi_val > 60 and strong_trend and price_below_vwap:
-                signals[i] = -0.20
+            # Enter short: weekly downtrend + price breaks below S3 + volume spike
+            elif weekly_down and close[i] < S3_aligned[i] and volume_spike:
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: RSI>50 (mean reversion complete) or trend weakens
-            if rsi_val > 50 or not strong_trend:
+            # Exit long: price returns to R1 or volume drops below average
+            if close[i] < R1_aligned[i] or vol_ratio < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI<50 (mean reversion complete) or trend weakens
-            if rsi_val < 50 or not strong_trend:
+            # Exit short: price returns to S1 or volume drops below average
+            if close[i] > S1_aligned[i] or vol_ratio < 1.0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
