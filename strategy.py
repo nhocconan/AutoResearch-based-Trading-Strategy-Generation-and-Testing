@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R3/S3) from daily data provide strong support/resistance.
-Breakouts above R3 or below S3 with volume confirmation and 1d EMA50 trend filter capture
-institutional breakout moves. Works in bull markets (breakouts above R3) and bear markets
-(breakdowns below S3). Target: 20-50 trades/year to minimize fee drag.
+6h_RSI2_TrendFilter_1dVWAP
+Hypothesis: 2-period RSI with 1d VWAP trend filter and volume confirmation.
+RSI2 is sensitive to short-term reversals; filtered by 1d VWAP trend to avoid counter-trend trades.
+In bull markets, buy dips above VWAP; in bear markets, sell rallies below VWAP.
+Volume confirmation ensures institutional participation. Target: 50-150 trades over 4 years.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_RSI2_TrendFilter_1dVWAP"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,89 +20,98 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation
+    # 1d VWAP calculation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
     volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels for previous day (using prior day's OHLC)
-    # R4 = C + ((H-L) * 1.5000), R3 = C + ((H-L) * 1.2500)
-    # S3 = C - ((H-L) * 1.2500), S4 = C - ((H-L) * 1.5000)
-    # We use previous day's values to avoid look-ahead
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_s3 = np.full(len(close_1d), np.nan)
+    vwap_1d = np.full(len(typical_price_1d), np.nan)
+    cumulative_tpv = 0.0
+    cumulative_volume = 0.0
+    for i in range(len(typical_price_1d)):
+        cumulative_tpv += typical_price_1d[i] * volume_1d[i]
+        cumulative_volume += volume_1d[i]
+        if cumulative_volume > 0:
+            vwap_1d[i] = cumulative_tpv / cumulative_volume
     
-    for i in range(1, len(close_1d)):
-        if not (np.isnan(high_1d[i-1]) or np.isnan(low_1d[i-1]) or np.isnan(close_1d[i-1])):
-            hl_range = high_1d[i-1] - low_1d[i-1]
-            camarilla_r3[i] = close_1d[i-1] + (hl_range * 1.25)
-            camarilla_s3[i] = close_1d[i-1] - (hl_range * 1.25)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Align Camarilla levels to 4h timeframe (using previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # 2-period RSI on 6h data
+    rsi2 = np.full(n, np.nan)
+    if n >= 2:
+        # Calculate price changes
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        
+        # Wilder's smoothing for RSI
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        # Initial average
+        if n >= 2:
+            avg_gain[1] = np.mean(gain[:2])
+            avg_loss[1] = np.mean(loss[:2])
+            
+            # Wilder smoothing
+            for i in range(2, n):
+                avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+                avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+        
+        # Calculate RSI
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi2 = 100 - (100 / (1 + rs))
+        # Handle division by zero
+        rsi2 = np.where(avg_loss == 0, 100, rsi2)
+        rsi2 = np.where(avg_gain == 0, 0, rsi2)
     
-    # 1d EMA50 for trend filter
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 1d volume SMA20 for volume confirmation
+    # Volume confirmation: 6h volume > 1.5x average 6h volume from 1d
+    # Approximate average 6h volume from 1d: volume_1d / 4
     vol_sma20_1d = np.full(len(volume_1d), np.nan)
     if len(volume_1d) >= 20:
         vol_sma20_1d[19] = np.mean(volume_1d[:20])
         for i in range(20, len(volume_1d)):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    vol_6h_avg_approx = vol_sma20_1d_aligned / 4.0
+    volume_confirm = volume > 1.5 * vol_6h_avg_approx
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # warmup
+    start_idx = max(20, 2)  # warmup
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or \
-           np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(vwap_1d_aligned[i]) or np.isnan(rsi2[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
-        # Approximate 4h volume from 1d: 1d volume / 6 (since 24h/4h = 6)
-        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0
-        volume_confirm = volume[i] > 1.5 * vol_4h_approx
-        
         if position == 0:
-            # Long: Break above R3 with uptrend and volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema50_1d_aligned[i] and volume_confirm:
+            # Long: RSI2 < 15 (oversold) and price above VWAP (uptrend) with volume
+            if rsi2[i] < 15 and close[i] > vwap_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with downtrend and volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema50_1d_aligned[i] and volume_confirm:
+            # Short: RSI2 > 85 (overbought) and price below VWAP (downtrend) with volume
+            elif rsi2[i] > 85 and close[i] < vwap_1d_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price re-enters Camarilla range (between S3 and R3) or trend reversal
-            if camarilla_s3_aligned[i] < close[i] < camarilla_r3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+            # Exit: RSI2 > 70 (overbought) or price below VWAP (trend change)
+            if rsi2[i] > 70 or close[i] < vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price re-enters Camarilla range or trend reversal
-            if camarilla_s3_aligned[i] < close[i] < camarilla_r3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+            # Exit: RSI2 < 30 (oversold) or price above VWAP (trend change)
+            if rsi2[i] < 30 or close[i] > vwap_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
