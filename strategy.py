@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
-# Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume confirmation.
-# Uses dynamic volume threshold (median of past 20 days) to avoid look-ahead and improve robustness.
-# Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 6h_Camarilla_R4_S4_Breakout_1dTrend_Volume
+# Hypothesis: 6-hour breakouts from daily Camarilla R4/S4 levels with daily trend filter (EMA34) and volume confirmation.
+# Daily EMA34 filters trend direction to avoid counter-trend trades; daily Camarilla R4/S4 levels provide breakout/continuation signals;
+# Volume confirmation ensures breakout strength. Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
-timeframe = "12h"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -36,30 +35,29 @@ def generate_signals(prices):
     def calculate_camarilla(h, l, c):
         typical = (h + l + c) / 3.0
         range_ = h - l
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
-        return R1, S1
+        R4 = c + (range_ * 1.1000 / 2)
+        S4 = c - (range_ * 1.1000 / 2)
+        return R4, S4
     
-    R1 = np.full_like(close_1d, np.nan)
-    S1 = np.full_like(close_1d, np.nan)
+    R4 = np.full_like(close_1d, np.nan)
+    S4 = np.full_like(close_1d, np.nan)
     for i in range(1, len(close_1d)):
-        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+        R4[i], S4[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # Daily volume median (robust to outliers) - lookback window
-    def median_arr(arr, p):
+    # Daily volume confirmation: 20-period average
+    def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
-                window = arr[i - p + 1:i + 1]
-                res[i] = np.median(window)
+                res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_median_20 = median_arr(volume_1d, 20)
+    vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    # Align daily indicators to 6h timeframe (wait for 1d bar to close)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    vol_median_20_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,32 +65,32 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_median_20_aligned[i]):
+        if np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or \
+           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, above daily EMA34, volume above 20-day median
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > vol_median_20_aligned[i]:
+            # Long: price breaks above R4, above daily EMA34, strong volume
+            if close[i] > R4_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below daily EMA34, volume above 20-day median
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > vol_median_20_aligned[i]:
+            # Short: price breaks below S4, below daily EMA34, strong volume
+            elif close[i] < S4_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1 or below daily EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: price drops below S4 or below daily EMA34
+            if close[i] < S4_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 or above daily EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: price rises above R4 or above daily EMA34
+            if close[i] > R4_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
