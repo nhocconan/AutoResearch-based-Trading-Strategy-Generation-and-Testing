@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R1S1_Breakout_Trend_Volume
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume confirmation.
-# Enters long when price breaks above R1 in uptrend with volume surge, short when breaks below S1 in downtrend.
+# 4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h momentum filter (price > 12h EMA20) and volume confirmation.
+# Enters long when price breaks above R1 in bullish momentum with volume surge, short when breaks below S1 in bearish momentum.
 # Exits on close crossing the 5-period EMA in opposite direction.
-# Designed for low trade frequency (20-40/year) to minimize fee drag and work in bull/bear markets.
+# Designed for low trade frequency (15-30/year) to minimize fee drift and work in bull/bear markets.
 
-name = "4h_12h_Camarilla_R1S1_Breakout_Trend_Volume"
+name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +18,7 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Get 12h data for EMA50 trend filter
+    # Get 12h data for momentum filter
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) < 60:
         return np.zeros(n)
@@ -29,10 +29,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
+    # Calculate 12h EMA20 for momentum filter
     close_12h = df_12h['close'].values
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    ema_20 = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_12h, ema_20)
     
     # Calculate Camarilla levels (R1, S1) from previous day
     # Using 1d data to get prior day's high, low, close
@@ -68,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_aligned[i]) or
+        if (np.isnan(ema_20_aligned[i]) or
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i]) or
             np.isnan(ema_5[i]) or
@@ -78,21 +78,21 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Trend filter from 12h EMA50
+        # Momentum filter from 12h EMA20
         close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
-        uptrend = close_12h_aligned[i] > ema_50_aligned[i]
-        downtrend = close_12h_aligned[i] < ema_50_aligned[i]
+        bullish_momentum = close_12h_aligned[i] > ema_20_aligned[i]
+        bearish_momentum = close_12h_aligned[i] < ema_20_aligned[i]
         
         # Volume confirmation (2.0x average)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above R1 in uptrend with volume
-            if close[i] > r1_aligned[i] and uptrend and volume_surge:
+            # Long: breakout above R1 in bullish momentum with volume
+            if close[i] > r1_aligned[i] and bullish_momentum and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below S1 in downtrend with volume
-            elif close[i] < s1_aligned[i] and downtrend and volume_surge:
+            # Short: breakdown below S1 in bearish momentum with volume
+            elif close[i] < s1_aligned[i] and bearish_momentum and volume_surge:
                 signals[i] = -0.25
                 position = -1
         else:
