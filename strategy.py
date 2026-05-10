@@ -1,15 +1,12 @@
-#!/usr/bin/env python3
-"""
-4h_ADX_VolumeBreakout_Trend
-Hypothesis: Combine ADX trend strength with volume breakout signals on 4h timeframe.
-Long when ADX > 25, +DI > -DI, and volume breaks above 1.5x 20-period average.
-Short when ADX > 25, -DI > +DI, and volume breaks above 1.5x 20-period average.
-Uses 1d EMA50 as additional trend filter to avoid counter-trend trades.
-Volume confirmation reduces false breakouts. Designed for fewer trades (~25-40/year)
-to minimize fee drag while capturing strong trending moves in both bull and bear markets.
-"""
+# 4h_IchimokuKumo_CryptoTrend
+# Hypothesis: Ichimoku Cloud (Tenkan/Kijun) with 4h price position relative to cloud and 1d trend filter for multi-timeframe confirmation.
+# Long when price > cloud and Tenkan > Kijun in uptrend (price > 1d EMA50).
+# Short when price < cloud and Tenkan < Kijun in downtrend (price < 1d EMA50).
+# Uses volume confirmation (current 4h volume > 1.5x average 1d volume scaled) to reduce false breakouts.
+# Ichimoku works in both bull and bear markets by capturing momentum shifts via cloud breaks and TK crosses.
+# Target: 20-50 trades/year (80-200 total over 4 years) to minimize fee drag.
 
-name = "4h_ADX_VolumeBreakout_Trend"
+name = "4h_IchimokuKumo_CryptoTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,61 +16,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # ADX calculation (14-period)
-    period_adx = 14
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0  # First period has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    max_high_9 = np.full(n, np.nan)
+    min_low_9 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= period_tenkan - 1:
+            start = i - period_tenkan + 1
+            max_high_9[i] = np.max(high[start:i+1])
+            min_low_9[i] = np.min(low[start:i+1])
+    tenkan = (max_high_9 + min_low_9) / 2
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    max_high_26 = np.full(n, np.nan)
+    min_low_26 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= period_kijun - 1:
+            start = i - period_kijun + 1
+            max_high_26[i] = np.max(high[start:i+1])
+            min_low_26[i] = np.min(low[start:i+1])
+    kijun = (max_high_26 + min_low_26) / 2
     
-    # Smoothed values using Wilder's smoothing (alpha = 1/period)
-    def wilders_smoothing(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.mean(data[:period])
-            alpha = 1.0 / period
-            for i in range(period, len(data)):
-                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
-        return result
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    tr_smoothed = wilders_smoothing(tr, period_adx)
-    plus_dm_smoothed = wilders_smoothing(plus_dm, period_adx)
-    minus_dm_smoothed = wilders_smoothing(minus_dm, period_adx)
-    
-    # DI values
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, period_adx)
-    
-    # Volume SMA (20-period)
-    vol_sma20 = np.full(n, np.nan)
-    if n >= 20:
-        vol_sma20[19] = np.mean(volume[:20])
-        for i in range(20, n):
-            vol_sma20[i] = (vol_sma20[i-1] * 19 + volume[i]) / 20
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    max_high_52 = np.full(n, np.nan)
+    min_low_52 = np.full(n, np.nan)
+    for i in range(n):
+        if i >= period_senkou_b - 1:
+            start = i - period_senkou_b + 1
+            max_high_52[i] = np.max(high[start:i+1])
+            min_low_52[i] = np.min(low[start:i+1])
+    senkou_b = (max_high_52 + min_low_52) / 2
     
     # 1d EMA50 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -86,53 +72,67 @@ def generate_signals(prices):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
+    # 1d volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(period_adx * 2, 20, 50)  # Ensure all indicators ready
+    start_idx = max(period_kijun, period_senkou_b, 50)  # Ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or \
-           np.isnan(vol_sma20[i]) or np.isnan(ema50_1d_aligned[i]):
+        if np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or \
+           np.isnan(senkou_b[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume breakout: current volume > 1.5x 20-period average
-        volume_breakout = volume[i] > 1.5 * vol_sma20[i]
+        # Determine if price is above or below cloud
+        # Cloud top is max(senkou_a, senkou_b), bottom is min(senkou_a, senkou_b)
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
-        # Trend filter: price vs 1d EMA50
-        uptrend_filter = close[i] > ema50_1d_aligned[i]
-        downtrend_filter = close[i] < ema50_1d_aligned[i]
+        # TK cross: Tenkan > Kijun (bullish) or Tenkan < Kijun (bearish)
+        tk_bullish = tenkan[i] > kijun[i]
+        tk_bearish = tenkan[i] < kijun[i]
+        
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        # 1d has 6 periods of 4h, so scale 1d volume by 1/6 to get equivalent 4h average
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        
+        # Trend determination: price vs 1d EMA50
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Long: ADX > 25, +DI > -DI, volume breakout, uptrend filter
-            if (adx[i] > 25 and 
-                plus_di[i] > minus_di[i] and
-                volume_breakout and
-                uptrend_filter):
+            # Long: price above cloud, TK bullish, in uptrend with volume
+            if price_above_cloud and tk_bullish and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25, -DI > +DI, volume breakout, downtrend filter
-            elif (adx[i] > 25 and 
-                  minus_di[i] > plus_di[i] and
-                  volume_breakout and
-                  downtrend_filter):
+            # Short: price below cloud, TK bearish, in downtrend with volume
+            elif price_below_cloud and tk_bearish and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: ADX weakens (< 20) or trend filter fails
-            if (adx[i] < 20 or 
-                not uptrend_filter):
+            # Exit: price falls below cloud or TK turns bearish
+            if not price_above_cloud or not tk_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: ADX weakens (< 20) or trend filter fails
-            if (adx[i] < 20 or 
-                not downtrend_filter):
+            # Exit: price rises above cloud or TK turns bullish
+            if not price_below_cloud or not tk_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
