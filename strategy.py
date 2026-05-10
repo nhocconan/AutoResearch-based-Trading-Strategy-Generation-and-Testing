@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
 Hypothesis: Use Camarilla R3/S3 levels from 1d for breakout entries in the direction of 1d EMA34 trend, filtered by volume spike.
 Camarilla levels provide institutional support/resistance that work in both bull and bear markets via trend filter.
-Designed for ~25-35 trades/year on 4h timeframe to avoid excessive fee drag.
+Designed for ~10-30 trades/year on 6h timeframe to avoid excessive fee drift.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -35,7 +35,7 @@ def generate_signals(prices):
     camarilla_r3 = close_prev + range_prev * 1.1 / 2
     camarilla_s3 = close_prev - range_prev * 1.1 / 2
     
-    # Align daily Camarilla levels to 4h timeframe (wait for daily bar to close)
+    # Align daily Camarilla levels to 6h timeframe (wait for daily bar to close)
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
@@ -43,7 +43,7 @@ def generate_signals(prices):
     ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Get 4h price and volume
+    # Get 6h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
