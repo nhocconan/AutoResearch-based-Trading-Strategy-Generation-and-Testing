@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 6H_Range_Breakout_Volume
-# Hypothesis: In 6h timeframe, trade breakouts from daily-defined ranges with volume confirmation.
-# Uses 1-day high-low range to define support/resistance. Breakouts occur when price closes outside
-# the prior day's range with volume > 1.5x average. Uses volume to filter false breakouts.
-# Works in both bull and break as it captures momentum moves regardless of direction.
-# Target: 15-25 trades/year per symbol.
+# 12H_Camarilla_Pivot_Reversal_1DTrend
+# Hypothesis: Trade reversals at Camarilla pivot levels on 12h timeframe with 1d trend filter.
+# Long when: price touches or crosses below Camarilla S3 level in 1d uptrend with volume spike.
+# Short when: price touches or crosses above Camarilla R3 level in 1d downtrend with volume spike.
+# Uses 12h volume confirmation and exit on opposite touch of R1/S1.
+# Designed for low trade frequency (~20-40/year) with high win rate in trending and ranging markets.
+# Works in bull/bear by following 1d trend and using mean-reversion at extreme pivots.
 
-name = "6H_Range_Breakout_Volume"
-timeframe = "6h"
+name = "12H_Camarilla_Pivot_Reversal_1DTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,67 +25,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h indicators
+    # 12h indicators
+    close_s = pd.Series(close)
     volume_s = pd.Series(volume)
+    
+    # Volume average (20-period)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
-    # Daily range calculation (prior day's high-low)
+    # Daily trend filter from 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_uptrend = close_1d > ema50_1d
+    daily_downtrend = close_1d < ema50_1d
     
-    # Prior day's range (shifted by 1 to avoid look-ahead)
-    prior_high = np.roll(high_1d, 1)
-    prior_low = np.roll(low_1d, 1)
-    # First day has no prior, set to same day
-    prior_high[0] = high_1d[0]
-    prior_low[0] = low_1d[0]
+    # Align daily trend to 12h
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
-    # Align prior day's range to 6h
-    prior_high_aligned = align_htf_to_ltf(prices, df_1d, prior_high)
-    prior_low_aligned = align_htf_to_ltf(prices, df_1d, prior_low)
+    # Calculate Camarilla levels from previous day's OHLC
+    # We'll use rolling window of previous day's data
+    high_prev = df_1d['high'].shift(1).values  # Previous day's high
+    low_prev = df_1d['low'].shift(1).values    # Previous day's low
+    close_prev = df_1d['close'].shift(1).values # Previous day's close
+    
+    # Calculate Camarilla levels for each day
+    R4 = close_prev + (high_prev - low_prev) * 1.5000
+    R3 = close_prev + (high_prev - low_prev) * 1.2500
+    R2 = close_prev + (high_prev - low_prev) * 1.1666
+    R1 = close_prev + (high_prev - low_prev) * 1.0833
+    PP = (high_prev + low_prev + close_prev) / 3.0
+    S1 = close_prev - (high_prev - low_prev) * 1.0833
+    S2 = close_prev - (high_prev - low_prev) * 1.1666
+    S3 = close_prev - (high_prev - low_prev) * 1.2500
+    S4 = close_prev - (high_prev - low_prev) * 1.5000
+    
+    # Align Camarilla levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or np.isnan(prior_high_aligned[i]) or np.isnan(prior_low_aligned[i])):
+        if (np.isnan(vol_ma[i]) or
+            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]) or
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
+        volume_confirm = vol_ratio > 2.0  # Require strong volume spike
+        
+        daily_up = daily_uptrend_aligned[i] > 0.5
+        daily_down = daily_downtrend_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: break above prior day's high with volume
-            if close[i] > prior_high_aligned[i] and volume_confirm:
+            # Enter long: price at or below S3 in 1d uptrend with volume spike
+            if daily_up and volume_confirm and low[i] <= S3_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below prior day's low with volume
-            elif close[i] < prior_low_aligned[i] and volume_confirm:
+            # Enter short: price at or above R3 in 1d downtrend with volume spike
+            elif daily_down and volume_confirm and high[i] >= R3_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price returns to prior day's range or volume weakens
-            if close[i] < prior_high_aligned[i] or volume_ratio < 1.0:
+            # Exit long: price reaches S1 (mean reversion target) or trend changes
+            if high[i] >= S1_aligned[i] or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price returns to prior day's range or volume weakens
-            if close[i] > prior_low_aligned[i] or volume_ratio < 1.0:
+            # Exit short: price reaches R1 (mean reversion target) or trend changes
+            if low[i] <= R1_aligned[i] or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
