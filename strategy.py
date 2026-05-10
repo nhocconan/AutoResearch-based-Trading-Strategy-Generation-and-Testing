@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-"""
-1D_Wick_Reversal_With_WeeklyTrend
-Hypothesis: Price reverses from long upper/lower wicks when weekly trend is aligned.
-- Long when: close > open (bullish candle) AND low < weekly EMA50 (wick below trend) AND weekly trend up
-- Short when: close < open (bearish candle) AND high > weekly EMA50 (wick above trend) AND weekly trend down
-- Exit when: price crosses weekly EMA50 in opposite direction
-Works in bull/bear by following weekly trend. Low turnover due to weekly trend filter.
-"""
+# 4H_Camarilla_Pivot_Reversal_With_1dTrend_VolumeFilter
+# Hypothesis: Reversal at Camarilla pivot levels (S3/S4 for long, R3/R4 for short) with 1d trend filter and volume confirmation.
+# Works in bull/bear by using 1d trend for direction and Camarilla levels for mean-reversion entries.
+# Target: 20-35 trades/year per symbol. Low frequency avoids fee drag.
 
-name = "1D_Wick_Reversal_With_WeeklyTrend"
-timeframe = "1d"
+name = "4H_Camarilla_Pivot_Reversal_With_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,72 +14,99 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Weekly EMA50 for trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 4h indicators
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
+    volume_s = pd.Series(volume)
+    
+    # Volume average (20-period)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema50_1w
-    trend_1w_down = close_1w < ema50_1w
+    # Calculate Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly trend to daily
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Camarilla formulas
+    R4 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    S4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h (they update only when new 1d bar forms)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # 1d trend (close vs EMA50)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
+    
+    # Align 1d trend to 4h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    # Start after we have enough data
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50_1w_aligned[i]) or
-            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i])):
+        if (np.isnan(vol_ma[i]) or np.isnan(R4_aligned[i]) or np.isnan(R3_aligned[i]) or
+            np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        is_bullish = close[i] > open_price[i]
-        is_bearish = close[i] < open_price[i]
-        wick_low_below = low[i] < ema50_1w_aligned[i]
-        wick_high_above = high[i] > ema50_1w_aligned[i]
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_confirm = vol_ratio > 1.5
         
-        trend_up = trend_1w_up_aligned[i] > 0.5
-        trend_down = trend_1w_down_aligned[i] > 0.5
+        trend_up = trend_1d_up_aligned[i] > 0.5
+        trend_down = trend_1d_down_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: bullish candle with wick below weekly EMA50 + weekly uptrend
-            if is_bullish and wick_low_below and trend_up:
+            # Enter long at S3/S4 with 1d uptrend and volume
+            if close[i] <= S3_aligned[i] and trend_up and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish candle with wick above weekly EMA50 + weekly downtrend
-            elif is_bearish and wick_high_above and trend_down:
+            # Enter short at R3/R4 with 1d downtrend and volume
+            elif close[i] >= R3_aligned[i] and trend_down and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below weekly EMA50
-            if close[i] < ema50_1w_aligned[i]:
+            # Exit when price reaches midpoint or shows weakness
+            midpoint = (S3_aligned[i] + R3_aligned[i]) / 2
+            if close[i] >= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above weekly EMA50
-            if close[i] > ema50_1w_aligned[i]:
+            # Exit when price reaches midpoint or shows weakness
+            midpoint = (S3_aligned[i] + R3_aligned[i]) / 2
+            if close[i] <= midpoint:
                 signals[i] = 0.0
                 position = 0
             else:
