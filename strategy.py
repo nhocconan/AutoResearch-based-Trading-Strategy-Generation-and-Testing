@@ -1,13 +1,10 @@
-#!/usr/bin/env python3
-"""
-1d_RSI2_MeanReversion_WeeklyTrend
-Hypothesis: Use 2-period RSI on daily timeframe for mean reversion entries, filtered by weekly trend (EMA50) and volume confirmation.
-Works in both bull and bear markets: in uptrend, buy RSI2 dips; in downtrend, sell RSI2 bounces.
-Designed for 10-20 trades/year to avoid fee drag while capturing mean reversion at trend-aligned levels.
-"""
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Use 1d Camarilla pivot levels (R1/S1) for breakout entries on 4h timeframe, filtered by 1d EMA34 trend and volume confirmation. Works in both bull and bear markets by trading in direction of daily trend.
+# Target: 20-40 trades/year per symbol with strong risk-reward via trend filter.
+# Avoids overtrading by requiring confluence of trend, breakout, and volume.
 
-name = "1d_RSI2_MeanReversion_WeeklyTrend"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,33 +13,38 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla pivots and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_weekly) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Weekly EMA50 for trend filter
-    ema_50_weekly = pd.Series(df_weekly['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_50_weekly)
+    # Calculate Camarilla pivot levels from prior day
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Daily price and volume
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    range_prev = high_prev - low_prev
+    camarilla_r1 = close_prev + range_prev * 1.1 / 12
+    camarilla_s1 = close_prev - range_prev * 1.1 / 12
+    
+    # Align daily Camarilla levels to 4h timeframe (wait for daily bar to close)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # Get 4h price and volume
     high = prices['high'].values
     low = prices['low'].values
-    
-    # 2-period RSI for mean reversion signals
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Volume filter: current volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -51,36 +53,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA (50), RSI (2)
-    start_idx = 50
+    # Warmup: need daily pivot (needs 1 day), EMA34 (34 bars), volume EMA (20)
+    start_idx = 34
     
     for i in range(start_idx, n):
-        # Skip if weekly trend is not available
-        if np.isnan(ema_50_weekly_aligned[i]):
+        # Skip if any critical values are NaN
+        if (np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: weekly uptrend AND RSI2 oversold (<10) with volume confirmation
-            if close[i] > ema_50_weekly_aligned[i] and rsi[i] < 10 and volume_filter[i]:
+            # Long: above EMA34 (uptrend) AND price breaks above Camarilla R1 with volume
+            if close[i] > ema_34_aligned[i] and high[i] > camarilla_r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend AND RSI2 overbought (>90) with volume confirmation
-            elif close[i] < ema_50_weekly_aligned[i] and rsi[i] > 90 and volume_filter[i]:
+            # Short: below EMA34 (downtrend) AND price breaks below Camarilla S1 with volume
+            elif close[i] < ema_34_aligned[i] and low[i] < camarilla_s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI2 overbought (>80) or trend turns down
-            if rsi[i] > 80 or close[i] < ema_50_weekly_aligned[i]:
+            # Long exit: price breaks below Camarilla pivot point OR trend turns bearish
+            camarilla_p = (high_prev[i] + low_prev[i] + close_prev[i]) / 3  # Not used for exit, but we can use S1/R1 or close
+            # Instead, exit on close below EMA34 or price below S1 (mean reversion within range)
+            if close[i] < ema_34_aligned[i] or low[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI2 oversold (<20) or trend turns up
-            if rsi[i] < 20 or close[i] > ema_50_weekly_aligned[i]:
+            # Short exit: price breaks above Camarilla pivot point OR trend turns bullish
+            if close[i] > ema_34_aligned[i] or high[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
