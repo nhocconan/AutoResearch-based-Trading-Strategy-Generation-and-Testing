@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 4h_TRIX_Volume_Spike_Regime
-# Hypothesis: TRIX (12) captures momentum; a spike above zero with volume confirms institutional buying,
-# while a spike below zero with volume confirms selling. Trades only in trending regimes (ADX > 25)
-# to avoid whipsaws in ranging markets. Works in bull/bear by following momentum with volume confirmation.
-# Target: 20-40 trades/year to minimize fee drag.
+# 12h_KAMA_Direction_With_Trend_Filter
+# Hypothesis: KAMA adapts to market noise, providing a smooth trend line that reduces whipsaw.
+# In trending markets, price stays near KAMA; in ranging markets, it oscillates around it.
+# We go long when price is above KAMA with upward slope and volume confirmation,
+# short when below KAMA with downward slope and volume confirmation.
+# Uses 1-week EMA34 as higher timeframe trend filter to avoid counter-trend trades.
+# Designed for low trade frequency (15-25/year) on 12h timeframe to minimize fee drag.
 
-name = "4h_TRIX_Volume_Spike_Regime"
-timeframe = "4h"
+name = "12h_KAMA_Direction_With_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,68 +25,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-day data for ADX trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Get 1-week data for EMA34 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # Weekly EMA34 for trend filter (smooth, lag-appropriate)
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate ADX(14) on daily data
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # first value
-        
-        # Directional Movement
-        up_move = high - np.roll(high, 1)
-        down_move = np.roll(low, 1) - low
-        up_move[0] = 0
-        down_move[0] = 0
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-        
-        # Smoothed values
-        def smoothed_avg(arr, period):
-            res = np.full_like(arr, np.nan)
-            if len(arr) >= period:
-                # First value is simple average
-                res[period-1] = np.mean(arr[:period])
-                # Subsequent values: Wilder smoothing
-                for i in range(period, len(arr)):
-                    res[i] = (res[i-1] * (period-1) + arr[i]) / period
-            return res
-        
-        atr = smoothed_avg(tr, period)
-        plus_di = 100 * smoothed_avg(plus_dm, period) / atr
-        minus_di = 100 * smoothed_avg(minus_dm, period) / atr
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = smoothed_avg(dx, period)
-        return adx
+    # Calculate KAMA on 12h data
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum |diff| over 10 periods
+    # Avoid division by zero
+    er = np.zeros_like(close)
+    er[10:] = change[10:] / np.where(volatility[10:] == 0, 1, volatility[10:])
+    # Smoothing constants
+    fastest = 2 / (2 + 1)   # EMA(2)
+    slowest = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fastest - slowest) + slowest) ** 2
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_14_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_14_1d)
+    # Slope of KAMA (1-period change)
+    kama_slope = np.diff(kama, prepend=kama[0])
     
-    # Calculate TRIX(12) on 4h close
-    def calculate_trix(arr, period=12):
-        # Triple EMA
-        ema1 = pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
-        ema2 = pd.Series(ema1).ewm(span=period, adjust=False, min_periods=period).mean().values
-        ema3 = pd.Series(ema2).ewm(span=period, adjust=False, min_periods=period).mean().values
-        
-        # TRIX = 100 * (EMA3 - prev EMA3) / prev EMA3
-        trix = np.full_like(arr, np.nan)
-        trix[period:] = 100 * (ema3[period:] - ema3[period-1:-1]) / ema3[period-1:-1]
-        return trix
-    
-    trix_12 = calculate_trix(close, 12)
-    
-    # Volume confirmation: 20-period average
+    # Volume confirmation (20-period average on 12h = ~10 days)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -96,40 +64,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20) + 5
+    start_idx = max(50, 20, 34) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(adx_14_1d_aligned[i]) or np.isnan(trix_12[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(kama[i]) or \
+           np.isnan(kama_slope[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
-        
-        # Regime filter: trending market (ADX > 25)
-        trending = adx_14_1d_aligned[i] > 25
+        # Volume confirmation: current volume > 1.3x average
+        volume_confirm = volume[i] > 1.3 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume in trending market
-            if trix_12[i] > 0 and trix_12[i-1] <= 0 and volume_confirm and trending:
+            # Long: price above KAMA, KAMA rising, with volume confirmation and weekly uptrend
+            if close[i] > kama[i] and kama_slope[i] > 0 and \
+               volume_confirm and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume in trending market
-            elif trix_12[i] < 0 and trix_12[i-1] >= 0 and volume_confirm and trending:
+            # Short: price below KAMA, KAMA falling, with volume confirmation and weekly downtrend
+            elif close[i] < kama[i] and kama_slope[i] < 0 and \
+                 volume_confirm and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero
-            if trix_12[i] < 0 and trix_12[i-1] >= 0:
+            # Long exit: price crosses below KAMA OR KAMA slope turns negative
+            if close[i] < kama[i] or kama_slope[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero
-            if trix_12[i] > 0 and trix_12[i-1] <= 0:
+            # Short exit: price crosses above KAMA OR KAMA slope turns positive
+            if close[i] > kama[i] or kama_slope[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
