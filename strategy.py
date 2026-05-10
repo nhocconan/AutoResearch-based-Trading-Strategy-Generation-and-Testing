@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R3/S3) from daily chart act as strong support/resistance. Breakouts with daily trend filter and volume confirmation capture momentum moves. Designed for low frequency (~15-30 trades/year) to minimize fee drift. Works in bull/bear markets via trend filter.
+# 4h_CCI_Trend_Follow_20_50_1dTrend_Volume
+# Hypothesis: CCI (20) identifies overbought/oversold conditions. In a daily uptrend, buy when CCI crosses above -100 from below (end of pullback). In a daily downtrend, sell when CCI crosses below 100 from above (end of bounce). Volume confirmation filters weak moves. Designed for ~25-40 trades/year to avoid fee drag.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_CCI_Trend_Follow_20_50_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,43 +20,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla calculation and trend
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Camarilla levels from previous day (HLC of previous day)
-    # We use shift(1) to ensure we only use completed daily bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # CCI (20)
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    ma_tp = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (tp_series - ma_tp) / (0.015 * mad)
+    cci = cci.values
+    
+    # Daily trend: EMA50 on daily close
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # Previous day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    # First day has no previous, set to NaN
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Calculate Camarilla levels for current day based on previous day
-    range_val = prev_high - prev_low
-    camarilla_r3 = prev_close + range_val * 1.1 / 2
-    camarilla_s3 = prev_close - range_val * 1.1 / 2
-    
-    # Daily trend: EMA34 on daily close
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
-    
-    # Align daily data to 12h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volume confirmation: 20-period average on 12h
+    # Volume confirmation: 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -64,12 +51,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+        if (np.isnan(cci[i]) or np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -80,30 +66,28 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price breaks above R3 with daily uptrend and volume
-            if (close[i] > camarilla_r3_aligned[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: CCI crosses above -100 in daily uptrend with volume
+            if i > start_idx and cci[i-1] <= -100 and cci[i] > -100 and \
+               trend_1d_up_aligned[i] > 0.5 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below S3 with daily downtrend and volume
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: CCI crosses below 100 in daily downtrend with volume
+            elif i > start_idx and cci[i-1] >= 100 and cci[i] < 100 and \
+                 trend_1d_down_aligned[i] > 0.5 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns below R3 or trend fails
-            if (close[i] < camarilla_r3_aligned[i] or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit when CCI crosses below +100 (overbought) or trend fails
+            if (cci[i] < 100 and cci[i-1] >= 100) or trend_1d_up_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns above S3 or trend fails
-            if (close[i] > camarilla_s3_aligned[i] or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit when CCI crosses above -100 (oversold) or trend fails
+            if (cci[i] > -100 and cci[i-1] <= -100) or trend_1d_down_aligned[i] < 0.5:
                 signals[i] = 0.0
                 position = 0
             else:
