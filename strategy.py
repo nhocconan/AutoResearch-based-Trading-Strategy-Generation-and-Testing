@@ -1,121 +1,97 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_With_WeeklyTrend_And_Volume
-Hypothesis: Use daily KAMA direction as primary trend filter, combined with weekly
-trend alignment (price vs weekly pivot) and daily volume confirmation.
-KAMA adapts to market noise, reducing whipsaws in chop. Weekly pivot ensures
-trades align with major trend. Volume filter avoids low-conviction breakouts.
-Designed for 15-25 trades/year per symbol, works in bull/bear via dual trend filter.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Use 1d Camarilla R1/S1 levels for breakout entries, filtered by 1d EMA50 trend direction and volume confirmation.
+Camarilla levels provide precise intraday support/resistance; EMA50 filters for trend alignment; volume avoids false breakouts.
+Designed for 20-40 trades/year per symbol, works in bull/bear via trend filter.
 """
 
-name = "1d_KAMA_With_WeeklyTrend_And_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def kama(close, er_length=10, fast=2, slow=30):
-    """Kaufman's Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    
-    # Efficiency Ratio
-    er = np.zeros_like(close)
-    for i in range(er_length, len(close)):
-        if volatility[i-er_length:i+1].sum() > 0:
-            er[i] = change[i-er_length:i+1].sum() / volatility[i-er_length:i+1].sum()
-        else:
-            er[i] = 0
-    
-    # Smoothing constants
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # KAMA calculation
-    kama_out = np.zeros_like(close)
-    kama_out[0] = close[0]
-    for i in range(1, len(close)):
-        kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
-    
-    return kama_out
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for pivot calculation (trend filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get daily data for Camarilla calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (using prior week)
-    high_wk = df_1w['high'].shift(1).values
-    low_wk = df_1w['low'].shift(1).values
-    close_wk = df_1w['close'].shift(1).values
+    # Calculate daily Camarilla levels (using prior day)
+    high_d = df_1d['high'].shift(1).values
+    low_d = df_1d['low'].shift(1).values
+    close_d = df_1d['close'].shift(1).values
     
-    pivot_wk = (high_wk + low_wk + close_wk) / 3.0
+    # Camarilla levels
+    range_d = high_d - low_d
+    pivot_d = (high_d + low_d + close_d) / 3.0
+    r1_d = close_d + range_d * 1.1 / 12
+    s1_d = close_d - range_d * 1.1 / 12
     
-    # Align weekly pivot to daily timeframe
-    pivot_wk_aligned = align_htf_to_ltf(prices, df_1w, pivot_wk)
+    # Align daily Camarilla levels to 4h timeframe
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
-    # Get daily data for KAMA and volume
-    close = prices['close'].values
+    # Daily EMA50 for trend filter
+    ema50_d = pd.Series(close_d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_d_aligned = align_htf_to_ltf(prices, df_1d, ema50_d)
+    
+    # Get 4h price and volume
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA(10,2,30)
-    kama_val = kama(close, er_length=10, fast=2, slow=30)
-    
-    # Volume filter: current volume > 1.3x 20-day EMA
+    # Volume filter: current volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.3
+    volume_filter = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (30 for slow EMA) + weekly pivot
-    start_idx = 30
+    # Warmup: need daily EMA50 (50) and volume EMA (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_val[i]) or 
-            np.isnan(pivot_wk_aligned[i])):
+        if (np.isnan(r1_d_aligned[i]) or 
+            np.isnan(s1_d_aligned[i]) or
+            np.isnan(ema50_d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend alignment
-        # Daily trend: price vs KAMA
-        daily_bullish = close[i] > kama_val[i]
-        daily_bearish = close[i] < kama_val[i]
-        
-        # Weekly trend: price vs weekly pivot
-        weekly_bullish = close[i] > pivot_wk_aligned[i]
-        weekly_bearish = close[i] < pivot_wk_aligned[i]
+        # Determine daily trend: price vs EMA50
+        bullish_trend = close[i] > ema50_d_aligned[i]
+        bearish_trend = close[i] < ema50_d_aligned[i]
         
         if position == 0:
-            # Long: daily bullish AND weekly bullish AND volume
-            if daily_bullish and weekly_bullish and volume_filter[i]:
+            # Long: bullish daily trend AND price breaks above Camarilla R1 with volume
+            if bullish_trend and high[i] > r1_d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: daily bearish AND weekly bearish AND volume
-            elif daily_bearish and weekly_bearish and volume_filter[i]:
+            # Short: bearish daily trend AND price breaks below Camarilla S1 with volume
+            elif bearish_trend and low[i] < s1_d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: daily bearish OR weekly bearish
-            if not daily_bullish or not weekly_bullish:
+            # Long exit: price breaks below Camarilla S1 OR daily trend turns bearish
+            if low[i] < s1_d_aligned[i] or not bullish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: daily bullish OR weekly bullish
-            if not daily_bearish or not weekly_bullish:
+            # Short exit: price breaks above Camarilla R1 OR daily trend turns bullish
+            if high[i] > r1_d_aligned[i] or not bearish_trend:
                 signals[i] = 0.0
                 position = 0
             else:
