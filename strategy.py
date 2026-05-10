@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Weekly_Pivot_Breakout_1dTrend_Filter
-# Hypothesis: Breakouts at weekly pivot R2/S2 levels with 1-day EMA trend filter and volume confirmation (1.3x 20-period average).
-# Weekly pivots provide strong institutional levels; 1d trend ensures alignment with higher timeframe momentum.
-# Volume confirmation filters false breakouts. Designed for fewer trades (<30/year) to avoid fee drag on 4h.
-# Works in bull/bear markets via trend filter: only long in uptrend, short in downtrend.
+# 6h_ElderRay_1dTrend_Reversal
+# Hypothesis: Elder Ray (Bull/Bear power) + 1d trend filter for mean reversion in 6b timeframe.
+# Works in bull/bear by adapting to trend direction: long when Bear power > 0 in uptrend,
+# short when Bull power < 0 in downtrend. Uses volume confirmation to avoid false signals.
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "4h_Weekly_Pivot_Breakout_1dTrend_Filter"
-timeframe = "4h"
+name = "6h_ElderRay_1dTrend_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -33,11 +33,17 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 4h
+    # Align 1d trend to 6t
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volume confirmation (1.3x 20-period average)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
+    
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
@@ -46,32 +52,7 @@ def generate_signals(prices):
             vol_sum -= volume[i-20]
         if i >= 19:
             vol_ma[i] = vol_sum / 20
-    volume_confirm = volume > (1.3 * vol_ma)
-    
-    # Calculate weekly pivot levels (R2, S2) from previous week
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Shift to get previous week values
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    pivot = (prev_high + prev_low + prev_close) / 3
-    R2 = pivot + (prev_high - prev_low)
-    S2 = pivot - (prev_high - prev_low)
-    
-    # Align weekly pivot levels to 4h timeframe
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    volume_confirm = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
+            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
             np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -88,22 +69,22 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R2 with volume confirmation, 1d uptrend
-            if (high[i] > R2_aligned[i] and
+            # Long: Bear power > 0 (bulls in control) in 1d uptrend with volume confirmation
+            if (bear_power[i] > 0 and
                 trend_1d_up_aligned[i] > 0.5 and
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 with volume confirmation, 1d downtrend
-            elif (low[i] < S2_aligned[i] and
+            # Short: Bull power < 0 (bears in control) in 1d downtrend with volume confirmation
+            elif (bull_power[i] < 0 and
                   trend_1d_down_aligned[i] > 0.5 and
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below S2 or 1d trend turns down
-            if (low[i] < S2_aligned[i] or
+            # Exit: Bear power <= 0 or 1d trend turns down
+            if (bear_power[i] <= 0 or
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -111,8 +92,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above R2 or 1d trend turns up
-            if (high[i] > R2_aligned[i] or
+            # Exit: Bull power >= 0 or 1d trend turns up
+            if (bull_power[i] >= 0 or
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
