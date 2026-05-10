@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_FisherTransform_1dTrend_Volume
-# Hypothesis: Uses Ehlers Fisher Transform on 6h price to detect reversals. Enters long when Fisher crosses above -1.5 with 1-day uptrend and volume confirmation.
-# Enters short when Fisher crosses below +1.5 with 1-day downtrend and volume confirmation.
-# Exits when Fisher crosses back through zero.
-# Fisher Transform is effective in ranging and trending markets, capturing turning points with less lag than oscillators.
-# Combined with daily trend filter to avoid counter-trend trades and volume to confirm conviction.
-# Targets 15-35 trades per year on 6h timeframe with position size 0.25.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Uses Camarilla pivot levels from daily timeframe. Enters long when price breaks above R1 with volume confirmation and 1-day uptrend (close > EMA34).
+# Enters short when price breaks below S1 with volume confirmation and 1-day downtrend (close < EMA34).
+# Exits when price returns to the pivot point (CP) or reverses direction.
+# Uses 1-day EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
+# Targets 12-37 trades per year on 12h timeframe with position size 0.25.
 
-name = "6h_FisherTransform_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,7 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -34,66 +33,80 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate Fisher Transform on 6h prices (period=10)
-    # Normalize price to [-1, 1] range over lookback period
-    hl2 = (high + low) / 2
-    max_hl2 = pd.Series(hl2).rolling(window=10, min_periods=10).max().values
-    min_hl2 = pd.Series(hl2).rolling(window=10, min_periods=10).min().values
-    # Avoid division by zero
-    range_hl2 = max_hl2 - min_hl2
-    range_hl2 = np.where(range_hl2 == 0, 1e-10, range_hl2)
-    value = 2 * ((hl2 - min_hl2) / range_hl2 - 0.5)
-    # Clamp to [-0.999, 0.999] for math.log stability
-    value = np.clip(value, -0.999, 0.999)
+    # Calculate Camarilla pivot levels from previous day
+    # R4 = C + ((H-L)*1.1/2)
+    # R3 = C + ((H-L)*1.1/4)
+    # R2 = C + ((H-L)*1.1/6)
+    # R1 = C + ((H-L)*1.1/12)
+    # S1 = C - ((H-L)*1.1/12)
+    # S2 = C - ((H-L)*1.1/6)
+    # S3 = C - ((H-L)*1.1/4)
+    # S4 = C - ((H-L)*1.1/2)
+    # CP = (H + L + C) / 3
     
-    # Fisher Transform formula: 0.5 * ln((1+value)/(1-value))
-    fish = 0.5 * np.log((1 + value) / (1 - value))
-    # Smooth with 3-period EMA
-    fish = pd.Series(fish).ewm(span=3, adjust=False).mean().values
+    # Shift by 1 to use previous day's data
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = 0  # first day has no previous day
+    prev_low[0] = 0
+    prev_close[0] = 0
+    
+    # Calculate Camarilla levels
+    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
+    CP = (prev_high + prev_low + prev_close) / 3
+    
+    # Align Camarilla levels to 12h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    CP_aligned = align_htf_to_ltf(prices, df_1d, CP)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 13  # Warmup for Fisher (10 + 3 smoothing)
+    start_idx = max(34, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(fish[i]) or np.isnan(fish[i-1]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(CP_aligned[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter
+        # Trend filter: price above/below 1d EMA34
         price_above_ema = close[i] > ema_34_1d_aligned[i]
         price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation: current volume > 1.3 * 20-period average
-        vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        volume_confirm = volume > (vol_ma * 1.3)
-        
         if position == 0:
-            # Long entry: Fisher crosses above -1.5 with uptrend and volume
-            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and
-                price_above_ema and
-                volume_confirm[i]):
+            # Long entry: price breaks above R1 with volume confirmation and uptrend
+            if (close[i] > R1_aligned[i] and 
+                volume_confirm[i] and 
+                price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Fisher crosses below +1.5 with downtrend and volume
-            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and
-                  price_below_ema and
-                  volume_confirm[i]):
+            # Short entry: price breaks below S1 with volume confirmation and downtrend
+            elif (close[i] < S1_aligned[i] and 
+                  volume_confirm[i] and 
+                  price_below_ema):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Fisher crosses below zero
-            if fish[i] < 0 and fish[i-1] >= 0:
+            # Long exit: price returns to pivot point or trend reverses
+            if (close[i] <= CP_aligned[i] or 
+                price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Fisher crosses above zero
-            if fish[i] > 0 and fish[i-1] <= 0:
+            # Short exit: price returns to pivot point or trend reverses
+            if (close[i] >= CP_aligned[i] or 
+                price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
