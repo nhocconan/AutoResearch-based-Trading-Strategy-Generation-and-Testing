@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 1d_KAMA_With_1wTrend_Filter
-# Hypothesis: KAMA adapts to market efficiency, providing smooth trend signals in both bull and bear markets.
-# The 1-week EMA34 filter ensures trades align with the higher timeframe trend, reducing whipsaws.
-# Entry occurs when price crosses KAMA with volume confirmation (1.5x average volume).
-# Exit on opposite KAMA cross or trend reversal. Designed for low trade frequency (~10-25/year) to minimize fee drag.
+# 4h_Donchian_Breakout_VolumeTrend_1dTrendFilter
+# Hypothesis: Combines 4h Donchian breakout with volume confirmation (2x avg volume) and 1d trend filter (close > SMA50) to capture strong directional moves.
+# Uses 4h EMA20 as trend filter for entry direction. Designed for low trade frequency (20-50/year) to minimize fee drag.
+# Works in both bull and bear markets by filtering entries with higher timeframe trend.
 
-name = "1d_KAMA_With_1wTrend_Filter"
-timeframe = "1d"
+name = "4h_Donchian_Breakout_VolumeTrend_1dTrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,48 +17,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1) # EMA(30)
+    # 4h Donchian channels (20-period)
+    donchian_period = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.zeros_like(close)
-    er[er_len:] = change[er_len:] / volatility[er_len:]
-    er[er_len:] = np.where(volatility[er_len:] == 0, 0, er[er_len:])
+    for i in range(donchian_period - 1, n):
+        upper[i] = np.max(high[i - donchian_period + 1:i + 1])
+        lower[i] = np.min(low[i - donchian_period + 1:i + 1])
     
-    # Calculate Smoothing Constant (SC)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # 4h EMA20 for trend filter
+    ema20 = np.zeros(n)
+    ema20[:] = np.nan
+    if n >= 20:
+        ema20[19] = np.mean(high[:20])  # simple seed
+        for i in range(20, n):
+            ema20[i] = 0.1 * close[i] + 0.9 * ema20[i-1]
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # 1-week trend filter (EMA34)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
-    
-    # Align 1w trend to 1d
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
-    
-    # Volume confirmation (1.5x 20-period average)
-    vol_ma = np.zeros_like(volume)
+    # 4h volume average (20-period) for confirmation
+    vol_ma = np.zeros(n)
+    vol_ma[:] = np.nan
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
@@ -67,48 +49,60 @@ def generate_signals(prices):
             vol_sum -= volume[i-20]
         if i >= 19:
             vol_ma[i] = vol_sum / 20
-        else:
-            vol_ma[i] = np.nan
-    volume_confirm = volume > (1.5 * vol_ma)
+    
+    # 1d trend filter: close > SMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    sma50_1d = np.full(len(close_1d), np.nan)
+    for i in range(49, len(close_1d)):
+        sma50_1d[i] = np.mean(close_1d[i-49:i+1])
+    
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Ensure enough data for indicators
+    start_idx = max(20, 49)  # ensure Donchian, EMA, vol, and SMA50 are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(kama[i]) or np.isnan(volume_confirm[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(ema20[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(sma50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price crosses above KAMA with volume confirmation and 1w uptrend
-            if (close[i] > kama[i] and close[i-1] <= kama[i-1] and
-                trend_1w_up_aligned[i] > 0.5 and volume_confirm[i]):
+            # Long: price breaks above upper Donchian + volume > 2x avg + close > SMA50 (1d uptrend)
+            if (high[i] > upper[i] and
+                volume[i] > 2 * vol_ma[i] and
+                close[i] > sma50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price crosses below KAMA with volume confirmation and 1w downtrend
-            elif (close[i] < kama[i] and close[i-1] >= kama[i-1] and
-                  trend_1w_down_aligned[i] > 0.5 and volume_confirm[i]):
+            # Short: price breaks below lower Donchian + volume > 2x avg + close < SMA50 (1d downtrend)
+            elif (low[i] < lower[i] and
+                  volume[i] > 2 * vol_ma[i] and
+                  close[i] < sma50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below KAMA or 1w trend turns down
-            if (close[i] < kama[i] and close[i-1] >= kama[i-1]) or \
-               (trend_1w_up_aligned[i] < 0.5):
+            # Exit: price breaks below lower Donchian or 1d trend turns down
+            if (low[i] < lower[i] or
+                close[i] < sma50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above KAMA or 1w trend turns up
-            if (close[i] > kama[i] and close[i-1] <= kama[i-1]) or \
-               (trend_1w_down_aligned[i] < 0.5):
+            # Exit: price breaks above upper Donchian or 1d trend turns up
+            if (high[i] > upper[i] or
+                close[i] > sma50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
