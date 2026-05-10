@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R1_S1_Breakout_1dTrend_PriceAction
-Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend alignment capture directional moves. Uses price action (close > open) to avoid false breakouts in sideways markets. Designed for low trade frequency (<30/year) to minimize fee drag while maintaining edge in both bull and bear markets by following 1d trend.
+1d_Donchian20_Breakout_1wTrend
+Hypothesis: Daily Donchian(20) breakouts aligned with weekly trend capture major trends while minimizing whipsaws. Uses volume confirmation to avoid false breakouts. Designed for low trade frequency (<25/year) to reduce fee drag, with trend filter ensuring participation in strong moves and avoidance of counter-trend trades. Works in both bull and bear markets by following weekly trend direction.
 """
 
-name = "4H_Camarilla_R1_S1_Breakout_1dTrend_PriceAction"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,78 +22,66 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Previous 1d bar for Camarilla calculation
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily Donchian(20) - using current day's data for breakout
+    # We need 20 days of data, so we calculate on prices directly
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    range_1d = high_1d - low_1d
-    s1 = close_1d - (range_1d * 1.08333)
-    r1 = close_1d + (range_1d * 1.08333)
+    # Weekly trend: EMA 34 on weekly close
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Align to 4h timeframe (wait for 1d bar to close)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    
-    # 1d trend filter: EMA 34
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume filter: volume > 1.8x 20-period average (tight to reduce trades)
+    # Volume filter: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.8
-    
-    # Price action filter: close > open (bullish candle) or close < open (bearish candle)
-    bullish_candle = close > prices['open'].values
-    bearish_candle = close < prices['open'].values
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for indicators
+    start_idx = max(34, 20)  # Warmup for weekly EMA and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        is_uptrend = close[i] > ema_34_1d_aligned[i]
-        is_downtrend = close[i] < ema_34_1d_aligned[i]
+        # Determine weekly trend
+        is_uptrend = close[i] > ema_34_1w_aligned[i]
+        is_downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long entry: Price breaks above R1 + volume confirmation + 1d uptrend + bullish candle
-            if (close[i] > r1_aligned[i] and 
+            # Long entry: Price breaks above Donchian high + volume confirmation + weekly uptrend
+            if (high[i] > donchian_high[i] and 
                 volume[i] > vol_threshold[i] and 
-                is_uptrend and 
-                bullish_candle[i]):
+                is_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S1 + volume confirmation + 1d downtrend + bearish candle
-            elif (close[i] < s1_aligned[i] and 
+            # Short entry: Price breaks below Donchian low + volume confirmation + weekly downtrend
+            elif (low[i] < donchian_low[i] and 
                   volume[i] > vol_threshold[i] and 
-                  is_downtrend and 
-                  bearish_candle[i]):
+                  is_downtrend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below S1 (opposite side)
-            if close[i] < s1_aligned[i]:
+            # Long exit: Price closes below Donchian low (opposite side)
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above R1 (opposite side)
-            if close[i] > r1_aligned[i]:
+            # Short exit: Price closes above Donchian high (opposite side)
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
