@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Camarilla_R3_S3_Fade_1dTrend_Volume
-# Hypothesis: Fade at Camarilla R3/S3 levels on 6h chart with 1-day trend filter and volume confirmation.
-# In strong trends (1d EMA50 aligned), price often pulls back to R3/S3 before continuing.
-# Uses mean reversion at these levels with tight stops via position sizing (0.25).
-# Works in bull/bear by requiring 1d trend alignment, avoiding counter-trend traps.
-# Targets 50-150 trades over 4 years via strict entry conditions.
+# 6h_ElderRay_MeanReversion_1dTrend
+# Hypothesis: Elder Ray (Bull Power/Bear Power) with 1-day trend filter and mean reversion at extreme levels.
+# In strong 1-day trends, price often reverts to the 13-period EMA after extended moves.
+# Bull Power = High - EMA13, Bear Power = EMA13 - Low.
+# Enter long when Bear Power is extremely negative (oversold) in uptrend.
+# Enter short when Bull Power is extremely high (overbought) in downtrend.
+# Uses 1-day EMA50 for trend alignment and 13-period EMA for Elder Ray calculation.
+# Targets 50-150 trades over 4 years via extreme readings and trend alignment.
 
-name = "6h_Camarilla_R3_S3_Fade_1dTrend_Volume"
+name = "6h_ElderRay_MeanReversion_1dTrend"
 timeframe = "6h"
 leverage = 1.0
 
@@ -30,76 +32,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # Where C, H, L are from previous day's close, high, low
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 13-period EMA for Elder Ray
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate Camarilla R3 and S3 for each day
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
-    
-    # Align to 6h timeframe (wait for day to complete)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Elder Ray indicators
+    bull_power = high - ema_13  # Higher = more bullish
+    bear_power = ema_13 - low   # Higher = more bearish (since it's EMA13 - Low)
     
     # 1d EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
     
-    # Volume average (20-period for 6h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Normalize Elder Ray by ATR(20) for adaptive thresholds
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0], low[0]])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    
+    # Avoid division by zero
+    atr_20_safe = np.where(atr_20 == 0, 1e-10, atr_20)
+    bull_power_norm = bull_power / atr_20_safe
+    bear_power_norm = bear_power / atr_20_safe
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for Camarilla (need previous day) + EMA50 + vol MA
+    # Warmup: need enough for EMA13, ATR20, and 1d EMA50
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(bull_power_norm[i]) or
+            np.isnan(bear_power_norm[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+            np.isnan(close_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine trend from 1d EMA50
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
         uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
         downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation (1.3x average)
-        volume_surge = volume[i] > 1.3 * vol_ma[i]
-        
+        # Extreme levels for mean reversion (adaptive thresholds)
+        # Enter long when bear power is extremely negative (oversold) in uptrend
+        # Enter short when bull power is extremely high (overbought) in downtrend
         if position == 0:
-            # Long: Price near S3 in uptrend with volume
-            near_s3 = abs(close[i] - s3_aligned[i]) / s3_aligned[i] < 0.002  # within 0.2%
-            if near_s3 and uptrend and volume_surge:
+            # Long signal: extreme bear power (oversold) in uptrend
+            if bear_power_norm[i] < -2.0 and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price near R3 in downtrend with volume
-            elif abs(close[i] - r3_aligned[i]) / r3_aligned[i] < 0.002 and downtrend and volume_surge:
+            # Short signal: extreme bull power (overbought) in downtrend
+            elif bull_power_norm[i] > 2.0 and downtrend:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: price moves to midpoint or trend fails
-                midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-                if close[i] > midpoint or not uptrend:
+                # Long exit: bear power normalizes or trend fails
+                if bear_power_norm[i] > -0.5 or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: price moves to midpoint or trend fails
-                midpoint = (r3_aligned[i] + s3_aligned[i]) / 2
-                if close[i] < midpoint or not downtrend:
+                # Short exit: bull power normalizes or trend fails
+                if bull_power_norm[i] < 0.5 or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
