@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_PivotRange_Reversal_12hTrend
-# Hypothesis: Identifies reversal opportunities at daily pivot range boundaries with 12h trend alignment.
-# Uses daily pivot range (S1-R1) as dynamic support/resistance. Enters long near S1 in 12h uptrend, short near R1 in 12h downtrend.
-# Volume confirmation filters for institutional interest. Designed for 6h timeframe with 50-150 total trades over 4 years.
-# Works in bull/bear by aligning with 12h trend - only takes trades in direction of higher timeframe momentum.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+# Hypothesis: Uses Camarilla R3/S3 breakouts with daily trend filter and volume spikes for high-probability entries.
+# Daily trend (1d EMA34) filters direction to avoid counter-trend trades. Volume > 2.0x 20-period MA confirms momentum.
+# Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year). Works in bull/bear by aligning with daily trend.
 # Position size 0.25 for balanced risk management.
 
-name = "6h_PivotRange_Reversal_12hTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,84 +23,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot points
+    # Get daily data for trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
+    # Calculate ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate daily pivot points (standard formula)
+    # Calculate Camarilla levels from previous day's OHLC (R3 and S3 - wider bands)
+    prev_close = df_1d['close'].shift(1).values
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
+    # R3 and S3 levels (wider than R1/S1 for fewer, higher-quality signals)
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align pivot levels to 6h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Calculate 12h EMA for trend filter
-    ema_20_12h = pd.Series(df_12h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+    # Get daily EMA for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (20-period MA)
+    # Calculate volume average for confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Warmup for EMA and volume MA
+    start_idx = max(20, 34, 14)  # Warmup for volume MA, daily EMA, and ATR
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_20_12h_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 12h trend filter
-        uptrend_12h = close[i] > ema_20_12h_aligned[i]
-        downtrend_12h = close[i] < ema_20_12h_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
-        
-        # Distance to pivot levels (for entry precision)
-        dist_to_s1 = abs(close[i] - s1_aligned[i]) / s1_aligned[i]
-        dist_to_r1 = abs(close[i] - r1_aligned[i]) / r1_aligned[i]
-        near_s1 = dist_to_s1 < 0.005  # Within 0.5% of S1
-        near_r1 = dist_to_r1 < 0.005  # Within 0.5% of R1
+        # Volume confirmation and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
-            # Long entry: near S1 in 12h uptrend with volume confirmation
-            if near_s1 and uptrend_12h and volume_confirm:
+            # Long entry: price breaks above R3 with volume confirmation, daily uptrend
+            if close[i] > r3_aligned[i] and volume_confirm and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: near R1 in 12h downtrend with volume confirmation
-            elif near_r1 and downtrend_12h and volume_confirm:
+            # Short entry: price breaks below S3 with volume confirmation, daily downtrend
+            elif close[i] < s3_aligned[i] and volume_confirm and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches midpoint or trend changes
-            midpoint = (s1_aligned[i] + r1_aligned[i]) / 2
-            if close[i] >= midpoint or not uptrend_12h:
+            # Long exit: price falls back below R3 or daily trend turns down
+            if close[i] < r3_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches midpoint or trend changes
-            midpoint = (s1_aligned[i] + r1_aligned[i]) / 2
-            if close[i] <= midpoint or not downtrend_12h:
+            # Short exit: price rises back above S3 or daily trend turns up
+            if close[i] > s3_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
