@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_Pivot_Breakout_4hTrend_Volume
-# Hypothesis: Use Camarilla pivot points (S3/R3) on 1h for breakout entries, filtered by 4h EMA50 trend and volume spikes.
-# Camarilla levels provide high-probability reversal/breakout zones. 4h EMA50 ensures alignment with intermediate trend.
-# Volume confirmation filters low-conviction breakouts. Designed for 1h timeframe with controlled trade frequency.
-# Works in bull/bear by following 4h trend direction; range-bound markets filtered by volume.
-# Target: 15-35 trades/year to stay within optimal range for 1h.
+# 6h_ElderRay_1dTrend_Volume
+# Hypothesis: Elder Ray (Bull/Bear Power) on 6h identifies momentum extremes, filtered by 1d EMA trend and volume spikes.
+# Bull Power = High - EMA13, Bear Power = Low - EMA13. Enter long when Bull Power > 0 and rising, Bear Power < 0 and falling.
+# Enter short when Bear Power < 0 and falling, Bull Power < 0 and rising. 1d EMA50 filter ensures alignment with daily trend.
+# Volume confirmation (current > 2.0x 20-period average) adds conviction to avoid false signals in low-volume environments.
+# Designed to work in both bull and bear markets by following the higher-timeframe trend and capturing momentum shifts.
+# Target: 15-35 trades/year to stay within optimal trade frequency for 6h.
 
-name = "1h_Camarilla_Pivot_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,74 +25,65 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla pivot levels for previous period
-    # Using previous bar's high, low, close for current bar's levels (no look-ahead)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # Elder Ray: EMA13 for Bull/Bear Power
+    ema13_period = 13
+    close_s = pd.Series(close)
+    ema13 = close_s.ewm(span=ema13_period, adjust=False, min_periods=ema13_period).values
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # Camarilla levels: S3, S2, S1, R1, R2, R3
-    s3 = prev_close - (range_val * 1.1 / 2)
-    s2 = prev_close - (range_val * 1.1 / 4)
-    s1 = prev_close - (range_val * 1.1 / 6)
-    r1 = prev_close + (range_val * 1.1 / 6)
-    r2 = prev_close + (range_val * 1.1 / 4)
-    r3 = prev_close + (range_val * 1.1 / 2)
-    
-    # 4h EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1d EMA50 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume confirmation: current volume > 1.8 * 20-period average
+    # Volume confirmation: current volume > 2.0 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (1.8 * vol_ma)
+    volume_filter = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient warmup
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long breakout: price crosses above R3 with volume, 4h EMA uptrend
-            if close[i] > r3[i] and close[i-1] <= r3[i-1] and volume_filter[i] and ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]:
-                signals[i] = 0.20
+            # Long: Bull Power > 0 and rising (momentum building), Bear Power < 0, 1d EMA uptrend, volume confirmation
+            if (bull_power[i] > 0 and bull_power[i] > bull_power[i-1] and bear_power[i] < 0 and
+                close[i] > ema50_1d_aligned[i] and volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short breakdown: price crosses below S3 with volume, 4h EMA downtrend
-            elif close[i] < s3[i] and close[i-1] >= s3[i-1] and volume_filter[i] and ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]:
-                signals[i] = -0.20
+            # Short: Bear Power < 0 and falling (momentum building), Bull Power > 0, 1d EMA downtrend, volume confirmation
+            elif (bear_power[i] < 0 and bear_power[i] < bear_power[i-1] and bull_power[i] > 0 and
+                  close[i] < ema50_1d_aligned[i] and volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price crosses below R1 or 4h EMA turns down
-            if close[i] < r1[i] or ema_50_4h_aligned[i] < ema_50_4h_aligned[i-1]:
+            # Exit: Bull Power turns negative OR Bear Power becomes positive (momentum shift)
+            if bull_power[i] <= 0 or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price crosses above S1 or 4h EMA turns up
-            if close[i] > s1[i] or ema_50_4h_aligned[i] > ema_50_4h_aligned[i-1]:
+            # Exit: Bear Power turns positive OR Bull Power becomes negative (momentum shift)
+            if bear_power[i] >= 0 or bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
