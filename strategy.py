@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_With_Dual_Timeframe_Filter
-# Hypothesis: Kaufman Adaptive Moving Average (KAMA) on 4h acts as a dynamic trend filter.
-# Long when price > KAMA + 1d trend up + volume spike; short when price < KAMA + 1d trend down + volume spike.
-# Uses 1d trend for multi-timeframe alignment and volume confirmation to reduce false signals.
-# Designed for moderate trade frequency (target: 20-50 trades/year) with adaptive trend strength.
+# 1d_Keltner_Channel_Squeeze_Breakout_1wTrend
+# Hypothesis: On daily timeframe, Keltner Channel squeeze (BB width < KC width) indicates low volatility.
+# Breakout from squeezed KC with 1-week trend alignment (EMA50) and volume confirmation.
+# Works in bull/bear by filtering breakouts with higher timeframe trend.
+# Target: 15-25 trades/year, low frequency to minimize fee drag.
 
-name = "4h_KAMA_Trend_With_Dual_Timeframe_Filter"
-timeframe = "4h"
+name = "1d_Keltner_Channel_Squeeze_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
@@ -19,86 +19,83 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Bollinger Bands (20, 2)
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean()
+    bb_std = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = bb_upper - bb_lower
+    
+    # Keltner Channel (20, ATR*1.5)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean()
+    kc_mid = close_series.rolling(window=20, min_periods=20).mean()
+    kc_upper = kc_mid + 1.5 * atr
+    kc_lower = kc_mid - 1.5 * atr
+    kc_width = kc_upper - kc_lower
+    
+    # Squeeze condition: BB width < KC width
+    squeeze = bb_width < kc_width
+    
+    # Breakout conditions
+    breakout_up = close > kc_upper
+    breakout_down = close < kc_lower
+    
+    # Weekly trend filter (EMA 50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    uptrend_1w = close > ema_50_1w_aligned
+    downtrend_1w = close < ema_50_1w_aligned
     
-    # Calculate KAMA on 4h close (adaptive moving average)
-    # ER (Efficiency Ratio) = |change| / volatility
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly below
-    # Recompute volatility as rolling sum of absolute changes
-    volatility = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=1).sum().values
-    # Avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for EMA 2
-    slow_sc = 2 / (30 + 1)  # for EMA 30
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Initialize KAMA
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Calculate daily EMA for trend filter (34-period)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation (20-period MA on 4h chart)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_confirm = volume > volume_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (need ~10 for volatility, 34 for EMA, 20 for volume)
-    start_idx = max(10, 34, 20)
+    # Warmup: need 20 periods for BB/KC/ATR/volume
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(squeeze[i]) or np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
-        
-        # Price relative to KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
         if position == 0:
-            # Long entry: price above KAMA + daily uptrend + volume spike
-            if price_above_kama and uptrend and volume_confirm:
+            # Long entry: squeeze breakout up + weekly uptrend + volume
+            if squeeze[i-1] and breakout_up[i] and uptrend_1w[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below KAMA + daily downtrend + volume spike
-            elif price_below_kama and downtrend and volume_confirm:
+            # Short entry: squeeze breakout down + weekly downtrend + volume
+            elif squeeze[i-1] and breakout_down[i] and downtrend_1w[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA or daily trend turns down
-            if close[i] < kama[i] or not uptrend:
+            # Long exit: price crosses below KC mid or weekly trend turns down
+            if close[i] < kc_mid[i] or not uptrend_1w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA or daily trend turns up
-            if close[i] > kama[i] or not downtrend:
+            # Short exit: price crosses above KC mid or weekly trend turns up
+            if close[i] > kc_mid[i] or not downtrend_1w[i]:
                 signals[i] = 0.0
                 position = 0
             else:
