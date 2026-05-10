@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_LongTermTrend_Pullback_With_1dTrend
-# Hypothesis: In multi-year crypto markets, strong trends persist across timeframes.
-# We use 1-day EMA50 as the primary trend filter and enter on 6-hour pullbacks to EMA20.
-# Long when: 1d trend up (close > EMA50_1d) AND price pulls back to touch EMA20_6h from below.
-# Short when: 1d trend down (close < EMA50_1d) AND price pulls back to touch EMA20_6h from above.
-# This captures continuation moves in trending markets while avoiding counter-trend trades.
-# Works in both bull (follows strong uptrends) and bear (follows strong downtrends).
-# Uses volume confirmation to avoid low-conviction breakouts.
+# 6h_WeeklyTrend_Follow_With_DailyPullback
+# Hypothesis: Weekly trend direction provides strong directional bias, while daily pullbacks offer low-risk entry points.
+# Long when: Weekly trend up (price > weekly EMA50) AND price pulls back to touch daily EMA20 from below.
+# Short when: Weekly trend down (price < weekly EMA50) AND price pulls back to touch daily EMA20 from above.
+# Uses 6h chart for entry timing, with volume confirmation to avoid false signals.
+# Designed to work in both bull and bear markets by following the dominant weekly trend.
+# Target: 50-150 total trades over 4 years (12-37/year) with disciplined position sizing.
 
-name = "6h_LongTermTrend_Pullback_With_1dTrend"
+name = "6h_WeeklyTrend_Follow_With_DailyPullback"
 timeframe = "6h"
 leverage = 1.0
 
@@ -26,18 +25,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate EMA20 on 6h chart for pullback entries
-    close_s = pd.Series(close)
-    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Get daily data for pullback entries
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Calculate daily EMA20 for pullback entries
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
     # Volume confirmation (24-period MA on 6h chart = 4 days)
     volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
@@ -45,53 +49,51 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA20 (20), EMA50_1d (50), volume MA (24)
-    start_idx = max(20, 50, 24)
+    # Warmup: need weekly EMA50 (50), daily EMA20 (20), volume MA (24)
+    start_idx = max(50, 20, 24)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_20_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Price relative to EMA20 for pullback detection
-        # For long: price crosses above EMA20 from below (pullback in uptrend)
-        # For short: price crosses below EMA20 from above (pullback in downtrend)
+        # Price relative to daily EMA20 for pullback detection
         if i > 0:
-            cross_above_ema20 = (close[i] > ema_20[i]) and (close[i-1] <= ema_20[i-1])
-            cross_below_ema20 = (close[i] < ema_20[i]) and (close[i-1] >= ema_20[i-1])
+            cross_above_ema20 = (close[i] > ema_20_1d_aligned[i]) and (close[i-1] <= ema_20_1d_aligned[i-1])
+            cross_below_ema20 = (close[i] < ema_20_1d_aligned[i]) and (close[i-1] >= ema_20_1d_aligned[i-1])
         else:
             cross_above_ema20 = False
             cross_below_ema20 = False
         
         if position == 0:
-            # Long entry: uptrend + pullback to EMA20 from below + volume
+            # Long entry: weekly uptrend + pullback to daily EMA20 from below + volume
             if uptrend and cross_above_ema20 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + pullback to EMA20 from above + volume
+            # Short entry: weekly downtrend + pullback to daily EMA20 from above + volume
             elif downtrend and cross_below_ema20 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or reversal signal
+            # Long exit: weekly trend breaks or reversal signal
             if not uptrend or cross_below_ema20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or reversal signal
+            # Short exit: weekly trend breaks or reversal signal
             if not downtrend or cross_above_ema20:
                 signals[i] = 0.0
                 position = 0
