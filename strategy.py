@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from Camarilla R1/S1 levels (core support/resistance) with 1d EMA34 trend filter and volume confirmation.
-# Designed for 12h to capture multi-day trends with controlled trade frequency. Works in bull markets via breakouts above R1 with uptrend,
-# and in bear markets via breakdowns below S1 with downtrend. Volume confirmation filters false breakouts.
+# 6h_Williams_VIX_Fix_Reversal
+# Hypothesis: Williams VIX Fix identifies volatility spikes that precede mean-reverting moves in crypto.
+# High VIX Fix values indicate panic selling (long opportunity) or euphoric buying (short opportunity).
+# Combined with RSI extremes and volume confirmation to filter false signals.
+# Designed for 6h to capture multi-day reversals with low trade frequency.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Williams_VIX_Fix_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,31 +23,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Williams VIX Fix: measures synthetic VIX from price action
+    # VIX Fix = (Highest Close in period - Low) / Highest Close in period * 100
+    def williams_vix_fix(high_arr, low_arr, close_arr, period=22):
+        highest_close = np.full_like(close_arr, np.nan)
+        for i in range(len(close_arr)):
+            if i < period - 1:
+                highest_close[i] = np.nan
+            else:
+                highest_close[i] = np.max(close_arr[i-period+1:i+1])
+        vix_fix = (highest_close - low_arr) / highest_close * 100
+        return vix_fix
     
-    # Calculate Camarilla pivot levels (standard formula)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1 = close_1d + range_1d * 1.1 / 12.0
-    s1 = close_1d - range_1d * 1.1 / 12.0
+    # Calculate Williams VIX Fix
+    vix_fix = williams_vix_fix(high, low, close, period=22)
     
-    # Align Camarilla levels to 12h timeframe (wait for daily bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # RSI for confirmation
+    def rsi(close_arr, period=14):
+        delta = np.diff(close_arr, prepend=close_arr[0])
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(close_arr, np.nan)
+        avg_loss = np.full_like(close_arr, np.nan)
+        
+        # Initialize first average
+        if len(close_arr) >= period:
+            avg_gain[period-1] = np.mean(gain[0:period])
+            avg_loss[period-1] = np.mean(loss[0:period])
+            
+            # Wilder smoothing
+            for i in range(period, len(close_arr)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_val = 100 - (100 / (1 + rs))
+        return rsi_val
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    rsi_val = rsi(close, period=14)
     
-    # Volume confirmation (20-period average for 12h timeframe)
+    # Volume moving average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -58,35 +74,34 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for EMA
+    start_idx = 30  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(vix_fix[i]) or np.isnan(rsi_val[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R1, above 1d EMA34, strong volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 2.0 * vol_ma[i]:
+            # Long: High VIX Fix (panic selling) + RSI oversold + volume confirmation
+            if vix_fix[i] > 80 and rsi_val[i] < 30 and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1, below 1d EMA34, strong volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 2.0 * vol_ma[i]:
+            # Short: Extremely low VIX Fix (complacency) + RSI overbought + volume confirmation
+            elif vix_fix[i] < 20 and rsi_val[i] > 70 and volume[i] > 1.5 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below Camarilla S1 or below 1d EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Long exit: VIX Fix normalizes or RSI overbought
+            if vix_fix[i] < 40 or rsi_val[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above Camarilla R1 or above 1d EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Short exit: VIX Fix normalizes or RSI oversold
+            if vix_fix[i] > 60 or rsi_val[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
