@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_RSI_40_60_MeanReversion_With_Volume_and_Trend
-# Hypothesis: In ranging markets (low ADX), RSI extremes (below 40 for long, above 60 for short) 
-# combined with volume confirmation and trend filter (price relative to 50-period EMA) 
-# provide mean-reversion opportunities. Works in both bull and bear markets by 
-# trading mean reversion within the prevailing trend context.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) from 1-day chart act as strong intraday support/resistance.
+# In trending markets (1d EMA34), price breaking above R1 in uptrend or below S1 in downtrend
+# continues with momentum. Volume confirmation filters false breakouts. Works in both bull and bear
+# markets by only trading in direction of daily trend, reducing false signals during reversals.
 
-name = "4h_RSI_40_60_MeanReversion_With_Volume_and_Trend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,107 +23,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for ADX and EMA
+    # Get daily data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate ADX(14) on daily
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily Camarilla pivot levels (R1, S1)
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # First value has no previous close
+    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.1 / 12
+    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.1 / 12
     
-    # Plus Directional Movement
-    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    plus_dm[0] = 0
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Minus Directional Movement
-    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    minus_dm[0] = 0
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate RSI(14) on 4h
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation (20-period MA on 4h)
+    # Volume confirmation (20-period MA on 4h = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need RSI (14), EMA50 (50), ADX (14*3), volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: need daily EMA34 (34), volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(adx_aligned[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price relative to EMA50
-        above_ema = close[i] > ema_50_1d_aligned[i]
-        below_ema = close[i] < ema_50_1d_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # RSI conditions for mean reversion
-        rsi_oversold = rsi[i] < 40
-        rsi_overbought = rsi[i] > 60
-        
-        # Range filter: only trade when ADX < 25 (ranging market)
-        ranging = adx_aligned[i] < 25
-        
         if position == 0:
-            # Long entry: ranging + RSI oversold + price below EMA + volume
-            if ranging and rsi_oversold and below_ema and volume_confirm:
+            # Long entry: uptrend + price breaks above Camarilla R1 + volume
+            if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: ranging + RSI overbought + price above EMA + volume
-            elif ranging and rsi_overbought and above_ema and volume_confirm:
+            # Short entry: downtrend + price breaks below Camarilla S1 + volume
+            elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral or trend changes
-            if rsi[i] >= 50 or not below_ema:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral or trend changes
-            if rsi[i] <= 50 or not above_ema:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
