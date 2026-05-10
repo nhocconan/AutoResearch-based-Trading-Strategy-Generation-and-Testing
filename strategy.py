@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_DailyTrend_Breakout
-# Hypothesis: Weekly pivot levels (from weekly OHLC) act as strong support/resistance.
-# Breakouts above weekly R2 or below weekly S2 with daily trend alignment and volume
-# confirmation capture strong momentum moves. Works in bull (breakouts) and bear (mean
-# reversion at extremes) with tight entries to avoid overtrading.
+# 4h_Camarilla_R1_S1_4hTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) act as support/resistance; breakouts with
+# 4h trend and volume filter capture strong moves. Uses 4h EMA50 for trend to avoid lag from higher timeframes,
+# enabling faster adaptation to trend changes while maintaining fewer trades via volume confirmation.
+# Works in bull (breakouts) and bear (mean reversion at extremes) with tight entries to avoid overtrading.
 
-name = "6h_WeeklyPivot_DailyTrend_Breakout"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_4hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +23,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for weekly pivot levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 1d data for daily trend filter
+    # 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Weekly pivot levels (standard calculation)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    R1 = pivot_1w + range_1w
-    S1 = pivot_1w - range_1w
-    R2 = pivot_1w + 2 * range_1w
-    S2 = pivot_1w - 2 * range_1w
+    # 4h EMA50 trend
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = close_4h > ema50_4h
+    trend_4h_down = close_4h < ema50_4h
     
-    # Align weekly pivot levels to 6h
-    R2_aligned = align_htf_to_ltf(prices, df_1w, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1w, S2)
+    # Align 4h trend to 4h (no delay needed as it's same timeframe)
+    trend_4h_up_aligned = trend_4h_up.astype(float)
+    trend_4h_down_aligned = trend_4h_down.astype(float)
     
-    # Daily EMA34 trend
+    # Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    range_1d = high_1d - low_1d
+    R1 = close_1d + 1.1 * range_1d / 12
+    S1 = close_1d - 1.1 * range_1d / 12
     
-    # Align daily trend to 6h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
@@ -68,9 +65,7 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,34 +75,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: break above weekly R2 with daily uptrend and volume spike
-            if (close[i] > R2_aligned[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_spike):
+            # Long: break above R1 with 4h uptrend and volume spike
+            if (close[i] > R1_aligned[i] and 
+                trend_4h_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S2 with daily downtrend and volume spike
-            elif (close[i] < S2_aligned[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_spike):
+            # Short: break below S1 with 4h downtrend and volume spike
+            elif (close[i] < S1_aligned[i] and 
+                  trend_4h_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below weekly S1 or daily trend fails
-            S1 = pivot_1w[i] - range_1w[i] if not (np.isnan(pivot_1w[i]) or np.isnan(range_1w[i])) else np.nan
-            S1_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, S1))[i] if not np.isnan(S1) else np.nan
-            if (close[i] < S1_aligned or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: close below S1 or trend fails
+            if (close[i] < S1_aligned[i] or 
+                trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above weekly R1 or daily trend fails
-            R1 = pivot_1w[i] + range_1w[i] if not (np.isnan(pivot_1w[i]) or np.isnan(range_1w[i])) else np.nan
-            R1_aligned = align_htf_to_ltf(prices, df_1w, np.full_like(close_1w, R1))[i] if not np.isnan(R1) else np.nan
-            if (close[i] > R1_aligned or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: close above R1 or trend fails
+            if (close[i] > R1_aligned[i] or 
+                trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
