@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-Hypothesis: 12h trading using weekly Camarilla R1/S1 levels for breakout entries, filtered by 1-week EMA trend and volume confirmation. Weekly timeframe provides strong trend filter to avoid counter-trend trades, while Camarilla levels from weekly chart offer significant institutional support/resistance. Volume > 1.5x 20-period EMA confirms breakout strength. Designed for fewer, high-quality trades (target: 50-150 total over 4 years) to minimize fee drag and improve generalization to bear markets.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 4h breakout above/below daily Camarilla R1/S1 levels in direction of daily EMA34 trend with volume confirmation.
+Daily timeframe provides institutional S/R levels and trend context, while 4h provides timely entries. Volume >1.5x 20-period EMA confirms breakout strength. Works in bull/bear by following daily trend and using institutional levels.
+Target: 25-50 trades/year per symbol to minimize fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,31 +16,31 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1w) < 1:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate weekly Camarilla levels (using previous week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each week
-    camarilla_r1 = close_1w + (high_1w - low_1w) * 1.1 / 12
-    camarilla_s1 = close_1w - (high_1w - low_1w) * 1.1 / 12
+    # Camarilla: R1 = C + ((H-L)*1.1/12), S1 = C - ((H-L)*1.1/12)
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Get price, volume
     close = prices['close'].values
@@ -67,11 +69,11 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: above weekly EMA34 (uptrend) AND price breaks above R1 with volume
+            # Long: above EMA34 (uptrend) AND price breaks above R1 with volume
             if close[i] > ema_34_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: below weekly EMA34 (downtrend) AND price breaks below S1 with volume
+            # Short: below EMA34 (downtrend) AND price breaks below S1 with volume
             elif close[i] < ema_34_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
