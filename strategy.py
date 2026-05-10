@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Use 12h price breakouts at Camarilla R3/S3 levels in direction of 1d trend, with volume confirmation.
-# Camarilla levels provide intraday support/resistance; breakouts with trend and volume filter reduce false signals.
-# Works in bull/bear by following 1d trend direction. Target: 15-25 trades/year to stay under fee drag limits.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Use Camarilla R3/S3 breakouts from 1d in direction of 1d trend with volume confirmation.
+# Camarilla levels provide statistically significant support/resistance; breakouts with volume and
+# trend alignment capture momentum moves. Works in bull/bear by following 1d trend.
+# Target: 20-40 trades/year to stay under fee drag limits.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,21 +23,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Camarilla levels from previous day (using daily OHLC)
+    # 1d OHLC for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
+    # Previous day's OHLC for Camarilla levels
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
     # Camarilla R3 and S3 levels
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
