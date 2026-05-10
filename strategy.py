@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4H_VWAP_MeanReversion_1dTrend_Volume
-Hypothesis: Uses VWAP deviation from 4h VWAP (price crossing above/below VWAP) for mean reversion entries,
-confirmed by 1d EMA trend and volume spike. Designed for 4h timeframe to capture mean reversion moves
-with low trade frequency (target: 20-40 trades/year). Works in both bull and bear markets by following
-1d trend direction (long only in uptrend, short only in downtrend), avoiding counter-trend trades.
-Uses discrete position sizing (0.25) to minimize fee churn.
+12H_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Uses Camarilla pivot levels (R1/S1) from prior day for breakout entries on 12h timeframe, 
+confirmed by 1d EMA trend and volume spike. Designed for 12h timeframe to capture 
+trend continuation moves with low trade frequency (target: 15-30 trades/year). 
+Works in both bull and bear markets by following 1d trend direction, avoiding 
+counter-trend trades. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
-name = "4H_VWAP_MeanReversion_1dTrend_Volume"
-timeframe = "4h"
+name = "12H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -35,23 +35,32 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 4h VWAP
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, np.nan)
+    # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
+    # Note: Using same 1d data for both trend and pivots
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume filter: volume > 2.0x 20-period average on 4h chart
+    # Calculate Camarilla levels from prior day's OHLC
+    # R1 = C + ((H-L) * 1.1 / 12)
+    # S1 = C - ((H-L) * 1.1 / 12)
+    camarilla_r1 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
+    camarilla_s1 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe (use prior day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
+    
+    # Volume filter: volume > 2.0x 20-period average on 12h chart
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for EMA
+    start_idx = max(50, 20)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +71,28 @@ def generate_signals(prices):
         price_below_ema = close[i] < ema_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price crosses above VWAP + above 1d EMA + volume spike
-            if (close[i] > vwap[i] and 
-                close[i-1] <= vwap[i-1] and  # crossed above VWAP
+            # Long entry: price breaks above R1 + above 1d EMA + volume spike
+            if (close[i] > r1_aligned[i] and 
                 price_above_ema and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price crosses below VWAP + below 1d EMA + volume spike
-            elif (close[i] < vwap[i] and 
-                  close[i-1] >= vwap[i-1] and  # crossed below VWAP
+            # Short entry: price breaks below S1 + below 1d EMA + volume spike
+            elif (close[i] < s1_aligned[i] and 
                   price_below_ema and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below VWAP or volume drops
-            if (close[i] < vwap[i] and close[i-1] >= vwap[i-1]) or volume[i] < vol_ma[i]:
+            # Long exit: price breaks below S1 or volume drops
+            if (close[i] < s1_aligned[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above VWAP or volume drops
-            if (close[i] > vwap[i] and close[i-1] <= vwap[i-1]) or volume[i] < vol_ma[i]:
+            # Short exit: price breaks above R1 or volume drops
+            if (close[i] > r1_aligned[i] or volume[i] < vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
