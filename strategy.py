@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_1d_Trix_ZeroCross_VolumeTrend
-# Hypothesis: 4h TRIX zero-cross signals filtered by 1d EMA50 trend and volume surge.
-# TRIX (triple-smoothed EMA) captures momentum with less noise; zero-cross indicates trend change.
-# Combined with 1d trend alignment and volume confirmation for high-probability entries.
-# Designed for low trade frequency (<50/year) to minimize fee drag and work in bull/bear markets.
+# 4h_1d_Donchian_Breakout_VolumeTrend
+# Hypothesis: 4h Donchian channel breakouts filtered by 1d EMA50 trend and volume surge.
+# Donchian captures price extremes; EMA50 determines trend direction; volume surge confirms strength.
+# Designed for low trade frequency (<30/year) to minimize fee drift and work in bull/bear markets.
 
-name = "4h_1d_Trix_ZeroCross_VolumeTrend"
+name = "4h_1d_Donchian_Breakout_VolumeTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,12 +33,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # TRIX on 4h: triple EMA of close, then percent change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3.pct_change())
-    trix_values = trix.values
+    # Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average (20-period)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -47,13 +43,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need TRIX (12*3=36) + volume MA (20) + EMA (50)
+    # Warmup: need Donchian (20) + volume MA (20) + EMA (50)
     start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(trix_values[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,29 +63,29 @@ def generate_signals(prices):
         # Volume confirmation
         volume_surge = volume[i] > 1.5 * vol_ma[i]
         
-        # TRIX zero-cross signals
-        trix_cross_up = trix_values[i] > 0 and trix_values[i-1] <= 0
-        trix_cross_down = trix_values[i] < 0 and trix_values[i-1] >= 0
+        # Donchian breakout signals
+        breakout_up = close[i] > highest_high[i-1]
+        breakout_down = close[i] < lowest_low[i-1]
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume surge and 1d uptrend
-            if trix_cross_up and volume_surge and uptrend:
+            # Long: Donchian breakout up with volume surge and 1d uptrend
+            if breakout_up and volume_surge and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume surge and 1d downtrend
-            elif trix_cross_down and volume_surge and downtrend:
+            # Short: Donchian breakdown down with volume surge and 1d downtrend
+            elif breakout_down and volume_surge and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below zero OR trend changes
-            if trix_cross_down or not uptrend:
+            # Long exit: Donchian breakdown OR trend changes
+            if close[i] < lowest_low[i-1] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above zero OR trend changes
-            if trix_cross_up or not downtrend:
+            # Short exit: Donchian breakout up OR trend changes
+            if close[i] > highest_high[i-1] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
