@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 1h_OrderFlow_Imbalance_4hTrend_1dVolFilter
-# Hypothesis: Use 4h EMA50 for trend direction, 1h volume-weighted price deviation for entry timing, and 1d volume filter to avoid low-liquidity noise. Designed for 1h to achieve 15-37 trades/year in both bull and bear markets by combining trend alignment with mean-reversion entries during high-volume periods.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime
+# Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34), volume confirmation, and Choppiness Index regime filter.
+# Daily EMA34 filters trend direction to avoid counter-trend trades; daily Choppiness Index < 61.8 ensures trending markets only.
+# Daily Camarilla levels provide precise entry/exit; Volume confirmation ensures breakout strength. Designed for 12h to achieve 12-37 trades/year.
 
-name = "1h_OrderFlow_Imbalance_4hTrend_1dVolFilter"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Regime"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,24 +22,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h EMA50 for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # 1d volume filter: 20-period average
+    # Daily data for EMA34 trend filter, Choppiness Index, and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
-    vol_ma_20_1d = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # 1h volume-weighted average price (VWAP) deviation
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = vwap_num / vwap_den
-    vwap_dev = (close - vwap) / vwap  # normalized deviation
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Daily Choppiness Index (14-period)
+    def calculate_choppiness(high_arr, low_arr, close_arr, period=14):
+        n = len(high_arr)
+        chop = np.full(n, np.nan)
+        if n < period:
+            return chop
+        tr = np.maximum(high_arr[1:] - low_arr[1:], 
+                        np.maximum(np.abs(high_arr[1:] - close_arr[:-1]), 
+                                   np.abs(low_arr[1:] - close_arr[:-1])))
+        atr = np.zeros(n)
+        atr[period] = np.sum(tr[1:period+1])
+        for i in range(period+1, n):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        for i in range(period, n):
+            highest_high = np.max(high_arr[i-period+1:i+1])
+            lowest_low = np.min(low_arr[i-period+1:i+1])
+            if highest_high == lowest_low:
+                chop[i] = 50.0
+            else:
+                chop[i] = 100 * np.log10(np.sum(tr[i-period+1:i+1]) / (highest_high - lowest_low)) / np.log10(period)
+        return chop
+    
+    chop_1d = calculate_choppiness(high_1d, low_1d, close_1d, 14)
+    
+    # Camarilla levels (based on previous day)
+    def calculate_camarilla(h, l, c):
+        typical = (h + l + c) / 3.0
+        range_ = h - l
+        R1 = c + (range_ * 1.1000 / 12)
+        S1 = c - (range_ * 1.1000 / 12)
+        return R1, S1
+    
+    R1 = np.full_like(close_1d, np.nan)
+    S1 = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
+    
+    # Daily volume confirmation: 20-period average
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p - 1, len(arr)):
+                res[i] = np.mean(arr[i - p + 1:i + 1])
+        return res
+    vol_ma_20 = mean_arr(volume_1d, 20)
+    
+    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -45,37 +91,39 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]) or np.isnan(vwap_dev[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(ema_34_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or \
+           np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume filter: only trade when 1h volume > 1.5x 1d average volume (scaled)
-        vol_filter = volume[i] > 1.5 * vol_ma_20_1d_aligned[i] * (1/24)  # approximate 1h volume expectation
+        # Regime filter: only trade in trending markets (Choppiness Index < 61.8)
+        is_trending = chop_1d_aligned[i] < 61.8
         
-        if position == 0:
-            # Long: price below VWAP (mean reversion), uptrend (above 4h EMA50), high volume
-            if vwap_dev[i] < -0.002 and close[i] > ema_50_4h_aligned[i] and vol_filter:
-                signals[i] = 0.20
+        if position == 0 and is_trending:
+            # Long: price breaks above R1, above daily EMA34, strong volume
+            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price above VWAP (mean reversion), downtrend (below 4h EMA50), high volume
-            elif vwap_dev[i] > 0.002 and close[i] < ema_50_4h_aligned[i] and vol_filter:
-                signals[i] = -0.20
+            # Short: price breaks below S1, below daily EMA34, strong volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses above VWAP or trend breaks
-            if vwap_dev[i] > 0.001 or close[i] < ema_50_4h_aligned[i]:
+            # Long exit: price drops below S1 or below daily EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses below VWAP or trend breaks
-            if vwap_dev[i] < -0.001 or close[i] > ema_50_4h_aligned[i]:
+            # Short exit: price rises above R1 or above daily EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
