@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_RSI_Trend_Filter_with_Volume_Confirmation
-# Hypothesis: RSI(14) oversold/overbought combined with daily EMA trend filter and volume spike.
-# In uptrend (price > daily EMA34), go long when RSI < 30 and volume > 1.5x MA.
-# In downtrend (price < daily EMA34), go short when RSI > 70 and volume > 1.5x MA.
-# Exits when RSI returns to neutral zone (40-60) or trend reverses.
-# Works in bull/bear by aligning with daily trend. Targets 20-40 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels from daily data with breakout strategy.
+# Long when price breaks above R1 with daily uptrend and volume spike.
+# Short when price breaks below S1 with daily downtrend and volume spike.
+# Uses daily trend filter to align with higher timeframe direction.
+# Targets 20-50 trades/year to minimize fee drag.
 
-name = "4h_RSI_Trend_Filter_with_Volume_Confirmation"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,27 +19,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # RSI(14) calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate Camarilla levels from previous day's OHLC
+    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Daily EMA34 for trend filter
+    # Calculate Camarilla R1 and S1 for each day
+    camarilla_range = prev_high - prev_low
+    r1 = prev_close + camarilla_range * 1.1 / 12
+    s1 = prev_close - camarilla_range * 1.1 / 12
+    
+    # Align daily Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Daily EMA trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
@@ -49,11 +54,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, 34, 20)  # Warmup for RSI, daily EMA, volume MA
+    start_idx = max(34, 20) + 1  # Warmup for daily EMA + volume MA + 1 for shift
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +72,25 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # RSI conditions
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
-        
         if position == 0:
-            # Long entry: RSI oversold + uptrend + volume spike
-            if rsi_oversold and uptrend and volume_confirm:
+            # Long entry: price breaks above R1 + uptrend + volume spike
+            if close[i] > r1_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought + downtrend + volume spike
-            elif rsi_overbought and downtrend and volume_confirm:
+            # Short entry: price breaks below S1 + downtrend + volume spike
+            elif close[i] < s1_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral or trend reversal
-            if rsi_neutral[i] or not uptrend:
+            # Long exit: price breaks below S1 or trend reversal
+            if close[i] < s1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI returns to neutral or trend reversal
-            if rsi_neutral[i] or not downtrend:
+            # Short exit: price breaks above R1 or trend reversal
+            if close[i] > r1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
