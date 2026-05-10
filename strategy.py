@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_ThreeLineBreak_Trend_Follow
-# Hypothesis: Three Line Break (TLB) on 12h defines trend, with 4h RSI for entry timing and ATR-based stop.
-# TLB filters out noise and captures sustained moves. Works in bull/bear by following established trend.
-# Targets ~25-35 trades/year to minimize fee drag.
+# 1h_4h1dTrend_WithVolumeSpike_Entry
+# Hypothesis: Trade in direction of 4h and 1d trend alignment using EMA crossovers.
+# Enter on 1h pullbacks with volume spike confirmation during active hours (08-20 UTC).
+# Uses 4h EMA20/50 and 1d EMA50 for trend filter, 1h RSI for entry timing.
+# Designed to work in both bull and bear markets by following higher timeframe trends.
+# Targets ~20-30 trades/year to minimize fee drag.
 
-name = "4h_ThreeLineBreak_Trend_Follow"
-timeframe = "4h"
+name = "1h_4h1dTrend_WithVolumeSpike_Entry"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,60 +16,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # 12h data for Three Line Break trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 3:
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    # 4h EMA20/50 trend
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = ema20_4h > ema50_4h
+    trend_4h_down = ema20_4h < ema50_4h
     
-    # Three Line Break calculation
-    tlb_direction = np.zeros(len(close_12h), dtype=int)  # 1 for up, -1 for down, 0 for reverse
-    tlb_blocks = []  # store closing prices of each block
-    current_direction = 0
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    for i in range(len(close_12h)):
-        price = close_12h[i]
-        
-        if len(tlb_blocks) == 0:
-            tlb_blocks.append(price)
-            tlb_direction[i] = 1  # start with up
-            current_direction = 1
-        else:
-            if current_direction == 1:  # in up trend
-                if price > tlb_blocks[-1]:  # continue up
-                    tlb_blocks.append(price)
-                    tlb_direction[i] = 1
-                elif price < min(tlb_blocks[-3:] if len(tlb_blocks) >= 3 else tlb_blocks):  # reverse down
-                    tlb_blocks = [price]
-                    tlb_direction[i] = -1
-                    current_direction = -1
-                else:  # no change
-                    tlb_direction[i] = 0
-            else:  # in down trend
-                if price < tlb_blocks[-1]:  # continue down
-                    tlb_blocks.append(price)
-                    tlb_direction[i] = -1
-                elif price > max(tlb_blocks[-3:] if len(tlb_blocks) >= 3 else tlb_blocks):  # reverse up
-                    tlb_blocks = [price]
-                    tlb_direction[i] = 1
-                    current_direction = 1
-                else:  # no change
-                    tlb_direction[i] = 0
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Align 12h TLB direction to 4h
-    tlb_direction_float = tlb_direction.astype(float)
-    tlb_up_aligned = align_htf_to_ltf(prices, df_12h, (tlb_direction_float == 1).astype(float))
-    tlb_down_aligned = align_htf_to_ltf(prices, df_12h, (tlb_direction_float == -1).astype(float))
+    # 1d EMA50 trend
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # 4h RSI for entry timing
+    # Align 1d trend to 1h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # 1h RSI for entry timing
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -76,56 +68,61 @@ def generate_signals(prices):
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     
-    # ATR for volatility filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # 1h volume spike (2x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (2.0 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(tlb_up_aligned[i]) or np.isnan(tlb_down_aligned[i]) or
-            np.isnan(rsi[i]) or np.isnan(atr[i])):
+        # Skip if any data is not ready
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 12h TLB up + RSI not overbought + volatility filter
-            if (tlb_up_aligned[i] > 0.5 and
-                rsi[i] < 70 and
-                atr[i] > 0):  # volatility present
-                signals[i] = 0.25
+            # Long: aligned uptrend on 4h and 1d, RSI oversold, volume spike, in session
+            if (trend_4h_up_aligned[i] > 0.5 and
+                trend_1d_up_aligned[i] > 0.5 and
+                rsi[i] < 30 and
+                vol_spike[i] and
+                in_session[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: 12h TLB down + RSI not oversold + volatility filter
-            elif (tlb_down_aligned[i] > 0.5 and
-                  rsi[i] > 30 and
-                  atr[i] > 0):
-                signals[i] = -0.25
+            # Short: aligned downtrend on 4h and 1d, RSI overbought, volume spike, in session
+            elif (trend_4h_down_aligned[i] > 0.5 and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  rsi[i] > 70 and
+                  vol_spike[i] and
+                  in_session[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: 12h TLB reverses down or RSI extremely overbought
-            if (tlb_down_aligned[i] > 0.5 or
-                rsi[i] > 85):
+            # Exit: RSI overbought or trend breaks down
+            if (rsi[i] > 70 or
+                trend_4h_up_aligned[i] < 0.5 or
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: 12h TLB reverses up or RSI extremely oversold
-            if (tlb_up_aligned[i] > 0.5 or
-                rsi[i] < 15):
+            # Exit: RSI oversold or trend breaks up
+            if (rsi[i] < 30 or
+                trend_4h_down_aligned[i] < 0.5 or
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
