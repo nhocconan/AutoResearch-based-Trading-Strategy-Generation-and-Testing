@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_TRIX_VolumeSpike_ChopFilter
-# Hypothesis: Uses TRIX (15,9) momentum with volume spike and Choppiness Index regime filter.
-# Long when TRIX crosses above signal line with volume spike in trending market (CHOP < 38.2).
-# Short when TRIX crosses below signal line with volume spike in trending market.
-# Exit when TRIX crosses back or volume drops.
-# Designed to work in both bull and bear markets by filtering choppy regimes.
-# Targets 20-50 trades per year on 4h timeframe with position size 0.25.
+# 1D_WilliamsAlligator_1wTrend_Volume
+# Hypothesis: Uses Williams Alligator on 1d timeframe to determine trend (Jaw, Teeth, Lips alignment).
+# Enters long when price is above all three lines (bullish alignment) with volume confirmation.
+# Enters short when price is below all three lines (bearish alignment) with volume confirmation.
+# Uses weekly EMA40 as higher timeframe trend filter to avoid counter-trend trades.
+# Exits when price crosses back below/above the Teeth line or trend changes.
+# Designed for 1d timeframe with position size 0.25 to target 10-25 trades per year.
 
-name = "4h_TRIX_VolumeSpike_ChopFilter"
-timeframe = "4h"
+name = "1D_WilliamsAlligator_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,102 +20,101 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
-    volume = prices['volume'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Get 4h data for TRIX calculation (same timeframe, but we'll use it for smoothing)
-    # For TRIX we need the same timeframe data
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
-        return np.zeros(n)
-    
-    # Calculate TRIX: Triple Exponential Moving Average
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15)
-    close_series = pd.Series(close)
-    ema1 = close_series.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = ema3.pct_change() * 100  # Percentage change
-    
-    # Signal line: EMA of TRIX
-    signal_line = trix.ewm(span=9, adjust=False, min_periods=9).mean()
-    
-    # Align TRIX and signal line to lower timeframe (though same, we use align for safety)
-    trix_aligned = align_htf_to_ltf(prices, df_4h, trix.values)
-    signal_aligned = align_htf_to_ltf(prices, df_4h, signal_line.values)
-    
-    # Volume confirmation: current volume > 2.0 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 2.0)
-    
-    # Choppiness Index (using daily data for regime)
+    # Get 1d data for Williams Alligator
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    # Calculate Williams Alligator lines (SMA with specific periods)
+    # Jaw: 13-period SMA, shifted 8 bars forward
+    # Teeth: 8-period SMA, shifted 5 bars forward  
+    # Lips: 5-period SMA, shifted 3 bars forward
+    jaw_raw = pd.Series(df_1d['close']).rolling(window=13, min_periods=13).mean().values
+    teeth_raw = pd.Series(df_1d['close']).rolling(window=8, min_periods=8).mean().values
+    lips_raw = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().values
     
-    # ATR(14)
-    atr = tr.rolling(window=14, min_periods=14).mean()
+    # Apply forward shift (Alligator specific)
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
+    # Set initial values to NaN due to shift
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    # Sum of TR over 14 periods
-    sum_tr = tr.rolling(window=14, min_periods=14).sum()
+    # Align Alligator lines to 1d (no shift needed as already on 1d)
+    jaw_aligned = jaw
+    teeth_aligned = teeth
+    lips_aligned = lips
     
-    # Highest high and lowest low over 14 periods
-    hh = df_1d['high'].rolling(window=14, min_periods=14).max()
-    ll = df_1d['low'].rolling(window=14, min_periods=14).min()
+    # Get weekly data for higher timeframe trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 40:
+        return np.zeros(n)
     
-    # Choppiness Index
-    chop = 100 * np.log10(sum_tr / (atr * 14)) / np.log10(14)
-    chop = chop.fillna(50)  # Fill NaN with neutral value
+    # Weekly EMA40 for trend filter
+    ema_40_1w = pd.Series(df_1w['close']).ewm(span=40, adjust=False, min_periods=40).mean().values
+    ema_40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_40_1w)
     
-    # Align Chop to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop.values, additional_delay_bars=0)
+    # Volume confirmation: current volume > 1.3 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (vol_ma * 1.3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20, 14)  # Warmup for TRIX, volume MA, and Chop
+    start_idx = 13  # Warmup for Alligator (max of 13,8,5 periods)
     
     for i in range(start_idx, n):
-        if np.isnan(trix_aligned[i]) or np.isnan(signal_aligned[i]) or np.isnan(chop_aligned[i]):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(ema_40_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # TRIX crossover signals
-        trix_cross_above = trix_aligned[i] > signal_aligned[i] and trix_aligned[i-1] <= signal_aligned[i-1]
-        trix_cross_below = trix_aligned[i] < signal_aligned[i] and trix_aligned[i-1] >= signal_aligned[i-1]
+        # Check Alligator alignment
+        bullish_alignment = (close[i] > jaw_aligned[i] and 
+                           close[i] > teeth_aligned[i] and 
+                           close[i] > lips_aligned[i])
+        bearish_alignment = (close[i] < jaw_aligned[i] and 
+                           close[i] < teeth_aligned[i] and 
+                           close[i] < lips_aligned[i])
         
-        # Trending market filter (CHOP < 38.2)
-        trending = chop_aligned[i] < 38.2
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_40_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_40_1w_aligned[i]
         
         if position == 0:
-            # Long entry: TRIX crosses above signal with volume spike in trending market
-            if trix_cross_above and volume_confirm[i] and trending:
+            # Long entry: bullish Alligator alignment + volume confirmation + weekly uptrend
+            if (bullish_alignment and 
+                volume_confirm[i] and 
+                weekly_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TRIX crosses below signal with volume spike in trending market
-            elif trix_cross_below and volume_confirm[i] and trending:
+            # Short entry: bearish Alligator alignment + volume confirmation + weekly downtrend
+            elif (bearish_alignment and 
+                  volume_confirm[i] and 
+                  weekly_downtrend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses back below signal or market becomes choppy
-            if trix_cross_below or not trending:
+            # Long exit: price crosses below Teeth or weekly trend turns down
+            if (close[i] < teeth_aligned[i] or 
+                not weekly_uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses back above signal or market becomes choppy
-            if trix_cross_above or not trending:
+            # Short exit: price crosses above Teeth or weekly trend turns up
+            if (close[i] > teeth_aligned[i] or 
+                not weekly_downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
