@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 1D_RSI50_Trend_With_W1_SupportResistance
-# Hypothesis: Uses daily RSI(50) as trend filter with weekly support/resistance from prior weekly high/low.
-# Enters long when RSI crosses above 50 and price breaks above prior weekly high with volume > 1.5x 20-day average.
-# Enters short when RSI crosses below 50 and price breaks below prior weekly low with volume > 1.5x 20-day average.
-# Exits when RSI crosses back below/above 50 or price returns to opposite weekly level.
-# Uses RSI(50) as neutral trend filter to avoid whipsaws and works in both bull/bear markets.
-# Targets 8-20 trades per year on daily timeframe with position size 0.25 to minimize fee drag.
+# 6H_ElderRay_ForceIndex_Combo
+# Hypothesis: Combines Elder Ray (Bull/Bear Power) with Force Index on 6h timeframe,
+# using 1d EMA13 for trend filter. Enters long when Bull Power > 0 and Force Index > 0 in uptrend (close > EMA13).
+# Enters short when Bear Power < 0 and Force Index < 0 in downtrend (close < EMA13).
+# Uses volume-weighted confirmation to avoid whipsaws. Designed for 6h timeframe to target 12-37 trades/year.
+# Works in both bull and bear markets by following the higher timeframe trend.
 
-name = "1D_RSI50_Trend_With_W1_SupportResistance"
-timeframe = "1d"
+name = "6H_ElderRay_ForceIndex_Combo"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,84 +16,80 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for support/resistance levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly high and low (from completed weekly bar)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # Calculate 1d EMA(13) for trend direction
+    ema_13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Align weekly levels to daily timeframe (available after weekly bar closes)
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low)
+    # Calculate Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    # Using 6h EMA13 for Elder Ray calculation
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # Calculate daily RSI(50) for trend filter
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/50, adjust=False, min_periods=50).mean()
-    avg_loss = loss.ewm(alpha=1/50, adjust=False, min_periods=50).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    # Calculate Force Index: (Close - Close_prev) * Volume
+    # Using 1-period force index
+    close_shift = np.roll(close, 1)
+    close_shift[0] = 0  # avoid using future data
+    force_index = (close - close_shift) * volume
+    # Smooth Force Index with EMA(3) to reduce noise
+    force_index_smooth = pd.Series(force_index).ewm(span=3, adjust=False, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for RSI
+    start_idx = max(20, 13)  # Warmup for EMA and Force Index
     
     for i in range(start_idx, n):
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_13_1d_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(force_index_smooth[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # RSI trend filter
-        rsi_above_50 = rsi_values[i] > 50
-        rsi_below_50 = rsi_values[i] < 50
-        rsi_crossed_up = rsi_values[i] > 50 and rsi_values[i-1] <= 50
-        rsi_crossed_down = rsi_values[i] < 50 and rsi_values[i-1] >= 50
+        # Trend filter: price above/below 1d EMA13
+        price_above_ema = close[i] > ema_13_1d_aligned[i]
+        price_below_ema = close[i] < ema_13_1d_aligned[i]
         
         if position == 0:
-            # Long entry: RSI crosses above 50 and price breaks above weekly high with volume
-            if (rsi_crossed_up and 
-                close[i] > weekly_high_aligned[i] and 
-                volume[i] > vol_threshold[i]):
+            # Long entry: Bull Power > 0 AND Force Index > 0 in uptrend
+            if (bull_power[i] > 0 and 
+                force_index_smooth[i] > 0 and 
+                price_above_ema):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI crosses below 50 and price breaks below weekly low with volume
-            elif (rsi_crossed_down and 
-                  close[i] < weekly_low_aligned[i] and 
-                  volume[i] > vol_threshold[i]):
+            # Short entry: Bear Power < 0 AND Force Index < 0 in downtrend
+            elif (bear_power[i] < 0 and 
+                  force_index_smooth[i] < 0 and 
+                  price_below_ema):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses below 50 or price returns to weekly low
-            if (rsi_crossed_down or 
-                close[i] < weekly_low_aligned[i]):
+            # Long exit: Bull Power <= 0 OR Force Index <= 0 OR trend reverses
+            if (bull_power[i] <= 0 or 
+                force_index_smooth[i] <= 0 or 
+                price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses above 50 or price returns to weekly high
-            if (rsi_crossed_up or 
-                close[i] > weekly_high_aligned[i]):
+            # Short exit: Bear Power >= 0 OR Force Index >= 0 OR trend reverses
+            if (bear_power[i] >= 0 or 
+                force_index_smooth[i] >= 0 or 
+                price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
