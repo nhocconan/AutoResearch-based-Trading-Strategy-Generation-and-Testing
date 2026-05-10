@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_with_RSI_and_Chop
-Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) to capture trend direction on daily timeframe,
-combined with RSI for momentum confirmation and Choppiness Index to filter ranging markets.
-Enter long when KAMA slopes up, RSI > 50, and CHOP > 61.8 (ranging market - mean reversion setup).
-Enter short when KAMA slopes down, RSI < 50, and CHOP > 61.8.
-Exit when conditions reverse. Uses weekly trend filter to ensure alignment with higher timeframe trend.
-Designed for low trade frequency (<25/year) to minimize fee drag on 1d timeframe.
-Works in bull markets via trend following and in bear markets via mean reversion in ranging regimes.
+6h_Ichimoku_Kumo_Twist_1dTrend
+Hypothesis: Ichimoku cloud twist (Senkou Span A/B cross) combined with Kumo breakout and daily EMA trend filter.
+Works in bull/bear by trading in direction of daily trend (EMA50). Cloud twist signals momentum shift,
+while price above/below cloud confirms trend continuation. Uses 6h for entry timing and 1d for trend/filter.
+Target: 50-120 total trades over 4 years (12-30/year) to minimize fee drag.
 """
 
-name = "1d_KAMA_Trend_with_RSI_and_Chop"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,146 +20,124 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # --- 1d Indicators ---
-    # KAMA (Kaufman Adaptive Moving Average)
-    def kama(price, period=10, fast=2, slow=30):
-        # Efficiency Ratio
-        change = np.abs(np.diff(price, n=period))
-        volatility = np.sum(np.abs(np.diff(price)), axis=1)
-        er = np.zeros_like(price)
-        er[period:] = change[period-1:] / np.maximum(volatility[period-1:], 1e-10)
-        # Smoothing constants
-        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-        # KAMA calculation
-        kama_val = np.full_like(price, np.nan)
-        kama_val[period] = np.mean(price[:period+1])
-        for i in range(period+1, len(price)):
-            kama_val[i] = kama_val[i-1] + sc[i] * (price[i] - kama_val[i-1])
-        return kama_val
+    # 1d data for Ichimoku and trend
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # RSI (Relative Strength Index)
-    def rsi(price, period=14):
-        delta = np.diff(price)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full_like(price, np.nan)
-        avg_loss = np.full_like(price, np.nan)
-        if len(price) >= period + 1:
-            avg_gain[period] = np.mean(gain[:period])
-            avg_loss[period] = np.mean(loss[:period])
-            for i in range(period+1, len(price)):
-                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-        rsi_val = 100 - (100 / (1 + rs))
-        return rsi_val
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Choppiness Index
-    def choppiness_index(high, low, close, period=14):
-        atr = np.zeros_like(close)
-        for i in range(1, len(close)):
-            atr[i] = max(
-                high[i] - low[i],
-                np.abs(high[i] - close[i-1]),
-                np.abs(low[i] - close[i-1])
-            )
-        # Sum of ATR over period
-        atr_sum = np.zeros_like(close)
-        for i in range(period, len(close)):
-            atr_sum[i] = np.sum(atr[i-period+1:i+1])
-        # Highest high and lowest low over period
-        hh = np.zeros_like(close)
-        ll = np.zeros_like(close)
-        for i in range(period-1, len(close)):
-            hh[i] = np.max(high[i-period+1:i+1])
-            ll[i] = np.min(low[i-period+1:i+1])
-        # Chop calculation
-        chop = np.full_like(close, 50.0)
-        for i in range(period-1, len(close)):
-            if hh[i] != ll[i]:
-                chop[i] = 100 * np.log10(atr_sum[i] / (hh[i] - ll[i])) / np.log10(period)
-        return chop
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen_1d = np.full(len(high_1d), np.nan)
+    if len(high_1d) >= tenkan_period:
+        for i in range(tenkan_period - 1, len(high_1d)):
+            tenkan_sen_1d[i] = (np.max(high_1d[i - tenkan_period + 1:i + 1]) + 
+                               np.min(low_1d[i - tenkan_period + 1:i + 1])) / 2
     
-    # Calculate 1d indicators
-    kama_val = kama(close, period=10, fast=2, slow=30)
-    rsi_val = rsi(close, period=14)
-    chop_val = choppiness_index(high, low, close, period=14)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen_1d = np.full(len(high_1d), np.nan)
+    if len(high_1d) >= kijun_period:
+        for i in range(kijun_period - 1, len(high_1d)):
+            kijun_sen_1d[i] = (np.max(high_1d[i - kijun_period + 1:i + 1]) + 
+                              np.min(low_1d[i - kijun_period + 1:i + 1])) / 2
     
-    # KAMA slope (direction)
-    kama_slope = np.zeros_like(kama_val)
-    kama_slope[1:] = np.diff(kama_val)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a_1d = np.full(len(high_1d), np.nan)
+    if len(high_1d) >= kijun_period:
+        for i in range(len(high_1d)):
+            idx = i + kijun_period
+            if idx < len(high_1d) and not np.isnan(tenkan_sen_1d[i]) and not np.isnan(kijun_sen_1d[i]):
+                senkou_span_a_1d[idx] = (tenkan_sen_1d[i] + kijun_sen_1d[i]) / 2
     
-    # --- Weekly Trend Filter ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_span_b_1d = np.full(len(high_1d), np.nan)
+    if len(high_1d) >= senkou_span_b_period:
+        for i in range(senkou_span_b_period - 1, len(high_1d)):
+            senkou_span_b_1d[i] = (np.max(high_1d[i - senkou_span_b_period + 1:i + 1]) + 
+                                  np.min(low_1d[i - senkou_span_b_period + 1:i + 1])) / 2
+        # Shift forward by kijun_period (26)
+        senkou_span_b_shifted = np.full(len(high_1d), np.nan)
+        for i in range(len(high_1d) - kijun_period):
+            if not np.isnan(senkou_span_b_1d[i]):
+                senkou_span_b_shifted[i + kijun_period] = senkou_span_b_1d[i]
+        senkou_span_b_1d = senkou_span_b_shifted
     
-    weekly_close = df_1w['close'].values
-    # Weekly EMA20 for trend
-    def ema(price, period):
-        ema_val = np.full_like(price, np.nan)
-        if len(price) >= period:
-            ema_val[period-1] = np.mean(price[:period])
-            alpha = 2 / (period + 1)
-            for i in range(period, len(price)):
-                ema_val[i] = alpha * price[i] + (1 - alpha) * ema_val[i-1]
-        return ema_val
+    # Kumo (cloud) top and bottom
+    kumo_top_1d = np.full(len(high_1d), np.nan)
+    kumo_bottom_1d = np.full(len(high_1d), np.nan)
+    for i in range(len(high_1d)):
+        if not np.isnan(senkou_span_a_1d[i]) and not np.isnan(senkou_span_b_1d[i]):
+            kumo_top_1d[i] = max(senkou_span_a_1d[i], senkou_span_b_1d[i])
+            kumo_bottom_1d[i] = min(senkou_span_a_1d[i], senkou_span_b_1d[i])
     
-    weekly_ema20 = ema(weekly_close, 20)
-    weekly_ema20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema20)
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # --- Alignment ---
-    kama_aligned = kama_val  # Already 1d
-    rsi_aligned = rsi_val    # Already 1d
-    chop_aligned = chop_val  # Already 1d
-    kama_slope_aligned = kama_slope  # Already 1d
+    # Align 1d indicators to 6h
+    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d)
+    kijun_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen_1d)
+    kumo_top_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_top_1d)
+    kumo_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, kumo_bottom_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- Signal Generation ---
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for indicators
+    start_idx = 100  # Wait for Ichimoku and EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]) or np.isnan(weekly_ema20_aligned[i]):
+        if (np.isnan(tenkan_sen_1d_aligned[i]) or np.isnan(kijun_sen_1d_aligned[i]) or 
+            np.isnan(kumo_top_1d_aligned[i]) or np.isnan(kumo_bottom_1d_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Conditions
-        kama_up = kama_slope_aligned[i] > 0
-        kama_down = kama_slope_aligned[i] < 0
-        rsi_above_50 = rsi_aligned[i] > 50
-        rsi_below_50 = rsi_aligned[i] < 50
-        chop_high = chop_aligned[i] > 61.8  # Ranging market
-        weekly_uptrend = close[i] > weekly_ema20_aligned[i]
-        weekly_downtrend = close[i] < weekly_ema20_aligned[i]
+        # Kumo twist: Tenkan-sen/Kijun-sen cross above/below cloud
+        tk_cross_above = tenkan_sen_1d_aligned[i] > kijun_sen_1d_aligned[i]
+        tk_cross_below = tenkan_sen_1d_aligned[i] < kijun_sen_1d_aligned[i]
+        
+        # Price relative to cloud
+        price_above_kumo = close[i] > kumo_top_1d_aligned[i]
+        price_below_kumo = close[i] < kumo_bottom_1d_aligned[i]
+        
+        # Trend filter
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Long: KAMA up, RSI > 50, choppy market, weekly uptrend
-            if kama_up and rsi_above_50 and chop_high and weekly_uptrend:
+            # Long: TK cross above + price above cloud + uptrend
+            if tk_cross_above and price_above_kumo and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down, RSI < 50, choppy market, weekly downtrend
-            elif kama_down and rsi_below_50 and chop_high and weekly_downtrend:
+            # Short: TK cross below + price below cloud + downtrend
+            elif tk_cross_below and price_below_kumo and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA turns down or RSI < 50 or weekly trend turns down
-            if not kama_up or not rsi_above_50 or not weekly_uptrend:
+            # Exit: TK cross below OR price drops below cloud OR trend turns down
+            if not tk_cross_above or not price_above_kumo or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA turns up or RSI > 50 or weekly trend turns up
-            if not kama_down or not rsi_below_50 or not weekly_downtrend:
+            # Exit: TK cross above OR price rises above cloud OR trend turns up
+            if not tk_cross_below or not price_below_kumo or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
