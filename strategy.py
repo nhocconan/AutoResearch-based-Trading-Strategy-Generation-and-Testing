@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 1d_KAMA_With_1wTrend
-# Hypothesis: In multi-year crypto markets, the 1-week trend provides a strong filter for daily trades.
-# We use 1-week EMA50 as the primary trend filter and enter on daily KAMA direction aligned with the weekly trend.
-# Long when: 1w trend up (close > EMA50_1w) AND KAMA(14,2,30) is rising.
-# Short when: 1w trend down (close < EMA50_1w) AND KAMA(14,2,30) is falling.
-# This captures continuation moves in trending markets while avoiding counter-trend trades.
-# Works in both bull (follows strong uptrends) and bear (follows strong downtrends).
-# Uses volume confirmation to avoid low-conviction breakouts.
+# 12h_Camarilla_Pullback_With_1dTrend
+# Hypothesis: On 12h timeframe, price often pulls back to Camarilla pivot levels (S3/S4 for long, R3/R4 for short) during strong daily trends.
+# Enter when price touches S3 (long) or R3 (short) on 12h chart while 1d trend is confirmed (close > EMA50 for long, close < EMA50 for short).
+# Use volume spike (1.5x 24-period MA) to confirm momentum and avoid false breakouts.
+# Exit when price reverses to opposite Camarilla level (S4 for long exit, R4 for short exit) or trend breaks.
+# Works in bull markets (follows uptrend pullbacks to S3) and bear markets (follows downtrend pullbacks to R3).
+# Low trade frequency due to strict confluence: trend + pivot touch + volume.
 
-name = "1d_KAMA_With_1wTrend"
-timeframe = "1d"
+name = "12h_Camarilla_Pullback_With_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,83 +25,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get daily data for trend filter and Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate KAMA on daily chart
+    # Calculate 12-period EMA on 12h for trend filter (faster than 50-period)
     close_s = pd.Series(close)
-    # Efficiency ratio
-    change = abs(close_s.diff(10))
-    volatility = close_s.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
+    ema_12 = close_s.ewm(span=12, adjust=False, min_periods=12).mean().values
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation (20-day MA)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels from previous day
+    # Camarilla: based on previous day's range
+    # Resistance levels: R3 = close + 1.1*(high-low)/2, R4 = close + 1.1*(high-low)
+    # Support levels: S3 = close - 1.1*(high-low)/2, S4 = close - 1.1*(high-low)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_range = prev_high - prev_low
+    
+    r3 = prev_close + 1.1 * prev_range / 2
+    r4 = prev_close + 1.1 * prev_range
+    s3 = prev_close - 1.1 * prev_range / 2
+    s4 = prev_close - 1.1 * prev_range
+    
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume confirmation (24-period MA on 12h = 12 days)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (30), EMA50_1w (50), volume MA (20)
-    start_idx = max(30, 50, 20)
+    # Warmup: need EMA12 (12), EMA50_1d (50), volume MA (24), Camarilla (need prev day)
+    start_idx = max(12, 50, 24) + 1  # +1 for previous day shift
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema_12[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Daily trend filter: use 12h EMA vs daily EMA50 for smoother filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # KAMA direction
-        if i > 0:
-            kama_rising = kama[i] > kama[i-1]
-            kama_falling = kama[i] < kama[i-1]
-        else:
-            kama_rising = False
-            kama_falling = False
+        # Price touching Camarilla levels with wick close
+        # For long: touch S3 from above (wick low <= S3) and close above S3
+        # For short: touch R3 from below (wick high >= R3) and close below R3
+        touch_s3 = low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]
+        touch_r3 = high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]
         
         if position == 0:
-            # Long entry: uptrend + KAMA rising + volume
-            if uptrend and kama_rising and volume_confirm:
+            # Long entry: uptrend + touch S3 + volume
+            if uptrend and touch_s3 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + KAMA falling + volume
-            elif downtrend and kama_falling and volume_confirm:
+            # Short entry: downtrend + touch R3 + volume
+            elif downtrend and touch_r3 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or KAMA turns down
-            if not uptrend or not kama_rising:
+            # Long exit: trend breaks or touch S4 (stronger reversal)
+            if not uptrend or low[i] <= s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or KAMA turns up
-            if not downtrend or not kama_falling:
+            # Short exit: trend breaks or touch R4 (stronger reversal)
+            if not downtrend or high[i] >= r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
