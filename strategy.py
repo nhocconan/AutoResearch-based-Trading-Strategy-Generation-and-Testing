@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_DailyTrend_HTFVolume
-Hypothesis: Use weekly pivot points (from 1w) as structural support/resistance.
-In trending markets (determined by 1d EMA34), price tends to respect weekly pivot levels.
-Long when price pulls back to weekly S1/S2 in uptrend with volume confirmation.
-Short when price rallies to weekly R1/R2 in downtrend with volume confirmation.
-Weekly pivots provide cleaner structure than daily pivots for 6b timeframe.
-Targets 60-120 trades over 4 years (15-30/year) to minimize fee drag.
-Works in both bull (buy dips to support) and bear (sell rallies to resistance).
+4h_Keltner_Channel_1dTrend_Volume
+Hypothesis: Keltner breakouts on 4h timeframe with 1d EMA34 trend filter and volume confirmation.
+In trending markets, price tends to break and continue in direction of trend.
+Works in both bull (breakouts above upper band) and bear (breakdowns below lower band).
+Target 20-50 trades per year to minimize fee drag.
 """
 
-name = "6h_WeeklyPivot_DailyTrend_HTFVolume"
-timeframe = "6h"
+name = "4h_Keltner_Channel_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtt_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,6 +24,30 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # 4h ATR(10) for Keltner channels
+    atr_period = 10
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = np.full(n, np.nan)
+    if n >= atr_period:
+        atr[atr_period-1] = np.mean(tr[:atr_period])
+        for i in range(atr_period, n):
+            atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    
+    # 4h EMA20 for middle band
+    ema_period = 20
+    ema = np.full(n, np.nan)
+    if n >= ema_period:
+        ema[ema_period-1] = np.mean(close[:ema_period])
+        alpha = 2 / (ema_period + 1)
+        for i in range(ema_period, n):
+            ema[i] = alpha * close[i] + (1 - alpha) * ema[i-1]
+    
+    # Keltner bands
+    keltner_mult = 2.0
+    upper = ema + keltner_mult * atr
+    lower = ema - keltner_mult * atr
     
     # 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -48,75 +69,42 @@ def generate_signals(prices):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Weekly pivot points (from 1w)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate pivot points: P = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    
-    # Align weekly pivots to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 1)  # Need EMA34 and at least one weekly pivot
+    start_idx = max(atr_period, ema_period, 34, 1)
     
     for i in range(start_idx, n):
         if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or \
-           np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or \
-           np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or \
-           np.isnan(s2_1w_aligned[i]):
+           np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 6h volume > 1.5x average 1d volume (scaled to 6h)
-        vol_6h_approx = vol_sma20_1d_aligned[i] / 4.0  # 4x 6h periods in 1d
-        volume_confirm = volume[i] > 1.5 * vol_6h_approx
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
+        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h periods in 1d
+        volume_confirm = volume[i] > 1.5 * vol_4h_approx
         
         if position == 0:
-            # Long: Price near weekly S1/S2 in uptrend with volume confirmation
-            # Allow 0.5% buffer around pivot levels
-            near_s1 = abs(close[i] - s1_1w_aligned[i]) / s1_1w_aligned[i] < 0.005
-            near_s2 = abs(close[i] - s2_1w_aligned[i]) / s2_1w_aligned[i] < 0.005
-            if (near_s1 or near_s2) and close[i] > ema34_1d_aligned[i] and volume_confirm:
+            # Long: Break above upper Keltner band in uptrend with volume confirmation
+            if close[i] > upper[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price near weekly R1/R2 in downtrend with volume confirmation
-            elif (abs(close[i] - r1_1w_aligned[i]) / r1_1w_aligned[i] < 0.005 or
-                  abs(close[i] - r2_1w_aligned[i]) / r2_1w_aligned[i] < 0.005) and \
-                 close[i] < ema34_1d_aligned[i] and volume_confirm:
+            # Short: Break below lower Keltner band in downtrend with volume confirmation
+            elif close[i] < lower[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Price reaches weekly pivot or R1, or trend reversal
-            if (close[i] >= pivot_1w_aligned[i] or 
-                close[i] >= r1_1w_aligned[i] or
-                close[i] < ema34_1d_aligned[i]):
+            # Exit: Price closes below EMA middle band or trend reversal
+            if close[i] < ema[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Price reaches weekly pivot or S1, or trend reversal
-            if (close[i] <= pivot_1w_aligned[i] or 
-                close[i] <= s1_1w_aligned[i] or
-                close[i] > ema34_1d_aligned[i]):
+            # Exit: Price closes above EMA middle band or trend reversal
+            if close[i] > ema[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
