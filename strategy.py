@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-# 6h_MarketFacilitationIndex_1dTrend_Filter
-# Hypothesis: MFI (Market Facilitation Index) = (High - Low) / Volume measures price movement efficiency.
-# Rising MFI with increasing volume indicates strong trend continuation.
-# Falling MFI with increasing volume indicates weakening trend (fade signal).
-# Combined with 1-day trend filter (EMA50) to align with higher timeframe direction.
-# Works in both bull/bear markets by following 1d trend while using MMI for entry/exit timing.
-# Targets 15-35 trades per year on 6h timeframe with position size 0.25.
+# 12h_RSI2_1dTrend_MeanReversion
+# Hypothesis: RSI(2) mean reversion on 12h with 1-day trend filter. Goes long when RSI(2) < 10 and 1-day trend is up (close > EMA50), short when RSI(2) > 90 and 1-day trend is down (close < EMA50). Uses tight RSI thresholds to limit trades and avoid overtrading. Designed to work in both bull and bear markets by aligning with higher timeframe trend.
 
-name = "6h_MarketFacilitationIndex_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_RSI2_1dTrend_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,10 +15,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
     # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -34,23 +26,23 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate MFI components
-    price_range = high - low  # High - Low
-    # Avoid division by zero - add small epsilon where volume is zero
-    volume_safe = np.where(volume == 0, 1e-10, volume)
-    mfi = price_range / volume_safe
+    # Calculate RSI(2) on 12h data
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate 3-period EMA of MFI for smoothing (to reduce noise)
-    mfi_series = pd.Series(mfi)
-    mfi_ema = mfi_series.ewm(span=3, adjust=False).fillna(0).values
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, adjust=False, min_periods=2).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, 0.0), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for 1d EMA
+    start_idx = max(50, 2)  # Warmup for 1d EMA and RSI
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,26 +53,24 @@ def generate_signals(prices):
         downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: MFI rising AND 1-day uptrend
-            # MFI rising: current MFI > previous MFI
-            if i > 0 and mfi_ema[i] > mfi_ema[i-1] and uptrend:
+            # Long entry: RSI(2) < 10 AND 1-day uptrend
+            if rsi[i] < 10 and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: MFI falling AND 1-day downtrend
-            # MFI falling: current MFI < previous MFI
-            elif i > 0 and mfi_ema[i] < mfi_ema[i-1] and downtrend:
+            # Short entry: RSI(2) > 90 AND 1-day downtrend
+            elif rsi[i] > 90 and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: MFI falling OR 1-day trend turns down
-            if i > 0 and mfi_ema[i] < mfi_ema[i-1] or downtrend:
+            # Long exit: RSI(2) > 50 OR 1-day trend turns down
+            if rsi[i] > 50 or downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: MFI rising OR 1-day trend turns up
-            if i > 0 and mfi_ema[i] > mfi_ema[i-1] or uptrend:
+            # Short exit: RSI(2) < 50 OR 1-day trend turns up
+            if rsi[i] < 50 or uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
