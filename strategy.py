@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic on 12h timeframe.
-# Long when price breaks above R1 with volume > 1.5x average and price > daily EMA34.
-# Short when price breaks below S1 with volume > 1.5x average and price < daily EMA34.
+# 4h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic.
+# Long when price breaks above R1 with volume > 2x average and price > daily EMA34.
+# Short when price breaks below S1 with volume > 2x average and price < daily EMA34.
 # Exits when price crosses back below/above EMA34.
-# Designed for 12-30 trades/year to avoid overtrading and work in both bull and bear markets.
+# Designed for 20-40 trades/year to avoid overtrading and work in both bull and bear markets.
 
-name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camilla_R1S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -65,11 +65,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Breakout above R1 with volume confirmation and uptrend
-            if close[i] > camarilla_r1_aligned[i] and volume[i] > 1.5 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
+            if close[i] > camarilla_r1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Breakout below S1 with volume confirmation and downtrend
-            elif close[i] < camarilla_s1_aligned[i] and volume[i] > 1.5 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
+            elif close[i] < camarilla_s1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
