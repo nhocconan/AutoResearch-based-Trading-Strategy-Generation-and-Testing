@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6H_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike
-Hypothesis: Breakouts at weekly Camarilla R3/S3 levels with volume confirmation and 1-week trend alignment capture strong directional moves in both bull and bear markets. Uses volume spike (>2x 20-period average) to confirm breakout strength and avoid false signals. Designed for low trade frequency (<25/year) to minimize fee drag while capturing major trends. Weekly trend filter ensures alignment with higher timeframe momentum.
+4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum
+Hypothesis: Breakouts at 1d Camarilla R1/S1 levels with volume confirmation and 1d EMA34 trend alignment capture directional moves. Uses momentum filter (ROC > 0) to avoid false breakouts in sideways markets. Designed for low trade frequency (<30/year) to minimize fee drag while maintaining edge in both bull and bear markets by following 1d trend.
 """
 
-name = "6H_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "6h"
+name = "4H_Camarilla_R1_S1_Breakout_1dTrend_Volume_Momentum"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,72 +22,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for Camarilla and trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d data for Camarilla and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Previous 1w bar for Camarilla calculation
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Previous 1d bar for Camarilla calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous 1w bar
-    range_1w = high_1w - low_1w
-    s3 = close_1w - (range_1w * 1.16666)
-    r3 = close_1w + (range_1w * 1.16666)
+    # Calculate Camarilla levels from previous 1d bar
+    range_1d = high_1d - low_1d
+    s1 = close_1d - (range_1d * 1.08333)
+    r1 = close_1d + (range_1d * 1.08333)
     
-    # Align to 6h timeframe (wait for 1w bar to close)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    # Align to 4h timeframe (wait for 1d bar to close)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     
-    # 1w trend filter: EMA 34
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # 1d trend filter: EMA 34
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: volume > 2x 20-period average (strict to reduce trades)
+    # Volume filter: volume > 1.8x 20-period average (tight to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    vol_threshold = vol_ma * 1.8
+    
+    # Momentum filter: 10-period ROC > 0 (avoid flat markets)
+    roc = np.zeros_like(close)
+    roc[10:] = (close[10:] - close[:-10]) / close[:-10] * 100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for indicators
+    start_idx = max(34, 20, 10)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(s1_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1w trend
-        is_uptrend = close[i] > ema_34_1w_aligned[i]
-        is_downtrend = close[i] < ema_34_1w_aligned[i]
+        # Determine 1d trend
+        is_uptrend = close[i] > ema_34_1d_aligned[i]
+        is_downtrend = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            # Long entry: Price breaks above R3 + volume confirmation + 1w uptrend
-            if (close[i] > r3_aligned[i] and 
+            # Long entry: Price breaks above R1 + volume confirmation + 1d uptrend + positive momentum
+            if (close[i] > r1_aligned[i] and 
                 volume[i] > vol_threshold[i] and 
-                is_uptrend):
+                is_uptrend and 
+                roc[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price breaks below S3 + volume confirmation + 1w downtrend
-            elif (close[i] < s3_aligned[i] and 
+            # Short entry: Price breaks below S1 + volume confirmation + 1d downtrend + negative momentum
+            elif (close[i] < s1_aligned[i] and 
                   volume[i] > vol_threshold[i] and 
-                  is_downtrend):
+                  is_downtrend and 
+                  roc[i] < 0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price crosses below S3 (opposite side)
-            if close[i] < s3_aligned[i]:
+            # Long exit: Price crosses below S1 (opposite side)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price crosses above R3 (opposite side)
-            if close[i] > r3_aligned[i]:
+            # Short exit: Price crosses above R1 (opposite side)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
