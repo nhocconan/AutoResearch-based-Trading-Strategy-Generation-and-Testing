@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Engulfing_Breakout_1dTrend_Volume
-Hypothesis: 4h bullish/bearish engulfing candle at 1d support/resistance (prior day high/low) 
-in direction of 1d EMA50 trend, with volume confirmation. Uses price action structure 
-and institutional levels for high-probability entries. Works in bull/bear by following 
-higher timeframe trend. Target: 20-40 trades/year on 4h to avoid fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 12h Camarilla R1/S1 breakout in direction of 1d EMA34 trend with volume confirmation.
+Uses daily institutional levels and trend filter. Works in bull/bear by following higher timeframe trend.
+Target: 12-37 trades/year on 12h to avoid fee drag.
 """
 
-name = "4h_Engulfing_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,88 +19,73 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend and support/resistance
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Prior day high/low as support/resistance
+    # Calculate daily Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    # Shift by 1 to get prior day's levels (avoid look-ahead)
-    high_1d_prev = np.roll(high_1d, 1)
-    low_1d_prev = np.roll(low_1d, 1)
-    # First value will be invalid, handled by NaN check
+    close_1d = df_1d['close'].values
     
-    # Align prior day levels to 4h timeframe
-    high_1d_prev_aligned = align_htf_to_ltf(prices, df_1d, high_1d_prev)
-    low_1d_prev_aligned = align_htf_to_ltf(prices, df_1d, low_1d_prev)
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Get price, volume
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: current volume > 1.3x 20-period EMA
+    # Volume filter: current volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 1.3
+    volume_filter = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA50 (50) and valid prior day levels
-    start_idx = 50
+    # Warmup: need EMA34 (34) and enough history for Camarilla calculation
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_aligned[i]) or 
-            np.isnan(high_1d_prev_aligned[i]) or
-            np.isnan(low_1d_prev_aligned[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Bullish engulfing: current green candle fully engulfs prior red candle
-        bullish_engulf = (close[i] > open_price[i]) and \
-                         (open_price[i-1] > close[i-1]) and \
-                         (close[i] > open_price[i-1]) and \
-                         (open_price[i] < close[i-1])
-        
-        # Bearish engulfing: current red candle fully engulfs prior green candle
-        bearish_engulf = (close[i] < open_price[i]) and \
-                         (open_price[i-1] < close[i-1]) and \
-                         (close[i] < open_price[i-1]) and \
-                         (open_price[i] > close[i-1])
-        
         if position == 0:
-            # Long: bullish engulf at prior day support (low) AND uptrend AND volume
-            if bullish_engulf and low[i] <= low_1d_prev_aligned[i] * 1.001 and \
-               close[i] > ema_50_aligned[i] and volume_filter[i]:
+            # Long: above EMA34 (uptrend) AND price breaks above R1 with volume
+            if close[i] > ema_34_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish engulf at prior day resistance (high) AND downtrend AND volume
-            elif bearish_engulf and high[i] >= high_1d_prev_aligned[i] * 0.999 and \
-                 close[i] < ema_50_aligned[i] and volume_filter[i]:
+            # Short: below EMA34 (downtrend) AND price breaks below S1 with volume
+            elif close[i] < ema_34_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: bearish engulf OR trend turns bearish OR price reaches prior day resistance
-            if bearish_engulf or close[i] < ema_50_aligned[i] or high[i] >= high_1d_prev_aligned[i] * 0.999:
+            # Long exit: price breaks below S1 OR trend turns bearish
+            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: bullish engulf OR trend turns bullish OR price reaches prior day support
-            if bullish_engulf or close[i] > ema_50_aligned[i] or low[i] <= low_1d_prev_aligned[i] * 1.001:
+            # Short exit: price breaks above R1 OR trend turns bullish
+            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
