@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight
-# Hypothesis: Uses tight breakout at Camarilla R1/S1 (less extreme than R2/S2) with 1d EMA trend filter and volume confirmation.
-# Designed to reduce trade frequency vs R2/S2 version by using tighter levels, targeting 20-40 trades/year.
-# Works in bull/bear markets by aligning with 1d trend. Uses volume > 1.8x 20-period average for stronger confirmation.
+# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
+# Hypothesis: Uses daily Camarilla R1/S1 breakouts on 12h timeframe with 1d EMA trend filter and volume confirmation.
+# Designed for low trade frequency (15-30/year) to minimize fee drag. Works in bull/bear markets by aligning with 1d trend.
 # Position size 0.25 to balance risk and return.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -40,7 +39,7 @@ def generate_signals(prices):
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
