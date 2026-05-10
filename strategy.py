@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Donchian_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from 20-period Donchian channels on 12h timeframe with daily EMA50 trend filter and volume confirmation.
-# Donchian channels capture volatility breakouts, daily trend ensures alignment with higher timeframe momentum.
-# Volume confirmation filters false breakouts. Designed for 12h timeframe to capture multi-day moves with low trade frequency.
+# 6h_Camarilla_R4_S4_Breakout_12hTrend_Volume
+# Hypothesis: Breakouts from Camarilla R4/S4 levels (extreme levels) with 12h EMA50 trend filter and volume confirmation.
+# Camarilla R4/S4 represent strong support/resistance; breakouts with trend alignment and volume capture strong moves.
+# Designed for 6h to avoid overtrading while capturing multi-day trends in both bull and bear markets.
 
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_Camarilla_R4_S4_Breakout_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,52 +22,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and Donchian calculation
+    # 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 20-period Donchian channels on 1d
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
+    # Calculate Camarilla pivot levels (standard formula)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + (H - L) * 1.1 / 2
+    # S4 = C - (H - L) * 1.1 / 2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r4 = close_1d + range_1d * 1.1 / 2.0
+    s4 = close_1d - range_1d * 1.1 / 2.0
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
+    # Align Camarilla levels to 6h timeframe (wait for daily bar to close)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    upper_20 = rolling_max(high_1d, 20)
-    lower_20 = rolling_min(low_1d, 20)
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Align Donchian levels to 12h timeframe (wait for daily bar to close)
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_20)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_20)
+    # 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume confirmation (20-period average)
+    # Volume confirmation (24-period average for 6s timeframe)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, 20)
+    vol_ma = mean_arr(volume, 24)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for EMA and Donchian
+    start_idx = 50  # Need enough history for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or \
+        if np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or \
            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -75,24 +73,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Donchian, above 1d EMA50, strong volume confirmation
-            if close[i] > upper_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > 2.0 * vol_ma[i]:
+            # Long: price breaks above Camarilla R4, above 12h EMA50, strong volume confirmation
+            if close[i] > r4_aligned[i] and close[i] > ema_50_aligned[i] and volume[i] > 2.0 * vol_ma[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian, below 1d EMA50, strong volume confirmation
-            elif close[i] < lower_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > 2.0 * vol_ma[i]:
+            # Short: price breaks below Camarilla S4, below 12h EMA50, strong volume confirmation
+            elif close[i] < s4_aligned[i] and close[i] < ema_50_aligned[i] and volume[i] > 2.0 * vol_ma[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below lower Donchian or below 1d EMA50
-            if close[i] < lower_aligned[i] or close[i] < ema_50_aligned[i]:
+            # Long exit: price drops below Camarilla S4 or below 12h EMA50
+            if close[i] < s4_aligned[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above upper Donchian or above 1d EMA50
-            if close[i] > upper_aligned[i] or close[i] > ema_50_aligned[i]:
+            # Short exit: price rises above Camarilla R4 or above 12h EMA50
+            if close[i] > r4_aligned[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
