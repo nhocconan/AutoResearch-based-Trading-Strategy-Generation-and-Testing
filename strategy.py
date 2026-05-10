@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_1dTrend_Volume
-# Hypothesis: 4-hour breakouts from Keltner Channel (20,2.0) with daily EMA50 trend filter and volume confirmation.
-# Keltner breakouts capture volatility expansion; daily EMA50 ensures trend alignment; volume confirms strength.
-# Designed for 4h to achieve 20-50 trades/year, suitable for both bull and bear markets.
+# 1D_4H_Trend_Filtered_Camarilla_S1_R1_Breakout
+# Hypothesis: Daily breakouts from daily Camarilla R1/S1 levels filtered by 4-hour trend (EMA34) and volume confirmation. Designed for 1d timeframe to achieve 7-25 trades/year with strong trend alignment to work in both bull and bear markets.
 
-name = "4h_Keltner_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1D_4H_Trend_Filtered_Camarilla_S1_R1_Breakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,45 +20,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA50 trend filter
+    # Daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 4H data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Keltner Channel: 20-period ATR, 2.0 multiplier
-    def true_range(h, l, c_prev):
-        tr1 = h - l
-        tr2 = np.abs(h - c_prev)
-        tr3 = np.abs(l - c_prev)
-        return np.maximum(tr1, np.maximum(tr2, tr3))
+    # Daily EMA34 for trend filter (using 4H EMA aligned to daily)
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    tr = np.zeros_like(high)
-    tr[0] = high[0] - low[0]
-    for i in range(1, len(high)):
-        tr[i] = true_range(high[i], low[i], close[i-1])
+    # Camarilla levels (based on previous day)
+    def calculate_camarilla(h, l, c):
+        typical = (h + l + c) / 3.0
+        range_ = h - l
+        R1 = c + (range_ * 1.1000 / 12)
+        S1 = c - (range_ * 1.1000 / 12)
+        return R1, S1
     
-    atr = np.zeros_like(high)
-    for i in range(len(high)):
-        if i < 19:
-            atr[i] = np.nan
-        else:
-            atr[i] = np.mean(tr[i-19:i+1])
-    
-    upper = np.zeros_like(high)
-    lower = np.zeros_like(high)
-    ma = np.zeros_like(high)
-    for i in range(len(high)):
-        if i < 19:
-            upper[i] = np.nan
-            lower[i] = np.nan
-            ma[i] = np.nan
-        else:
-            ma[i] = np.mean(high[i-19:i+1])  # Typical price approximation
-            upper[i] = ma[i] + 2.0 * atr[i]
-            lower[i] = ma[i] - 2.0 * atr[i]
+    R1 = np.full_like(close_1d, np.nan)
+    S1 = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
     # Daily volume confirmation: 20-period average
     def mean_arr(arr, p):
@@ -71,8 +57,9 @@ def generate_signals(prices):
         return res
     vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align daily indicators to 4h timeframe (wait for 1d bar to close)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align daily indicators to daily timeframe (wait for 1d bar to close)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
@@ -81,32 +68,32 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]) or \
-           np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner, above daily EMA50, strong volume
-            if close[i] > upper[i] and close[i] > ema_50_1d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Long: price breaks above R1, above 4H EMA34, strong volume
+            if close[i] > R1_aligned[i] and close[i] > ema_34_4h_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Keltner, below daily EMA50, strong volume
-            elif close[i] < lower[i] and close[i] < ema_50_1d_aligned[i] and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Short: price breaks below S1, below 4H EMA34, strong volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_34_4h_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below lower Keltner or below daily EMA50
-            if close[i] < lower[i] or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: price drops below S1 or below 4H EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above upper Keltner or above daily EMA50
-            if close[i] > upper[i] or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: price rises above R1 or above 4H EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
