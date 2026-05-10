@@ -1,12 +1,10 @@
-#!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
-# Hypothesis: 12h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
-# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 12-period MA) confirms institutional participation.
-# Designed for 12h timeframe targeting 12-37 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
-# Added: Volume spike confirmation, clearer exit conditions, and more conservative position sizing to reduce trade frequency and improve Sharpe.
+# 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 4h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
+# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 20-period MA) confirms institutional participation.
+# Designed for 4h timeframe targeting 20-50 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
-timeframe = "12h"
+name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +21,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -49,14 +47,13 @@ def generate_signals(prices):
         camarilla_r1[i] = prev_close + diff * 1.1 / 6
         camarilla_s1[i] = prev_close - diff * 1.1 / 6
     
-    # Align daily indicators to 12h timeframe
+    # Align daily indicators to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
     
-    # Volume average (12-period for 12h = 6 days)
-    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
+    # Volume average (20-period for 4h = 10 days)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,14 +66,14 @@ def generate_signals(prices):
         if (np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(close_1d_aligned[i])):
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Determine trend: daily close > EMA50
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
         uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
         downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
