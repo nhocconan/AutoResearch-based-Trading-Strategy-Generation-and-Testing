@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_Adaptive_RSI_Trend_Volume
-Hypothesis: On 6h timeframe, use adaptive RSI (based on volatility) combined with 1-day EMA trend filter and volume spike for entries.
-In high volatility periods, RSI thresholds widen to capture trends; in low volatility, they narrow for mean reversion.
-This adapts to both bull and bear markets by adjusting sensitivity to market conditions.
-Target: 15-25 trades/year to minimize fee drag while maintaining edge.
+4h_Chaikin_Oscillator_Pullback_1dTrend
+Hypothesis: Chaikin Oscillator (3,10) zero-cross pullbacks with 1-day EMA50 trend filter and volume spike.
+Works in both bull/bear markets by combining momentum (Chaikin) with trend (EMA50) and volume confirmation.
+Target: 20-30 trades/year to minimize fee drag while capturing swings.
 """
 
-name = "6h_Adaptive_RSI_Trend_Volume"
-timeframe = "6h"
+name = "4h_Chaikin_Oscillator_Pullback_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,94 +16,84 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for EMA trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Get price, volume
-    close = prices['close'].values
+    # Calculate Chaikin Oscillator (3,10) on price data
+    # Chaikin Oscillator = EMA(3, ADL) - EMA(10, ADL)
+    # ADL = Cumsum( ((Close - Low) - (High - Close)) / (High - Low) * Volume )
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for volatility measurement
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Money Flow Multiplier
+    mfm = ((close - low) - (high - close)) / (high - low)
+    # Replace division by zero or NaN with 0
+    mfm = np.where((high - low) == 0, 0, mfm)
+    mfm = np.where(np.isnan(mfm), 0, mfm)
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Money Flow Volume
+    mfv = mfm * volume
     
-    # Adaptive RSI thresholds based on ATR ratio (current ATR vs 50-period average)
-    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = atr_14 / (atr_50 + 1e-10)
+    # Accumulation/Distribution Line
+    adl = np.cumsum(mfv)
     
-    # In high volatility (atr_ratio > 1.2): widen thresholds for trend following
-    # In low volatility (atr_ratio < 0.8): narrow thresholds for mean reversion
-    # Normal: use standard 30/70
-    rsi_long_threshold = np.where(atr_ratio > 1.2, 20,
-                     np.where(atr_ratio < 0.8, 40, 30))
-    rsi_short_threshold = np.where(atr_ratio > 1.2, 80,
-                      np.where(atr_ratio < 0.8, 60, 70))
+    # Chaikin Oscillator: EMA(3, ADL) - EMA(10, ADL)
+    adl_series = pd.Series(adl)
+    chaikin_osc = (
+        adl_series.ewm(span=3, adjust=False, min_periods=3).mean().values -
+        adl_series.ewm(span=10, adjust=False, min_periods=10).mean().values
+    )
     
-    # Volume filter: current volume > 2.0x 20-period EMA
+    # Volume filter: current volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume > vol_ema20 * 2.0
+    volume_filter = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need RSI(14), ATR(14,50), EMA34
-    start_idx = max(14, 50, 34)
+    # Warmup: need EMA50 (50) and Chaikin Oscillator (10)
+    start_idx = max(50, 10)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi[i]) or 
-            np.isnan(rsi_long_threshold[i]) or
-            np.isnan(rsi_short_threshold[i]) or
-            np.isnan(ema_34_1d_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(chaikin_osc[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI below adaptive long threshold with uptrend and volume
-            if rsi[i] < rsi_long_threshold[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+            # Long: Chaikin crosses above zero with uptrend and volume
+            if chaikin_osc[i] > 0 and chaikin_osc[i-1] <= 0 and close[i] > ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI above adaptive short threshold with downtrend and volume
-            elif rsi[i] > rsi_short_threshold[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+            # Short: Chaikin crosses below zero with downtrend and volume
+            elif chaikin_osc[i] < 0 and chaikin_osc[i-1] >= 0 and close[i] < ema_50_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI crosses above 50 (momentum fade) or trend change
-            if rsi[i] > 50 or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: Chaikin crosses below zero or trend change
+            if chaikin_osc[i] < 0 or close[i] < ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI crosses below 50 (momentum fade) or trend change
-            if rsi[i] < 50 or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: Chaikin crosses above zero or trend change
+            if chaikin_osc[i] > 0 or close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
