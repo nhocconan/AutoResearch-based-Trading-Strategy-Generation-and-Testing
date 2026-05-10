@@ -1,14 +1,14 @@
-#24
 #!/usr/bin/env python3
 """
-12h_TRIX_VolumeSpike_Trend
-Hypothesis: TRIX (triple exponential moving average crossover) identifies momentum shifts in 1w trend. 
-Volume spikes confirm institutional participation. Trend filter from 1w EMA20 ensures alignment with long-term momentum.
-Works in bull/bear by trading only in direction of 1w trend. Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
+Hypothesis: Price breaks above/below daily Camarilla R1/S1 levels with 12h EMA50 trend filter and volume confirmation. 
+Camarilla R1/S1 provide tight support/resistance in ranging markets, while the 12h EMA50 ensures alignment with medium-term momentum. 
+Volume filters false breakouts. Works in bull/bear by trading only in direction of 12h trend. 
+Target: 20-40 trades/year (80-160 total) to minimize fee drag.
 """
 
-name = "12h_TRIX_VolumeSpike_Trend"
-timeframe = "12h"
+name = "4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,88 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for TRIX and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate TRIX: triple EMA of percentage change
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then percentage change
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full(len(arr), np.nan)
-        res = np.full(len(arr), np.nan)
-        multiplier = 2 / (period + 1)
-        res[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            res[i] = (arr[i] - res[i-1]) * multiplier + res[i-1]
-        return res
+    # Calculate Camarilla pivot levels for each daily bar
+    # R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + range_1d * 1.1 / 12.0
+    s1_1d = close_1d - range_1d * 1.1 / 12.0
     
-    ema1 = ema(close_1w, 12)
-    ema2 = ema(ema1, 12)
-    ema3 = ema(ema2, 12)
-    trix_raw = np.full(len(close_1w), np.nan)
-    for i in range(1, len(ema3)):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
-            trix_raw[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+    # 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema50_12h[49] = np.mean(close_12h[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_12h)):
+            ema50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema50_12h[i-1]
     
-    # 1w EMA20 for trend filter
-    ema20_1w = ema(close_1w, 20)
+    # Daily volume SMA20 for volume confirmation
+    volume_1d = df_1d['volume'].values
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Volume spike: current 1w volume > 2.0x average volume
-    vol_mean_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 20:
-        vol_mean_1w[19] = np.mean(volume_1w[:20])
-        for i in range(20, len(volume_1w)):
-            vol_mean_1w[i] = np.mean(volume_1w[i-19:i+1])
-    volume_spike = np.full(len(volume_1w), False)
-    for i in range(len(volume_1w)):
-        if not np.isnan(vol_mean_1w[i]) and volume_1w[i] > 2.0 * vol_mean_1w[i]:
-            volume_spike[i] = True
-    
-    # Align all indicators to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1w, trix_raw)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1w, volume_spike.astype(float))
+    # Align all indicators to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Wait for EMA20
+    start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(trix_aligned[i]) or np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_spike_aligned[i]):
+        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend and momentum conditions
-        is_uptrend = close[i] > ema20_1w_aligned[i]
-        is_downtrend = close[i] < ema20_1w_aligned[i]
-        trix_positive = trix_aligned[i] > 0
-        trix_negative = trix_aligned[i] < 0
-        vol_spike = volume_spike_aligned[i] > 0.5  # Boolean as float
+        # Volume confirmation: current 4h volume > 1.5x average daily volume (scaled)
+        # 1d = 6 x 4h bars, so scale daily volume to 4h equivalent
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # Average 4h-equivalent volume from 1d data
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        
+        # Trend and price relative to Camarilla levels
+        is_uptrend = close[i] > ema50_12h_aligned[i]
+        is_downtrend = close[i] < ema50_12h_aligned[i]
+        price_above_r1 = close[i] > r1_1d_aligned[i]
+        price_below_s1 = close[i] < s1_1d_aligned[i]
         
         if position == 0:
-            # Long: TRIX turns positive, in uptrend, with volume spike
-            if trix_positive and is_uptrend and vol_spike:
+            # Long: price breaks above R1, in uptrend, with volume
+            if price_above_r1 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX turns negative, in downtrend, with volume spike
-            elif trix_negative and is_downtrend and vol_spike:
+            # Short: price breaks below S1, in downtrend, with volume
+            elif price_below_s1 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX turns negative or trend turns down
-            if not trix_positive or not is_uptrend:
+            # Exit: price falls back below R1 or trend turns down
+            if not price_above_r1 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX turns positive or trend turns up
-            if not trix_negative or not is_downtrend:
+            # Exit: price rises back above S1 or trend turns up
+            if not price_below_s1 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
