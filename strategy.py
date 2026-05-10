@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 6h_Weekly_Pivot_Breakout_1dTrend_Volume
-# Hypothesis: Weekly pivot points (PP, R1, S1, R2, S2) derived from the prior week act as key support/resistance.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R1/S1 levels from the prior daily bar act as key support/resistance.
 # A breakout above R1 (bullish) or below S1 (bearish) with 1-day EMA34 trend filter and volume confirmation
-# captures sustained moves. Weekly pivot provides longer-term structure than daily, reducing noise and
-# improving performance in both bull and bear markets by aligning with the dominant weekly trend.
-# The 1d EMA34 ensures we trade in the direction of the recent daily trend, and volume confirmation
-# avoids false breakouts. Expected low trade frequency due to strict conditions.
+# captures sustained moves. Uses 12h timeframe for lower trade frequency and better trend alignment.
+# Works in bull markets (breakouts above R1) and bear markets (breakdowns below S1) by following the 1d trend.
+# Low trade frequency expected due to strict breakout conditions + trend filter + volume confirmation.
 
-name = "6h_Weekly_Pivot_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,44 +24,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for weekly pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points from previous week
-    # PP = (high + low + close) / 3
-    # R1 = 2*PP - low
-    # S1 = 2*PP - high
-    # R2 = PP + (high - low)
-    # S2 = PP - (high - low)
-    pp = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pp - low_1w
-    s1 = 2 * pp - high_1w
-    r2 = pp + (high_1w - low_1w)
-    s2 = pp - (high_1w - low_1w)
-    
-    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # 1d data for EMA34 trend filter
+    # 1d data for Camarilla calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels from previous 1d bar
+    # R1 = close + 1.1 * (high - low) / 4
+    # S1 = close - 1.1 * (high - low) / 4
+    cam_range = high_1d - low_1d
+    r1 = close_1d + 1.1 * cam_range / 4
+    s1 = close_1d - 1.1 * cam_range / 4
+    
+    # Align Camarilla levels to 12h timeframe (wait for 1d bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 1d EMA34 for trend filter
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (4-period average = 1 day for 6h timeframe)
+    # Volume confirmation (2-period average = 1 day for 12h timeframe)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, 4)
+    vol_ma = mean_arr(volume, 2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
