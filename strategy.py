@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_ParabolicSAR_Trend_With_ADX_Filter
-Hypothesis: Uses Parabolic SAR to identify 6h trend direction, filtered by ADX for
-trend strength. Only takes trades when ADX > 25 (strong trend) and SAR confirms
-direction. In bull markets, rides uptrends; in bear markets, captures short
-selling opportunities during downtrends. Uses 1d trend as higher timeframe filter
-to avoid counter-trend trades. Target: 20-40 trades/year per symbol.
+12h_Williams_Alligator_ElderRay_Filter
+Hypothesis: Combines Williams Alligator (Jaw/Teeth/Lips) for trend direction with
+Elder Ray's Bull/Bear Power for momentum confirmation on 12h timeframe. Uses weekly
+trend filter to avoid counter-trend trades. Designed to work in both bull and bear
+markets by only taking trades in the direction of the higher timeframe trend.
+Target: 12-30 trades/year per symbol.
 """
 
-name = "6h_ParabolicSAR_Trend_With_ADX_Filter"
-timeframe = "6h"
+name = "12h_Williams_Alligator_ElderRay_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,159 +21,113 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
     # Convert to Series for indicator calculations
+    close_s = pd.Series(close)
     high_s = pd.Series(high)
     low_s = pd.Series(low)
-    close_s = pd.Series(close)
+    volume_s = pd.Series(volume)
     
-    # Parabolic SAR
-    # Start with acceleration factor
-    af = 0.02
-    max_af = 0.2
-    # Initialize
-    sar = np.zeros(n)
-    trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
-    ep = np.zeros(n)     # extreme point
-    
-    # Set initial values
-    sar[0] = low[0]
-    trend[0] = 1
-    ep[0] = high[0]
-    
-    for i in range(1, n):
-        if trend[i-1] == 1:  # uptrend
-            sar[i] = sar[i-1] + af * (ep[i-1] - sar[i-1])
-            # SAR cannot exceed previous two lows
-            sar[i] = min(sar[i], low[i-1], low[i-2] if i >= 2 else low[i-1])
-            
-            if low[i] < sar[i]:  # trend reversal
-                trend[i] = -1
-                sar[i] = ep[i-1]  # SAR becomes previous EP
-                ep[i] = low[i]
-                af = 0.02
-            else:
-                trend[i] = 1
-                if high[i] > ep[i-1]:
-                    ep[i] = high[i]
-                    af = min(af + 0.02, max_af)
+    # Williams Alligator: SMMA (Smoothed MA) with periods 13, 8, 5
+    # Jaw (blue): 13-period SMMA, 8 bars ahead
+    # Teeth (red): 8-period SMMA, 5 bars ahead  
+    # Lips (green): 5-period SMMA, 3 bars ahead
+    def smma(values, period):
+        """Smoothed Moving Average"""
+        sma = pd.Series(values).rolling(window=period, min_periods=period).mean()
+        # Initialize first value as SMA
+        result = np.full_like(values, np.nan, dtype=float)
+        if len(sma) >= period:
+            result[period-1] = sma.iloc[period-1]
+            for i in range(period, len(values)):
+                if not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + values[i]) / period
                 else:
-                    ep[i] = ep[i-1]
-                    af = af
-        else:  # downtrend
-            sar[i] = sar[i-1] + af * (ep[i-1] - sar[i-1])
-            # SAR cannot go below previous two highs
-            sar[i] = max(sar[i], high[i-1], high[i-2] if i >= 2 else high[i-1])
-            
-            if high[i] > sar[i]:  # trend reversal
-                trend[i] = 1
-                sar[i] = ep[i-1]  # SAR becomes previous EP
-                ep[i] = high[i]
-                af = 0.02
-            else:
-                trend[i] = -1
-                if low[i] < ep[i-1]:
-                    ep[i] = low[i]
-                    af = min(af + 0.02, max_af)
-                else:
-                    ep[i] = ep[i-1]
-                    af = af
-    
-    # ADX calculation
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] - (result[i-1] / period) + data[i] / period
+                    result[i] = np.nan
         return result
     
-    period = 14
-    atr = wilder_smooth(tr, period)
-    dm_plus_smooth = wilder_smooth(dm_plus, period)
-    dm_minus_smooth = wilder_smooth(dm_minus, period)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / np.where(atr != 0, atr, 1e-10)
-    di_minus = 100 * dm_minus_smooth / np.where(atr != 0, atr, 1e-10)
+    # Shift according to Alligator definition
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
     
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) != 0, (di_plus + di_minus), 1e-10)
-    adx = wilder_smooth(dx, period)
+    # Elder Ray: Bull Power and Bear Power using 13-period EMA
+    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # 1d trend filter: EMA50
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Weekly trend filter: EMA34 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = close_1w > ema34_1w
+    trend_1w_down = close_1w < ema34_1w
     
-    # Align 1d trend to 6h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align weekly trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    
+    # Volume confirmation: 20-period average
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
+    # Start after we have enough data for all indicators
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(sar[i]) or np.isnan(trend[i]) or np.isnan(adx[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(ema13[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: only trade when ADX > 25 (strong trend)
-        strong_trend = adx[i] > 25
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_confirm = vol_ratio > 1.5
+        
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        alligator_bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_bearish = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Enter long: SAR bullish + strong trend + 1d uptrend
-            if (trend[i] == 1 and strong_trend and trend_1d_up_aligned[i] > 0.5):
+            # Enter long: bullish alignment + bullish momentum + weekly uptrend + volume
+            if (alligator_bullish and bull_power[i] > 0 and 
+                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: SAR bearish + strong trend + 1d downtrend
-            elif (trend[i] == -1 and strong_trend and trend_1d_down_aligned[i] > 0.5):
+            # Enter short: bearish alignment + bearish momentum + weekly downtrend + volume
+            elif (alligator_bearish and bear_power[i] < 0 and 
+                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when trend reverses or ADX weakens
-            if (trend[i] == -1 or adx[i] < 20):
+            # Exit when alignment breaks or momentum fades
+            if not alligator_bullish or bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when trend reverses or ADX weakens
-            if (trend[i] == 1 or adx[i] < 20):
+            # Exit when alignment breaks or momentum fades
+            if not alligator_bearish or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
