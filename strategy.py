@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 4H_RSI_Trend_Filter
-# Hypothesis: Mean reversion within strong trends using RSI and trend filters.
-# Long when: RSI < 30, price above 50-period EMA, and ADX > 25 (strong uptrend).
-# Short when: RSI > 70, price below 50-period EMA, and ADX > 25 (strong downtrend).
-# Uses 12h trend filter to avoid counter-trend trades in weak trends.
-# Works in bull/bear by following trend and using RSI for mean reversion entries.
-# Target: 20-30 trades/year per symbol.
+# 1H_RSI40_60_MeanReversion_4hTrendFilter
+# Hypothesis: Mean-revert on 1h RSI extremes (40/60) only when 4h trend is strong (ADX>25).
+# Long when RSI<40 in 4h uptrend, short when RSI>60 in 4h downtrend.
+# Uses 1d trend filter: only trade if 1h price is above/below daily VWAP to avoid counter-trend.
+# Target: 20-40 trades/year per symbol. Works in bull/bear by following 4h trend direction.
 
-name = "4H_RSI_Trend_Filter"
-timeframe = "4h"
+name = "1H_RSI40_60_MeanReversion_4hTrendFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,120 +23,109 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h indicators
-    close_s = pd.Series(close)
-    
-    # EMA50 for trend direction
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # RSI(14)
-    delta = np.diff(close)
+    # 1h RSI (14-period)
+    delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    if len(gain) > 0:
-        avg_gain[14] = np.mean(gain[:14])
-        avg_loss[14] = np.mean(loss[:14])
-        for i in range(15, len(close)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
     
-    # ADX(14) for trend strength
+    # 4h trend strength (ADX)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
+        return np.zeros(n)
+    
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
     # +DM and -DM
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                       np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                        np.maximum(low[:-1] - low[1:], 0), 0)
+    up_move = high_4h[1:] - high_4h[:-1]
+    down_move = low_4h[:-1] - low_4h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
     # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # Wilder's smoothing
+    
+    # Wilder's smoothing (14-period)
     atr = np.zeros_like(tr)
     if len(tr) > 0:
         atr[0] = tr[0]
         for i in range(1, len(tr)):
             atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
     # +DI and -DI
-    plus_di = 100 * (np.convolve(plus_dm, np.ones(14)/14, mode='full')[:len(plus_dm)] / 
-                     np.convolve(atr, np.ones(14)/14, mode='full')[:len(atr)])
-    minus_di = 100 * (np.convolve(minus_dm, np.ones(14)/14, mode='full')[:len(minus_dm)] / 
-                      np.convolve(atr, np.ones(14)/14, mode='full')[:len(atr)])
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / 
+                     pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / 
+                      pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
+    
     # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = np.convolve(dx, np.ones(14)/14, mode='full')[:len(dx)]
-    # Prepend NaN for alignment
-    ema50 = np.concatenate([np.full(49, np.nan), ema50])
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
-    adx = np.concatenate([np.full(13, np.nan), adx])
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
     
-    # 12h trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Align 4h ADX to 1h
+    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Daily VWAP filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    uptrend_12h = close_12h > ema50_12h
-    downtrend_12h = close_12h < ema50_12h
-    
-    # Align 12h trend to 4h
-    uptrend_12h_aligned = align_htf_to_ltf(prices, df_12h, uptrend_12h.astype(float))
-    downtrend_12h_aligned = align_htf_to_ltf(prices, df_12h, downtrend_12h.astype(float))
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3
+    vwap_1d = (pd.Series(typical_price_1d * df_1d['volume'].values).cumsum() / 
+               pd.Series(df_1d['volume'].values).cumsum()).values
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 60
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50[i]) or np.isnan(rsi[i]) or np.isnan(adx[i]) or
-            np.isnan(uptrend_12h_aligned[i]) or np.isnan(downtrend_12h_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(adx_aligned[i]) or np.isnan(vwap_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        price_above_ema = close[i] > ema50[i]
-        price_below_ema = close[i] < ema50[i]
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        strong_trend = adx[i] > 25
-        
-        uptrend_12h = uptrend_12h_aligned[i] > 0.5
-        downtrend_12h = downtrend_12h_aligned[i] > 0.5
+        rsi_val = rsi[i]
+        strong_trend = adx_aligned[i] > 25
+        price_above_vwap = close[i] > vwap_1d_aligned[i]
+        price_below_vwap = close[i] < vwap_1d_aligned[i]
         
         if position == 0:
-            # Enter long: 12h uptrend + strong 4h trend + RSI oversold + price above EMA50
-            if uptrend_12h and strong_trend and rsi_oversold and price_above_ema:
-                signals[i] = 0.25
+            # Enter long: RSI<40 (oversold) + 4h uptrend + price above daily VWAP
+            if rsi_val < 40 and strong_trend and price_above_vwap:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: 12h downtrend + strong 4h trend + RSI overbought + price below EMA50
-            elif downtrend_12h and strong_trend and rsi_overbought and price_below_ema:
-                signals[i] = -0.25
+            # Enter short: RSI>60 (overbought) + 4h downtrend + price below daily VWAP
+            elif rsi_val > 60 and strong_trend and price_below_vwap:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit conditions: trend weakens or RSI normalizes
-            if not uptrend_12h or not strong_trend or rsi[i] > 50:
+            # Exit: RSI>50 (mean reversion complete) or trend weakens
+            if rsi_val > 50 or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit conditions: trend weakens or RSI normalizes
-            if not downtrend_12h or not strong_trend or rsi[i] < 50:
+            # Exit: RSI<50 (mean reversion complete) or trend weakens
+            if rsi_val < 50 or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
