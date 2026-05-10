@@ -1,13 +1,13 @@
-# 4h_Camarilla_Pivot_R1_S1_Breakout_1dATR_Trend_Filter
-# Hypothesis: Uses 1d Camarilla pivot levels (R1/S1) as key support/resistance levels.
-# Enters long when price breaks above R1 with 1d ATR filter and volume confirmation.
-# Enters short when price breaks below S1 with 1d ATR filter and volume confirmation.
-# Exits when price returns to the pivot point (PP) or reverses across the opposite level.
-# Uses 1d ATR to filter out low volatility periods and avoid false breakouts.
-# Designed for 30-50 trades/year on 4h to balance opportunity with fee efficiency.
+#!/usr/bin/env python3
+# 12h_1w_Camarilla_R3_S3_Breakout_With_Volume_Spike
+# Hypothesis: Uses weekly Camarilla pivot levels (R3/S3) as key support/resistance levels on 12h timeframe.
+# Enters long when price breaks above R3 with volume spike, short when breaks below S3 with volume spike.
+# Uses 1w ADX(14) to filter for strong trends (ADX > 25) to avoid false breakouts in ranging markets.
+# Volume spike defined as current volume > 1.5 * 20-period average volume.
+# Designed for 12-37 trades/year on 12h to avoid overtrading and work in both bull and bear markets.
 
-name = "4h_Camarilla_Pivot_R1_S1_Breakout_1dATR_Trend_Filter"
-timeframe = "4h"
+name = "12h_1w_Camarilla_R3_S3_Breakout_With_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,101 +24,132 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # 1w data for Camarilla pivot levels and ADX
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:  # Need sufficient data for calculations
         return np.zeros(n)
     
-    # Calculate 1d Camarilla pivot levels (R1, S1, PP)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla pivot levels from weekly data
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
+    # Pivot point = typical price
+    pp = typical_price.values
+    # R3 = PP + (H - L) * 1.1
+    # S3 = PP - (H - L) * 1.1
+    r3 = pp + (df_1w['high'] - df_1w['low']).values * 1.1
+    s3 = pp - (df_1w['high'] - df_1w['low']).values * 1.1
     
-    # Camarilla formulas: PP = (H+L+C)/3, R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12.0
-    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12.0
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Calculate 1d ATR(14) for volatility filter
-    tr_1d = np.zeros(len(df_1d))
-    for i in range(1, len(df_1d)):
-        tr_1d[i] = max(
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
+    # Calculate 1w ADX(14) for trend filter
+    # Calculate +DM, -DM, TR
+    plus_dm = np.zeros(len(df_1w))
+    minus_dm = np.zeros(len(df_1w))
+    tr = np.zeros(len(df_1w))
+    
+    for i in range(1, len(df_1w)):
+        high_diff = df_1w['high'].iloc[i] - df_1w['high'].iloc[i-1]
+        low_diff = df_1w['low'].iloc[i-1] - df_1w['low'].iloc[i]
+        
+        plus_dm[i] = high_diff if high_diff > low_diff and high_diff > 0 else 0
+        minus_dm[i] = low_diff if low_diff > high_diff and low_diff > 0 else 0
+        
+        tr[i] = max(
+            df_1w['high'].iloc[i] - df_1w['low'].iloc[i],
+            abs(df_1w['high'].iloc[i] - df_1w['close'].iloc[i-1]),
+            abs(df_1w['low'].iloc[i] - df_1w['close'].iloc[i-1])
         )
     
-    atr_1d = np.zeros(len(df_1d))
-    if len(df_1d) >= 14:
-        atr_1d[13] = np.mean(tr_1d[1:14])
-        for i in range(14, len(df_1d)):
-            atr_1d[i] = (atr_1d[i-1] * 13 + tr_1d[i]) / 14
-    else:
-        # Not enough data for ATR, use zeros
-        pass
+    # Smooth TR, +DM, -DM using Wilder's smoothing
+    atr_1w = np.zeros(len(df_1w))
+    plus_dm_sum = np.zeros(len(df_1w))
+    minus_dm_sum = np.zeros(len(df_1w))
     
-    # Align 1d indicators to 4h timeframe
-    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Initial values
+    if len(df_1w) >= 14:
+        atr_1w[13] = np.mean(tr[1:14])
+        plus_dm_sum[13] = np.sum(plus_dm[1:14])
+        minus_dm_sum[13] = np.sum(minus_dm[1:14])
+        
+        for i in range(14, len(df_1w)):
+            atr_1w[i] = (atr_1w[i-1] * 13 + tr[i]) / 14
+            plus_dm_sum[i] = plus_dm_sum[i-1] - (plus_dm_sum[i-1] / 14) + plus_dm[i]
+            minus_dm_sum[i] = minus_dm_sum[i-1] - (minus_dm_sum[i-1] / 14) + minus_dm[i]
     
-    # Volume moving average (20-period) for confirmation
-    vol_ma = np.zeros(n)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma[i] = vol_sum / 20.0
+    # Calculate +DI and -DI
+    plus_di_1w = np.zeros(len(df_1w))
+    minus_di_1w = np.zeros(len(df_1w))
+    
+    for i in range(14, len(df_1w)):
+        if atr_1w[i] != 0:
+            plus_di_1w[i] = 100 * plus_dm_sum[i] / atr_1w[i]
+            minus_di_1w[i] = 100 * minus_dm_sum[i] / atr_1w[i]
+    
+    # Calculate DX and ADX
+    dx_1w = np.zeros(len(df_1w))
+    adx_1w = np.zeros(len(df_1w))
+    
+    for i in range(14, len(df_1w)):
+        di_sum = plus_di_1w[i] + minus_di_1w[i]
+        if di_sum != 0:
+            dx_1w[i] = 100 * abs(plus_di_1w[i] - minus_di_1w[i]) / di_sum
+    
+    # Smooth DX to get ADX
+    if len(df_1w) >= 28:
+        adx_1w[27] = np.mean(dx_1w[14:28])
+        for i in range(28, len(df_1w)):
+            adx_1w[i] = (adx_1w[i-1] * 13 + dx_1w[i]) / 14
+    
+    # Align ADX to 12h timeframe
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    
+    # Volume spike detection: current volume > 1.5 * 20-period average
+    volume_ma = np.zeros(n)
+    for i in range(20, n):
+        volume_ma[i] = np.mean(volume[i-20:i])
+    
+    volume_spike = np.zeros(n, dtype=bool)
+    for i in range(20, n):
+        if volume_ma[i] > 0:
+            volume_spike[i] = volume[i] > 1.5 * volume_ma[i]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 30)  # Ensure sufficient warmup
+    start_idx = max(30, 20)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is not available
-        if (np.isnan(pp_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or vol_ma[i] == 0):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(adx_1w_aligned[i]) or i < 20):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
-        
-        # ATR filter: only trade when volatility is sufficient (ATR > 0)
-        atr_filter = atr_1d_aligned[i] > 0
-        
         if position == 0:
-            # Long: Price breaks above R1 with volume and ATR confirmation
-            if (close[i] > r1_1d_aligned[i] and 
-                vol_confirm and atr_filter):
+            # Long: Price breaks above R3 with volume spike and strong trend (ADX > 25)
+            if close[i] > r3_aligned[i] and volume_spike[i] and adx_1w_aligned[i] > 25:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and ATR confirmation
-            elif (close[i] < s1_1d_aligned[i] and 
-                  vol_confirm and atr_filter):
+            # Short: Price breaks below S3 with volume spike and strong trend (ADX > 25)
+            elif close[i] < s3_aligned[i] and volume_spike[i] and adx_1w_aligned[i] > 25:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Long exit: Price returns to PP or breaks below S1 (reversal)
-            if (close[i] <= pp_1d_aligned[i] or 
-                close[i] < s1_1d_aligned[i]):
+            # Exit: Price breaks below S3 or trend weakens (ADX < 20)
+            if close[i] < s3_aligned[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Short exit: Price returns to PP or breaks above R1 (reversal)
-            if (close[i] >= pp_1d_aligned[i] or 
-                close[i] > r1_1d_aligned[i]):
+            # Exit: Price breaks above R3 or trend weakens (ADX < 20)
+            if close[i] > r3_aligned[i] or adx_1w_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
