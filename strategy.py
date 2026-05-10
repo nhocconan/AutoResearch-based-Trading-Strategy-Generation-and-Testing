@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume
+# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume_Improved
 # Hypothesis: 4h breakout of 12h Camarilla R3/S3 levels with 12h trend filter and volume confirmation.
 # Uses tighter levels (R3/S3) for stronger signals and 12h trend filter for better trend alignment.
 # Designed to work in both bull and bear markets by following the 12h trend direction.
 # Expected trade count: ~10-20 per year per symbol to avoid fee drag.
 
-name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
+name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume_Improved"
 timeframe = "4h"
 leverage = 1.0
 
@@ -43,6 +43,10 @@ def generate_signals(prices):
     atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
     atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
+    # Calculate 12h ATR long-term average for volatility filter (50-period)
+    atr_12h_long_avg = pd.Series(atr_12h).rolling(window=50, min_periods=50).mean().values
+    atr_12h_long_avg_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_long_avg)
+    
     # Calculate 12h Camarilla levels (based on previous 12h bar's OHLC)
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
@@ -67,7 +71,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # Volatility filter: avoid low volatility conditions
-    vol_filter = atr_12h_aligned > 0.5 * pd.Series(atr_12h_aligned).rolling(window=50, min_periods=50).mean().values
+    vol_filter = atr_12h_aligned > 0.5 * atr_12h_long_avg_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
