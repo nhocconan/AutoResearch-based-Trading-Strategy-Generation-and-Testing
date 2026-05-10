@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_DonchianBreakout_1dTrend_Volume
-Hypothesis: Use 4h Donchian(20) breakouts for entry, filtered by 1d EMA trend direction and volume confirmation.
-This combines price breakout momentum with trend filtering to work in both bull and bear markets,
-while volume confirmation reduces false breakouts. Designed for 20-40 trades/year to avoid fee drag.
+12h_1d_WeeklyPivot_Breakout_Volume_Filter
+Hypothesis: Use weekly pivot levels (P, R1, S1) for 12h breakout entries, filtered by 1d EMA trend and volume confirmation.
+Weekly pivots provide strong institutional levels that work in both bull and bear markets via trend filter.
+Designed for 12-37 trades/year by requiring volume confirmation and trend alignment to avoid overtrading.
 """
 
-name = "4h_DonchianBreakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_1d_WeeklyPivot_Breakout_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,65 +19,81 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for trend filter (1d EMA)
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 50:
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
+        return np.zeros(n)
     
-    # Calculate 4h Donchian channels (20-period)
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # Calculate weekly pivot points (using prior week)
+    high_prev = df_weekly['high'].shift(1).values
+    low_prev = df_weekly['low'].shift(1).values
+    close_prev = df_weekly['close'].shift(1).values
     
-    # Donchian upper and lower bands (20-period)
-    donchian_upper = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Standard pivot: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_p = (high_prev + low_prev + close_prev) / 3
+    pivot_r1 = 2 * pivot_p - low_prev
+    pivot_s1 = 2 * pivot_p - high_prev
     
-    # Volume filter: current volume > 1.8x 20-period EMA
-    vol_ema20 = pd.Series(volume_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_filter = volume_4h > vol_ema20 * 1.8
+    # Align weekly pivot levels to 12h timeframe
+    pivot_p_aligned = align_htf_to_ltf(prices, df_weekly, pivot_p)
+    pivot_r1_aligned = align_htf_to_ltf(prices, df_weekly, pivot_r1)
+    pivot_s1_aligned = align_htf_to_ltf(prices, df_weekly, pivot_s1)
+    
+    # Daily EMA50 for trend filter
+    ema_50 = pd.Series(df_daily['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_daily, ema_50)
+    
+    # Get 12h price and volume
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Volume filter: current volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Donchian (20), EMA50 (50), volume EMA (20)
+    # Warmup: need weekly pivot (needs 1 week), EMA50 (50 days), volume EMA (20)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(pivot_p_aligned[i]) or 
+            np.isnan(pivot_r1_aligned[i]) or
+            np.isnan(pivot_s1_aligned[i]) or
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper + uptrend (price > 1d EMA50) + volume
-            if close_4h[i] > donchian_upper[i] and close_4h[i] > ema_50_1d_aligned[i] and volume_filter[i]:
+            # Long: above EMA50 (uptrend) AND price breaks above weekly R1 with volume
+            if close[i] > ema_50_aligned[i] and high[i] > pivot_r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower + downtrend (price < 1d EMA50) + volume
-            elif close_4h[i] < donchian_lower[i] and close_4h[i] < ema_50_1d_aligned[i] and volume_filter[i]:
+            # Short: below EMA50 (downtrend) AND price breaks below weekly S1 with volume
+            elif close[i] < ema_50_aligned[i] and low[i] < pivot_s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian lower OR trend turns bearish
-            if close_4h[i] < donchian_lower[i] or close_4h[i] < ema_50_1d_aligned[i]:
+            # Long exit: price breaks below weekly pivot P OR trend turns bearish
+            if low[i] < pivot_p_aligned[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian upper OR trend turns bullish
-            if close_4h[i] > donchian_upper[i] or close_4h[i] > ema_50_1d_aligned[i]:
+            # Short exit: price breaks above weekly pivot P OR trend turns bullish
+            if high[i] > pivot_p_aligned[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
