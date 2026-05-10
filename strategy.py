@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-# 1d_1w_KAMA_RSI_ChopFilter
-# Hypothesis: Daily KAMA trend direction filtered by weekly EMA for trend bias, with RSI mean reversion and Choppiness index regime filter to avoid whipsaws.
-# Designed for low trade frequency (~15-25/year) to minimize fee drag in both bull and bear markets.
-# Uses KAMA for adaptive trend, RSI(14) for mean reversion entries, and Choppiness index (>61.8) to identify ranging markets where mean reversion works best.
+#/usr/bin/env python3
+# 6h_1d_AngleBasedBreakout_TrendFilter
+# Hypothesis: 6h breakout from daily Donchian(20) channels with angle-based momentum filter (price slope > 0 for longs, < 0 for shorts) and volume confirmation.
+# Uses daily trend via EMA50 slope for bias and volume spike to avoid false breakouts.
+# Designed for low trade frequency (~15-30/year) to minimize fee bear in bear markets.
+# Angle filter ensures breakouts have momentum, not just random spikes.
 
-name = "1d_1w_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_1d_AngleBasedBreakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,152 +18,106 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter and daily data for indicators
-    df_1w = get_htf_data(prices, '1w')
+    # Get daily data for Donchian channels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 30 or len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly EMA34 for trend bias (more stable than EMA50 for weekly)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Daily Donchian channels (20-period)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donch_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # KAMA components: Efficiency Ratio and Smoothing Constants
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # will be corrected below
-    # Correct volatility calculation: sum of absolute changes over 10 periods
-    volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    # For first 10 periods, use expanding sum
-    for i in range(1, 10):
-        volatility[i] = np.sum(np.abs(np.diff(close[:i+1])))
+    # Align Donchian levels to 6h timeframe
+    donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
+    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
     
-    # Avoid division by zero
-    er = np.zeros_like(close)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
+    # Daily EMA50 for trend filter (using slope)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope = np.diff(ema_50_1d, prepend=ema_50_1d[0])  # slope = today - yesterday
+    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # ATR for volatility and trailing stop
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14) for mean reversion
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.zeros_like(close)
-    rs[13:] = avg_gain[13:] / np.where(avg_loss[13:] == 0, 1e-10, avg_loss[13:])
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14-period) for regime detection
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]
-    
-    # ATR(14)
-    atr = np.zeros_like(close)
-    atr[13] = np.mean(tr[1:14])
-    for i in range(14, len(close)):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of True Range over 14 periods
-    sum_tr = np.zeros_like(close)
-    for i in range(13, len(close)):
-        sum_tr[i] = np.sum(tr[i-13:i+1])
-    
-    # Highest high and lowest low over 14 periods
-    max_high = np.zeros_like(close)
-    min_low = np.zeros_like(close)
-    for i in range(13, len(close)):
-        max_high[i] = np.max(high[i-13:i+1])
-        min_low[i] = np.min(low[i-13:i+1])
-    
-    # Choppiness Index
-    chop = np.zeros_like(close)
-    for i in range(13, len(close)):
-        if sum_tr[i] > 0 and (max_high[i] - min_low[i]) > 0:
-            chop[i] = 100 * np.log10(sum_tr[i] / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when undefined
-    
-    # Align weekly EMA34 to daily
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Volume confirmation (2.0x 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
-    # Warmup: need enough data for all indicators
-    start_idx = 50
+    # Warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or
-            np.isnan(rsi[i]) or
-            np.isnan(chop[i]) or
-            np.isnan(ema_34_1w_aligned[i])):
+        if (np.isnan(donch_high_aligned[i]) or
+            np.isnan(donch_low_aligned[i]) or
+            np.isnan(ema_slope_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from weekly EMA34
-        bullish_trend = close[i] > ema_34_1w_aligned[i]
-        bearish_trend = close[i] < ema_34_1w_aligned[i]
+        # Trend filter from daily EMA50 slope
+        bullish_trend = ema_slope_aligned[i] > 0
+        bearish_trend = ema_slope_aligned[i] < 0
         
-        # Mean reversion conditions: RSI extremes in choppy market
-        # Choppiness > 61.8 indicates ranging market (good for mean reversion)
-        ranging_market = chop[i] > 61.8
+        # Volume confirmation (2.0x average)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: RSI oversold in bullish trend bias + ranging market
-            if rsi[i] < 30 and bullish_trend and ranging_market:
+            # Long: breakout above Donchian high in bullish trend with volume surge
+            if close[i] > donch_high_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought in bearish trend bias + ranging market
-            elif rsi[i] > 70 and bearish_trend and ranging_market:
+                highest_high_since_entry = high[i]
+            # Short: breakdown below Donchian low in bearish trend with volume surge
+            elif close[i] < donch_low_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = low[i]
         else:
             if position == 1:
-                # Exit long: RSI reverts to midline or trend breaks
-                if rsi[i] > 50 or not bullish_trend:
+                # Update highest high since entry
+                if high[i] > highest_high_since_entry:
+                    highest_high_since_entry = high[i]
+                
+                # Trailing stop: exit if price drops 2.5*ATR from highest high
+                if close[i] < highest_high_since_entry - 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    highest_high_since_entry = 0.0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI reverts to midline or trend breaks
-                if rsi[i] < 50 or not bearish_trend:
+                # Update lowest low since entry
+                if low[i] < lowest_low_since_entry:
+                    lowest_low_since_entry = low[i]
+                
+                # Trailing stop: exit if price rises 2.5*ATR from lowest low
+                if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    lowest_low_since_entry = 0.0
                 else:
                     signals[i] = -0.25
     
