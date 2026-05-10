@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1dATRBreakout_WeeklyTrend_Volume
-# Hypothesis: Breakouts from ATR-based channels on 12h, filtered by weekly trend (EMA34) and volume confirmation.
-# Works in bull markets (buying breakouts in uptrend) and bear markets (selling breakdowns in downtrend).
-# Uses ATR(14) to set dynamic channels, avoiding fixed lookbacks that fail in volatile regimes.
-# Target: 20-50 trades over 4 years (5-12/year) to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Camarilla pivot levels from 12h provide institutional support/resistance.
+# In trending markets (12h EMA50), price breaking above R1 or below S1 continues with momentum.
+# Volume confirmation filters false breakouts. Works in bull and bear markets by following the 12h trend.
 
-name = "12h_1dATRBreakout_WeeklyTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,90 +22,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # Get 12h data for Camarilla pivot levels and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Get daily data for ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # Calculate 12h Camarilla pivot levels (R1, S1)
+    # P = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily ATR(14) for volatility-based channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    pivot_point = (high_12h + low_12h + close_12h) / 3
+    camarilla_r1 = close_12h + (high_12h - low_12h) * 1.1 / 12
+    camarilla_s1 = close_12h - (high_12h - low_12h) * 1.1 / 12
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
     
-    # Calculate ATR-based channels using previous day's close
-    # Upper channel = previous close + 1.5 * ATR
-    # Lower channel = previous close - 1.5 * ATR
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = close_1d[0]  # Avoid NaN on first
-    upper_channel = prev_close_1d + 1.5 * atr_14
-    lower_channel = prev_close_1d - 1.5 * atr_14
-    
-    upper_channel_aligned = align_htf_to_ltf(prices, df_1d, upper_channel)
-    lower_channel_aligned = align_htf_to_ltf(prices, df_1d, lower_channel)
-    
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Volume confirmation (20-period MA on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA34 (34), daily ATR (14), volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need 12h EMA50 (50) and volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(upper_channel_aligned[i]) or 
-            np.isnan(lower_channel_aligned[i]) or 
+        if (np.isnan(ema_50_12h_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_34_1w_aligned[i]
-        downtrend = close[i] < ema_34_1w_aligned[i]
+        # 12h trend filter
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above upper channel + volume
-            if uptrend and close[i] > upper_channel_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above Camarilla R1 + volume
+            if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below lower channel + volume
-            elif downtrend and close[i] < lower_channel_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below Camarilla S1 + volume
+            elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below upper channel
-            if not uptrend or close[i] < upper_channel_aligned[i]:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above lower channel
-            if not downtrend or close[i] > lower_channel_aligned[i]:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
