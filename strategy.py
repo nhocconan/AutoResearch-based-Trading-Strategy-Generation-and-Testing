@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2
 # Hypothesis: Uses Camarilla pivot levels from daily timeframe. Enters long when price breaks above R1 with volume confirmation and 1-day uptrend (close > EMA34).
 # Enters short when price breaks below S1 with volume confirmation and 1-day downtrend (close < EMA34).
 # Exits when price returns to the pivot point (CP) or reverses direction.
 # Uses 1-day EMA34 for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 12-37 trades per year on 12h timeframe with position size 0.25.
+# Reduced position size to 0.20 to lower trade frequency and improve risk-adjusted returns.
+# Targets 20-50 trades per year on 4h timeframe.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -57,7 +58,7 @@ def generate_signals(prices):
     S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
     CP = (prev_high + prev_low + prev_close) / 3
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     CP_aligned = align_htf_to_ltf(prices, df_1d, CP)
@@ -87,13 +88,13 @@ def generate_signals(prices):
             if (close[i] > R1_aligned[i] and 
                 volume_confirm[i] and 
                 price_above_ema):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short entry: price breaks below S1 with volume confirmation and downtrend
             elif (close[i] < S1_aligned[i] and 
                   volume_confirm[i] and 
                   price_below_ema):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long exit: price returns to pivot point or trend reverses
@@ -102,7 +103,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Short exit: price returns to pivot point or trend reverses
             if (close[i] >= CP_aligned[i] or 
@@ -110,6 +111,6 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
