@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-6H_Donchian_Breakout_20_WeeklyPivotDirection_VolumeConfirmation
-Hypothesis: 6h Donchian(20) breakouts with weekly pivot point (from weekly high/low/close) direction filter and volume confirmation capture institutional breakout moves. Weekly pivot provides multi-day structure to filter false breakouts, while volume confirmation ensures follow-through. Designed for low trade frequency (15-35/year) to work in both bull (breakout continuation) and bear (mean reversion at extremes) markets by using pivot direction as regime filter.
+4H_KAMA_Trend_Filter_Volume_Breakout
+Hypothesis: KAMA(14) trend direction combined with volume spikes and Bollinger Band squeezes
+captures explosive moves in both bull and bear markets. The KAMA adapts to market noise,
+reducing whipsaws, while volume confirmation ensures momentum. Bollinger Band squeeze
+identifies low volatility periods preceding breakouts. Designed for low trade frequency
+(<30/year) to minimize fee decay while maintaining edge across regimes.
 """
 
-name = "6H_Donchian_Breakout_20_WeeklyPivotDirection_VolumeConfirmation"
-timeframe = "6h"
+name = "4H_KAMA_Trend_Filter_Volume_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,72 +26,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot calculation
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 2:
+    # 1d data for Bollinger Band squeeze detection
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous weekly bar for pivot calculation (use complete prior week)
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Bollinger Bands on 1d close
+    close_1d = df_1d['close'].values
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = bb_upper - bb_lower
     
-    # Weekly pivot point: (H + L + C) / 3
-    pivot_w = (high_w + low_w + close_w) / 3.0
+    # Bollinger Band squeeze: width < 20-period mean width
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    bb_squeeze = bb_width < bb_width_ma
+    bb_squeeze_aligned = align_htf_to_ltf(prices, df_1d, bb_squeeze)
     
-    # Align weekly pivot to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_weekly, pivot_w)
+    # KAMA on 4h close (adaptive to market noise)
+    # Efficiency Ratio: |close - close[10]| / sum(|close[i] - close[i-1]|) over 10 periods
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will fix below
     
-    # Donchian channels (20-period) on 6m data
-    lookback = 20
-    highest_high = np.full_like(high, np.nan)
-    lowest_low = np.full_like(low, np.nan)
+    # Proper ER calculation
+    er = np.zeros(n)
+    for i in range(10, n):
+        price_change = np.abs(close[i] - close[i-10])
+        price_volatility = np.sum(np.abs(np.diff(close[i-10:i+1])))
+        if price_volatility > 0:
+            er[i] = price_change / price_volatility
+        else:
+            er[i] = 0
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma = np.full_like(volume, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    vol_threshold = vol_ma * 1.5
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Volume filter: volume > 2.0x 20-period average (tight)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback-1, 19)  # Warmup for indicators
+    start_idx = 30  # Warmup for KAMA
     
     for i in range(start_idx, n):
-        if np.isnan(pivot_w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(kama[i]) or np.isnan(vol_threshold[i]) or np.isnan(bb_squeeze_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine trend: price relative to KAMA
+        is_uptrend = close[i] > kama[i]
+        is_downtrend = close[i] < kama[i]
+        
         if position == 0:
-            # Long: Price breaks above Donchian high AND price > weekly pivot (bullish bias)
-            if (high[i] > highest_high[i-1] and 
-                close[i] > pivot_w_aligned[i] and 
-                volume[i] > vol_threshold[i]):
+            # Long entry: KAMA uptrend + volume spike + Bollinger Band squeeze (breakout from low vol)
+            if (is_uptrend and 
+                volume[i] > vol_threshold[i] and 
+                bb_squeeze_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian low AND price < weekly pivot (bearish bias)
-            elif (low[i] < lowest_low[i-1] and 
-                  close[i] < pivot_w_aligned[i] and 
-                  volume[i] > vol_threshold[i]):
+            # Short entry: KAMA downtrend + volume spike + Bollinger Band squeeze
+            elif (is_downtrend and 
+                  volume[i] > vol_threshold[i] and 
+                  bb_squeeze_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below Donchian low (reversal signal)
-            if close[i] < lowest_low[i]:
+            # Long exit: price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above Donchian high (reversal signal)
-            if close[i] > highest_high[i]:
+            # Short exit: price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
