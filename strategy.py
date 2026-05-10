@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
-# 6h_Donchian_20_WeeklyPivot_Direction_Volume
-# Hypothesis: Uses 6h Donchian(20) breakout in the direction of the weekly pivot trend.
-# Weekly pivot trend is determined by whether the weekly close is above/below the weekly pivot point (PP).
-# Long when price breaks above Donchian upper band with weekly uptrend and volume confirmation.
-# Short when price breaks below Donchian lower band with weekly downtrend and volume confirmation.
-# Exit when price returns to the Donchian midpoint or trend reverses.
-# Uses weekly pivot for trend to avoid whipsaws and works in both bull/bear markets.
-# Targets 12-37 trades per year on 6h timeframe with position size 0.25.
+# 4h_KAMA_Direction_RSI_ChopFilter
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction on 4h timeframe.
+# Enters long when price is above KAMA and RSI > 50 with chop filter (Choppiness Index > 61.8 = ranging).
+# Enters short when price is below KAMA and RSI < 50 with chop filter.
+# Exits when price crosses KAMA in opposite direction.
+# Uses Chop filter to avoid whipsaws in strong trends and only trade in ranging markets.
+# Targets 20-40 trades per year on 4h timeframe with position size 0.25.
 
-name = "6h_Donchian_20_WeeklyPivot_Direction_Volume"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -26,75 +24,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot and trend
-    df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 1:
-        return np.zeros(n)
+    # Calculate KAMA (ER=10, FAST=2, SLOW=30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
+    # Fix: volatility should be rolling sum of absolute changes
+    volatility = pd.Series(change).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate weekly pivot point (PP) and trend
-    # PP = (H + L + C) / 3
-    # Trend: close > PP = uptrend, close < PP = downtrend
-    pp_w = (df_w['high'] + df_w['low'] + df_w['close']) / 3
-    pp_w_array = pp_w.values
-    weekly_close = df_w['close'].values
-    weekly_uptrend = weekly_close > pp_w_array  # True if weekly close above PP
-    weekly_downtrend = weekly_close < pp_w_array  # True if weekly close below PP
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align weekly trend to 6h
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_w, weekly_uptrend)
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_w, weekly_downtrend)
+    # Calculate Choppiness Index(14)
+    atr = np.zeros_like(close)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(np.roll(high, 1) - close)
+    tr3 = np.abs(np.roll(low, 1) - close)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Donchian(20) on 6h
-    # Upper band = 20-period high
-    # Lower band = 20-period low
-    # Middle band = (upper + lower) / 2
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # Volume confirmation: current volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_ma * 1.5)
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where((max_high - min_low) != 0, 
+                    100 * np.log10(np.sum(atr, axis=1) / (max_high - min_low)) / np.log10(14), 
+                    50)
+    # Fix chop calculation: sum of ATR over period
+    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop = np.where((max_high - min_low) != 0, chop, 50)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 20)  # Warmup for Donchian and volume MA
+    start_idx = max(14, 30)  # Warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(donchian_mid[i]) or \
-           np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Chop filter: only trade when market is ranging (CHOP > 61.8)
+        chop_filter = chop[i] > 61.8
+        
         if position == 0:
-            # Long entry: price breaks above Donchian upper band with weekly uptrend and volume confirmation
-            if (close[i] > donchian_high[i] and 
-                weekly_uptrend_aligned[i] and 
-                volume_confirm[i]):
+            # Long entry: price above KAMA, RSI > 50, and chop filter
+            if (close[i] > kama[i] and 
+                rsi[i] > 50 and 
+                chop_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian lower band with weekly downtrend and volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  weekly_downtrend_aligned[i] and 
-                  volume_confirm[i]):
+            # Short entry: price below KAMA, RSI < 50, and chop filter
+            elif (close[i] < kama[i] and 
+                  rsi[i] < 50 and 
+                  chop_filter):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns to Donchian midpoint or weekly trend turns down
-            if (close[i] <= donchian_mid[i] or 
-                not weekly_uptrend_aligned[i]):
+            # Long exit: price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns to Donchian midpoint or weekly trend turns up
-            if (close[i] >= donchian_mid[i] or 
-                not weekly_downtrend_aligned[i]):
+            # Short exit: price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
