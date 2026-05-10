@@ -1,97 +1,112 @@
 #!/usr/bin/env python3
-# 12h_Weekly_Trend_Daily_Range_Breakout
-# Hypothesis: Uses 1-week trend filter (price above/below EMA200) and breaks above/below
-# daily range (high-low) from previous day with volume confirmation. Designed for 12h timeframe
-# to capture multi-day moves in both bull and bear markets by aligning with weekly trend.
-# Targets 12-30 trades per year with position size 0.25 to minimize fee drag.
+# 4h_KAMA_Direction_RSI14_ChopFilter
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction on 4h.
+# Goes long when KAMA turns upward and RSI(14) > 50, short when KAMA turns downward and RSI(14) < 50.
+# Includes Choppiness Index (CHOP) filter to avoid ranging markets (CHOP > 61.8 = range, avoid trading).
+# Designed to work in both bull and bear markets by following adaptive trend.
+# Targets 20-50 trades per year on 4h timeframe with position size 0.25.
 
-name = "12h_Weekly_Trend_Daily_Range_Breakout"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI14_ChopFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (EMA200)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
+    # Calculate KAMA (ER=10, fast=2, slow=30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None
+    # Proper volatility calculation: sum of absolute changes over ER period
+    er_period = 10
+    change_abs = np.abs(np.diff(close, prepend=close[0]))
+    volatility_sum = np.zeros_like(change_abs)
+    for i in range(1, len(volatility_sum)):
+        volatility_sum[i] = volatility_sum[i-1] + change_abs[i]
+        if i >= er_period:
+            volatility_sum[i] -= change_abs[i - er_period]
+    er = np.where(volatility_sum > 0, change_abs / volatility_sum, 0)
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate weekly EMA200 for trend direction
-    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Calculate RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Get daily data for range calculation (previous day's high-low)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate Choppiness Index (CHOP) - using 14-period
+    atr_list = []
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where((max_high - min_low) != 0, 100 * np.log10(atr.sum() / (max_high - min_low)) / np.log10(14), 50)
+    # Fix: proper CHOP calculation
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop = np.where((max_high - min_low) > 0, chop, 50)
     
-    # Calculate daily range from previous day's OHLC
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    daily_range = prev_high - prev_low
-    
-    # Calculate breakout levels: previous day's high + 50% of range for long,
-    # previous day's low - 50% of range for short
-    breakout_long = prev_high + daily_range * 0.5
-    breakout_short = prev_low - daily_range * 0.5
-    
-    # Align breakout levels to 12h timeframe
-    breakout_long_aligned = align_htf_to_ltf(prices, df_1d, breakout_long)
-    breakout_short_aligned = align_htf_to_ltf(prices, df_1d, breakout_short)
-    
-    # Calculate volume average for confirmation (20-period)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # KAMA direction: upward if current > previous, downward if current < previous
+    kama_up = kama > np.roll(kama, 1)
+    kama_down = kama < np.roll(kama, 1)
+    kama_up[0] = False
+    kama_down[0] = False
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 200)  # Warmup for volume MA and weekly EMA
+    start_idx = 14  # warmup for RSI and CHOP
     
     for i in range(start_idx, n):
-        if np.isnan(ema_200_1w_aligned[i]) or np.isnan(breakout_long_aligned[i]) or np.isnan(breakout_short_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_200_1w_aligned[i]
-        downtrend = close[i] < ema_200_1w_aligned[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Chop filter: avoid ranging markets (CHOP > 61.8)
+        if chop[i] > 61.8:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
         if position == 0:
-            # Long entry: price breaks above breakout level with volume confirmation and weekly uptrend
-            if close[i] > breakout_long_aligned[i] and volume_confirm and uptrend:
+            # Long entry: KAMA upward and RSI > 50
+            if kama_up[i] and rsi[i] > 50:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below breakout level with volume confirmation and weekly downtrend
-            elif close[i] < breakout_short_aligned[i] and volume_confirm and downtrend:
+            # Short entry: KAMA downward and RSI < 50
+            elif kama_down[i] and rsi[i] < 50:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below breakout level or trend turns down
-            if close[i] < breakout_long_aligned[i] or not uptrend:
+            # Long exit: KAMA downward or RSI < 50
+            if kama_down[i] or rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above breakout level or trend turns up
-            if close[i] > breakout_short_aligned[i] or not downtrend:
+            # Short exit: KAMA upward or RSI > 50
+            if kama_up[i] or rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
