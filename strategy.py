@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1D_Camarilla_R3_S3_Bounce_1wTrend_Volume
-Hypothesis: Daily bounces off weekly Camarilla S3/R3 levels with volume confirmation and weekly trend filter.
-This strategy aims to capture mean-reversion bounces in ranging markets and continuation in trending markets
-by combining weekly trend alignment with daily price action at key weekly support/resistance levels.
-Designed for low trade frequency (<25/year) to minimize fee drift and work in both bull and bear markets.
+6H_ADX_Trend_Strength_Volume_Signal
+Hypothesis: Uses ADX to detect trending conditions (ADX > 25) and RSI to determine direction 
+(RSI > 50 for long, RSI < 50 for short). Volume confirmation ensures breakout validity. 
+Designed for 6h timeframe to capture medium-term trends with low trade frequency (target: 15-35 trades/year).
+Works in both bull and bear markets by following trend direction, avoiding false signals in ranging markets.
 """
 
-name = "1D_Camarilla_R3_S3_Bounce_1wTrend_Volume"
-timeframe = "1d"
+name = "6H_ADX_Trend_Strength_Volume_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,74 +25,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for Camarilla calculation and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Daily data for ADX and RSI calculation (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Use previous weekly bar to calculate Camarilla levels (non-lookahad)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate ADX components on daily data
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # Calculate weekly range and Camarilla levels
-    range_1w = high_1w - low_1w
-    s3 = close_1w - (range_1w * 1.5)  # S3 level
-    r3 = close_1w + (range_1w * 1.5)   # R3 level
+    # Directional Movement
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Align weekly levels to daily timeframe (wait for weekly bar close)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean()
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / tr_ma
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / tr_ma
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean()
     
-    # Weekly trend filter: EMA 34 on weekly close
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
+    # RSI on daily close
+    delta = df_1d['close'].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: volume > 2.0x 20-day average (strict to reduce trades)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    # Convert to numpy arrays
+    adx_vals = adx.values
+    rsi_vals = rsi.values
+    
+    # Align to 6h timeframe (wait for daily close)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_vals)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_vals)
+    
+    # Volume filter: volume > 1.5x 24-period average on 6h chart
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for weekly EMA and volume MA
+    start_idx = max(30, 24)  # Warmup for ADX/RSI and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend direction
-        is_uptrend = close[i] > ema_34_1w_aligned[i]
-        is_downtrend = close[i] < ema_34_1w_aligned[i]
+        # Trend strength filter: ADX > 25 indicates trending market
+        is_trending = adx_aligned[i] > 25
         
         if position == 0:
-            # Long entry: Price touches/bounces off S3 + volume + weekly uptrend
-            if (low[i] <= s3_aligned[i] and 
-                close[i] > s3_aligned[i] and  # Confirmed bounce
+            # Long entry: RSI > 50 (bullish momentum) + volume + trending market
+            if (rsi_aligned[i] > 50 and 
                 volume[i] > vol_threshold[i] and 
-                is_uptrend):
+                is_trending):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: Price touches/rejects at R3 + volume + weekly downtrend
-            elif (high[i] >= r3_aligned[i] and 
-                  close[i] < r3_aligned[i] and  # Confirmed rejection
+            # Short entry: RSI < 50 (bearish momentum) + volume + trending market
+            elif (rsi_aligned[i] < 50 and 
                   volume[i] > vol_threshold[i] and 
-                  is_downtrend):
+                  is_trending):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price reaches opposite R3 level or loses weekly uptrend
-            if high[i] >= r3_aligned[i] or not is_uptrend:
+            # Long exit: RSI < 40 (loss of momentum) or ADX < 20 (trend weakening)
+            if (rsi_aligned[i] < 40 or adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price reaches opposite S3 level or loses weekly downtrend
-            if low[i] <= s3_aligned[i] or not is_downtrend:
+            # Short exit: RSI > 60 (loss of bearish momentum) or ADX < 20 (trend weakening)
+            if (rsi_aligned[i] > 60 or adx_aligned[i] < 20):
                 signals[i] = 0.0
                 position = 0
             else:
