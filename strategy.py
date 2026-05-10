@@ -1,13 +1,13 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 """
-1D_Weekly_Camarilla_R3_S3_Breakout_Trend
-Hypothesis: Daily timeframe strategy using weekly EMA trend filter with daily Camarilla R3/S3 breakouts.
-Weekly trend reduces false breakouts in choppy markets, while daily pivot levels provide precise entry/exit.
-Volume confirmation ensures breakout strength. Designed for low trade frequency (7-25/year) to minimize
-fee drag in both bull and bear markets.
+148919: 6h_Pivot_Volume_Regime_Adaptive
+Hypothesis: Combines daily pivot points with volatility regime filtering. In low volatility
+(regime), fades at pivot extremes (S1/R1); in high volatility, breaks out at S2/R2.
+Uses 12h ATR regime filter to avoid whipsaws. Designed for 20-40 trades/year with
+adaptive logic that works in both trending and ranging markets.
 """
-name = "1D_Weekly_Camarilla_R3_S3_Breakout_Trend"
-timeframe = "1d"
+name = "6h_Pivot_Volume_Regime_Adaptive"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,73 +24,131 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get daily data for Camarilla pivot levels (based on previous day)
+    # Daily pivot points (standard calculation)
     df_1d = get_htf_data(prices, '1d')
-    # Calculate typical price and range from previous day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_hl = df_1d['high'] - df_1d['low']
-    # Camarilla R3 and S3 levels
-    R3 = typical_price + (range_hl * 1.2500)
-    S3 = typical_price - (range_hl * 1.2500)
-    # Align daily levels to daily timeframe (same timeframe, but ensures proper alignment)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    # Previous day's OHLC for pivot calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Volume confirmation (20-day average)
-    vol_ma_period = 20
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    
+    # Standard pivot levels: S1, R1, S2, R2
+    S1 = (2 * pivot) - prev_high
+    R1 = (2 * pivot) - prev_low
+    S2 = pivot - range_hl
+    R2 = pivot + range_hl
+    
+    # Align daily pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    
+    # 12h ATR for volatility regime (regime filter)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # True Range calculation
+    tr1 = high_12h - low_12h
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # ATR(14) on 12h
+    atr_12h = np.full_like(tr, np.nan)
+    for i in range(13, len(tr)):
+        atr_12h[i] = np.mean(tr[i-13:i+1])
+    
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    
+    # ATR regime: high vol when current ATR > 1.3 * 50-period average
+    atr_ma_50 = np.full_like(atr_12h_aligned, np.nan)
+    for i in range(49, len(atr_12h_aligned)):
+        atr_ma_50[i] = np.mean(atr_12h_aligned[i-49:i+1])
+    
+    high_vol_regime = atr_12h_aligned > (1.3 * atr_ma_50)
+    
+    # Volume confirmation: 20-period volume average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, vol_ma_period)
+    
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20) + 5  # need enough history for calculations
+    start_idx = max(50, 20) + 5
     
     for i in range(start_idx, n):
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
-           np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(R1_aligned[i]) or
+            np.isnan(S2_aligned[i]) or np.isnan(R2_aligned[i]) or np.isnan(atr_12h_aligned[i]) or
+            np.isnan(atr_ma_50[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x average (stricter for fewer trades)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i] if vol_ma[i] > 0 else False
+        vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: price breaks above R3 with volume, above weekly EMA20 (uptrend)
-            if close[i] > R3_aligned[i] and volume_confirm and close[i] > ema_1w_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S3 with volume, below weekly EMA20 (downtrend)
-            elif close[i] < S3_aligned[i] and volume_confirm and close[i] < ema_1w_aligned[i]:
-                signals[i] = -0.25
-                position = -1
+            # Determine regime: fade in low vol, breakout in high vol
+            if high_vol_regime[i]:
+                # High volatility regime: breakout at S2/R2
+                if close[i] < S2_aligned[i] and vol_confirm:
+                    signals[i] = -0.25
+                    position = -1
+                elif close[i] > R2_aligned[i] and vol_confirm:
+                    signals[i] = 0.25
+                    position = 1
+            else:
+                # Low volatility regime: fade at S1/R1
+                if close[i] > R1_aligned[i] and vol_confirm:
+                    signals[i] = -0.25
+                    position = -1
+                elif close[i] < S1_aligned[i] and vol_confirm:
+                    signals[i] = 0.25
+                    position = 1
         elif position == 1:
-            # Long exit: price closes below S3 or breaks below weekly EMA20
-            if close[i] < S3_aligned[i] or close[i] < ema_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Long exit: reverse signal or pivot crossover
+            if high_vol_regime[i]:
+                # In high vol, exit on break of S2
+                if close[i] < S2_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.25
+                # In low vol, exit on reverse fade signal
+                if close[i] < S1_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R3 or breaks above weekly EMA20
-            if close[i] > R3_aligned[i] or close[i] > ema_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Short exit: reverse signal or pivot crossover
+            if high_vol_regime[i]:
+                # In high vol, exit on break of R2
+                if close[i] > R2_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.25
+                # In low vol, exit on reverse fade signal
+                if close[i] > R1_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
