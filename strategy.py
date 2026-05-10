@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: For 4h timeframe, use daily Camarilla R1/S1 levels for breakout entries.
-# In trending markets (1d EMA50), price breaks R1/S1 and continues; in ranging markets, fewer triggers.
-# 1d trend filter avoids counter-trend trades. Volume confirmation reduces false breakouts.
-# Designed for 4h to capture multi-day moves with low frequency (~20-40 trades/year).
-# Works in bull (breakouts continue) and bear (breakdowns continue) via trend filter.
+# 4h_RSI_Extremes_Volume_Trend
+# Hypothesis: RSI(14) extremes (oversold <20, overbought >80) with volume confirmation and 1d trend filter.
+# In strong trends (1d EMA50 aligned), RSI extremes offer high-probability continuation entries.
+# Volume > 1.5x average confirms institutional interest. Works in bull/bear via trend filter.
+# Target: 20-40 trades/year on 4h timeframe.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_RSI_Extremes_Volume_Trend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,21 +23,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivots and trend
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
-    
-    # Calculate Camarilla levels from previous day
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_val = df_1d['high'] - df_1d['low']
-    
-    R1 = typical_price + (range_val * 1.1 / 4)
-    S1 = typical_price - (range_val * 1.1 / 4)
-    
-    # Use previous day's levels (shift by 1 to avoid look-ahead)
-    R1_prev = R1.shift(1).values
-    S1_prev = S1.shift(1).values
     
     # 1d trend: EMA50
     close_1d = df_1d['close'].values
@@ -46,13 +34,21 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema50_1d
     trend_1d_down = close_1d < ema50_1d
     
-    # Align daily data to 4h
-    R1_prev_aligned = align_htf_to_ltf(prices, df_1d, R1_prev)
-    S1_prev_aligned = align_htf_to_ltf(prices, df_1d, S1_prev)
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volume confirmation: 6-period (1.5-day) average on 4h
+    # RSI(14) on 4h close
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
+    
+    # Volume confirmation: 6-period average on 4h
     volume_s = pd.Series(volume)
     vol_ma = volume_s.rolling(window=6, min_periods=6).mean().values
     
@@ -64,8 +60,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(R1_prev_aligned[i]) or np.isnan(S1_prev_aligned[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,22 +71,20 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: break above R1 with 1d uptrend and volume
-            if (close[i] > R1_prev_aligned[i] and 
+            # Enter long: RSI oversold (<20) with 1d uptrend and volume
+            if (rsi[i] < 20 and 
                 trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with 1d downtrend and volume
-            elif (close[i] < S1_prev_aligned[i] and 
+            # Enter short: RSI overbought (>80) with 1d downtrend and volume
+            elif (rsi[i] > 80 and 
                   trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to typical price or trend fails
-            typical_price_aligned = ((df_1d['high'] + df_1d['low'] + df_1d['close']) / 3).shift(1).values
-            typical_price_aligned = align_htf_to_ltf(prices, df_1d, typical_price_aligned)
-            if (close[i] < typical_price_aligned[i] or 
+            # Exit when RSI returns to neutral (50) or trend fails
+            if (rsi[i] > 50 or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -99,10 +92,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to typical price or trend fails
-            typical_price_aligned = ((df_1d['high'] + df_1d['low'] + df_1d['close']) / 3).shift(1).values
-            typical_price_aligned = align_htf_to_ltf(prices, df_1d, typical_price_aligned)
-            if (close[i] > typical_price_aligned[i] or 
+            # Exit when RSI returns to neutral (50) or trend fails
+            if (rsi[i] < 50 or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
