@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-Hypothesis: Camarilla pivot breakouts on 12h with daily trend filter and volume confirmation.
-Buying at R3 breakout in uptrend (price > EMA34) and selling at S3 breakdown in downtrend (price < EMA34).
-Volume confirms breakout strength. Works in bull (buy breakouts) and bear (sell breakdowns).
+4h_RSI_MeanReversion_1dTrend_Volume
+Hypothesis: RSI mean reversion with daily trend filter and volume confirmation.
+In trending markets, price pulls back to RSI extremes (oversold in uptrend, overbought in downtrend) before continuing.
+Volume confirms the resumption of trend. Works in both bull (buy dips) and bear (sell rallies).
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_MeanReversion_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -45,54 +45,62 @@ def generate_signals(prices):
             vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
-    # Previous 1d high, low, close for Camarilla calculation
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
-    
-    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # RSI(14)
+    rsi_period = 14
+    rsi = np.full(n, np.nan)
+    if n >= rsi_period:
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        
+        avg_gain[rsi_period] = np.mean(gain[:rsi_period])
+        avg_loss[rsi_period] = np.mean(loss[:rsi_period])
+        
+        for i in range(rsi_period + 1, n):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i-1]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i-1]) / rsi_period
+        
+        rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+        rsi[rsi_period:] = 100 - (100 / (1 + rs[rsi_period:]))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need EMA34 warmup
+    start_idx = max(34, rsi_period + 1)
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or \
-           np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled to 12h)
-        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0  # 1 day = 2 x 12h bars
-        volume_confirm = volume[i] > 1.5 * vol_12h_approx
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
+        vol_4h_approx = vol_sma20_1d_aligned[i] / 6.0
+        volume_confirm = volume[i] > 1.5 * vol_4h_approx
         
         if position == 0:
-            # Long: price breaks above R3 in uptrend with volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_confirm:
+            # Long: RSI oversold (<30) in uptrend (price > EMA34) with volume confirmation
+            if rsi[i] < 30 and close[i] > ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in downtrend with volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_confirm:
+            # Short: RSI overbought (>70) in downtrend (price < EMA34) with volume confirmation
+            elif rsi[i] > 70 and close[i] < ema34_1d_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price returns below R3 or trend reversal
-            if close[i] < camarilla_r3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit: RSI returns to neutral (>=50) or trend reversal
+            if rsi[i] >= 50 or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price returns above S3 or trend reversal
-            if close[i] > camarilla_s3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit: RSI returns to neutral (<=50) or trend reversal
+            if rsi[i] <= 50 or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
