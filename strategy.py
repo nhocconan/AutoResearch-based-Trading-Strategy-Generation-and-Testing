@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # 12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
-# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic.
+# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic on 12h timeframe.
 # Long when price breaks above R1 with volume > 2x average and price > daily EMA34.
 # Short when price breaks below S1 with volume > 2x average and price < daily EMA34.
 # Exits when price crosses back below/above EMA34.
 # Designed for 12-37 trades/year to avoid overtrading and work in both bull and bear markets.
-# Optimized for 12h timeframe with proper MTF data loading to avoid look-ahead and excessive trades.
+# Uses 12h timeframe to reduce trade frequency and increase win rate.
 
 name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
 timeframe = "12h"
