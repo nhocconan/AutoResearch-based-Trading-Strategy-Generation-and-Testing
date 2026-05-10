@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_1dTrend_Volume
-Hypothesis: Camarilla pivot levels from daily timeframe provide strong intraday support/resistance.
+4h_Camarilla_R1_S1_1dTrend_Volume
+Hypothesis: Camarilla pivot levels from daily timeframe provide strong support/resistance.
 Combined with daily trend filter (EMA34) and volume spike confirmation, this strategy captures
-breakouts with institutional interest. Designed for 12h timeframe to limit trades to 15-35/year,
-reducing fee drag while maintaining edge in both bull and bear markets via trend alignment.
+breakouts with institutional interest. Designed for 4h timeframe to target 25-50 trades/year,
+balancing edge and trade frequency. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
-name = "12h_Camarilla_R1_S1_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -36,7 +36,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 12h (no extra delay needed as they're based on prior day)
+    # Align Camarilla levels to 4h (no extra delay needed as they're based on prior day)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -48,7 +48,7 @@ def generate_signals(prices):
     vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # 12h price data
+    # 4h price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -75,10 +75,10 @@ def generate_signals(prices):
         uptrend_1d = close[i] > ema34_1d_aligned[i]
         downtrend_1d = close[i] < ema34_1d_aligned[i]
         
-        # Volume filter: current 12h volume > 2.0x average daily volume (scaled)
-        # 1 day = 2 x 12h bars, so scale daily volume to 12h equivalent
-        vol_12h_equiv = vol_avg_1d_aligned[i] / 2.0
-        volume_spike = volume[i] > vol_12h_equiv * 2.0
+        # Volume filter: current 4h volume > 2.0x average daily volume (scaled)
+        # 1 day = 6 x 4h bars, so scale daily volume to 4h equivalent
+        vol_4h_equiv = vol_avg_1d_aligned[i] / 6.0
+        volume_spike = volume[i] > vol_4h_equiv * 2.0
         
         if position == 0:
             # Long entry: price breaks above R1 + uptrend + volume spike
