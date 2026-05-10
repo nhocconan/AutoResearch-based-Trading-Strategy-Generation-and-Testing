@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_1dTrend_Reversal
-# Hypothesis: Elder Ray (Bull/Bear power) + 1d trend filter for mean reversion in 6b timeframe.
-# Works in bull/bear by adapting to trend direction: long when Bear power > 0 in uptrend,
-# short when Bull power < 0 in downtrend. Uses volume confirmation to avoid false signals.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# 12h_KAMA_With_1wTrend_Filter
+# Hypothesis: KAMA direction (trend) filtered by 1w trend (EMA13) on 12h timeframe.
+# Uses adaptive trend strength to avoid whipsaws in sideways markets.
+# Target: 20-40 trades/year to minimize fee drag on 12h timeframe.
 
-name = "6h_ElderRay_1dTrend_Reversal"
-timeframe = "6h"
+name = "12h_KAMA_With_1wTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,33 +14,53 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 1w trend filter (EMA13)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    close_1w = df_1w['close'].values
+    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    trend_1w_up = close_1w > ema13_1w
+    trend_1w_down = close_1w < ema13_1w
     
-    # Align 1d trend to 6t
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # KAMA direction (ER = Efficiency Ratio, smooth with 2 and 30)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))).cumsum()  # placeholder, will fix below
+    # Recalculate volatility properly as rolling sum of absolute changes
+    volatility = np.zeros(n)
+    for i in range(n):
+        if i == 0:
+            volatility[i] = 0
+        else:
+            volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+            if i >= 30:
+                volatility[i] -= np.abs(close[i-30] - close[i-30-1]) if i-30-1 >= 0 else 0
+    # Avoid division by zero
+    volatility = np.where(volatility == 0, 1e-10, volatility)
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smooth ER with smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # (ER * (fast - slow) + slow)^2
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # KAMA direction: price above/below KAMA
+    kama_up = close > kama
+    kama_down = close < kama
     
     # Volume confirmation (1.5x 20-period average)
     vol_ma = np.full(n, np.nan)
@@ -57,11 +76,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 40  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(kama_up[i]) or np.isnan(kama_down[i]) or
             np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,32 +88,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bear power > 0 (bulls in control) in 1d uptrend with volume confirmation
-            if (bear_power[i] > 0 and
-                trend_1d_up_aligned[i] > 0.5 and
+            # Long: price above KAMA with volume confirmation, 1w uptrend
+            if (kama_up[i] and
+                trend_1w_up_aligned[i] > 0.5 and
                 volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull power < 0 (bears in control) in 1d downtrend with volume confirmation
-            elif (bull_power[i] < 0 and
-                  trend_1d_down_aligned[i] > 0.5 and
+            # Short: price below KAMA with volume confirmation, 1w downtrend
+            elif (kama_down[i] and
+                  trend_1w_down_aligned[i] > 0.5 and
                   volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Bear power <= 0 or 1d trend turns down
-            if (bear_power[i] <= 0 or
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: price below KAMA or 1w trend turns down
+            if (not kama_up[i] or
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Bull power >= 0 or 1d trend turns up
-            if (bull_power[i] >= 0 or
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: price above KAMA or 1w trend turns up
+            if (not kama_down[i] or
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
