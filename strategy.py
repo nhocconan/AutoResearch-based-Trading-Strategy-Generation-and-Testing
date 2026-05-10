@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Buy/sell at Camarilla R3/S3 levels on 12h timeframe with daily trend and volume confirmation.
-# Works in bull/bear by following daily trend and using volume to confirm institutional interest.
-# Target: 20-40 trades/year per symbol.
+# 1H_Camarilla_R1S1_4H_Trend_Filter
+# Hypothesis: Trade Camarilla pivot breakouts in the direction of 4h trend during active hours.
+# Uses Camarilla R1/S1 levels on 1h for entry, 4h EMA50 for trend filter, and session filter (08-20 UTC) to reduce noise.
+# Works in bull/bear by following 4h trend and using pivot levels for precise entries.
+# Target: 15-35 trades/year per symbol (60-140 total over 4 years).
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1H_Camarilla_R1S1_4H_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,90 +18,97 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Camarilla levels (R3, S3)
+    # Previous day's high, low, close for Camarilla calculation
+    # We'll use daily data to calculate Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day
+    # Using the standard Camarilla formula based on previous day's range
+    ph = df_1d['high'].values  # previous day high
+    pl = df_1d['low'].values   # previous day low
+    pc = df_1d['close'].values # previous day close
     
-    # Calculate pivot and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
+    # Camarilla R1 and S1 levels
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
     
-    # Align Camarilla levels to 12h
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Camarilla levels to 1h (they are constant for the day)
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Daily trend filter (EMA50)
-    close_1d_series = pd.Series(close_1d)
-    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_uptrend = close_1d > ema50_1d
-    daily_downtrend = close_1d < ema50_1d
+    # 4h trend filter: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
     
-    # Align daily trend to 12h
-    daily_uptrend_12h = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
-    daily_downtrend_12h = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Trend: price above/below EMA50
+    uptrend_4h = close_4h > ema50_4h
+    downtrend_4h = close_4h < ema50_4h
     
-    # Volume spike detection (20-period average)
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Align 4h trend to 1h
+    uptrend_4h_1h = align_htf_to_ltf(prices, df_4h, uptrend_4h.astype(float))
+    downtrend_4h_1h = align_htf_to_ltf(prices, df_4h, downtrend_4h.astype(float))
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 20
+    start_idx = 1
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(daily_uptrend_12h[i]) or np.isnan(daily_downtrend_12h[i]) or
-            np.isnan(vol_ma[i])):
+        # Skip if data not ready or outside session
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
+            np.isnan(uptrend_4h_1h[i]) or np.isnan(downtrend_4h_1h[i]) or
+            not in_session[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_spike = vol_ratio > 2.0
-        
-        daily_up = daily_uptrend_12h[i] > 0.5
-        daily_down = daily_downtrend_12h[i] > 0.5
+        r1_level = r1_1h[i]
+        s1_level = s1_1h[i]
+        uptrend = uptrend_4h_1h[i] > 0.5
+        downtrend = downtrend_4h_1h[i] > 0.5
         
         if position == 0:
-            # Enter long: daily uptrend + price breaks above R3 + volume spike
-            if daily_up and close[i] > r3_12h[i] and volume_spike:
-                signals[i] = 0.25
+            # Enter long: 4h uptrend + price breaks above R1
+            if uptrend and close[i] > r1_level and close[i-1] <= r1_level:
+                signals[i] = 0.20
                 position = 1
-            # Enter short: daily downtrend + price breaks below S3 + volume spike
-            elif daily_down and close[i] < s3_12h[i] and volume_spike:
-                signals[i] = -0.25
+            # Enter short: 4h downtrend + price breaks below S1
+            elif downtrend and close[i] < s1_level and close[i-1] >= s1_level:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price returns below R3 or trend changes
-            if close[i] < r3_12h[i] or not daily_up:
+            # Exit long: 4h trend weakens or price breaks below S1 (mean reversion)
+            if not uptrend or close[i] < s1_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price returns above S3 or trend changes
-            if close[i] > s3_12h[i] or not daily_down:
+            # Exit short: 4h trend weakens or price breaks above R1 (mean reversion)
+            if not downtrend or close[i] > r1_level:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
