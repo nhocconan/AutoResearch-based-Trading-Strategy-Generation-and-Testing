@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1h_Bollinger_Band_Bounce_Volume_Trend
-# Hypothesis: In 1h timeframe, price tends to bounce off Bollinger Bands (20,2) with volume confirmation
-# and 4h trend alignment. This mean-reversion strategy works in both bull and bear markets
-# by trading reversals from extremes while respecting the higher timeframe trend.
-# Uses Bollinger Bands for entry/exit, volume for confirmation, and 4h EMA for trend filter.
-# Target: 15-35 trades/year (60-140 total over 4 years) to minimize fee drag.
+# 6h_Weekly_Pivot_Breakout_1dTrend_Volume
+# Hypothesis: Weekly pivot points (PP, R1, S1, R2, S2) derived from the prior week act as key support/resistance.
+# A breakout above R1 (bullish) or below S1 (bearish) with 1-day EMA34 trend filter and volume confirmation
+# captures sustained moves. Weekly pivot provides longer-term structure than daily, reducing noise and
+# improving performance in both bull and bear markets by aligning with the dominant weekly trend.
+# The 1d EMA34 ensures we trade in the direction of the recent daily trend, and volume confirmation
+# avoids false breakouts. Expected low trade frequency due to strict conditions.
 
-name = "1h_Bollinger_Band_Bounce_Volume_Trend"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,77 +25,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 1h
-    bb_period = 20
-    bb_std = 2
-    close_series = pd.Series(close)
-    bb_middle = close_series.rolling(window=bb_period, min_periods=bb_period).mean().values
-    bb_std_dev = close_series.rolling(window=bb_period, min_periods=bb_period).std().values
-    bb_upper = bb_middle + bb_std * bb_std_dev
-    bb_lower = bb_middle - bb_std * bb_std_dev
+    # 1w data for weekly pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h data for trend filter and session filtering
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Calculate weekly pivot points from previous week
+    # PP = (high + low + close) / 3
+    # R1 = 2*PP - low
+    # S1 = 2*PP - high
+    # R2 = PP + (high - low)
+    # S2 = PP - (high - low)
+    pp = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pp - low_1w
+    s1 = 2 * pp - high_1w
+    r2 = pp + (high_1w - low_1w)
+    s2 = pp - (high_1w - low_1w)
     
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Align weekly pivot levels to 6h timeframe (wait for weekly bar to close)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
     
-    # Volume confirmation (24-period average = 1 day for 1h)
+    # 1d data for EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation (4-period average = 1 day for 6h timeframe)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, 24)
-    
-    # Session filter: 08-20 UTC (precomputed for efficiency)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    vol_ma = mean_arr(volume, 4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(bb_period, 34)  # Need enough history for BB and EMA
+    start_idx = 34  # Need enough history for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or \
-           np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        if not in_session[i]:
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
+           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price touches/bounces off lower BB, above 4h EMA34, volume confirmation
-            if close[i] <= bb_lower[i] and close[i] > ema_34_4h_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R1, above 1d EMA34, volume confirmation
+            if close[i] > r1_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price touches/bounces off upper BB, below 4h EMA34, volume confirmation
-            elif close[i] >= bb_upper[i] and close[i] < ema_34_4h_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S1, below 1d EMA34, volume confirmation
+            elif close[i] < s1_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches middle BB or crosses below 4h EMA34
-            if close[i] >= bb_middle[i] or close[i] < ema_34_4h_aligned[i]:
+            # Long exit: price drops below S1 or below 1d EMA34
+            if close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches middle BB or crosses above 4h EMA34
-            if close[i] <= bb_middle[i] or close[i] > ema_34_4h_aligned[i]:
+            # Short exit: price rises above R1 or above 1d EMA34
+            if close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
