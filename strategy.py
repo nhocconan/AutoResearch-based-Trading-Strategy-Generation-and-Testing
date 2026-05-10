@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Donchian20_Breakout_1dTrend_VolumeConfirmation
-# Hypothesis: Breakout above/below 20-bar Donchian channel on 12h timeframe with 1d trend filter and volume spike confirmation.
-# In bull markets: breakout above upper band triggers long; in bear markets: breakout below lower band triggers short.
-# Trend filter uses 1d EMA50 to avoid counter-trend trades. Volume confirmation ensures breakout legitimacy.
-# Targets ~20-40 trades/year to minimize fee drag and avoid overtrading.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Buy at Camarilla R1 support with 1d uptrend and volume spike; sell at S1 resistance with 1d downtrend and volume spike.
+# Uses daily trend filter to avoid counter-trend trades, volume confirmation for breakout strength, and Camarilla levels from prior day for precise entries.
+# Designed to work in both bull and bear markets by following the daily trend while capturing intraday reversals at key levels.
+# Targets ~25 trades/year to minimize fee drag.
 
-name = "12h_Donchian20_Breakout_1dTrend_VolumeConfirmation"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,72 +23,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channel (20-period)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # 1d EMA50 for trend filter
+    # Daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    # Daily EMA34 trend
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 12h
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # Volume confirmation: current volume > 1.5 * 20-period average volume
+    # Calculate Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values
+    
+    # Camarilla levels: based on previous day's range
+    R1 = close_1d_prev + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d_prev - 1.1 * (high_1d - low_1d) / 12
+    
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # Volume spike: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmation = volume > (1.5 * vol_ma)
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(lookback, 50)
+    start_idx = 34  # Wait for EMA34 calculation
     
     for i in range(start_idx, n):
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(volume_confirmation[i])):
+        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: breakout above upper Donchian band in uptrend with volume confirmation
-            if (high[i] > highest_high[i] and
+            # Long: price at R1 support with daily uptrend and volume spike
+            if (low[i] <= R1_aligned[i] * 1.002 and  # within 0.2% of R1
                 trend_1d_up_aligned[i] > 0.5 and
-                volume_confirmation[i]):
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below lower Donchian band in downtrend with volume confirmation
-            elif (low[i] < lowest_low[i] and
+            # Short: price at S1 resistance with daily downtrend and volume spike
+            elif (high[i] >= S1_aligned[i] * 0.998 and  # within 0.2% of S1
                   trend_1d_down_aligned[i] > 0.5 and
-                  volume_confirmation[i]):
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price closes below middle of Donchian channel or trend reversal
-            mid_band = (highest_high[i] + lowest_low[i]) / 2
-            if (close[i] < mid_band or
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: price reaches S1 or daily trend turns down
+            if (high[i] >= S1_aligned[i] * 0.998 or
+                trend_1d_down_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price closes above middle of Donchian channel or trend reversal
-            mid_band = (highest_high[i] + lowest_low[i]) / 2
-            if (close[i] > mid_band or
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: price reaches R1 or daily trend turns up
+            if (low[i] <= R1_aligned[i] * 1.002 or
+                trend_1d_up_aligned[i] > 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
