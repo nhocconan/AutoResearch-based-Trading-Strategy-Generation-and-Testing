@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 12h_KAMA_RSI_Trend_Filter
-# Hypothesis: On 12h timeframe, KAMA captures trend direction while RSI filters overextended entries.
-# In trending markets (KAMA slope > 0), go long on RSI pullbacks from overbought (RSI < 60).
-# In downtrends (KAMA slope < 0), go short on RSI bounces from oversold (RSI > 40).
-# Uses 1w EMA50 as higher timeframe trend filter to avoid counter-trend trades.
-# Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull/bear markets.
+# 1D_1W_CCI_Trend_Follow
+# Hypothesis: On the daily chart, CCI(20) identifies overbought/oversold conditions within the weekly trend.
+# In a weekly uptrend (close > weekly EMA50), go long when daily CCI crosses below -100 (oversold pullback).
+# In a weekly downtrend (close < weekly EMA50), go short when daily CCI crosses above 100 (overbought pullback).
+# Uses weekly EMA50 for trend filter and daily CCI(20) for entry timing.
+# Works in bull/bear by following weekly trend direction. Target: 10-20 trades/year per symbol.
 
-name = "12h_KAMA_RSI_Trend_Filter"
-timeframe = "12h"
+name = "1D_1W_CCI_Trend_Follow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,79 +16,40 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get weekly data for higher timeframe trend filter
+    # Get weekly data
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    close_1w_series = pd.Series(close_1w)
+    
     # Weekly EMA50 for trend filter
+    close_1w_series = pd.Series(close_1w)
     ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Get daily data for KAMA and RSI calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Trend: bullish if close > EMA50, bearish if close < EMA50
+    bullish_trend = close_1w > ema50_1w
+    bearish_trend = close_1w < ema50_1w
     
-    close_1d = df_1d['close'].values
+    # Align weekly trend to daily
+    bullish_aligned = align_htf_to_ltf(prices, df_1w, bullish_trend.astype(float))
+    bearish_aligned = align_htf_to_ltf(prices, df_1w, bearish_trend.astype(float))
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily data
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0)  # placeholder, will compute properly below
-    
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        if i >= 1:
-            direction = np.abs(close_1d[i] - close_1d[i-10]) if i >= 10 else np.abs(close_1d[i] - close_1d[0])
-            volatility = np.sum(np.abs(np.diff(close_1d[max(0,i-9):i+1])))
-            if volatility > 0:
-                er[i] = direction / volatility
-            else:
-                er[i] = 0
-    
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    # Calculate RSI(14) on daily data
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align weekly EMA50 to 12h
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # Align daily KAMA and RSI to 12h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Daily CCI(20)
+    typical_price = (high + low + close) / 3.0
+    tp_series = pd.Series(typical_price)
+    sma_tp = tp_series.rolling(window=20, min_periods=20).mean()
+    mad = tp_series.rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True)
+    cci = (typical_price - sma_tp.values) / (0.015 * mad.values)
+    # Handle division by zero or invalid mad
+    cci = np.where(mad.values == 0, 0, cci)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -98,44 +59,37 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
+            np.isnan(cci[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter: only trade in direction of weekly trend
-        weekly_uptrend = close_1w[-1] > ema50_1w_aligned[i] if len(close_1w) > 0 else False
-        weekly_downtrend = close_1w[-1] < ema50_1w_aligned[i] if len(close_1w) > 0 else False
-        
-        # Daily signals
-        price_above_kama = close[i] > kama_aligned[i]
-        price_below_kama = close[i] < kama_aligned[i]
-        rsi_not_overbought = rsi_aligned[i] < 60  # Avoid buying too overextended
-        rsi_not_oversold = rsi_aligned[i] > 40    # Avoid selling too overextended
+        bullish = bullish_aligned[i] > 0.5
+        bearish = bearish_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: weekly uptrend + price above KAMA + RSI not overbought
-            if weekly_uptrend and price_above_kama and rsi_not_overbought:
+            # Enter long: weekly uptrend + daily CCI crosses below -100 (oversold)
+            if bullish and cci[i] < -100 and cci[i-1] >= -100:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly downtrend + price below KAMA + RSI not oversold
-            elif weekly_downtrend and price_below_kama and rsi_not_oversold:
+            # Enter short: weekly downtrend + daily CCI crosses above 100 (overbought)
+            elif bearish and cci[i] > 100 and cci[i-1] <= 100:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly downtrend or price below KAMA
-            if not weekly_uptrend or price_below_kama:
+            # Exit long: weekly downtrend or daily CCI crosses above 100 (overbought)
+            if bearish or (cci[i] > 100 and cci[i-1] <= 100):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly uptrend or price above KAMA
-            if not weekly_downtrend or price_above_kama:
+            # Exit short: weekly uptrend or daily CCI crosses below -100 (oversold)
+            if bullish or (cci[i] < -100 and cci[i-1] >= -100):
                 signals[i] = 0.0
                 position = 0
             else:
