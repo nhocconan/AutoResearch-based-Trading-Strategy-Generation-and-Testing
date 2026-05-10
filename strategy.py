@@ -1,9 +1,10 @@
-# 6h_Camarilla_R4_S4_Breakout_1dTrend_Volume
-# Hypothesis: 6-hour breakouts from daily Camarilla R4/S4 levels with daily trend filter (EMA34) and volume confirmation.
-# Daily EMA34 filters trend direction to avoid counter-trend trades; daily Camarilla R4/S4 levels provide breakout/continuation signals;
-# Volume confirmation ensures breakout strength. Designed for 6h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+#!/usr/bin/env python3
+# 6h_Weekly_Pivot_Breakout_1dTrend_Volume
+# Hypothesis: Weekly pivot points (calculated from prior week OHLC) provide strong support/resistance.
+# Breakouts above R1 or below S1 with 1d EMA34 trend filter and volume confirmation capture institutional moves.
+# Weekly timeframe reduces noise, suitable for 6h to achieve 12-37 trades/year. Works in bull/bear via trend filter.
 
-name = "6h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+name = "6h_Weekly_Pivot_Breakout_1dTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,30 +22,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA34 trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot points (based on prior week)
+    def calculate_pivot_point(h, l, c):
+        pivot = (h + l + c) / 3.0
+        R1 = 2 * pivot - l
+        S1 = 2 * pivot - h
+        return R1, S1
+    
+    R1 = np.full_like(close_1w, np.nan)
+    S1 = np.full_like(close_1w, np.nan)
+    for i in range(1, len(close_1w)):
+        R1[i], S1[i] = calculate_pivot_point(high_1w[i-1], low_1w[i-1], close_1w[i-1])
     
     # Daily EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Camarilla levels (based on previous day)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R4 = c + (range_ * 1.1000 / 2)
-        S4 = c - (range_ * 1.1000 / 2)
-        return R4, S4
-    
-    R4 = np.full_like(close_1d, np.nan)
-    S4 = np.full_like(close_1d, np.nan)
-    for i in range(1, len(close_1d)):
-        R4[i], S4[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-    
     # Daily volume confirmation: 20-period average
+    volume_1d = df_1d['volume'].values
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -53,10 +55,10 @@ def generate_signals(prices):
         return res
     vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align daily indicators to 6h timeframe (wait for 1d bar to close)
+    # Align weekly and daily indicators to 6h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
@@ -65,7 +67,7 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or \
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
@@ -73,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R4, above daily EMA34, strong volume
-            if close[i] > R4_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: price breaks above R1, above daily EMA34, strong volume
+            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S4, below daily EMA34, strong volume
-            elif close[i] < S4_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: price breaks below S1, below daily EMA34, strong volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S4 or below daily EMA34
-            if close[i] < S4_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: price drops below S1 or below daily EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R4 or above daily EMA34
-            if close[i] > R4_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: price rises above R1 or above daily EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
