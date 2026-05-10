@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Pivot_Breakout_TrendVolume_v1
-# Hypothesis: Daily pivot points (R1/S1) act as key support/resistance. Breaking above R1 in a daily uptrend or below S1 in a daily downtrend indicates momentum. Uses 12h timeframe for lower trade frequency, volume confirmation to filter false breakouts, and trend filter (daily EMA34) to align with higher timeframe bias. Designed to work in both bull and bear markets by following the daily trend.
+# 4h_KAMA_Trend_With_Volume_Confirm
+# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a dynamic trend filter.
+# In trending markets, KAMA closely follows price; in ranging markets, it stays flat.
+# Strategy: Go long when price crosses above KAMA with volume confirmation, short when price crosses below KAMA with volume confirmation.
+# Uses daily trend filter (EMA34) to avoid counter-trend trades. Volume confirmation requires 2.0x 20-period MA to filter noise.
+# Designed for low trade frequency (<50/year) to minimize fee drag and work in both bull and bear markets.
 
-name = "12h_Pivot_Breakout_TrendVolume_v1"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,41 +24,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for pivot levels and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
+    # Daily EMA34 for trend filter
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate daily pivot levels (standard formula)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # KAMA parameters
+    er_len = 10
+    fast_sc = 2 / (2 + 1)  # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
     
-    pivot_point = (daily_high + daily_low + daily_close) / 3
-    daily_r1 = 2 * pivot_point - daily_low
-    daily_s1 = 2 * pivot_point - daily_high
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Handle volatility calculation for array
+    volatility_full = np.zeros_like(close)
+    for i in range(er_len, len(close)):
+        volatility_full[i] = np.sum(np.abs(np.diff(close[i-er_len:i])))
+    er = np.where(volatility_full != 0, change / volatility_full, 0)
     
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    # Calculate Smoothing Constant (SC)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Volume confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need KAMA (er_len), EMA34 (34), volume MA (20)
+    start_idx = max(er_len, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(daily_r1_aligned[i]) or 
-            np.isnan(daily_s1_aligned[i]) or 
+        if (np.isnan(kama[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,28 +79,28 @@ def generate_signals(prices):
         uptrend = close[i] > ema_34_1d_aligned[i]
         downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (2.0x MA to reduce false signals)
+        # Volume confirmation (stricter: >2.0x MA to reduce false signals)
         volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above daily R1 + volume
-            if uptrend and close[i] > daily_r1_aligned[i] and volume_confirm:
+            # Long entry: price crosses above KAMA + uptrend + volume
+            if close[i] > kama[i] and close[i-1] <= kama[i-1] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below daily S1 + volume
-            elif downtrend and close[i] < daily_s1_aligned[i] and volume_confirm:
+            # Short entry: price crosses below KAMA + downtrend + volume
+            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < daily_r1_aligned[i]:
+            # Long exit: price crosses below KAMA or trend breaks
+            if close[i] < kama[i] or close[i-1] >= kama[i-1] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > daily_s1_aligned[i]:
+            # Short exit: price crosses above KAMA or trend breaks
+            if close[i] > kama[i] or close[i-1] <= kama[i-1] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
