@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
