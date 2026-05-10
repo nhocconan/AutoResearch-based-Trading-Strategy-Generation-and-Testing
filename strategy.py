@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_4hTrend_1dVolumeBreakout
-Hypothesis: Use 4h EMA trend as directional filter, enter on 1h Donchian breakout with volume confirmation.
-1d volume spike filter ensures participation from larger timeframe participants.
-Designed for 15-30 trades/year on 1h timeframe to avoid fee drag while capturing trending moves.
-Works in both bull and bear markets via trend filter - only trades in direction of 4h trend.
+6h_RangeBreakout_WeeklyTrend_Volume
+Hypothesis: Combine weekly trend filter with 6h range breakout and volume confirmation to capture momentum in both bull and bear markets.
+Weekly EMA200 establishes long-term trend direction. 6h price breaking above/below prior 24-bar high/low with volume confirms momentum.
+Designed for 12-30 trades/year on 6h timeframe with strict entry criteria to minimize fee drag.
 """
 
-name = "1h_4hTrend_1dVolumeBreakout"
-timeframe = "1h"
+name = "6h_RangeBreakout_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,76 +19,68 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 4h data for trend filter (EMA20)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly data for trend filter
+    df_weekly = get_htf_data(prices, '1w')
+    
+    if len(df_weekly) < 50:
         return np.zeros(n)
     
-    # 4h EMA20 for trend direction
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+    # Weekly EMA200 for trend filter
+    ema_200 = pd.Series(df_weekly['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_aligned = align_htf_to_ltf(prices, df_weekly, ema_200)
     
-    # Get 1d data for volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1d volume EMA20 for volume spike detection
-    vol_ema_20_1d = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ema_20_1d, additional_delay_bars=0)
-    
-    # 1h price data
+    # Get 6h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h Donchian channels (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume filter: current volume > 1.8x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema20 * 1.8
     
-    # Volume spike: current 1h volume > 1.5x 1d average volume (aligned)
-    volume_spike = volume > (vol_ema_20_1d_aligned * 1.5)
+    # 6h range: highest high and lowest low of prior 24 bars (4 days)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    rolling_high = high_series.rolling(window=24, min_periods=24).max().shift(1).values
+    rolling_low = low_series.rolling(window=24, min_periods=24).min().shift(1).values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 4h EMA (20), 1d volume EMA (20), Donchian (20)
-    start_idx = 20
+    # Warmup: need weekly EMA200 (200 bars) and 6h range (24 bars)
+    start_idx = 200
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(vol_ema_20_1d_aligned[i]) or
-            np.isnan(high_max_20[i]) or
-            np.isnan(low_min_20[i])):
+        # Skip if weekly trend is not available
+        if np.isnan(ema_200_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: 4h uptrend AND price breaks above 20-period high with volume spike
-            if close[i] > ema_20_4h_aligned[i] and high[i] > high_max_20[i] and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: above weekly EMA200 (bullish trend) AND price breaks above 24-bar high with volume
+            if close[i] > ema_200_aligned[i] and high[i] > rolling_high[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend AND price breaks below 20-period low with volume spike
-            elif close[i] < ema_20_4h_aligned[i] and low[i] < low_min_20[i] and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: below weekly EMA200 (bearish trend) AND price breaks below 24-bar low with volume
+            elif close[i] < ema_200_aligned[i] and low[i] < rolling_low[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 20-period low OR 4h trend turns down
-            if low[i] < low_min_20[i] or close[i] < ema_20_4h_aligned[i]:
+            # Long exit: price breaks below 24-bar low OR trend turns bearish
+            if low[i] < rolling_low[i] or close[i] < ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 20-period high OR 4h trend turns up
-            if high[i] > high_max_20[i] or close[i] > ema_20_4h_aligned[i]:
+            # Short exit: price breaks above 24-bar high OR trend turns bullish
+            if high[i] > rolling_high[i] or close[i] > ema_200_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
