@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_KeltnerChannel_Breakout_12hTrend_Volume
-# Hypothesis: Long when price breaks above Keltner upper band (EMA20 + 2*ATR) with volume > 1.5x average in uptrend (price > 12h EMA50).
-# Short when price breaks below Keltner lower band (EMA20 - 2*ATR) with volume > 1.5x average in downtrend (price < 12h EMA50).
-# Exit when price crosses back below/above EMA20 or ATR-based stoploss hit.
-# Designed for 20-50 trades/year to avoid fee drag. Works in bull/bear via trend filter.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: Use 4h trend (price > 4h EMA50) and 1d momentum (price > 1d EMA200) for direction. 
+# Enter long at 1h when price breaks above Camarilla R1 with volume > 1.5x average, short below S1 in downtrend.
+# Exit when price crosses Camarilla pivot (PP) or ATR-based stop hit. Designed for 15-35 trades/year on 1h.
 
-name = "4h_KeltnerChannel_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(20) for Keltner bands and stoploss
+    # Calculate True Range and ATR(20)
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -32,68 +31,86 @@ def generate_signals(prices):
     for i in range(20, n):
         atr[i] = np.nanmean(tr[i-19:i+1])
     
-    # EMA20 for Keltner basis
-    ema20 = np.full(n, np.nan)
-    k = 2 / (20 + 1)
-    for i in range(20, n):
-        if i == 20:
-            ema20[i] = np.mean(close[0:20])
-        else:
-            ema20[i] = close[i] * k + ema20[i-1] * (1 - k)
+    # Calculate Camarilla levels from previous day
+    # Using daily high, low, close from 1d data
+    df_1d = get_htf_data(prices, '1d')
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Keltner bands
-    keltner_up = ema20 + 2 * atr
-    keltner_dn = ema20 - 2 * atr
+    # Previous day values for Camarilla calculation
+    pd_high = np.concatenate([[np.nan], d_high[:-1]])
+    pd_low = np.concatenate([[np.nan], d_low[:-1]])
+    pd_close = np.concatenate([[np.nan], d_close[:-1]])
     
-    # Get 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Camarilla formulas
+    pp = (pd_high + pd_low + pd_close) / 3
+    r1 = pp + (pd_high - pd_low) * 1.1 / 12
+    s1 = pp - (pd_high - pd_low) * 1.1 / 12
     
-    # Volume average (20 periods)
+    # Align Camarilla levels to 1h
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    
+    # 1d EMA200 for regime filter
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Volume average (24 periods)
     vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.nanmean(volume[i-20:i])
+    for i in range(24, n):
+        vol_ma[i] = np.nanmean(volume[i-24:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient warmup
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(keltner_up[i]) or np.isnan(keltner_dn[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trade only in direction of 12h EMA50 trend
-            if close[i] > ema_50_12h_aligned[i]:  # Uptrend
-                # Long: Breakout above Keltner upper band with volume confirmation
-                if close[i] > keltner_up[i] and volume[i] > 1.5 * vol_ma[i]:
-                    signals[i] = 0.25
+            # Determine trend: 4h EMA50 and 1d EMA200 both must agree
+            uptrend = close[i] > ema_50_4h_aligned[i] and close[i] > ema_200_1d_aligned[i]
+            downtrend = close[i] < ema_50_4h_aligned[i] and close[i] < ema_200_1d_aligned[i]
+            
+            if uptrend:
+                # Long: Break above R1 with volume confirmation
+                if close[i] > r1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = 0.20
                     position = 1
-            else:  # Downtrend
-                # Short: Breakout below Keltner lower band with volume confirmation
-                if close[i] < keltner_dn[i] and volume[i] > 1.5 * vol_ma[i]:
-                    signals[i] = -0.25
+            elif downtrend:
+                # Short: Break below S1 with volume confirmation
+                if close[i] < s1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = -0.20
                     position = -1
         
         elif position == 1:
-            # Exit: Price closes below EMA20 or stoploss hit
-            if close[i] < ema20[i] or (i > 0 and low[i] < keltner_dn[i] - 2.0 * atr[i-1]):
+            # Exit: Price crosses below pivot PP or ATR stop
+            if close[i] < pp_aligned[i] or (i > 0 and low[i] < pp_aligned[i] - 1.5 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: Price closes above EMA20 or stoploss hit
-            if close[i] > ema20[i] or (i > 0 and high[i] > keltner_up[i] + 2.0 * atr[i-1]):
+            # Exit: Price crosses above pivot PP or ATR stop
+            if close[i] > pp_aligned[i] or (i > 0 and high[i] > pp_aligned[i] + 1.5 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
