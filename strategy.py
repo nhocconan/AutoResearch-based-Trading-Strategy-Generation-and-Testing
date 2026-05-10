@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_KC_Breakout_Volume_KC_Width
-# Hypothesis: Bollinger Bandwidth (BBW) identifies low-volatility squeezes that precede breakouts.
-# When price breaks above the upper Keltner Channel (KC) with volume confirmation, it signals a bullish breakout.
-# Conversely, breaking below the lower KC with volume confirms a bearish breakout.
-# KC is used because it adapts better to volatility than BB, reducing false breakouts in choppy markets.
-# Volume filter ensures breakouts are supported by participation, reducing false signals.
-# Designed for low trade frequency (20-40/year) to minimize fee drag.
+# 1h_4h1D_Trend_Momentum_With_Volume_v2
+# Hypothesis: Use 4h for trend direction (EMA21) and 1d for momentum (RSI50 > 50), with volume confirmation on 1h.
+# Enter long when 4h EMA21 rising, 1d RSI > 50, and 1h price breaks above 20-period high with volume > 1.5x average.
+# Enter short when 4h EMA21 falling, 1d RSI < 50, and 1h price breaks below 20-period low with volume > 1.5x average.
+# Exit when trend reverses or momentum fails. Designed for low trade frequency (15-30/year) to avoid fee drag.
+# Works in bull (follows 4h trend) and bear (avoids counter-trend trades via 4h EMA filter).
 
-name = "4h_KC_Breakout_Volume_KC_Width"
-timeframe = "4h"
+name = "1h_4h1D_Trend_Momentum_With_Volume_v2"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,91 +24,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands for bandwidth calculation (20, 2)
-    bb_period = 20
-    bb_mult = 2
-    close_series = pd.Series(close)
-    bb_ma = close_series.ewm(span=bb_period, adjust=False, min_periods=bb_period).mean()
-    bb_std = close_series.ewm(span=bb_period, adjust=False, min_periods=bb_period).std()
-    bb_upper = bb_ma + bb_mult * bb_std
-    bb_lower = bb_ma - bb_mult * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_ma  # Normalized bandwidth
+    # === 4h Trend: EMA21 ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Keltner Channel (20, ATR multiplier 1.5)
-    kc_period = 20
-    kc_mult = 1.5
+    # 4h EMA slope (rising/falling)
+    ema_4h_slope = np.zeros_like(ema_4h_aligned)
+    ema_4h_slope[1:] = ema_4h_aligned[1:] - ema_4h_aligned[:-1]
     
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value has no previous close
+    # === 1d Momentum: RSI(14) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # ATR
-    atr = pd.Series(tr).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean()
+    # === 1h Breakout: 20-period high/low ===
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # KC middle line (EMA of close)
-    kc_middle = close_series.ewm(span=kc_period, adjust=False, min_periods=kc_period).mean()
-    kc_upper = kc_middle + kc_mult * atr
-    kc_lower = kc_middle - kc_mult * atr
-    
-    # Volume confirmation (20-period average)
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
-        return res
-    vol_ma = mean_arr(volume, 20)
-    
-    # Bollinger Bandwidth regime filter: low volatility = squeeze
-    # We use 50-period percentile of BBW to define squeeze (below 20th percentile = squeeze)
-    bbw_series = pd.Series(bb_width.values)
-    bbw_rank = bbw_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False
-    )
-    squeeze_condition = bbw_rank < 0.2  # Below 20th percentile = low volatility squeeze
+    # === 1h Volume: 20-period average ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20) + 5  # Need enough history for all indicators
+    start_idx = max(20, 21, 14)  # warmup for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(squeeze_condition.iloc[i] if hasattr(squeeze_condition, 'iloc') else squeeze_condition[i]):
+        # Skip if any key data is NaN
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_4h_slope[i]) or \
+           np.isnan(rsi_1d_aligned[i]) or np.isnan(high_20[i]) or np.isnan(low_20[i]) or \
+           np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Extract squeeze value safely
-        sq_val = squeeze_condition.iloc[i] if hasattr(squeeze_condition, 'iloc') else squeeze_condition[i]
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long breakout: price closes above upper KC AND volatility squeeze
-            if close[i] > kc_upper[i] and sq_val and vol_confirm:
-                signals[i] = 0.25
+            # Long: 4h EMA rising, 1d RSI > 50, break above 20-period high with volume
+            if ema_4h_slope[i] > 0 and rsi_1d_aligned[i] > 50 and close[i] > high_20[i] and vol_confirm:
+                signals[i] = 0.20
                 position = 1
-            # Short breakout: price closes below lower KC AND volatility squeeze
-            elif close[i] < kc_lower[i] and sq_val and vol_confirm:
-                signals[i] = -0.25
+            # Short: 4h EMA falling, 1d RSI < 50, break below 20-period low with volume
+            elif ema_4h_slope[i] < 0 and rsi_1d_aligned[i] < 50 and close[i] < low_20[i] and vol_confirm:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price closes below middle KC OR volatility expansion (end of squeeze)
-            if close[i] < kc_middle[i] or not sq_val:
+            # Long exit: 4h EMA falling OR 1d RSI < 50
+            if ema_4h_slope[i] < 0 or rsi_1d_aligned[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price closes above middle KC OR volatility expansion
-            if close[i] > kc_middle[i] or not sq_val:
+            # Short exit: 4h EMA rising OR 1d RSI > 50
+            if ema_4h_slope[i] > 0 or rsi_1d_aligned[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
