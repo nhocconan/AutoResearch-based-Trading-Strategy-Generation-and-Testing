@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R3S3_Breakout_Trend_Volume
-# Hypothesis: Breakouts at Camarilla R3/S3 levels from the previous day (1d) with 1d EMA50 trend filter and volume confirmation (1.5x 24-period average).
-# Uses daily timeframe for trend and pivot levels to reduce noise, and 4h for precise entry timing.
-# Works in both bull and bear markets by aligning with the higher timeframe trend.
+# 4h_Camarilla_R3S3_Breakout_1dEMA134_Trend_VolumeS
+# Hypothesis: Breakouts at Camarilla R3/S3 levels with 1d EMA134 trend filter and volume confirmation (1.5x 24-period average).
+# Uses 4h timeframe for institutional entries, works in bull/bear markets via trend alignment.
 # Target: 20-50 trades/year to minimize fee drag on 4h timeframe.
 
-name = "4h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA134_Trend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 140:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,15 +22,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA50)
+    # 1d trend filter (EMA134)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 134:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    ema134_1d = pd.Series(close_1d).ewm(span=134, adjust=False, min_periods=134).mean().values
+    trend_1d_up = close_1d > ema134_1d
+    trend_1d_down = close_1d < ema134_1d
     
     # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
@@ -48,19 +47,19 @@ def generate_signals(prices):
             vol_ma[i] = vol_sum / 24
     volume_confirm = volume > (1.5 * vol_ma)
     
-    # Calculate Camarilla levels from previous 1d bar (not 4h)
-    df_1d_full = get_htf_data(prices, '1d')
-    if len(df_1d_full) < 2:
+    # Calculate Camarilla levels from previous 4h bar
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d_full['high'].values
-    low_1d = df_1d_full['low'].values
-    close_1d_full = df_1d_full['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Shift to get previous 1d bar values
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d_full, 1)
+    # Shift to get previous 4h bar values
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close = np.roll(close_4h, 1)
     prev_high[0] = np.nan
     prev_low[0] = np.nan
     prev_close[0] = np.nan
@@ -70,13 +69,13 @@ def generate_signals(prices):
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
     # Align Camarilla levels to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d_full, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d_full, S3)
+    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for all indicators
+    start_idx = 140  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
