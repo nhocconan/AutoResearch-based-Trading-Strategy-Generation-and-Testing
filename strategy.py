@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4H_1D_Alligator_ElderRay_Trend
-# Hypothesis: On 4h timeframe, enter long when Williams Alligator lines are bullish (jaw > teeth > lips) and Elder Ray bull power > 0 with 1d uptrend confirmation.
-# Short when Alligator lines are bearish (jaw < teeth < lips) and Elder Ray bear power < 0 with 1d downtrend.
-# Uses 1d EMA(50) for trend filter to avoid counter-trend trades.
-# Target: 25-40 trades/year per symbol (100-160 total over 4 years).
+# 1D_1W_Camarilla_R1_S1_Breakout_WeekTrend
+# Hypothesis: On daily timeframe, enter long when price breaks above weekly Camarilla R1 with weekly uptrend.
+# Short when price breaks below weekly Camarilla S1 with weekly downtrend.
+# Weekly timeframe filters out daily noise, reducing overtrading and focusing on major trend changes.
+# Target: 10-25 trades/year per symbol (40-100 total over 4 years).
 
-name = "4H_1D_Alligator_ElderRay_Trend"
-timeframe = "4h"
+name = "1D_1W_Camarilla_R1_S1_Breakout_WeekTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,40 +23,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and Elder Ray
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Camarilla levels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1d = close_1d > ema_50_1d
+    # Calculate weekly Camarilla levels: R1, S1 based on previous week
+    typical_price = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    camarilla_r1 = close_1w + (range_1w * 1.1 / 12)
+    camarilla_s1 = close_1w - (range_1w * 1.1 / 12)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
+    # Weekly trend: EMA(34) on close
+    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1w > ema_34
     
-    # Williams Alligator on 1d: SMA of median price (HL/2)
-    # Jaw: 13-period SMA, 8 bars ahead
-    # Teeth: 8-period SMA, 5 bars ahead
-    # Lips: 5-period SMA, 3 bars ahead
-    median_price_1d = (high_1d + low_1d) / 2
-    jaw = pd.Series(median_price_1d).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price_1d).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price_1d).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Volume confirmation: current volume > 1.5x 20-period average
+    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align 1d indicators to 4h
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Align weekly indicators to daily
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,36 +59,33 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: Alligator bullish (jaw > teeth > lips) + Bull Power > 0 + 1d uptrend
-            if (jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i] and
-                bull_power_aligned[i] > 0 and trend_up_1d_aligned[i]):
+            # Enter long: price breaks above weekly Camarilla R1 + weekly uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Alligator bearish (jaw < teeth < lips) + Bear Power < 0 + 1d downtrend
-            elif (jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i] and
-                  bear_power_aligned[i] < 0 and not trend_up_1d_aligned[i]):
+            # Enter short: price breaks below weekly Camarilla S1 + weekly downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: Alligator turns bearish OR Bull Power <= 0
-            if not (jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]) or bull_power_aligned[i] <= 0:
+            # Exit long: price breaks below weekly Camarilla S1 (reversal) or trend changes
+            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: Alligator turns bullish OR Bear Power >= 0
-            if not (jaw_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < lips_aligned[i]) or bear_power_aligned[i] >= 0:
+            # Exit short: price breaks above weekly Camarilla R1 (reversal) or trend changes
+            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
