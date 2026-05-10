@@ -1,13 +1,11 @@
-# 6H_Donchian_Breakout_WeeklyTrend_Volume
-# Hypothesis: Donchian(20) breakout on 6h chart with weekly trend filter and volume confirmation.
-# Long when price breaks above 20-period Donchian high + weekly uptrend + volume > 1.5x average.
-# Short when price breaks below 20-period Donchian low + weekly downtrend + volume > 1.5x average.
-# Exit when price closes back inside the Donchian channel.
-# Uses weekly trend to filter direction, reducing false signals in choppy markets.
-# Target: 15-30 trades/year per symbol. Works in bull/bear by following weekly trend.
+#!/usr/bin/env python3
+# 12H_WedgeBreakout_With_1wTrend_Volume
+# Hypothesis: Breakouts from ascending/descending wedges (defined by higher lows/lower highs)
+# combined with 1-week trend and volume confirmation. Works in bull/bear by following 1w trend.
+# Uses 12h timeframe to limit trades (<30/year) and avoid fee drag.
 
-name = "6H_Donchian_Breakout_WeeklyTrend_Volume"
-timeframe = "6h"
+name = "12H_WedgeBreakout_With_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,17 +22,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Wedge detection: higher lows and lower highs over 5 periods
+    # Higher low: low[i] > low[i-5]
+    # Lower high: high[i] < high[i-5]
+    higher_low = np.zeros(n, dtype=bool)
+    lower_high = np.zeros(n, dtype=bool)
     
-    # Volume average (20-period)
+    for i in range(5, n):
+        higher_low[i] = low[i] > low[i-5]
+        lower_high[i] = high[i] < high[i-5]
+    
+    # Ascending wedge: higher lows + lower highs (bullish breakout potential)
+    # Descending wedge: lower highs + higher lows (same condition, context by trend)
+    wedge_forming = higher_low & lower_high
+    
+    # Volume confirmation: 2x average volume
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Weekly trend (EMA50 on weekly data)
+    # 1-week trend (EMA50)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 50:
         return np.zeros(n)
@@ -44,7 +50,7 @@ def generate_signals(prices):
     trend_1w_up = close_1w > ema50_1w
     trend_1w_down = close_1w < ema50_1w
     
-    # Align weekly trend to 6h
+    # Align 1w trend to 12h
     trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
     trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
@@ -52,11 +58,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or
+        if (np.isnan(vol_ma[i]) or
             np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -64,32 +70,36 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
+        volume_confirm = vol_ratio > 2.0
         
+        wedge_now = wedge_forming[i]
         trend_up = trend_1w_up_aligned[i] > 0.5
         trend_down = trend_1w_down_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: breakout above Donchian high + weekly uptrend + volume
-            if close[i] > donchian_high[i] and trend_up and volume_confirm:
+            # Enter long: wedge breakout up + 1w uptrend + volume
+            # Breakout up: close above previous high
+            if i > 0 and wedge_now and close[i] > high[i-1] and trend_up and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: breakout below Donchian low + weekly downtrend + volume
-            elif close[i] < donchian_low[i] and trend_down and volume_confirm:
+            # Enter short: wedge breakout down + 1w downtrend + volume
+            # Breakout down: close below previous low
+            elif i > 0 and wedge_now and close[i] < low[i-1] and trend_down and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price closes back inside Donchian channel
-            if close[i] < donchian_high[i]:
+            # Exit when wedge breaks down (close below wedge support)
+            # Simple exit: close below previous low (trailing stop logic)
+            if i > 0 and close[i] < low[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price closes back inside Donchian channel
-            if close[i] > donchian_low[i]:
+            # Exit when wedge breaks up (close above wedge resistance)
+            if i > 0 and close[i] > high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
