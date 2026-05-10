@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4H_1W_RSI_EXTREMES_VOLUME_CONFIRMATION
-# Hypothesis: RSI(14) extremes (<30 or >70) on 4h with weekly trend filter and volume confirmation captures mean-reversion in overbought/oversold conditions while avoiding counter-trend trades. Weekly trend ensures alignment with higher timeframe momentum, volume reduces false signals. Designed for 20-40 trades/year to minimize fee drag.
+# 1d_Camarilla_R1S1_Breakout_1wTrend_Volume
+# Hypothesis: On daily timeframe, price breaking Camarilla R1/S1 levels with weekly trend filter and volume confirmation captures strong directional moves. Weekly trend avoids counter-trend trades, volume reduces false breakouts. Designed for low frequency (10-25 trades/year) to minimize fee drift. Works in bull via R1 breakouts, in bear via S1 breakdowns.
 
-name = "4H_1W_RSI_EXTREMES_VOLUME_CONFIRMATION"
-timeframe = "4h"
+name = "1d_Camarilla_R1S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,72 +22,80 @@ def generate_signals(prices):
     
     # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h RSI(14)
+    # Daily Camarilla levels (based on previous day)
+    # R1 = close + 1.12*(high - low)/12
+    # S1 = close - 1.12*(high - low)/12
     close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral when undefined
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    prev_close = close_series.shift(1)
+    prev_high = high_series.shift(1)
+    prev_low = low_series.shift(1)
+    cam_range = prev_high - prev_low
+    r1 = prev_close + 1.12 * cam_range / 12
+    s1 = prev_close - 1.12 * cam_range / 12
     
-    # Weekly trend: close vs EMA21
+    # Weekly trend: EMA34 on weekly close
     close_1w = df_1w['close'].values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_1w_up = close_1w > ema21_1w
-    trend_1w_down = close_1w < ema21_1w
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = close_1w > ema34_1w
+    trend_1w_down = close_1w < ema34_1w
     
-    # Align weekly trend to 4h
+    # Align weekly trend to daily
     trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
     trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    # Volume confirmation: 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: 20-day average
+    volume_s = pd.Series(volume)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Start after we have enough data
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(rsi[i]) or np.isnan(trend_1w_up_aligned[i]) or 
-            np.isnan(trend_1w_down_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or
+            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.5
+        volume_confirm = vol_ratio > 1.8
         
         if position == 0:
-            # Enter long: RSI oversold (<30) with weekly uptrend and volume
-            if (rsi[i] < 30 and trend_1w_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: break above R1 with weekly uptrend and volume
+            if (close[i] > r1[i] and 
+                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: RSI overbought (>70) with weekly downtrend and volume
-            elif (rsi[i] > 70 and trend_1w_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: break below S1 with weekly downtrend and volume
+            elif (close[i] < s1[i] and 
+                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when RSI returns to neutral (50) or trend fails
-            if (rsi[i] >= 50 or trend_1w_up_aligned[i] < 0.5):
+            # Exit when price returns to S1 or trend fails
+            if (close[i] < s1[i] or 
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when RSI returns to neutral (50) or trend fails
-            if (rsi[i] <= 50 or trend_1w_down_aligned[i] < 0.5):
+            # Exit when price returns to R1 or trend fails
+            if (close[i] > r1[i] or 
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
