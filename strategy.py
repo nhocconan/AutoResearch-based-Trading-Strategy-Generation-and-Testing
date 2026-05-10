@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Camarilla_Breakout_Trend_Volume
-# Hypothesis: Buy breakouts above Camarilla R1 in uptrends (4h EMA50 > 200 EMA + 1d close > EMA50) and sell breakdowns below S3 in downtrends, with volume confirmation.
-# Uses 4h/1d for trend direction and structure, 1h for precise entry timing. Targets 60-150 trades over 4 years via strict multi-condition entry.
+# 1h_4h1d_TRIX_Momentum_Filter
+# Hypothesis: TRIX (12) crossover on 1h with 4h/1d trend alignment and volume confirmation.
+# TRIX filters noise; long when TRIX > 0 and 4h/1d uptrend, short when TRIX < 0 and 4h/1d downtrend.
+# Uses 4h/1d for trend direction, 1h for entry timing. Targets 60-150 trades over 4 years via TRIX smoothing + trend filter.
 # Works in bull/bear by requiring trend alignment, avoiding counter-trend traps.
 
-name = "1h_4h1d_Camarilla_Breakout_Trend_Volume"
+name = "1h_4h1d_TRIX_Momentum_Filter"
 timeframe = "1h"
 leverage = 1.0
 
@@ -29,18 +30,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # R1 = C + (H-L)*1.1/12, S3 = C - (H-L)*1.1/4
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 1h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # TRIX (1-period ROC of triple-smoothed EMA)
+    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix.fillna(0).values
     
     # 4h EMA50 and EMA200 for trend filter
     ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
@@ -52,20 +48,22 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
+    # Aligned close prices for trend checks
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['close'].values)
+    close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+    
     # Volume average (24-period for 1h = 1 day)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for Camarilla (previous day) + EMAs + vol MA
-    start_idx = 100
+    # Warmup: need enough history for TRIX + EMAs + vol MA
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(ema_200_4h_aligned[i]) or
             np.isnan(ema_50_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
@@ -75,11 +73,7 @@ def generate_signals(prices):
             continue
         
         # Determine trend: 4h EMA50 > EMA200 AND 1h close > 4h EMA50 AND 1d close > 1d EMA50
-        close_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['close'].values)
         uptrend_4h = close_4h_aligned[i] > ema_50_4h_aligned[i] and ema_50_4h_aligned[i] > ema_200_4h_aligned[i]
-        uptrend_1d = close_4h_aligned[i] > ema_50_1d_aligned[i]  # Approximate 1d close using 4h close aligned
-        # Better: get actual 1d close aligned
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
         uptrend_1d = close_1d_aligned[i] > ema_50_1d_aligned[i]
         uptrend = uptrend_4h and uptrend_1d
         
@@ -92,25 +86,25 @@ def generate_signals(prices):
         volume_surge = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Breakout above R1 in uptrend with volume
-            if close[i] > r1_aligned[i] and uptrend and volume_surge:
+            # Long: TRIX > 0 in uptrend with volume
+            if trix[i] > 0 and uptrend and volume_surge:
                 signals[i] = 0.20
                 position = 1
-            # Short: Breakdown below S3 in downtrend with volume
-            elif close[i] < s3_aligned[i] and downtrend and volume_surge:
+            # Short: TRIX < 0 in downtrend with volume
+            elif trix[i] < 0 and downtrend and volume_surge:
                 signals[i] = -0.20
                 position = -1
         else:
             if position == 1:
-                # Long exit: close below R1 or trend fails
-                if close[i] < r1_aligned[i] or not uptrend:
+                # Long exit: TRIX <= 0 or trend fails
+                if trix[i] <= 0 or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.20
             elif position == -1:
-                # Short exit: close above S3 or trend fails
-                if close[i] > s3_aligned[i] or not downtrend:
+                # Short exit: TRIX >= 0 or trend fails
+                if trix[i] >= 0 or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
