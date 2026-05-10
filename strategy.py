@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_DailyTrend_Camarilla_R3_S3_Breakout_Volume
-# Hypothesis: Daily trend filter (EMA34) reduces false breakouts in choppy markets,
-# while daily Camarilla R3/S3 levels provide precise entries. Volume confirmation ensures
-# breakout strength. Designed for low trade frequency (15-25/year) to minimize fee drift.
-# Works in bull markets via trend-following breakouts and in bear via mean-reversion
-# at extreme levels when trend aligns.
+# 6h_WilliamsAlligator_ElderRay_TrendFilter
+# Hypothesis: Combines Williams Alligator (trend identification) with Elder Ray (bull/bear power) on 1d timeframe.
+# The Alligator's jaw-teeth-lips alignment filters trend direction, while Elder Ray measures bull/bear strength.
+# Only takes long when bull power > 0 and price above Alligator teeth in uptrend alignment.
+# Only takes short when bear power > 0 and price below Alligator teeth in downtrend alignment.
+# Uses volume confirmation to avoid false signals. Designed for low trade frequency (15-25/year) on 6h timeframe.
+# Works in bull markets via trend-following and in bear via strong bear power signals when aligned.
 
-name = "12h_DailyTrend_Camarilla_R3_S3_Breakout_Volume"
-timeframe = "12h"
+name = "6h_WilliamsAlligator_ElderRay_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,68 +25,84 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
+    # Get daily data for Williams Alligator and Elder Ray
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Daily EMA34 for trend (more stable than SMA)
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Get daily data for Camarilla pivot levels
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    range_hl = df_1d['high'] - df_1d['low']
-    # Camarilla R3 and S3 levels
-    R3 = typical_price + (range_hl * 1.2500)
-    S3 = typical_price - (range_hl * 1.2500)
-    # Align daily levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
+    # Williams Alligator: SMAs with specific offsets
+    # Jaw (13-period SMMA, 8 bars ahead)
+    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().shift(8).values
+    # Teeth (8-period SMMA, 5 bars ahead)
+    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().shift(5).values
+    # Lips (5-period SMMA, 3 bars ahead)
+    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().shift(3).values
     
-    # Volume confirmation (12-period average on 12h = ~6 days)
-    vol_ma_period = 12
+    # Align Alligator lines to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13
+    bear_power = ema13 - low_1d
+    
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Volume confirmation (20-period average on 6d = ~5 days)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, vol_ma_period)
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(12, 34) + 5  # need enough history for calculations
+    start_idx = max(20, 13) + 10  # need enough history
     
     for i in range(start_idx, n):
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
-           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or \
+           np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x average (stricter for fewer trades)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        
+        # Trend alignment checks
+        # Uptrend: Lips > Teeth > Jaw (all aligned upwards)
+        uptrend_aligned = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
+        # Downtrend: Jaw > Teeth > Lips (all aligned downwards)
+        downtrend_aligned = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume, above daily EMA34 (uptrend)
-            if close[i] > R3_aligned[i] and volume_confirm and close[i] > ema_1d_aligned[i]:
+            # Long: Uptrend + Bull Power positive + price above teeth + volume
+            if uptrend_aligned and bull_power_aligned[i] > 0 and close[i] > teeth_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume, below daily EMA34 (downtrend)
-            elif close[i] < S3_aligned[i] and volume_confirm and close[i] < ema_1d_aligned[i]:
+            # Short: Downtrend + Bear Power positive + price below teeth + volume
+            elif downtrend_aligned and bear_power_aligned[i] > 0 and close[i] < teeth_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 or breaks below daily EMA34
-            if close[i] < S3_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: trend breaks down or bear power takes over
+            if not uptrend_aligned or bear_power_aligned[i] > bull_power_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R3 or breaks above daily EMA34
-            if close[i] > R3_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: trend breaks up or bull power takes over
+            if not downtrend_aligned or bull_power_aligned[i] > bear_power_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
