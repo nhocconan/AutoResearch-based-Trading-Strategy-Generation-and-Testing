@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Trade breakouts of Camarilla R3/S3 levels from daily candles on 12h timeframe.
-# Uses daily trend filter (1d EMA34) and volume confirmation (volume > 1.5x 20-period SMA).
-# Designed to capture strong momentum moves in both bull and bear markets by trading
-# institutional levels with trend alignment. Targets ~20 trades/year to minimize fee drag.
+# 1d_Weekly_Pivot_Breakout_Momentum
+# Hypothesis: Trade breakouts from weekly pivot levels on daily chart with momentum confirmation.
+# Uses weekly pivot points (R1, S1) as key support/resistance levels.
+# Long when price breaks above R1 with bullish momentum (MACD > 0), short when breaks below S1 with bearish momentum (MACD < 0).
+# Weekly context provides structural levels that work in both bull and bear markets.
+# Targets ~15-25 trades/year to minimize fee drag on daily timeframe.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_Breakout_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,85 +16,74 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for trend filter and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Daily EMA34 trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    # Calculate weekly pivot points: (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate Camarilla levels from previous daily candle
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pivot - weekly_low
+    s1 = 2 * pivot - weekly_high
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = close_1d_prev + (high_1d - low_1d) * 1.1 / 6
-    camarilla_s3 = close_1d_prev - (high_1d - low_1d) * 1.1 / 6
+    # Align weekly pivot levels to daily
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
-    # Align daily data to 12h timeframe
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Volume confirmation: volume > 1.5x 20-period SMA
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (vol_sma * 1.5)
+    # Daily MACD for momentum confirmation (12,26,9)
+    exp1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    exp2 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean()
+    macd = exp1 - exp2
+    signal_line = pd.Series(macd).ewm(span=9, adjust=False, min_periods=9).mean()
+    macd_hist = macd - signal_line
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34
+    start_idx = 30  # Need enough data for MACD
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(macd_hist[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: break above Camarilla R3 with uptrend and volume confirmation
-            if (high[i] > camarilla_r3_aligned[i] and
-                trend_1d_up_aligned[i] > 0.5 and
-                volume_confirm[i]):
+            # Long: break above R1 with bullish momentum
+            if close[i] > r1_aligned[i] and macd_hist[i] > 0:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Camarilla S3 with downtrend and volume confirmation
-            elif (low[i] < camarilla_s3_aligned[i] and
-                  trend_1d_down_aligned[i] > 0.5 and
-                  volume_confirm[i]):
+            # Short: break below S1 with bearish momentum
+            elif close[i] < s1_aligned[i] and macd_hist[i] < 0:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price re-enters Camarilla range (between R3 and S3) or trend reversal
-            if (close[i] < camarilla_r3_aligned[i] and close[i] > camarilla_s3_aligned[i]) or \
-               (trend_1d_up_aligned[i] < 0.5):
+            # Exit: break below pivot or momentum turns bearish
+            if close[i] < pivot_aligned[i] or macd_hist[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price re-enters Camarilla range or trend reversal
-            if (close[i] < camarilla_r3_aligned[i] and close[i] > camarilla_s3_aligned[i]) or \
-               (trend_1d_down_aligned[i] < 0.5):
+            # Exit: break above pivot or momentum turns bullish
+            if close[i] > pivot_aligned[i] or macd_hist[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
