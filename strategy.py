@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend
-Hypothesis: Price breaks weekly Camarilla R1 (long) or S1 (short) levels with 1w EMA50 trend filter and volume confirmation.
-Weekly context reduces noise and improves robustness in both bull and bear markets.
-Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+1d_WeeklyPivot_Breakout_1wTrend
+Hypothesis: Price breaks weekly pivot R1 (long) or S1 (short) levels calculated from prior week's range, with 1w EMA50 trend filter and volume confirmation.
+Weekly pivots act as weekly support/resistance; breakouts with volume and trend alignment capture directional moves.
+Works in bull/bear by filtering trades in direction of weekly trend.
+Target: 10-20 trades/year (40-80 total) to minimize fee drag.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend"
-timeframe = "12h"
+name = "1d_WeeklyPivot_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -31,9 +32,11 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     volume_1w = df_1w['volume'].values
     
-    # Weekly Camarilla levels from prior week
-    camarilla_r1 = close_1w + 1.1 * (high_1w - low_1w) / 12
-    camarilla_s1 = close_1w - 1.1 * (high_1w - low_1w) / 12
+    # Weekly pivot points from prior week: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    pivot_high = (high_1w + low_1w + close_1w) / 3
+    pivot_range = high_1w - low_1w
+    weekly_r1 = pivot_high + 1.1 * pivot_range / 12
+    weekly_s1 = pivot_high - 1.1 * pivot_range / 12
     
     # 1w EMA50 for trend filter
     ema50_1w = np.full(len(close_1w), np.nan)
@@ -50,9 +53,9 @@ def generate_signals(prices):
         for i in range(20, len(volume_1w)):
             vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + volume_1w[i]) / 20
     
-    # Align weekly indicators to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
+    # Align 1w indicators to 1d
+    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
     
@@ -68,12 +71,11 @@ def generate_signals(prices):
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average weekly volume (scaled)
-        # 14 x 12h bars in 1 week
-        vol_1w_scaled = vol_sma20_1w_aligned[i] / 14.0
+        # Volume confirmation: current 1d volume > 1.5x average 1w volume (scaled)
+        vol_1w_scaled = vol_sma20_1w_aligned[i] / 5.0  # 5x 1d bars in 1w
         volume_confirm = volume[i] > 1.5 * vol_1w_scaled
         
-        # Trend and price relative to weekly Camarilla levels
+        # Trend and price relative to weekly pivot levels
         is_uptrend = close[i] > ema50_1w_aligned[i]
         is_downtrend = close[i] < ema50_1w_aligned[i]
         price_above_r1 = close[i] > r1_aligned[i]
