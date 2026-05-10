@@ -1,17 +1,63 @@
-# 6H_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Build on proven 6H Camarilla R3/S3 breakout pattern by adding 1d EMA trend filter and volume spike confirmation.
-# Uses prior day's Camarilla R3/S3 levels for breakout entries, confirmed by 1d EMA trend and volume > 2x average.
-# Designed for 6h timeframe to capture strong trend continuation moves with low trade frequency (target: 12-37 trades/year).
-# Works in both bull and bear markets by following 1d trend direction, avoiding counter-trend trades.
-# Uses discrete position sizing (0.25) to minimize fee churn.
+#!/usr/bin/env python3
+# 4H_ThreeLineBreak_12hTrend_Volume
+# Hypothesis: Three Line Break (TLB) reversal signals combined with 12h EMA trend filter and volume confirmation.
+# TLB filters out small reversals, focusing on significant trend changes. Works in both bull and bear markets by
+# only taking trades in the direction of the 12h trend, reducing whipsaws. Volume > 2.0x average confirms momentum.
+# Target: 20-40 trades/year to minimize fee drag.
 
-name = "6H_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4H_ThreeLineBreak_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def three_line_break(close):
+    """Calculate Three Line Break reversal signals.
+    Returns: 1 for bullish reversal, -1 for bearish reversal, 0 for no signal.
+    """
+    n = len(close)
+    tlb = np.zeros(n, dtype=int)
+    
+    if n < 4:
+        return tlb
+    
+    # Initialize first line
+    line_high = close[0]
+    line_low = close[0]
+    line_count = 1
+    reversal = 0  # 1 for up, -1 for down
+    
+    for i in range(1, n):
+        if close[i] > line_high:
+            # Continue upward line
+            line_high = close[i]
+            line_low = close[i]
+            reversal = 1
+        elif close[i] < line_low:
+            # Continue downward line
+            line_high = close[i]
+            line_low = close[i]
+            reversal = -1
+        else:
+            # Check for reversal
+            if reversal == 1 and close[i] < line_low:
+                # Bearish reversal: close below prior low
+                tlb[i] = -1
+                line_high = close[i]
+                line_low = close[i]
+                line_count += 1
+                reversal = -1
+            elif reversal == -1 and close[i] > line_high:
+                # Bullish reversal: close above prior high
+                tlb[i] = 1
+                line_high = close[i]
+                line_low = close[i]
+                line_count += 1
+                reversal = 1
+    
+    return tlb
 
 def generate_signals(prices):
     n = len(prices)
@@ -23,73 +69,61 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for EMA trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA(34) for trend direction
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 12h EMA(50) for trend direction
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Get 1d data for Camarilla pivot calculation (prior day's OHLC)
-    # Note: We use the same df_1d for pivot calculation
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Three Line Break signals
+    tlb_signals = three_line_break(close)
     
-    # Calculate Camarilla levels from prior day's OHLC
-    # R3 = C + ((H-L) * 1.1 / 4)
-    # S3 = C - ((H-L) * 1.1 / 4)
-    camarilla_r3 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 4)
-    camarilla_s3 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 4)
-    
-    # Align Camarilla levels to 6h timeframe (use prior day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
-    
-    # Volume filter: volume > 2x 20-period average on 6h chart
+    # Volume filter: volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for EMA and volume MA
+    start_idx = 50  # Warmup for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 1d EMA34
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below 12h EMA50
+        price_above_ema = close[i] > ema_12h_aligned[i]
+        price_below_ema = close[i] < ema_12h_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above R3 + above 1d EMA + volume spike
-            if (close[i] > r3_aligned[i] and 
+            # Long entry: TLB bullish reversal + above 12h EMA + volume spike
+            if (tlb_signals[i] == 1 and 
                 price_above_ema and 
                 volume[i] > vol_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + below 1d EMA + volume spike
-            elif (close[i] < s3_aligned[i] and 
+            # Short entry: TLB bearish reversal + below 12h EMA + volume spike
+            elif (tlb_signals[i] == -1 and 
                   price_below_ema and 
                   volume[i] > vol_threshold[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or volume drops below average
-            if (close[i] < s3_aligned[i] or volume[i] < vol_ma[i]):
+            # Long exit: TLB bearish reversal or price below EMA
+            if (tlb_signals[i] == -1 or not price_above_ema):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or volume drops below average
-            if (close[i] > r3_aligned[i] or volume[i] < vol_ma[i]):
+            # Short exit: TLB bullish reversal or price above EMA
+            if (tlb_signals[i] == 1 or not price_below_ema):
                 signals[i] = 0.0
                 position = 0
             else:
