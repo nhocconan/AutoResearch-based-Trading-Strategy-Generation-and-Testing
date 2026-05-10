@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Williams_Alligator_Elder_Ray_Volume_Confirmation
-# Hypothesis: Williams Alligator (Jaws, Teeth, Lips) identifies trend direction,
-# Elder Ray (Bull/Bear Power) confirms momentum, and volume spike filters false signals.
-# Works in both bull and bear markets by only trading in the direction of the Alligator alignment.
-# Target: 12-30 trades/year on 12h timeframe to minimize fee drag.
+# 4h_12h_PriceChannel_Breakout
+# Hypothesis: Combines 12h price channel breakout with 4h trend filter and volume confirmation
+# Works in both bull and bear markets by capturing breakouts aligned with higher timeframe trend
+# Price channel acts as support/resistance structure, reducing whipsaw
+# Target: 20-40 trades/year to minimize fee drag on 4h timeframe
 
-name = "12h_Williams_Alligator_Elder_Ray_Volume_Confirmation"
-timeframe = "12h"
+name = "4h_12h_PriceChannel_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,25 +23,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams Alligator: SMAs of median price
-    median_price = (high + low) / 2
-    jaws_period, teeth_period, lips_period = 13, 8, 5
-    jaws_shift, teeth_shift, lips_shift = 8, 5, 3
+    # 12h price channel (20-period high/low)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    jaws = pd.Series(median_price).rolling(window=jaws_period, min_periods=jaws_period).mean().shift(jaws_shift).values
-    teeth = pd.Series(median_price).rolling(window=teeth_period, min_periods=teeth_period).mean().shift(teeth_shift).values
-    lips = pd.Series(median_price).rolling(window=lips_period, min_periods=lips_period).mean().shift(lips_shift).values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Alligator alignment: jaws < teeth < lips = downtrend, jaws > teeth > lips = uptrend
-    alligator_up = (jaws > teeth) & (teeth > lips)
-    alligator_down = (jaws < teeth) & (teeth < lips)
+    # Calculate 20-period high/low channels
+    high_ch = np.full(len(high_12h), np.nan)
+    low_ch = np.full(len(low_12h), np.nan)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    for i in range(20, len(high_12h)):
+        high_ch[i] = np.max(high_12h[i-20:i])
+        low_ch[i] = np.min(low_12h[i-20:i])
     
-    # Volume confirmation: 1.5x 20-period average
+    # Align 12h channels to 4h timeframe
+    high_ch_aligned = align_htf_to_ltf(prices, df_12h, high_ch)
+    low_ch_aligned = align_htf_to_ltf(prices, df_12h, low_ch)
+    
+    # 4h trend filter (EMA34)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_4h_up = close_4h > ema34_4h
+    trend_4h_down = close_4h < ema34_4h
+    
+    # Align 4h trend to 4h (no shift needed as we're on same timeframe)
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
+    
+    # Volume confirmation (1.5x 20-period average)
     vol_ma = np.zeros_like(volume)
     vol_sum = 0
     for i in range(n):
@@ -57,11 +74,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(jaws_period + jaws_shift, teeth_period + teeth_shift, lips_period + lips_shift, 13, 20) + 5
+    start_idx = 40  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+        if (np.isnan(high_ch_aligned[i]) or np.isnan(low_ch_aligned[i]) or
+            np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
             np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,26 +86,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Alligator aligned up AND Bull Power > 0 AND volume confirmation
-            if alligator_up[i] and (bull_power[i] > 0) and volume_confirm[i]:
+            # Long: price breaks above 12h high channel with volume confirmation and 4h uptrend
+            if (high[i] > high_ch_aligned[i] and
+                trend_4h_up_aligned[i] > 0.5 and
+                volume_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator aligned down AND Bear Power < 0 AND volume confirmation
-            elif alligator_down[i] and (bear_power[i] < 0) and volume_confirm[i]:
+            # Short: price breaks below 12h low channel with volume confirmation and 4h downtrend
+            elif (low[i] < low_ch_aligned[i] and
+                  trend_4h_down_aligned[i] > 0.5 and
+                  volume_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Alligator alignment breaks down OR Bull Power becomes negative
-            if not alligator_up[i] or (bull_power[i] <= 0):
+            # Exit: price breaks below 12h low channel or 4h trend turns down
+            if (low[i] < low_ch_aligned[i] or
+                trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Alligator alignment breaks up OR Bear Power becomes positive
-            if not alligator_down[i] or (bear_power[i] >= 0):
+            # Exit: price breaks above 12h high channel or 4h trend turns up
+            if (high[i] > high_ch_aligned[i] or
+                trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
