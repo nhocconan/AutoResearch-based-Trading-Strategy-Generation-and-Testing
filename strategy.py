@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_Williams_Alligator_Filtered_1wTrend_Volume
-# Hypothesis: Williams Alligator (3 SMAs) defines trend structure on 12h; trades only in direction of weekly trend with volume confirmation. Uses Alligator's jaw/teeth/lips to filter whipsaws. Designed for low frequency (15-30 trades/year) to minimize fee decay, works in both bull and bear via trend alignment.
+# 4h_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Price breaking Camarilla R3/S3 levels with weekly trend filter and volume confirmation captures strong momentum moves in both bull and bear markets. Weekly trend avoids counter-trend trades, volume reduces false breakouts. Designed for low frequency (20-50 trades/year) to minimize fee drag.
 
-name = "12h_Williams_Alligator_Filtered_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,20 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Daily data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     # Weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Williams Alligator on 12h: SMAs of median price
-    median_price = (high + low) / 2.0
-    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Camarilla levels from daily OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator alignment: bullish when lips > teeth > jaw
-    alligator_bullish = (lips > teeth) & (teeth > jaw)
-    alligator_bearish = (lips < teeth) & (teeth < jaw)
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 6
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 6
+    
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # Weekly trend: EMA50 on weekly close
     close_1w = df_1w['close'].values
@@ -41,7 +49,7 @@ def generate_signals(prices):
     trend_1w_up = close_1w > ema50_1w
     trend_1w_down = close_1w < ema50_1w
     
-    # Align weekly trend to 12h
+    # Align weekly trend to 4h timeframe
     trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
     trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
@@ -57,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -69,20 +77,20 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: Alligator bullish + weekly uptrend + volume
-            if (alligator_bullish[i] and 
+            # Enter long: break above Camarilla R3 with weekly uptrend and volume
+            if (close[i] > r3_aligned[i] and 
                 trend_1w_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: Alligator bearish + weekly downtrend + volume
-            elif (alligator_bearish[i] and 
+            # Enter short: break below Camarilla S3 with weekly downtrend and volume
+            elif (close[i] < s3_aligned[i] and 
                   trend_1w_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when Alligator turns bearish or weekly trend fails
-            if (not alligator_bullish[i] or 
+            # Exit when price returns to Camarilla S3 or trend fails
+            if (close[i] < s3_aligned[i] or 
                 trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -90,8 +98,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when Alligator turns bullish or weekly trend fails
-            if (not alligator_bearish[i] or 
+            # Exit when price returns to Camarilla R3 or trend fails
+            if (close[i] > r3_aligned[i] or 
                 trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
