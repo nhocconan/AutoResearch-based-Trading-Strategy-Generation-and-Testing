@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-# 4h_TRIX_Volume_Spike_12hTrend
-# Hypothesis: TRIX momentum combined with volume spikes and 12h EMA trend filter captures sustained moves in both bull and bear markets.
-# Volume spikes confirm institutional interest, reducing false breakouts. Trend filter ensures alignment with higher timeframe momentum.
-# Target: 20-30 trades/year with low turnover to minimize fee drag.
+# 1h_TripleConfirmation_RangeBound_MeanReversion
+# Hypothesis: In range-bound markets (common in 2025-2026), price reverts to mean at Bollinger Bands extremes.
+# Uses 4h trend filter (EMA50) to avoid counter-trend trades, and 1d volume spike for confirmation.
+# Entry: Price touches Bollinger Band (20,2) AND 4h EMA50 filter aligned AND 1d volume > 1.5x 20-day average.
+# Exit: Price returns to Bollinger middle band.
+# Timeframe: 1h for precise entry/exit, 4h for trend filter, 1d for volume confirmation.
+# Target: 20-40 trades/year with strict criteria to minimize fee drag.
 
-name = "4h_TRIX_Volume_Spike_12hTrend"
-timeframe = "4h"
+name = "1h_TripleConfirmation_RangeBound_MeanReversion"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,68 +17,71 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # TRIX (12-period EMA of EMA of EMA, then ROC)
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3.pct_change())
-    trix_values = trix.values
+    # Bollinger Bands (20, 2)
+    ma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    upper = ma + 2.0 * std
+    lower = ma - 2.0 * std
     
-    # Volume spike detection: current volume > 2.0 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * vol_ma)
-    
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 1d volume spike confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    vol_ma_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Ensure sufficient warmup for all indicators
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(trix_values[i]) or np.isnan(ema50_12h_aligned[i]):
+        if (np.isnan(ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero, volume spike, and price above 12h EMA50 (uptrend)
-            if trix_values[i] > 0 and trix_values[i-1] <= 0 and volume_spike[i] and close[i] > ema50_12h_aligned[i]:
-                signals[i] = 0.25
+            # Long: price at lower Bollinger Band, above 4h EMA50 (uptrend bias), high volume
+            if close[i] <= lower[i] and close[i] > ema_4h_aligned[i] and volume[i] > 1.5 * vol_ma_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: TRIX crosses below zero, volume spike, and price below 12h EMA50 (downtrend)
-            elif trix_values[i] < 0 and trix_values[i-1] >= 0 and volume_spike[i] and close[i] < ema50_12h_aligned[i]:
-                signals[i] = -0.25
+            # Short: price at upper Bollinger Band, below 4h EMA50 (downtrend bias), high volume
+            elif close[i] >= upper[i] and close[i] < ema_4h_aligned[i] and volume[i] > 1.5 * vol_ma_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX crosses below zero or trend lost
-            if trix_values[i] < 0 or close[i] < ema50_12h_aligned[i]:
+            # Exit: price returns to middle band or trend bias lost
+            if close[i] >= ma[i] or close[i] <= ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: TRIX crosses above zero or trend lost
-            if trix_values[i] > 0 or close[i] > ema50_12h_aligned[i]:
+            # Exit: price returns to middle band or trend bias lost
+            if close[i] <= ma[i] or close[i] >= ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
