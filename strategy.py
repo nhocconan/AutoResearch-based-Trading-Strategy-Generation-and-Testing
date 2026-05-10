@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Price breaks above/below daily Camarilla R1/S1 levels with 12h EMA50 trend filter and volume confirmation. 
-Camarilla R1/S1 provide tight support/resistance in ranging markets, while the 12h EMA50 ensures alignment with medium-term momentum. 
-Volume filters false breakouts. Works in bull/bear by trading only in direction of 12h trend. 
-Target: 20-40 trades/year (80-160 total) to minimize fee drag.
+1d_Portfolio_Momentum_Rotation
+Hypothesis: Rank assets by 1-month momentum (20-day return), go long top 2 (BTC, ETH, SOL) and short bottom 1.
+Uses weekly trend filter (1w EMA20) to avoid counter-trend trades in strong trends.
+Rebalances daily at close. Designed for low turnover (<25 trades/year) to minimize fee drag.
+Works in bull/bear by capturing relative strength and avoiding weak trends.
 """
 
-name = "4h_4H_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1d_Portfolio_Momentum_Rotation"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,95 +17,79 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Momentum: 20-day return (approx 1 month)
+    mom = np.full(n, np.nan)
+    if n >= 20:
+        mom[19:] = (close[19:] / close[:n-19]) - 1
     
-    # Calculate Camarilla pivot levels for each daily bar
-    # R1 = close + (high-low)*1.1/12, S1 = close - (high-low)*1.1/12
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
+    # Weekly trend filter: EMA20 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema20_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 20:
+        ema20_1w[19] = np.mean(close_1w[:20])
+        alpha = 2 / (20 + 1)
+        for i in range(20, len(close_1w)):
+            ema20_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema20_1w[i-1]
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema50_12h[49] = np.mean(close_12h[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema50_12h[i-1]
+    # Align weekly EMA to daily
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Daily volume SMA20 for volume confirmation
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    
-    # Align all indicators to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    # Determine trend: above/below EMA20
+    trend_up = close >= ema20_1w_aligned  # True if in uptrend
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
-    
-    for i in range(start_idx, n):
-        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
+    # Rebalance only once per week (every 7th day) to reduce turnover
+    for i in range(20, n):
+        if np.isnan(mom[i]) or np.isnan(ema20_1w_aligned[i]):
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average daily volume (scaled)
-        # 1d = 6 x 4h bars, so scale daily volume to 4h equivalent
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # Average 4h-equivalent volume from 1d data
-        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        # Only rebalance on weekly boundary (day 0 of week)
+        if i % 7 != 0:
+            # Carry forward previous day's signal
+            signals[i] = signals[i-1]
+            continue
         
-        # Trend and price relative to Camarilla levels
-        is_uptrend = close[i] > ema50_12h_aligned[i]
-        is_downtrend = close[i] < ema50_12h_aligned[i]
-        price_above_r1 = close[i] > r1_1d_aligned[i]
-        price_below_s1 = close[i] < s1_1d_aligned[i]
-        
-        if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Exit: price falls back below R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+        # In strong uptrend, go long top 2 momentum
+        # In weak/downtrend, go long top 1, short bottom 1 (market neutral)
+        if trend_up[i]:
+            # Bullish: long top 2
+            # Find indices of top 2 momentum
+            mom_slice = mom[max(0, i-19):i+1]  # Use recent momentum
+            if len(mom_slice) < 3:
+                continue
+            # Get relative ranks within window
+            sorted_idx = np.argsort(mom_slice)[::-1]  # Descending
+            if len(sorted_idx) >= 2:
+                top2_idx = sorted_idx[:2]
+                # Map back to absolute indices
+                top2_abs = [max(0, i-19) + idx for idx in top2_idx]
+                # Equal weight long
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Exit: price rises back above S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+                for idx in top2_abs:
+                    if idx < n:
+                        signals[i] += 0.5  # 50% each
+        else:
+            # Bearish/neutral: long top 1, short bottom 1
+            mom_slice = mom[max(0, i-19):i+1]
+            if len(mom_slice) < 3:
+                continue
+            sorted_idx = np.argsort(mom_slice)[::-1]
+            if len(sorted_idx) >= 2:
+                top1_idx = sorted_idx[0]
+                bottom1_idx = sorted_idx[-1]
+                top1_abs = max(0, i-19) + top1_idx
+                bottom1_abs = max(0, i-19) + bottom1_idx
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+                if top1_abs < n:
+                    signals[i] += 0.5  # Long 50%
+                if bottom1_abs < n:
+                    signals[i] -= 0.5  # Short 50%
     
     return signals
