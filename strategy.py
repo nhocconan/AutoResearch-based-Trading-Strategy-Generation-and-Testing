@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Donchian_Breakout_Trend_Filter
-Hypothesis: Price breaks the weekly Donchian channel (high/low of past 12 weeks) with trend filter from weekly EMA40 and volume confirmation.
-Weekly Donchian captures longer-term structure, EMA40 filters for trend alignment, volume confirms breakout strength.
-Works in bull/bear by only taking breakouts in direction of weekly trend. Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+6h_Ichimoku_Kumo_Twist_1dTrend
+Hypothesis: Price crosses the Kumo (cloud) twist on 6h chart, with 1d Ichimoku trend filter.
+Kumo twist (Senkou Span A/B cross) signals potential trend reversals. Trading in the direction
+of the 1d Ichimoku trend (price above/below Kumo) ensures alignment with higher timeframe.
+Works in bull/bear by only taking trades aligned with 1d trend. Target: 15-25 trades/year (60-100 total).
 """
 
-name = "1d_Weekly_Donchian_Breakout_Trend_Filter"
-timeframe = "1d"
+name = "6h_Ichimoku_Kumo_Twist_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,92 +17,116 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 52:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1w data for Donchian channel and trend
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Ichimoku parameters
+    tenkan = 9
+    kijun = 26
+    senkou = 52
     
-    # Weekly Donchian channel (12-week lookback)
-    donchian_period = 12
-    high_donchian = np.full(len(high_1w), np.nan)
-    low_donchian = np.full(len(low_1w), np.nan)
+    # Calculate 6h Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window - 1, len(arr)):
+            res[i] = np.max(arr[i - window + 1:i + 1])
+        return res
     
-    if len(high_1w) >= donchian_period:
-        for i in range(donchian_period, len(high_1w)):
-            high_donchian[i] = np.max(high_1w[i-donchian_period:i])
-            low_donchian[i] = np.min(low_1w[i-donchian_period:i])
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window - 1, len(arr)):
+            res[i] = np.min(arr[i - window + 1:i + 1])
+        return res
     
-    # Weekly EMA40 for trend filter
-    ema40_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 40:
-        ema40_1w[39] = np.mean(close_1w[:40])
-        alpha = 2 / (40 + 1)
-        for i in range(40, len(close_1w)):
-            ema40_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema40_1w[i-1]
+    # Tenkan and Kijun for 6h
+    tenkan_sen = (rolling_max(high, tenkan) + rolling_min(low, tenkan)) / 2
+    kijun_sen = (rolling_max(high, kijun) + rolling_min(low, kijun)) / 2
     
-    # Weekly volume SMA10 for volume confirmation
-    vol_sma10_1w = np.full(len(volume_1w), np.nan)
-    if len(volume_1w) >= 10:
-        vol_sma10_1w[9] = np.mean(volume_1w[:10])
-        for i in range(10, len(volume_1w)):
-            vol_sma10_1w[i] = (vol_sma10_1w[i-1] * 9 + volume_1w[i]) / 10
+    # Senkou Span A and B (leading span)
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    senkou_span_b = (rolling_max(high, senkou) + rolling_min(low, senkou)) / 2
     
-    # Align 1w indicators to 1d
-    high_donchian_aligned = align_htf_to_ltf(prices, df_1w, high_donchian)
-    low_donchian_aligned = align_htf_to_ltf(prices, df_1w, low_donchian)
-    ema40_1w_aligned = align_htf_to_ltf(prices, df_1w, ema40_1w)
-    vol_sma10_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma10_1w)
+    # Chikou Span (lagging span) - not used for entry but for confirmation
+    chikou_span = np.roll(close, -kijun)  # shifted back by kijun periods
+    
+    # Kumo twist detection: Senkou Span A crosses Senkou Span B
+    # Bullish twist: Senkou A crosses above Senkou B
+    # Bearish twist: Senkou A crosses below Senkou B
+    senkou_a_above_b = senkou_span_a > senkou_span_b
+    senkou_a_below_b = senkou_span_a < senkou_span_b
+    
+    # Kumo twist signals (crossovers)
+    kumo_twist_bull = senkou_a_above_b & ~np.roll(senkou_a_above_b, 1)
+    kumo_twist_bear = senkou_a_below_b & ~np.roll(senkou_a_below_b, 1)
+    
+    # Price relative to Kumo (cloud)
+    kumo_top = np.maximum(senkou_span_a, senkou_span_b)
+    kumo_bottom = np.minimum(senkou_span_a, senkou_span_b)
+    price_above_kumo = close > kumo_top
+    price_below_kumo = close < kumo_bottom
+    
+    # Get 1d Ichimoku for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate 1d Ichimoku components
+    tenkan_sen_1d = (rolling_max(high_1d, tenkan) + rolling_min(low_1d, tenkan)) / 2
+    kijun_sen_1d = (rolling_max(high_1d, kijun) + rolling_min(low_1d, kijun)) / 2
+    senkou_span_a_1d = ((tenkan_sen_1d + kijun_sen_1d) / 2)
+    senkou_span_b_1d = (rolling_max(high_1d, senkou) + rolling_min(low_1d, senkou)) / 2
+    kumo_top_1d = np.maximum(senkou_span_a_1d, senkou_span_b_1d)
+    kumo_bottom_1d = np.minimum(senkou_span_a_1d, senkou_span_b_1d)
+    
+    # 1d trend: price above/below 1d Kumo
+    price_above_kumo_1d = close_1d > kumo_top_1d
+    price_below_kumo_1d = close_1d < kumo_bottom_1d
+    
+    # Align 1d Ichimoku to 6h
+    price_above_kumo_1d_aligned = align_htf_to_ltf(prices, df_1d, price_above_kumo_1d.astype(float))
+    price_below_kumo_1d_aligned = align_htf_to_ltf(prices, df_1d, price_below_kumo_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Wait for EMA40
+    start_idx = senkou  # Wait for Senkou Span calculation
     
     for i in range(start_idx, n):
-        if np.isnan(high_donchian_aligned[i]) or np.isnan(low_donchian_aligned[i]) or np.isnan(ema40_1w_aligned[i]) or np.isnan(vol_sma10_1w_aligned[i]):
+        if np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 1d volume > 1.3x average 1w volume (scaled)
-        # 1w = 5 x 1d bars, so scale weekly volume to daily equivalent
-        vol_1w_scaled = vol_sma10_1w_aligned[i] / 5.0  # Average 1d-equivalent volume from 1w data
-        volume_confirm = volume[i] > 1.3 * vol_1w_scaled
-        
-        # Trend and price relative to weekly Donchian levels
-        is_uptrend = close[i] > ema40_1w_aligned[i]
-        is_downtrend = close[i] < ema40_1w_aligned[i]
-        price_above_donchian_high = close[i] > high_donchian_aligned[i]
-        price_below_donchian_low = close[i] < low_donchian_aligned[i]
+        # Check for Kumo twist on 6h
+        bullish_twist = kumo_twist_bull[i] if i < len(kumo_twist_bull) else False
+        bearish_twist = kumo_twist_bear[i] if i < len(kumo_twist_bear) else False
         
         if position == 0:
-            # Long: price breaks above weekly Donchian high, in uptrend, with volume
-            if price_above_donchian_high and is_uptrend and volume_confirm:
+            # Long: bullish Kumo twist + price above 6h Kumo + 1d uptrend
+            if bullish_twist and price_above_kumo[i] and price_above_kumo_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian low, in downtrend, with volume
-            elif price_below_donchian_low and is_downtrend and volume_confirm:
+            # Short: bearish Kumo twist + price below 6h Kumo + 1d downtrend
+            elif bearish_twist and price_below_kumo[i] and price_below_kumo_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below weekly Donchian high or trend turns down
-            if not price_above_donchian_high or not is_uptrend:
+            # Exit: bearish Kumo twist or price falls below 6h Kumo
+            if bearish_twist or not price_above_kumo[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above weekly Donchian low or trend turns up
-            if not price_below_donchian_low or not is_downtrend:
+            # Exit: bullish Kumo twist or price rises above 6h Kumo
+            if bullish_twist or not price_below_kumo[i]:
                 signals[i] = 0.0
                 position = 0
             else:
