@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_v2
-Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
-Camarilla levels act as intraday support/resistance; breakouts with volume and trend alignment capture directional moves.
-Works in bull/bear by filtering trades in direction of daily trend.
-Target: 25-40 trades/year (100-160 total) to minimize fee drift.
+1d_WeeklyPivot_Breakout_1wTrend
+Hypothesis: Price breaks weekly Camarilla R3/S3 levels with 1-week EMA34 trend filter and volume confirmation.
+Weekly pivot levels provide significant support/resistance; breakouts with volume and weekly trend alignment
+capture directional moves. Works in bull/bear by filtering trades in direction of weekly trend.
+Target: 15-25 trades/year (60-100 total) to minimize fee drift.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_v2"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Breakout_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,79 +25,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    # 1w data
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Camarilla levels from prior day: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Weekly Camarilla levels from prior week: R3 = close + 1.1*(high-low)/4, S3 = close - 1.1*(high-low)/4
+    camarilla_r3 = close_1w + 1.1 * (high_1w - low_1w) / 4
+    camarilla_s3 = close_1w - 1.1 * (high_1w - low_1w) / 4
     
-    # 1d EMA50 for trend filter
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    # 1-week EMA34 for trend filter
+    ema34_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 34:
+        ema34_1w[33] = np.mean(close_1w[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1w)):
+            ema34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema34_1w[i-1]
     
-    # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full(len(vol_1d), np.nan)
-    if len(vol_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(vol_1d[:20])
-        for i in range(20, len(vol_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + vol_1d[i]) / 20
+    # 1-week volume SMA10 for volume confirmation
+    vol_sma10_1w = np.full(len(volume_1w), np.nan)
+    if len(volume_1w) >= 10:
+        vol_sma10_1w[9] = np.mean(volume_1w[:10])
+        for i in range(10, len(volume_1w)):
+            vol_sma10_1w[i] = (vol_sma10_1w[i-1] * 9 + volume_1w[i]) / 10
     
-    # Align 1d indicators to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    # Align 1w indicators to 1d
+    r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    vol_sma10_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma10_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = 34  # Wait for EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_sma10_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
-        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
+        # Volume confirmation: current 1d volume > 1.5x average 1w volume (scaled)
+        vol_1w_scaled = vol_sma10_1w_aligned[i] / 5.0  # 5x 1d bars in 1w
+        volume_confirm = volume[i] > 1.5 * vol_1w_scaled
         
-        # Trend and price relative to Camarilla levels
-        is_uptrend = close[i] > ema50_1d_aligned[i]
-        is_downtrend = close[i] < ema50_1d_aligned[i]
-        price_above_r1 = close[i] > r1_aligned[i]
-        price_below_s1 = close[i] < s1_aligned[i]
+        # Trend and price relative to weekly Camarilla levels
+        is_uptrend = close[i] > ema34_1w_aligned[i]
+        is_downtrend = close[i] < ema34_1w_aligned[i]
+        price_above_r3 = close[i] > r3_aligned[i]
+        price_below_s3 = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
+            # Long: price breaks above R3, in uptrend, with volume
+            if price_above_r3 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
+            # Short: price breaks below S3, in downtrend, with volume
+            elif price_below_s3 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+            # Exit: price falls back below R3 or trend turns down
+            if not price_above_r3 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+            # Exit: price rises back above S3 or trend turns up
+            if not price_below_s3 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
