@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_With_RSI_and_Volume_Filter
-# Hypothesis: KAMA adapts to market noise, providing a reliable trend filter in both bull and bear markets.
-# Combined with RSI (40-60 for trend strength) and volume confirmation, it filters false signals.
-# Trades only in direction of KAMA trend with volume filter to reduce whipsaws.
-# Target: 20-50 trades/year on 4h timeframe.
+# 12h_1d_ATRBreakout_Trend_Filter_Volume
+# Hypothesis: 12h price breaking above/below daily ATR-based channels with trend filter and volume confirmation.
+# Uses daily ATR(14) to set dynamic channels: Upper = EMA20 + 1.5*ATR, Lower = EMA20 - 1.5*ATR.
+# In trending markets (price > EMA50), breakouts above upper channel go long; in downtrends (price < EMA50),
+# breakouts below lower channel go short. Volume confirmation avoids false breakouts.
+# Works in bull/bear by only trading in direction of trend, reducing whipsaw.
 
-name = "4h_KAMA_Trend_With_RSI_and_Volume_Filter"
-timeframe = "4h"
+name = "12h_1d_ATRBreakout_Trend_Filter_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,93 +24,81 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - 10 period
-    # ER = |net change| / sum(|abs change|)
-    # SSC = [ER * (fast - slow) + slow]^2
-    # KAMA = previous KAMA + SSC * (price - previous KAMA)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = np.abs(np.diff(close, prepend=close[0]))
+    # Get daily data for ATR, EMA20, EMA50
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Avoid division by zero
-    sum_abs_change = np.sum(change) if np.sum(change) > 0 else 1
-    er = np.abs(np.diff(close, prepend=close[0])) / sum_abs_change
+    # Calculate daily ATR(14)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Handle first element
-    er[0] = 0
+    # Calculate daily EMA20 and EMA50 for channels and trend
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    fast_sc = 2 / (2 + 1)  # 2-period EMA
-    slow_sc = 2 / (30 + 1)  # 30-period EMA
-    ssc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    ssc[0] = 0  # Initialize
+    # Align to 12h timeframe
+    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + ssc[i] * (close[i] - kama[i-1])
+    # Calculate dynamic channels: EMA20 ± 1.5*ATR
+    upper_channel = ema_20_aligned + 1.5 * atr_14_aligned
+    lower_channel = ema_20_aligned - 1.5 * atr_14_aligned
     
-    # RSI (14 period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    # Handle division by zero (when avg_loss is 0)
-    rsi = np.where(avg_loss == 0, 100, rsi)
-    # Handle first 13 values
-    rsi[:13] = 50
-    
-    # Volume confirmation (20-period MA)
+    # Volume confirmation (20-period MA on 12h = ~10 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (30), RSI (14), volume MA (20)
-    start_idx = max(30, 14, 20)
+    # Warmup: need EMA50 (50), ATR (14), volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or 
+            np.isnan(upper_channel[i]) or 
+            np.isnan(lower_channel[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price relative to KAMA
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
-        
-        # RSI filter: 40-60 for trend strength (avoid extremes)
-        rsi_mid = (rsi[i] >= 40) & (rsi[i] <= 60)
+        # Trend filter: price vs EMA50
+        uptrend = close[i] > ema_50_aligned[i]
+        downtrend = close[i] < ema_50_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: above KAMA + RSI in middle range + volume
-            if above_kama and rsi_mid and volume_confirm:
+            # Long entry: uptrend + price breaks above upper channel + volume
+            if uptrend and close[i] > upper_channel[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: below KAMA + RSI in middle range + volume
-            elif below_kama and rsi_mid and volume_confirm:
+            # Short entry: downtrend + price breaks below lower channel + volume
+            elif downtrend and close[i] < lower_channel[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA
-            if not above_kama:
+            # Long exit: trend breaks or price re-enters below upper channel
+            if not uptrend or close[i] < upper_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KAMA
-            if not below_kama:
+            # Short exit: trend breaks or price re-enters above lower channel
+            if not downtrend or close[i] > lower_channel[i]:
                 signals[i] = 0.0
                 position = 0
             else:
