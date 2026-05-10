@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-# 6H_1D_VolumeSpike_Breakout_Trend
-# Hypothesis: Breakouts above 1d high or below 1d low with volume > 1.5x 1d volume average (20-period) confirm momentum in the direction of the 1d trend (close > EMA20 = bullish, close < EMA20 = bearish). Works in bull/bear by following 1d trend. Volume spike filters false breakouts. Target: 20-40 trades/year per symbol.
+"""
+12H_1W_1D_CCI_MeanReversion
+Hypothesis: Use weekly CCI extremes for mean-reversion in 12h timeframe.
+Buy when weekly CCI < -100 and price touches 1d lower Bollinger Band (mean-reversion in oversold).
+Sell when weekly CCI > 100 and price touches 1d upper Bollinger Band.
+Uses weekly structure to identify extremes and daily Bollinger for entry timing.
+Works in both bull and bear markets by fading extremes. Target: 20-40 trades/year per symbol.
+"""
 
-name = "6H_1D_VolumeSpike_Breakout_Trend"
-timeframe = "6h"
+name = "12H_1W_1D_CCI_MeanReversion"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,92 +18,85 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 1d data
+    # Get 1d and 1w data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 1d EMA20 for trend
-    close_1d_series = pd.Series(close_1d)
-    ema20_1d = close_1d_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Weekly CCI(20)
+    tp_1w = (high_1w + low_1w + close_1w) / 3.0
+    sma_tp_1w = pd.Series(tp_1w).rolling(window=20, min_periods=20).mean().values
+    mad_1w = pd.Series(tp_1w).rolling(window=20, min_periods=20).apply(
+        lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
+    ).values
+    cci_1w = (tp_1w - sma_tp_1w) / (0.015 * mad_1w)
+    cci_1w = np.where(mad_1w == 0, 0, cci_1w)  # avoid division by zero
     
-    # 1d 20-period volume average
-    vol_series = pd.Series(volume_1d)
-    vol_avg_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Daily Bollinger Bands(20,2)
+    sma_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb_1d = sma_1d + 2 * std_1d
+    lower_bb_1d = sma_1d - 2 * std_1d
     
-    # Breakout levels: today's high/low (using prior day's values for lookback-free)
-    # We use the prior day's high/low to avoid look-ahead
-    breakout_high = np.concatenate([[np.nan], high_1d[:-1]])
-    breakout_low = np.concatenate([[np.nan], low_1d[:-1]])
-    
-    # Trend: bullish if close > EMA20, bearish if close < EMA20
-    bullish_trend = close_1d > ema20_1d
-    bearish_trend = close_1d < ema20_1d
-    
-    # Volume spike: volume > 1.5x 20-period average
-    vol_spike = volume_1d > (1.5 * vol_avg_20)
-    
-    # Align to 6h
-    breakout_high_aligned = align_htf_to_ltf(prices, df_1d, breakout_high)
-    breakout_low_aligned = align_htf_to_ltf(prices, df_1d, breakout_low)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike.astype(float))
+    # Align to 12h
+    cci_aligned = align_htf_to_ltf(prices, df_1w, cci_1w)
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_bb_1d)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_bb_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 20
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(breakout_high_aligned[i]) or np.isnan(breakout_low_aligned[i]) or
-            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(vol_spike_aligned[i])):
+        if (np.isnan(cci_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish = bullish_aligned[i] > 0.5
-        bearish = bearish_aligned[i] > 0.5
-        vol_spike = vol_spike_aligned[i] > 0.5
-        
         if position == 0:
-            # Enter long: bullish trend + price breaks above prior day's high + volume spike
-            if bullish and close[i] > breakout_high_aligned[i] and vol_spike:
+            # Enter long: weekly CCI < -100 (oversold) and price touches lower BB
+            if cci_aligned[i] < -100 and close[i] <= lower_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish trend + price breaks below prior day's low + volume spike
-            elif bearish and close[i] < breakout_low_aligned[i] and vol_spike:
+            # Enter short: weekly CCI > 100 (overbought) and price touches upper BB
+            elif cci_aligned[i] > 100 and close[i] >= upper_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish trend or price falls back below prior day's low
-            if bearish or close[i] < breakout_low_aligned[i]:
+            # Exit long: weekly CCI > -50 (recovering from oversold) or price reaches middle BB
+            middle_bb_1d = sma_1d
+            middle_aligned = align_htf_to_ltf(prices, df_1d, middle_bb_1d)
+            if cci_aligned[i] > -50 or close[i] >= middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish trend or price rises back above prior day's high
-            if bullish or close[i] > breakout_high_aligned[i]:
+            # Exit short: weekly CCI < 50 (declining from overbought) or price reaches middle BB
+            middle_bb_1d = sma_1d
+            middle_aligned = align_htf_to_ltf(prices, df_1d, middle_bb_1d)
+            if cci_aligned[i] < 50 or close[i] <= middle_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
