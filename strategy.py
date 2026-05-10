@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breakouts from Camarilla R1/S1 levels on 12h with 1d trend filter (EMA34) and volume confirmation.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts from Camarilla R1/S1 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
 # Camarilla levels provide institutional support/resistance; EMA34 filters trend direction; volume confirms breakout strength.
-# Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# Designed for 4h to achieve 19-50 trades/year, suitable for both bull and bear markets.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -29,14 +29,14 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # Camarilla levels (based on previous day) - R1 and S1
+    # Camarilla levels (based on previous day)
     def calculate_camarilla(h, l, c):
         # Typical price for the day
         typical = (h + l + c) / 3.0
         range_ = h - l
-        # Camarilla levels R1 and S1
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
+        # Camarilla levels
+        R1 = c + (range_ * 1.1000 / 6)
+        S1 = c - (range_ * 1.1000 / 6)
         return R1, S1
     
     R1 = np.full_like(close_1d, np.nan)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 40  # Need enough history for indicators
     
     for i in range(start_idx, n):
         if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
