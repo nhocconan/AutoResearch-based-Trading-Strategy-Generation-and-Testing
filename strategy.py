@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
-# Hypothesis: 12h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
-# Uses daily trend for bias to avoid whipsaws in sideways markets, 12h for entry timing.
-# Targets 12-37 trades/year to minimize fee drag. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2
+# Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
+# Uses 1d trend for bias to avoid whipsaws in sideways markets, 4h for entry timing.
+# Targets 25-40 trades/year to minimize fee drain. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     # 1d EMA34 trend
@@ -33,7 +33,7 @@ def generate_signals(prices):
     trend_1d_up = close_1d > ema34_1d
     trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 12h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
@@ -50,7 +50,7 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h
+    # Align Camarilla levels to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
