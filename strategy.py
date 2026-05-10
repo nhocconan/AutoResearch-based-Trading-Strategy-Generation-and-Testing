@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 12h_OrderBlock_1dTrend_Volume
-# Hypothesis: Institutional order blocks on 12h chart provide high-probability reversal zones.
-# In trending markets (1d EMA50), price pulling back to bullish/bearish order blocks
-# offers continuation trades with favorable risk-reward. Volume confirmation filters
-# weak signals. Works in bull markets (pullbacks to bullish OBs in uptrend) and
-# bear markets (pullbacks to bearish OBs in downtrend). Target: 15-35 trades/year.
+# 4h_WilliamsAlligator_ElderRay_Trend_Volume
+# Hypothesis: Williams Alligator identifies trend direction (jaws/teeth/lips alignment).
+# Elder Ray (Bull/Bear Power) confirms momentum behind the trend.
+# Combined with volume confirmation to filter false signals.
+# Works in bull markets (follows uptrends) and bear markets (follows downtrends)
+# by only trading in direction of Alligator + Elder Ray alignment.
+# Target: 20-50 trades/year to minimize fee drag.
 
-name = "12h_OrderBlock_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_WilliamsAlligator_ElderRay_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,102 +25,111 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily data for Williams Alligator and Elder Ray
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Williams Alligator: 3 SMAs
+    # Jaw (blue): 13-period SMMA, shifted 8 bars forward
+    # Teeth (red): 8-period SMMA, shifted 5 bars forward
+    # Lips (green): 5-period SMMA, shifted 3 bars forward
+    # SMMA = smoothed moving average (similar to RMA/Wilder's MA)
+    close_1d = df_1d['close'].values
+    sma5 = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    sma8 = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
+    sma13 = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
     
-    # Calculate 12h order blocks (bullish/bearish)
-    # Bullish OB: strong down candle followed by strong up candle closing above midpoint
-    # Bearish OB: strong up candle followed by strong down candle closing below midpoint
-    body_size = np.abs(close - open_)
-    avg_body = pd.Series(body_size).rolling(window=20, min_periods=20).mean().values
+    # SMMA approximation: first value = SMA, then smoothed
+    def smma(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # First value is SMA
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev*(period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    bullish_ob = np.zeros(n, dtype=bool)
-    bearish_ob = np.zeros(n, dtype=bool)
+    jaw = smma(close_1d, 13)
+    teeth = smma(close_1d, 8)
+    lips = smma(close_1d, 5)
     
-    for i in range(2, n):
-        if np.isnan(avg_body[i]) or np.isnan(avg_body[i-1]) or np.isnan(avg_body[i-2]):
-            continue
-            
-        # Current candle
-        curr_body = body_size[i]
-        curr_mid = (high[i] + low[i]) / 2
-        
-        # Previous candle
-        prev_close = close[i-1]
-        prev_open = open_[i-1]
-        prev_body = body_size[i-1]
-        
-        # Two candles ago
-        prev2_close = close[i-2]
-        prev2_open = open_[i-2]
-        prev2_body = body_size[i-2]
-        
-        # Bullish OB: two red candles followed by strong green closing above midpoint of second red
-        if (close[i-2] < open_[i-2] and  # red
-            close[i-1] < open_[i-1] and  # red
-            close[i] > open_[i] and      # green
-            curr_body > avg_body[i] * 1.5 and  # strong body
-            close[i] > (high[i-1] + low[i-1]) / 2):  # above midpoint of prev candle
-            bullish_ob[i] = True
-            
-        # Bearish OB: two green candles followed by strong red closing below midpoint of second green
-        if (close[i-2] > open_[i-2] and  # green
-            close[i-1] > open_[i-1] and  # green
-            close[i] < open_[i] and      # red
-            curr_body > avg_body[i] * 1.5 and  # strong body
-            close[i] < (high[i-1] + low[i-1]) / 2):  # below midpoint of prev candle
-            bearish_ob[i] = True
+    # Shift as per Alligator specification
+    jaw = np.roll(jaw, 8)
+    teeth = np.roll(teeth, 5)
+    lips = np.roll(lips, 3)
+    # Set shifted values to NaN
+    jaw[:8] = np.nan
+    teeth[:5] = np.nan
+    lips[:3] = np.nan
     
-    # Volume confirmation (20-period MA on 12h = ~10 days)
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = df_1d['low'].values - ema13_1d
+    
+    # Align all 1d indicators to 4h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Volume confirmation (20-period MA on 4h = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA50 (50), volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: need sufficient data for Alligator (13+8=21) and Elder Ray (13)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 1d trend filter
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Williams Alligator trend detection
+        # Uptrend: Lips > Teeth > Jaw (green > red > blue)
+        # Downtrend: Jaw > Teeth > Lips (blue > red > green)
+        uptrend = lips_aligned[i] > teeth_aligned[i] > jaw_aligned[i]
+        downtrend = jaw_aligned[i] > teeth_aligned[i] > lips_aligned[i]
+        
+        # Elder Ray momentum confirmation
+        # Bull Power > 0 indicates bullish momentum
+        # Bear Power < 0 indicates bearish momentum
+        bull_momentum = bull_power_aligned[i] > 0
+        bear_momentum = bear_power_aligned[i] < 0
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + bullish OB + volume
-            if uptrend and bullish_ob[i] and volume_confirm:
+            # Long entry: uptrend + bullish momentum + volume
+            if uptrend and bull_momentum and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + bearish OB + volume
-            elif downtrend and bearish_ob[i] and volume_confirm:
+            # Short entry: downtrend + bearish momentum + volume
+            elif downtrend and bear_momentum and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or bearish OB appears
-            if not uptrend or bearish_ob[i]:
+            # Long exit: trend/momentum breaks
+            if not (uptrend and bull_momentum):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or bullish OB appears
-            if not downtrend or bullish_ob[i]:
+            # Short exit: trend/momentum breaks
+            if not (downtrend and bear_momentum):
                 signals[i] = 0.0
                 position = 0
             else:
