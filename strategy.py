@@ -1,63 +1,19 @@
 #!/usr/bin/env python3
-# 4H_ThreeLineBreak_12hTrend_Volume
-# Hypothesis: Three Line Break (TLB) reversal signals combined with 12h EMA trend filter and volume confirmation.
-# TLB filters out small reversals, focusing on significant trend changes. Works in both bull and bear markets by
-# only taking trades in the direction of the 12h trend, reducing whipsaws. Volume > 2.0x average confirms momentum.
-# Target: 20-40 trades/year to minimize fee drag.
+# 6H_WeeklyPivot_Direction_1dTrend_Filter
+# Hypothesis: Use weekly pivot points (from prior week) as dynamic support/resistance.
+# Enter long when price crosses above weekly pivot + price > 1d EMA50 (bullish trend).
+# Enter short when price crosses below weekly pivot + price < 1d EMA50 (bearish trend).
+# Exit when price crosses back below/above weekly pivot or trend changes.
+# Uses weekly trend filter to avoid counter-trend trades, works in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing (0.25).
 
-name = "4H_ThreeLineBreak_12hTrend_Volume"
-timeframe = "4h"
+name = "6H_WeeklyPivot_Direction_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def three_line_break(close):
-    """Calculate Three Line Break reversal signals.
-    Returns: 1 for bullish reversal, -1 for bearish reversal, 0 for no signal.
-    """
-    n = len(close)
-    tlb = np.zeros(n, dtype=int)
-    
-    if n < 4:
-        return tlb
-    
-    # Initialize first line
-    line_high = close[0]
-    line_low = close[0]
-    line_count = 1
-    reversal = 0  # 1 for up, -1 for down
-    
-    for i in range(1, n):
-        if close[i] > line_high:
-            # Continue upward line
-            line_high = close[i]
-            line_low = close[i]
-            reversal = 1
-        elif close[i] < line_low:
-            # Continue downward line
-            line_high = close[i]
-            line_low = close[i]
-            reversal = -1
-        else:
-            # Check for reversal
-            if reversal == 1 and close[i] < line_low:
-                # Bearish reversal: close below prior low
-                tlb[i] = -1
-                line_high = close[i]
-                line_low = close[i]
-                line_count += 1
-                reversal = -1
-            elif reversal == -1 and close[i] > line_high:
-                # Bullish reversal: close above prior high
-                tlb[i] = 1
-                line_high = close[i]
-                line_low = close[i]
-                line_count += 1
-                reversal = 1
-    
-    return tlb
 
 def generate_signals(prices):
     n = len(prices)
@@ -67,63 +23,63 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for EMA trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 12h EMA(50) for trend direction
-    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Three Line Break signals
-    tlb_signals = three_line_break(close)
+    # Get 1w data for weekly pivot calculation (prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Volume filter: volume > 2.0x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 2.0
+    # Calculate weekly pivot points from prior week's OHLC
+    # Pivot = (H + L + C) / 3
+    weekly_pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+    
+    # Align weekly pivot to 6h timeframe (use prior week's pivot)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Warmup for EMA
+    start_idx = max(50, 2)  # Warmup for EMA and pivot (need at least 2 weeks)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA50
-        price_above_ema = close[i] > ema_12h_aligned[i]
-        price_below_ema = close[i] < ema_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA50
+        price_above_ema = close[i] > ema_1d_aligned[i]
+        price_below_ema = close[i] < ema_1d_aligned[i]
         
         if position == 0:
-            # Long entry: TLB bullish reversal + above 12h EMA + volume spike
-            if (tlb_signals[i] == 1 and 
-                price_above_ema and 
-                volume[i] > vol_threshold[i]):
+            # Long entry: price crosses above weekly pivot + above 1d EMA50
+            if close[i] > pivot_aligned[i] and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: TLB bearish reversal + below 12h EMA + volume spike
-            elif (tlb_signals[i] == -1 and 
-                  price_below_ema and 
-                  volume[i] > vol_threshold[i]):
+            # Short entry: price crosses below weekly pivot + below 1d EMA50
+            elif close[i] < pivot_aligned[i] and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TLB bearish reversal or price below EMA
-            if (tlb_signals[i] == -1 or not price_above_ema):
+            # Long exit: price crosses back below weekly pivot OR trend turns bearish
+            if close[i] < pivot_aligned[i] or price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TLB bullish reversal or price above EMA
-            if (tlb_signals[i] == 1 or not price_below_ema):
+            # Short exit: price crosses back above weekly pivot OR trend turns bullish
+            if close[i] > pivot_aligned[i] or price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
