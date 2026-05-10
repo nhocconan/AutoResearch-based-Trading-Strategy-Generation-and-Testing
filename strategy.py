@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Reversal_v2
-Hypothesis: Price reverses at weekly pivot levels (S2/S3/R2/R3) with volume confirmation and trend filter. 
-Uses 1d ATR to dynamically adjust entry/exit zones and filter out low-volatility periods. 
-Trades only when price approaches weekly support/resistance with volume spike and trend alignment.
-Designed for 6h timeframe to balance signal frequency and profit potential.
-Target: 15-30 trades/year to minimize fee drag.
+6h_Linear_Regression_Channel_v1
+Hypothesis: Price tends to revert to the mean within a 60-period linear regression channel on 6h timeframe, 
+with entries at ±1.5 standard deviations from the regression line. Uses 1-week trend filter to align with 
+higher timeframe momentum and volume confirmation to avoid false signals. Designed to work in both bull 
+and bear markets by fading extremes in ranging conditions and following trend when channel breaks.
+Target: 20-40 trades/year to minimize fee drag.
 """
 
-name = "6h_Weekly_Pivot_Reversal_v2"
+name = "6h_Linear_Regression_Channel_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,60 +21,78 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for pivot calculation
+    # Get weekly data for trend filter
     df_w = get_htf_data(prices, '1w')
-    if len(df_w) < 5:
+    if len(df_w) < 50:
         return np.zeros(n)
     
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
     close_w = df_w['close'].values
     
-    # Calculate weekly pivot points (standard formula)
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    s1_w = 2 * pivot_w - high_w
-    s2_w = pivot_w - (high_w - low_w)
-    s3_w = low_w - 2 * (high_w - pivot_w)
-    r1_w = 2 * pivot_w - low_w
-    r2_w = pivot_w + (high_w - low_w)
-    r3_w = high_w + 2 * (pivot_w - low_w)
+    # Calculate 50-period EMA on weekly for trend filter
+    ema50_w = pd.Series(close_w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_w_aligned = align_htf_to_ltf(prices, df_w, ema50_w)
     
-    # Align weekly pivots to 6h timeframe (with 1-bar delay for completed weekly bar)
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
-    s2_w_aligned = align_htf_to_ltf(prices, df_w, s2_w)
-    s3_w_aligned = align_htf_to_ltf(prices, df_w, s3_w)
-    r2_w_aligned = align_htf_to_ltf(prices, df_w, r2_w)
-    r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
-    
-    # Get 1d data for ATR calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 14-period ATR on 1d
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = tr2[0] = np.inf  # First value has no previous close
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Get 6h data for trend filter and volume
+    # Get 6h data for linear regression channel and volume
     df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 34:
+    if len(df_6h) < 60:
         return np.zeros(n)
     
     close_6h = df_6h['close'].values
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
     volume_6h = df_6h['volume'].values
     
-    # Calculate 6h EMA34 for trend filter
-    ema34_6h = pd.Series(close_6h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_6h_aligned = align_htf_to_ltf(prices, df_6h, ema34_6h)
+    # Calculate 60-period linear regression and standard error on 6h close
+    def linreg(src, length):
+        if length < 2:
+            return np.full_like(src, np.nan), np.full_like(src, np.nan)
+        sum_x = (length - 1) * length / 2.0
+        sum_x2 = (length - 1) * length * (2 * length - 1) / 6.0
+        src_series = pd.Series(src)
+        sum_y = src_series.rolling(window=length, min_periods=length).sum().values
+        sum_xy = src_series.rolling(window=length, min_periods=length).apply(
+            lambda x: np.sum(x * np.arange(length)), raw=True
+        ).values
+        slope = (length * sum_xy - sum_x * sum_y) / (length * sum_x2 - sum_x * sum_x)
+        intercept = (sum_y - slope * sum_x) / length
+        return slope * np.arange(length) + intercept, slope
+    
+    # Calculate linear regression values and standard error
+    lr_slope = np.full(n, np.nan)
+    lr_intercept = np.full(n, np.nan)
+    lr_value = np.full(n, np.nan)
+    std_err = np.full(n, np.nan)
+    
+    for i in range(59, n):  # Start from index 59 to have 60 points (0-59)
+        window_close = close_6h[i-59:i+1]
+        if len(window_close) < 60:
+            continue
+        sum_x = 60 * 59 / 2.0  # sum of 0 to 59
+        sum_x2 = 60 * 59 * 119 / 6.0  # sum of squares of 0 to 59
+        sum_y = np.sum(window_close)
+        sum_xy = np.sum(window_close * np.arange(60))
+        slope = (60 * sum_xy - sum_x * sum_y) / (60 * sum_x2 - sum_x * sum_x)
+        intercept = (sum_y - slope * sum_x) / 60
+        lr_slope[i] = slope
+        lr_intercept[i] = intercept
+        lr_value[i] = slope * 59 + intercept  # Value at bar i (most recent)
+        # Standard error of estimate
+        y_pred = slope * np.arange(60) + intercept
+        residuals = window_close - y_pred
+        std_err[i] = np.sqrt(np.sum(residuals**2) / 58)  # 60-2 degrees of freedom
+    
+    # Align LR values to 6h timeframe (already calculated on 6h data)
+    lr_value_aligned = lr_value  # Already on 6h timeframe
+    std_err_aligned = std_err    # Already on 6h timeframe
+    
+    # Calculate upper and lower channel lines (±1.5 standard errors)
+    upper_channel = lr_value_aligned + 1.5 * std_err_aligned
+    lower_channel = lr_value_aligned - 1.5 * std_err_aligned
+    
+    # Volume filter: current 6h volume > 1.5x 20-period EMA
+    vol_ema20 = pd.Series(volume_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ema20_aligned = align_htf_to_ltf(prices, df_6h, vol_ema20)
+    volume_filter = volume_6h > vol_ema20_aligned * 1.5
     
     # 6h data for signal generation
     close = prices['close'].values
@@ -85,65 +103,54 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly pivot (5 weeks), 1d ATR (14), and 6h EMA34 (34)
-    start_idx = max(5, 14, 34)
+    # Warmup: need weekly trend (50), 60-period LR (59)
+    start_idx = max(50, 59)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_6h_aligned[i]) or 
-            np.isnan(s2_w_aligned[i]) or
-            np.isnan(s3_w_aligned[i]) or
-            np.isnan(r2_w_aligned[i]) or
-            np.isnan(r3_w_aligned[i]) or
-            np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(ema50_w_aligned[i]) or 
+            np.isnan(lr_value_aligned[i]) or
+            np.isnan(std_err_aligned[i]) or
+            np.isnan(upper_channel[i]) or
+            np.isnan(lower_channel[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs 6h EMA34
-        uptrend_6h = close[i] > ema34_6h_aligned[i]
-        downtrend_6h = close[i] < ema34_6h_aligned[i]
+        # Trend filter: weekly EMA50 direction
+        # Use slope of weekly EMA to determine trend (avoid look-ahead)
+        if i >= 51:  # Need at least 2 points to calculate slope
+            ema50_prev = ema50_w_aligned[i-1]
+            ema50_curr = ema50_w_aligned[i]
+            w_trend_up = ema50_curr > ema50_prev
+            w_trend_down = ema50_curr < ema50_prev
+        else:
+            w_trend_up = False
+            w_trend_down = False
         
-        # Volume filter: current 6h volume > 2.0x 20-period average
-        vol_ma20 = pd.Series(volume_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
-        vol_ma20_aligned = align_htf_to_ltf(prices, df_6h, vol_ma20)
-        volume_filter = volume[i] > vol_ma20_aligned[i] * 2.0
-        
-        # Dynamic zone size based on 1d ATR (as fraction of price)
-        zone_size = (atr_1d_aligned[i] * 0.5) / close[i]  # 0.5x ATR as zone
-        
-        # Distance to weekly levels (as fraction of price)
-        dist_to_s2 = (close[i] - s2_w_aligned[i]) / close[i] if s2_w_aligned[i] > 0 else 1.0
-        dist_to_s3 = (close[i] - s3_w_aligned[i]) / close[i] if s3_w_aligned[i] > 0 else 1.0
-        dist_to_r2 = (r2_w_aligned[i] - close[i]) / close[i] if r2_w_aligned[i] > 0 else 1.0
-        dist_to_r3 = (r3_w_aligned[i] - close[i]) / close[i] if r3_w_aligned[i] > 0 else 1.0
-        
-        # Entry zones: within dynamic zone of weekly S2/S3 or R2/R3
-        near_s2 = abs(dist_to_s2) < zone_size
-        near_s3 = abs(dist_to_s3) < zone_size
-        near_r2 = abs(dist_to_r2) < zone_size
-        near_r3 = abs(dist_to_r3) < zone_size
+        # Volume filter
+        vol_filter = volume[i] > vol_ema20_aligned[i] if i < len(vol_ema20_aligned) else False
         
         if position == 0:
-            # Long entry: near S2/S3 + uptrend + volume
-            if (near_s2 or near_s3) and uptrend_6h and volume_filter:
+            # Long entry: price at or below lower channel + up trend + volume
+            if low[i] <= lower_channel[i] and w_trend_up and vol_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: near R2/R3 + downtrend + volume
-            elif (near_r2 or near_r3) and downtrend_6h and volume_filter:
+            # Short entry: price at or above upper channel + down trend + volume
+            elif high[i] >= upper_channel[i] and w_trend_down and vol_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches weekly pivot or trend fails
-            if close[i] >= pivot_w_aligned[i] or not uptrend_6h:
+            # Long exit: price reaches middle line or trend fails
+            if close[i] >= lr_value_aligned[i] or not w_trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches weekly pivot or trend fails
-            if close[i] <= pivot_w_aligned[i] or not downtrend_6h:
+            # Short exit: price reaches middle line or trend fails
+            if close[i] <= lr_value_aligned[i] or not w_trend_down:
                 signals[i] = 0.0
                 position = 0
             else:
