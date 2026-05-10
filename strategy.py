@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_PivotPoint_Breakout_Volume_Spike_TrendFilter
-Hypothesis: Use daily pivot points (PP, R1, S1) as key support/resistance levels on 4h chart. Breakouts above R1 or below S1 with volume spike and aligned trend (via 1w EMA200) capture institutional breakout moves. Works in bull/bear via 1w trend filter, limiting trades to 20-40/year via strict breakout conditions.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level (1d) and short when breaks below S1 level, filtered by 1d EMA34 trend and volume spike (>1.5x 20-period average). This captures institutional breakouts with trend alignment, generating ~20-40 trades/year. Works in bull/bear via trend filter and volume confirmation to avoid false breakouts.
 """
 
-name = "4h_PivotPoint_Breakout_Volume_Spike_TrendFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,96 +17,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for pivot points
+    # Get 1d data for Camarilla levels, EMA trend, and volume
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Calculate daily pivot points: PP = (H+L+C)/3, R1 = 2*PP - L, S1 = 2*PP - H
+    # Calculate Camarilla pivot levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pp - low_1d
-    s1 = 2 * pp - high_1d
+    # Previous day's values for today's Camarilla calculation
+    ph = np.roll(high_1d, 1)
+    pl = np.roll(low_1d, 1)
+    pc = np.roll(close_1d, 1)
+    ph[0] = ph[1] if len(ph) > 1 else ph[0]
+    pl[0] = pl[1] if len(pl) > 1 else pl[0]
+    pc[0] = pc[1] if len(pc) > 1 else pc[0]
     
-    # Align pivot levels to 4h (they change only once per day)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Camarilla levels
+    R1 = pc + 1.1 * (ph - pl) / 12
+    S1 = pc - 1.1 * (ph - pl) / 12
     
-    # Get 1w data for trend filter (EMA200)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
+    # 1d EMA34 trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 1d volume spike filter (>1.5x 20-period average)
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (vol_ma20_1d * 1.5)
     
-    # Get 4h data for volume and price
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Align all 1d indicators to 12h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
-    volume_4h = df_4h['volume'].values
-    vol_ma20_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma20_4h)
-    
+    # 12h price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 200 EMA and 20 MA
-    start_idx = 200
+    # Warmup: need EMA34 (34) and volume MA (20)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(pp_aligned[i]) or
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma20_4h_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or
+            np.isnan(ema34_1d_aligned[i]) or
+            np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs 1w EMA200
-        uptrend_1w = close[i] > ema200_1w_aligned[i]
-        downtrend_1w = close[i] < ema200_1w_aligned[i]
+        # Trend filter: price vs 1d EMA34
+        uptrend_1d = close[i] > ema34_1d_aligned[i]
+        downtrend_1d = close[i] < ema34_1d_aligned[i]
         
-        # Volume filter: current 4h volume > 2x 20-period MA
-        volume_spike = volume[i] > vol_ma20_4h_aligned[i] * 2.0
-        
-        # Breakout conditions
-        breakout_long = high[i] > r1_aligned[i]  # Break above R1
-        breakout_short = low[i] < s1_aligned[i]  # Break below S1
+        # Volume spike filter
+        vol_spike = volume_spike_aligned[i] > 0.5  # boolean as float
         
         if position == 0:
             # Long: break above R1 in uptrend with volume spike
-            if breakout_long and uptrend_1w and volume_spike:
+            if high[i] > R1_aligned[i] and uptrend_1d and vol_spike:
                 signals[i] = 0.25
                 position = 1
             # Short: break below S1 in downtrend with volume spike
-            elif breakout_short and downtrend_1w and volume_spike:
+            elif low[i] < S1_aligned[i] and downtrend_1d and vol_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses back below PP or trend fails
-            if low[i] < pp_aligned[i] or not uptrend_1w:
+            # Long exit: price breaks below S1 or trend fails
+            if low[i] < S1_aligned[i] or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses back above PP or trend fails
-            if high[i] > pp_aligned[i] or not downtrend_1w:
+            # Short exit: price breaks above R1 or trend fails
+            if high[i] > R1_aligned[i] or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
