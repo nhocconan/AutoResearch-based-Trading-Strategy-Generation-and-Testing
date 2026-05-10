@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking above/below Keltner Channel (20, 1.5) with 1d trend and volume
-# captures strong momentum moves. Works in bull (breakouts) and bear (mean reversion at extremes)
-# with tight entries to avoid overtrading.
+# 6h_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Fade at R3/S3 levels from daily Camarilla (strong reversal zones) with
+# weekly trend filter and volume confirmation. Works in bull (fade from resistance) and
+# bear (fade from support) with tight entries to avoid overtrading.
 
-name = "4h_Keltner_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,32 +22,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d EMA50 trend
+    # 1w EMA34 trend
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1w_up = close_1w > ema34_1w
+    trend_1w_down = close_1w < ema34_1w
+    
+    # Align 1w trend to 6h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    
+    # Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    range_1d = high_1d - low_1d
+    R3 = close_1d + 1.1 * range_1d / 4
+    S3 = close_1d - 1.1 * range_1d / 4
     
-    # Align 1d trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
-    
-    # Keltner Channel (20, 1.5)
-    atr_period = 20
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper = ema20 + 1.5 * atr
-    lower = ema20 - 1.5 * atr
+    # Align Camarilla levels to 6h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
@@ -59,8 +64,8 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,30 +75,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Long: break above upper Keltner with 1d uptrend and volume spike
-            if (close[i] > upper[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_spike):
+            # Long: fade from S3 (support) with weekly uptrend and volume spike
+            if (close[i] < S3_aligned[i] and 
+                trend_1w_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Keltner with 1d downtrend and volume spike
-            elif (close[i] < lower[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_spike):
+            # Short: fade from R3 (resistance) with weekly downtrend and volume spike
+            elif (close[i] > R3_aligned[i] and 
+                  trend_1w_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: close below lower or trend fails
-            if (close[i] < lower[i] or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: close above R3 or trend fails
+            if (close[i] > R3_aligned[i] or 
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: close above upper or trend fails
-            if (close[i] > upper[i] or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: close below S3 or trend fails
+            if (close[i] < S3_aligned[i] or 
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
