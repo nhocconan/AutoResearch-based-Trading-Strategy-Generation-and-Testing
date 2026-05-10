@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_v2
-Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) from prior day's range, with 1d EMA50 trend filter and volume confirmation. 
-Reduces trade frequency by requiring tighter volume confirmation (2.0x scaled 1d volume) and adding a minimum hold of 6 bars to avoid whipsaw.
-Target: 20-35 trades/year (80-140 total) to stay under 400 total 4h trades and minimize fee drag.
-Works in bull/bear by only taking trades in direction of daily trend.
+4h_KAMA_Trend_With_1d_ADX_Filter
+Hypothesis: KAMA adapts to market noise, providing a smooth trend filter. 
+Trend direction is determined by price relative to KAMA(10). 
+Entries are taken only when 1d ADX > 25 (trending market) to avoid whipsaws in ranging periods.
+Exit when price crosses back over KAMA or ADX falls below 20.
+Target: 20-30 trades/year (80-120 total) to minimize fee drag.
+Works in bull/bear by only trading in strong trends.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_v2"
+name = "4h_KAMA_Trend_With_1d_ADX_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,94 +22,109 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
     # 1d data
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Camarilla levels from prior day: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # KAMA(10) on 4h close
+    er = np.zeros(n)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    for i in range(10, n):
+        direction = np.abs(close[i] - close[i-10])
+        volatility = np.sum(change[i-9:i+1])
+        er[i] = direction / volatility if volatility != 0 else 0
+    sc = (er * 0.59 + 0.06) ** 2
+    kama = np.full(n, np.nan)
+    kama[9] = np.mean(close[:10])
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 1d EMA50 for trend filter
-    ema50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema50_1d[49] = np.mean(close_1d[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1d)):
-            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
+    # ADX(14) on 1d
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            elif minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], 
+                       np.abs(high[i] - close[i-1]), 
+                       np.abs(low[i] - close[i-1]))
+        # Smooth
+        atr = np.zeros_like(tr)
+        plus_di = np.zeros_like(plus_dm)
+        minus_di = np.zeros_like(minus_dm)
+        if len(high) >= period:
+            atr[period-1] = np.mean(tr[1:period])
+            plus_di[period-1] = np.mean(plus_dm[1:period]) / atr[period-1] * 100
+            minus_di[period-1] = np.mean(minus_dm[1:period]) / atr[period-1] * 100
+            for i in range(period, len(high)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_di[i] = (plus_di[i-1] * (period-1) + plus_dm[i]) / atr[i] * 100
+                minus_di[i] = (minus_di[i-1] * (period-1) + minus_dm[i]) / atr[i] * 100
+        dx = np.zeros_like(atr)
+        dx[:] = np.nan
+        mask = (plus_di + minus_di) != 0
+        dx[mask] = np.abs(plus_di[mask] - minus_di[mask]) / (plus_di[mask] + minus_di[mask]) * 100
+        adx = np.full_like(dx, np.nan)
+        if len(high) >= 2*period-1:
+            adx[2*period-2] = np.mean(dx[period-1:2*period-1])
+            for i in range(2*period-1, len(high)):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        return adx
     
-    # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    
-    # Align 1d indicators to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    bars_since_entry = 0
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = 30  # Wait for KAMA and ADX
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             continue
         
-        bars_since_entry += 1
-        
-        # Volume confirmation: current 4h volume > 2.0x average 1d volume (scaled)
-        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
-        volume_confirm = volume[i] > 2.0 * vol_1d_scaled
-        
-        # Trend and price relative to Camarilla levels
-        is_uptrend = close[i] > ema50_1d_aligned[i]
-        is_downtrend = close[i] < ema50_1d_aligned[i]
-        price_above_r1 = close[i] > r1_aligned[i]
-        price_below_s1 = close[i] < s1_aligned[i]
+        adx = adx_1d_aligned[i]
+        is_trending = adx > 25
+        is_weak_trend = adx < 20
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
         if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume, and minimum bars since last exit
-            if price_above_r1 and is_uptrend and volume_confirm and bars_since_entry >= 6:
+            # Enter long in uptrend with strong ADX
+            if price_above_kama and is_trending:
                 signals[i] = 0.25
                 position = 1
-                bars_since_entry = 0
-            # Short: price breaks below S1, in downtrend, with volume, and minimum bars since last exit
-            elif price_below_s1 and is_downtrend and volume_confirm and bars_since_entry >= 6:
+            # Enter short in downtrend with strong ADX
+            elif price_below_kama and is_trending:
                 signals[i] = -0.25
                 position = -1
-                bars_since_entry = 0
         elif position == 1:
-            # Exit: price falls back below R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+            # Exit: price crosses below KAMA or trend weakens
+            if price_below_kama or is_weak_trend:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+            # Exit: price crosses above KAMA or trend weakens
+            if price_above_kama or is_weak_trend:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
             else:
                 signals[i] = -0.25
     
