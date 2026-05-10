@@ -1,12 +1,13 @@
-# 1D_Pullback_to_200SMA_with_200MA_Volume_Spike
-# Hypothesis: In both bull and bear markets, strong trends often retrace to the 200-day SMA before resuming.
-# Long entries occur when price pulls back to the 200SMA with a bullish candle, volume spike, and price above 200-day EMA (trend filter).
-# Short entries occur when price rallies to the 200SMA with a bearish candle, volume spike, and price below 200-day EMA.
-# The 200SMA acts as dynamic support/resistance; the 200EMA confirms the trend direction; volume spike confirms institutional interest.
-# Designed for low trade frequency (5-15/year) to minimize fee drag.
+#!/usr/bin/env python3
+# 6h_Momentum_Divergence_Strategy
+# Hypothesis: Combines RSI divergence with volume confirmation and 1-day trend filter.
+# In bull markets, we go long on bullish RSI divergence (price makes LL, RSI makes HL) with volume confirmation.
+# In bear markets, we go short on bearish RSI divergence (price makes HH, RSI makes LH) with volume confirmation.
+# Uses 1-day EMA20 as trend filter to align with higher timeframe momentum.
+# Designed for low trade frequency (15-25/year) to minimize fee drag.
 
-name = "1D_Pullback_to_200SMA_with_200MA_Volume_Spike"
-timeframe = "1d"
+name = "6h_Momentum_Divergence_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,76 +24,88 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1-week data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Get 1-day data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Daily EMA20 for trend filter
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Calculate 200-day SMA and EMA on daily data
-    def sma(arr, window):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= window:
-            for i in range(window-1, len(arr)):
-                res[i] = np.mean(arr[i-window+1:i+1])
-        return res
+    # RSI calculation (14-period)
+    def rsi(arr, period=14):
+        delta = np.diff(arr)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.full_like(arr, np.nan)
+        avg_loss = np.full_like(arr, np.nan)
+        
+        # First average
+        if len(arr) >= period + 1:
+            avg_gain[period] = np.mean(gain[1:period+1])
+            avg_loss[period] = np.mean(loss[1:period+1])
+            
+            # Wilder's smoothing
+            for i in range(period+1, len(arr)):
+                avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i]) / period
+                avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i]) / period
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi_vals = 100 - (100 / (1 + rs))
+        return rsi_vals
     
-    sma_200 = sma(close, 200)
-    ema_200 = pd.Series(close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    rsi_vals = rsi(close, 14)
     
-    # 20-day volume average for spike detection
+    # Volume confirmation (20-period average)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma_20 = mean_arr(volume, 20)
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Need full 200-day history
+    start_idx = max(50, 20) + 10  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(sma_200[i]) or np.isnan(ema_200[i]) or \
-           np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(ema_20_1d_aligned[i]) or np.isnan(rsi_vals[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x 20-day average
-        volume_spike = volume[i] > 2.0 * vol_ma_20[i] if vol_ma_20[i] > 0 else False
-        
-        # Bullish candle: close > open
-        bullish_candle = close[i] > prices['open'].iloc[i]
-        # Bearish candle: close < open
-        bearish_candle = close[i] < prices['open'].iloc[i]
-        
-        # Price near 200SMA (within 1%)
-        price_near_sma = abs(close[i] - sma_200[i]) / sma_200[i] < 0.01
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: price pulls back to 200SMA with bullish candle, volume spike, and above 200EMA (uptrend)
-            if price_near_sma and bullish_candle and volume_spike and close[i] > ema_200[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price rallies to 200SMA with bearish candle, volume spike, and below 200EMA (downtrend)
-            elif price_near_sma and bearish_candle and volume_spike and close[i] < ema_200[i]:
-                signals[i] = -0.25
-                position = -1
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            # Look back 3 periods for pivot points
+            if i >= 3:
+                price_ll = low[i] < low[i-1] and low[i] < low[i-2] and low[i] < low[i-3]
+                price_hh = high[i] > high[i-1] and high[i] > high[i-2] and high[i] > high[i-3]
+                rsi_hl = rsi_vals[i] > rsi_vals[i-1] and rsi_vals[i] > rsi_vals[i-2] and rsi_vals[i] > rsi_vals[i-3]
+                rsi_lh = rsi_vals[i] < rsi_vals[i-1] and rsi_vals[i] < rsi_vals[i-2] and rsi_vals[i] < rsi_vals[i-3]
+                
+                # Long: bullish divergence in downtrend (price LL, RSI HL) with volume confirmation and above daily EMA20
+                if price_ll and rsi_hl and volume_confirm and close[i] > ema_20_1d_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: bearish divergence in uptrend (price HH, RSI LH) with volume confirmation and below daily EMA20
+                elif price_hh and rsi_lh and volume_confirm and close[i] < ema_20_1d_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
         elif position == 1:
-            # Long exit: price crosses below 200EMA OR weekly EMA50 turns down
-            if close[i] < ema_200[i] or ema_50_1w_aligned[i] < ema_50_1w_aligned[i-1]:
+            # Long exit: price makes new high or RSI becomes overbought
+            if high[i] > high[i-1] and high[i] > high[i-2] or rsi_vals[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above 200EMA OR weekly EMA50 turns up
-            if close[i] > ema_200[i] or ema_50_1w_aligned[i] > ema_50_1w_aligned[i-1]:
+            # Short exit: price makes new low or RSI becomes oversold
+            if low[i] < low[i-1] and low[i] < low[i-2] or rsi_vals[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
