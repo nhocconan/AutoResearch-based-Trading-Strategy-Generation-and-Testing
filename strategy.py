@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: 1h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
-# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 20-period MA) confirms institutional participation.
-# Designed for 1h timeframe targeting 15-37 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
+# 1h_4h1d_Momentum_Divergence_Filter
+# Hypothesis: 1h momentum divergence with 4h trend filter and volume confirmation.
+# Uses 4h RSI divergence (bullish/bearish) to identify reversals, confirmed by 1h price action and volume spike.
+# 4h trend (close > EMA50) filters counter-trend signals. Designed for 15-30 trades/year per symbol.
+# Works in bull/bear by requiring alignment with higher timeframe trend and momentum exhaustion signals.
 
-name = "1h_4h1d_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "1h_4h1d_Momentum_Divergence_Filter"
 timeframe = "1h"
 leverage = 1.0
 
@@ -12,14 +13,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def rsi(close, period=14):
+    """Calculate RSI with proper handling of edge cases."""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 4h data for trend and RSI divergence
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
     # 1h OHLCV
@@ -28,79 +42,110 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 4h RSI for divergence detection
+    rsi_4h = rsi(df_4h['close'].values, period=14)
     
-    camarilla_r1 = np.full(len(df_1d), np.nan)
-    camarilla_s1 = np.full(len(df_1d), np.nan)
+    # Find 4h swing highs and lows for divergence
+    # Swing high: high > previous 2 and next 2 highs
+    # Swing low: low < previous 2 and next 2 lows
+    swing_high = np.zeros(len(df_4h), dtype=bool)
+    swing_low = np.zeros(len(df_4h), dtype=bool)
     
-    for i in range(1, len(df_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        diff = prev_high - prev_low
-        
-        camarilla_r1[i] = prev_close + diff * 1.1 / 6
-        camarilla_s1[i] = prev_close - diff * 1.1 / 6
+    for i in range(2, len(df_4h) - 2):
+        if (df_4h['high'].values[i] > df_4h['high'].values[i-1] and 
+            df_4h['high'].values[i] > df_4h['high'].values[i-2] and
+            df_4h['high'].values[i] > df_4h['high'].values[i+1] and
+            df_4h['high'].values[i] > df_4h['high'].values[i+2]):
+            swing_high[i] = True
+            
+        if (df_4h['low'].values[i] < df_4h['low'].values[i-1] and 
+            df_4h['low'].values[i] < df_4h['low'].values[i-2] and
+            df_4h['low'].values[i] < df_4h['low'].values[i+1] and
+            df_4h['low'].values[i] < df_4h['low'].values[i+2]):
+            swing_low[i] = True
     
-    # Align daily indicators to 1h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Detect bullish and bearish RSI divergence
+    bullish_div = np.zeros(len(df_4h), dtype=bool)
+    bearish_div = np.zeros(len(df_4h), dtype=bool)
     
-    # Volume average (20-period for 1h)
+    # Bullish divergence: price makes lower low, RSI makes higher low
+    for i in range(4, len(df_4h)):
+        if swing_low[i]:
+            # Look back for previous swing low
+            for j in range(i-1, max(0, i-20), -1):
+                if swing_low[j]:
+                    if (df_4h['low'].values[i] < df_4h['low'].values[j] and  # lower low
+                        rsi_4h[i] > rsi_4h[j]):  # higher low on RSI
+                        bullish_div[i] = True
+                    break
+    
+    # Bearish divergence: price makes higher high, RSI makes lower high
+    for i in range(4, len(df_4h)):
+        if swing_high[i]:
+            # Look back for previous swing high
+            for j in range(i-1, max(0, i-20), -1):
+                if swing_high[j]:
+                    if (df_4h['high'].values[i] > df_4h['high'].values[j] and  # higher high
+                        rsi_4h[i] < rsi_4h[j]):  # lower high on RSI
+                        bearish_div[i] = True
+                    break
+    
+    # Align 4h indicators to 1h timeframe
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    bullish_div_aligned = align_htf_to_ltf(prices, df_4h, bullish_div.astype(float))
+    bearish_div_aligned = align_htf_to_ltf(prices, df_4h, bearish_div.astype(float))
+    close_4h_aligned = align_htf_to_ltf(prices, df_4h, df_4h['close'].values)
+    
+    # Volume confirmation (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for daily EMA50 + vol MA
+    # Warmup: need enough history for 4h indicators
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or
+            np.isnan(bullish_div_aligned[i]) or
+            np.isnan(bearish_div_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend: daily close > EMA50
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        # Determine 4h trend: close > EMA50
+        uptrend = close_4h_aligned[i] > ema_50_4h_aligned[i]
+        downtrend = close_4h_aligned[i] < ema_50_4h_aligned[i]
         
         # Volume confirmation (2x average for significance)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Breakout above Camarilla R1 in uptrend with volume spike
-            if close[i] > camarilla_r1_aligned[i] and uptrend and volume_surge:
+            # Long: Bullish RSI divergence in uptrend with volume spike
+            if bullish_div_aligned[i] > 0.5 and uptrend and volume_surge:
                 signals[i] = 0.20
                 position = 1
-            # Short: Breakdown below Camarilla S1 in downtrend with volume spike
-            elif close[i] < camarilla_s1_aligned[i] and downtrend and volume_surge:
+            # Short: Bearish RSI divergence in downtrend with volume spike
+            elif bearish_div_aligned[i] > 0.5 and downtrend and volume_surge:
                 signals[i] = -0.20
                 position = -1
         else:
             if position == 1:
-                # Long exit: close below Camarilla R1 or trend fails
-                if close[i] < camarilla_r1_aligned[i] or not uptrend:
+                # Long exit: bearish divergence appears or trend fails
+                if bearish_div_aligned[i] > 0.5 or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.20
             elif position == -1:
-                # Short exit: close above Camarilla S1 or trend fails
-                if close[i] > camarilla_s1_aligned[i] or not downtrend:
+                # Short exit: bullish divergence appears or trend fails
+                if bullish_div_aligned[i] > 0.5 or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
