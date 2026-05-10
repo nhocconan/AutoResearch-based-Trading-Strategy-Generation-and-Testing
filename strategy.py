@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 4h_HTF1d_RSI_CCI_Reversal
-# Hypothesis: 4-hour reversals triggered by daily RSI(14) and CCI(20) extremes. Uses daily RSI < 30 for long and > 70 for short, confirmed by CCI crossing zero and volume spike. Works in both bull and bear markets by capturing mean reversion at extremes with trend filter via CCI zero-cross. Designed for ~30-50 trades/year.
+# 12h_KAMA_RSI_Chop_Filter
+# Hypothesis: 12-hour KAMA direction filtered by RSI momentum and Choppiness regime. 
+# KAMA adapts to trend strength, RSI filters momentum extremes, Choppiness avoids whipsaws in sideways markets.
+# Designed for low trade frequency (12-37/year) with discipline to work in both bull and bear markets.
 
-name = "4h_HTF1d_RSI_CCI_Reversal"
-timeframe = "4h"
+name = "12h_KAMA_RSI_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,101 +14,117 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for RSI and CCI
+    # Daily data for KAMA, RSI, and Choppiness
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Daily RSI(14)
-    def rsi(arr, period):
-        delta = np.diff(arr)
+    # KAMA (Kaufman Adaptive Moving Average) - ER=10, Fast=2, Slow=30
+    def kama(close, er_length=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, prepend=close[0]))
+        volatility = np.abs(np.diff(close))
+        er = np.zeros_like(close)
+        for i in range(1, len(close)):
+            if volatility[i-er_length+1:i+1].sum() != 0:
+                er[i] = change[i] / volatility[i-er_length+1:i+1].sum()
+            else:
+                er[i] = 0
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama_out = np.zeros_like(close)
+        kama_out[0] = close[0]
+        for i in range(1, len(close)):
+            kama_out[i] = kama_out[i-1] + sc[i] * (close[i] - kama_out[i-1])
+        return kama_out
+    
+    # RSI (14)
+    def rsi(close, length=14):
+        delta = np.diff(close, prepend=close[0])
         gain = np.where(delta > 0, delta, 0)
         loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.zeros_like(arr)
-        avg_loss = np.zeros_like(arr)
-        avg_gain[period] = np.mean(gain[:period])
-        avg_loss[period] = np.mean(loss[:period])
-        for i in range(period+1, len(arr)):
-            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
-            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi_val = 100 - (100 / (1 + rs))
-        rsi_full = np.full_like(arr, np.nan)
-        rsi_full[period:] = rsi_val[period:]
-        return rsi_full
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        for i in range(1, len(close)):
+            if i < length:
+                avg_gain[i] = np.mean(gain[1:i+1]) if i > 0 else 0
+                avg_loss[i] = np.mean(loss[1:i+1]) if i > 0 else 0
+            else:
+                avg_gain[i] = (avg_gain[i-1] * (length-1) + gain[i]) / length
+                avg_loss[i] = (avg_loss[i-1] * (length-1) + loss[i]) / length
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi_out = 100 - (100 / (1 + rs))
+        return rsi_out
     
-    rsi_14 = rsi(close_1d, 14)
+    # Choppiness Index (14)
+    def choppiness(high, low, close, length=14):
+        atr = np.zeros_like(close)
+        for i in range(1, len(close)):
+            atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        sum_atr = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            sum_atr[i] = np.sum(atr[i-length+1:i+1])
+        highest = np.zeros_like(close)
+        lowest = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            highest[i] = np.max(high[i-length+1:i+1])
+            lowest[i] = np.min(low[i-length+1:i+1])
+        chop = np.zeros_like(close)
+        for i in range(length-1, len(close)):
+            if highest[i] - lowest[i] != 0:
+                chop[i] = 100 * np.log10(sum_atr[i] / (highest[i] - lowest[i])) / np.log10(length)
+            else:
+                chop[i] = 50
+        return chop
     
-    # Daily CCI(20)
-    def cci(high, low, close, period):
-        tp = (high + low + close) / 3.0
-        sma = np.zeros_like(tp)
-        mean_dev = np.zeros_like(tp)
-        for i in range(period-1, len(tp)):
-            sma[i] = np.mean(tp[i-period+1:i+1])
-            mean_dev[i] = np.mean(np.abs(tp[i-period+1:i+1] - sma[i]))
-        cci_val = np.where(mean_dev != 0, (tp - sma) / (0.015 * mean_dev), 0)
-        cci_full = np.full_like(tp, np.nan)
-        cci_full[period-1:] = cci_val[period-1:]
-        return cci_full
+    # Calculate indicators
+    kama_1d = kama(close_1d, er_length=10, fast=2, slow=30)
+    rsi_1d = rsi(close_1d, length=14)
+    chop_1d = choppiness(high_1d, low_1d, close_1d, length=14)
     
-    cci_20 = cci(high_1d, low_1d, close_1d, 20)
-    
-    # Daily volume confirmation: 20-period average
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
-        return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
-    
-    # Align daily indicators to 4h timeframe (wait for 1d bar to close)
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
-    cci_20_aligned = align_htf_to_ltf(prices, df_1d, cci_20)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    # Align to 12h timeframe
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_14_aligned[i]) or np.isnan(cci_20_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: RSI < 30 (oversold), CCI crosses above zero, volume spike
-            if rsi_14_aligned[i] < 30 and cci_20_aligned[i] > 0 and cci_20_aligned[i-1] <= 0 and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Long: price above KAMA, RSI > 50 (bullish momentum), Choppiness < 61.8 (trending)
+            if close[i] > kama_1d_aligned[i] and rsi_1d_aligned[i] > 50 and chop_1d_aligned[i] < 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought), CCI crosses below zero, volume spike
-            elif rsi_14_aligned[i] > 70 and cci_20_aligned[i] < 0 and cci_20_aligned[i-1] >= 0 and volume[i] > 1.5 * vol_ma_20_aligned[i]:
+            # Short: price below KAMA, RSI < 50 (bearish momentum), Choppiness < 61.8 (trending)
+            elif close[i] < kama_1d_aligned[i] and rsi_1d_aligned[i] < 50 and chop_1d_aligned[i] < 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 50 or CCI < -100
-            if rsi_14_aligned[i] > 50 or cci_20_aligned[i] < -100:
+            # Long exit: price below KAMA or RSI < 40 or Choppiness > 61.8 (choppy)
+            if close[i] < kama_1d_aligned[i] or rsi_1d_aligned[i] < 40 or chop_1d_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 50 or CCI > 100
-            if rsi_14_aligned[i] < 50 or cci_20_aligned[i] > 100:
+            # Short exit: price above KAMA or RSI > 60 or Choppiness > 61.8 (choppy)
+            if close[i] > kama_1d_aligned[i] or rsi_1d_aligned[i] > 60 or chop_1d_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
