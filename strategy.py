@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1w_Keltner_Breakout_Trend_Filter
-# Hypothesis: In trending markets, price breaking above/below Keltner Channel (2x ATR) on weekly timeframe
-# indicates strong momentum. We use 12h close > weekly EMA50 for trend filter and volume confirmation
-# to avoid false breakouts. Works in bull markets (follows uptrends) and bear markets (follows downtrends)
-# by only trading in direction of 12h trend. Target: 15-30 trades/year to minimize fee drag.
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 levels represent stronger intraday support/resistance.
+# Breaking above R3 in a 1d uptrend or below S3 in a 1d downtrend indicates
+# strong momentum continuation. Volume confirmation filters false breakouts.
+# Works in bull/bear markets by trading only with the 1d trend.
 
-name = "12h_1w_Keltner_Breakout_Trend_Filter"
-timeframe = "12h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,72 +23,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Keltner Channel and EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate weekly ATR for Keltner Channel (14-period)
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_14_1w = tr.rolling(window=14, min_periods=14).mean().values
-    upper_keltner = df_1w['close'] + 2 * atr_14_1w
-    lower_keltner = df_1w['close'] - 2 * atr_14_1w
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1w, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1w, lower_keltner)
+    # Calculate Camarilla levels from previous day
+    # R3 = close + (high - low) * 1.12 / 4
+    # S3 = close - (high - low) * 1.12 / 4
+    camarilla_r3 = df_1d['close'] + (df_1d['high'] - df_1d['low']) * 1.12 / 4
+    camarilla_s3 = df_1d['close'] - (df_1d['high'] - df_1d['low']) * 1.12 / 4
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
     
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-period MA on 6h = ~5 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA50 (50), ATR (14), volume MA (20)
-    start_idx = max(50, 14, 20)
+    # Warmup: need 1d EMA50 (50), Camarilla (needs 1d), volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(upper_keltner_aligned[i]) or 
-            np.isnan(lower_keltner_aligned[i]) or 
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # 12h price vs weekly EMA50 for trend filter
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # 1d trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above upper Keltner + volume
-            if uptrend and close[i] > upper_keltner_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above R3 + volume
+            if uptrend and close[i] > camarilla_r3_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below lower Keltner + volume
-            elif downtrend and close[i] < lower_keltner_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below S3 + volume
+            elif downtrend and close[i] < camarilla_s3_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters Keltner Channel
-            if not uptrend or close[i] < upper_keltner_aligned[i]:
+            # Long exit: trend breaks or price re-enters below R3
+            if not uptrend or close[i] < camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters Keltner Channel
-            if not downtrend or close[i] > lower_keltner_aligned[i]:
+            # Short exit: trend breaks or price re-enters above S3
+            if not downtrend or close[i] > camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
