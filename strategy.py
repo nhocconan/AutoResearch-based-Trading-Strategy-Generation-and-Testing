@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Uses 12h timeframe with Camarilla R1/S1 breakout signals filtered by 1d EMA34 trend and volume confirmation.
-# Targets 15-30 trades per year per symbol with discrete position sizing (0.25) to minimize fee churn.
-# Designed to work in both bull and bear markets by combining price level breaks with trend and volume filters.
+# 4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Combines 1d EMA34 trend filter with Camarilla R1/S1 breakouts and volume confirmation.
+# Uses higher timeframe trend (1d EMA34) to filter direction, reducing false signals in choppy markets.
+# Designed to work in both bull and bear markets by aligning with daily trend.
+# Targets 15-25 trades per year with discrete position sizing (0.25) to minimize fee churn.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla calculation
+    # Get 1d data for EMA trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -37,18 +38,18 @@ def generate_signals(prices):
     camarilla_r1 = df_1d['close'] + ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
     camarilla_s1 = df_1d['close'] - ((df_1d['high'] - df_1d['low']) * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe (use prior day's levels)
+    # Align Camarilla levels to 4h timeframe (use prior day's levels)
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Volume filter: volume > 1.5x 20-period average on 12h chart
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 1.5x 30-period average on 4h chart
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_threshold = vol_ma * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for EMA and volume MA
+    start_idx = max(34, 30)  # Warmup for EMA and volume MA
     
     for i in range(start_idx, n):
         if np.isnan(ema_34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_threshold[i]):
