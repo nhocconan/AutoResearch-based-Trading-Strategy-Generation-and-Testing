@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_With_1wTrend_Filter
-# Hypothesis: On 12h timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend detection with weekly trend filter and volume confirmation. The weekly trend filter prevents counter-trend trades during major trend reversals, while volume confirmation ensures momentum behind the move. KAMA adapts to market noise, reducing whipsaws in choppy markets and capturing strong trends. Designed for low frequency (12-37 trades/year) to minimize fee drift, suitable for both bull and bear markets.
+# 4h_Three_Sigma_Reversal_Volume_Trend
+# Hypothesis: Extreme price deviations beyond 3 standard deviations from the 20-period mean often precede mean-reversion. Combined with daily trend filter and volume confirmation, this captures exhaustion moves in both bull and bear markets. Low-frequency signals reduce fee drag while maintaining edge.
 
-name = "12h_KAMA_Trend_With_1wTrend_Filter"
-timeframe = "12h"
+name = "4h_Three_Sigma_Reversal_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -20,52 +20,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Daily data for additional confirmation
+    # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # KAMA (10, 2, 30) on 12h close
+    # 20-period mean and std dev for 3-sigma bands
     close_series = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series - close_series.shift(1)).rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Handle NaN/inf
-    sc = sc.fillna(0).replace([np.inf, -np.inf], 0).values
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    ma20 = close_series.rolling(window=20, min_periods=20).mean().values
+    std20 = close_series.rolling(window=20, min_periods=20).std().values
+    upper_sigma3 = ma20 + 3 * std20
+    lower_sigma3 = ma20 - 3 * std20
     
-    # Weekly trend: EMA34 on weekly close
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
-    
-    # Align weekly trend to 12h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
-    
-    # Daily trend: EMA34 on daily close for additional filter
+    # Daily trend: price above/below 50-period EMA
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # Align daily trend to 12h
+    # Align daily trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
@@ -77,11 +50,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+        if (np.isnan(upper_sigma3[i]) or np.isnan(lower_sigma3[i]) or
             np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -93,25 +66,20 @@ def generate_signals(prices):
         volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: price above KAMA with weekly and daily uptrend and volume
-            if (close[i] > kama[i] and 
-                trend_1w_up_aligned[i] > 0.5 and 
-                trend_1d_up_aligned[i] > 0.5 and 
-                volume_confirm):
+            # Enter long: price below 3-sigma lower band with daily uptrend and volume
+            if (close[i] < lower_sigma3[i] and 
+                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA with weekly and daily downtrend and volume
-            elif (close[i] < kama[i] and 
-                  trend_1w_down_aligned[i] > 0.5 and 
-                  trend_1d_down_aligned[i] > 0.5 and 
-                  volume_confirm):
+            # Enter short: price above 3-sigma upper band with daily downtrend and volume
+            elif (close[i] > upper_sigma3[i] and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below KAMA or trend fails
-            if (close[i] <= kama[i] or 
-                trend_1w_up_aligned[i] < 0.5 or 
+            # Exit when price returns to 20-period mean or trend fails
+            if (close[i] > ma20[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -119,9 +87,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above KAMA or trend fails
-            if (close[i] >= kama[i] or 
-                trend_1w_down_aligned[i] < 0.5 or 
+            # Exit when price returns to 20-period mean or trend fails
+            if (close[i] < ma20[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
