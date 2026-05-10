@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_KAMA_RSI_Reversal
-# Hypothesis: 4h KAMA direction combined with RSI mean reversion and 1d trend filter.
-# KAMA adapts to market noise, reducing false signals in choppy markets.
-# RSI identifies overbought/oversold conditions for mean reversion entries.
-# 1d trend filter ensures trades align with higher timeframe momentum.
-# Designed for low trade frequency to minimize fee drag and work in bull/bear markets.
+# 6h_1d_1w_RollingReversal
+# Hypothesis: 6h mean reversion when price deviates from 1d VWAP and aligns with weekly trend.
+# Uses 1d VWAP as fair value and 1w EMA50 for trend filter. Enters when price reverts to VWAP
+# with volume confirmation, exits on VWAP cross or trend change. Designed for low trade frequency
+# (<30/year) to work in both bull and bear markets by fading extremes in trending markets.
 
-name = "4h_1d_KAMA_RSI_Reversal"
-timeframe = "4h"
+name = "6h_1d_1w_RollingReversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,104 +18,88 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for VWAP and 1w data for trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # 1d VWAP calculation (typical price * volume)
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_numerator = (typical_price * df_1d['volume']).cumsum()
+    vwap_denominator = df_1d['volume'].cumsum()
+    vwap = (vwap_numerator / vwap_denominator).values
     
-    # 4h data
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # 6h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (adaptive moving average)
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of absolute changes over 10 periods
-    # Handle array sizes
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Pre-calculate VWAP alignment and trend
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap)
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # RSI (14-period)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # First average
-    avg_gain = np.full_like(close, np.nan)
-    avg_loss = np.full_like(close, np.nan)
-    avg_gain[14] = np.nanmean(gain[1:15])
-    avg_loss[14] = np.nanmean(loss[1:15])
-    # Subsequent averages
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Price deviation from VWAP (normalized by ATR-like measure)
+    price_dev = (close - vwap_aligned) / vwap_aligned
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA, RSI, and EMA aligned
-    start_idx = 40
+    # Warmup: need VWAP (1d), EMA (1w), volume MA (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(vwap_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend from 1d EMA34
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        uptrend = close_1d_aligned[i] > ema_34_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_34_1d_aligned[i]
+        # Determine trend from 1w EMA50
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # KAMA direction
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Volume confirmation
+        volume_surge = volume[i] > 1.5 * vol_ma[i]
         
-        # RSI levels for mean reversion
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
+        # Mean reversion signals: price deviated from VWAP
+        dev_long = price_dev[i] < -0.015  # 1.5% below VWAP
+        dev_short = price_dev[i] > 0.015   # 1.5% above VWAP
+        
+        # Re-entry signals: price returning to VWAP
+        reentry_long = (price_dev[i] > -0.005) and (price_dev[i-1] <= -0.005)
+        reentry_short = (price_dev[i] < 0.005) and (price_dev[i-1] >= 0.005)
         
         if position == 0:
-            # Long: price above KAMA (uptrend) + RSI oversold + 1d uptrend
-            if price_above_kama and rsi_oversold and uptrend:
+            # Long: price oversold below VWAP with volume surge and weekly uptrend
+            if dev_long and volume_surge and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (downtrend) + RSI overbought + 1d downtrend
-            elif price_below_kama and rsi_overbought and downtrend:
+            # Short: price overbought above VWAP with volume surge and weekly downtrend
+            elif dev_short and volume_surge and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price below KAMA OR RSI overbought
-            if price_below_kama or rsi_overbought:
+            # Long exit: price returns to VWAP OR trend changes
+            if reentry_long or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price above KAMA OR RSI oversold
-            if price_above_kama or rsi_oversold:
+            # Short exit: price returns to VWAP OR trend changes
+            if reentry_short or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
