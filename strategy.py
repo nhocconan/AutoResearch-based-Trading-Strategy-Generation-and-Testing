@@ -1,11 +1,13 @@
-# 6h_WeeklyTrend_DailyRangeBreakout_Volume
-# Hypothesis: Combines weekly trend filter (EMA20) with daily range breakout (ATR-based) and volume confirmation.
-# Weekly trend ensures alignment with higher timeframe direction. Daily range breakout captures volatility expansion.
-# Volume confirms breakout strength. Designed for low trade frequency (15-30/year) to minimize fee drag.
-# Works in bull markets via trend-following breakouts and in bear via volatility expansion plays.
+#!/usr/bin/env python3
+# 12h_DailyTrend_Camarilla_R3_S3_Breakout_Volume
+# Hypothesis: Daily trend filter (EMA34) reduces false breakouts in choppy markets,
+# while daily Camarilla R3/S3 levels provide precise entries. Volume confirmation ensures
+# breakout strength. Designed for low trade frequency (15-25/year) to minimize fee drift.
+# Works in bull markets via trend-following breakouts and in bear via mean-reversion
+# at extreme levels when trend aligns.
 
-name = "6h_WeeklyTrend_DailyRangeBreakout_Volume"
-timeframe = "6h"
+name = "12h_DailyTrend_Camarilla_R3_S3_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,89 +24,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend (more stable than SMA)
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get daily data for ATR calculation
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    # Daily EMA34 for trend (more stable than SMA)
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate ATR(14) on daily timeframe
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr_14 = np.zeros_like(tr)
-    for i in range(len(tr)):
-        if i < 14:
-            atr_14[i] = np.nan
-        else:
-            atr_14[i] = np.mean(tr[i-13:i+1])
+    # Get daily data for Camarilla pivot levels
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_hl = df_1d['high'] - df_1d['low']
+    # Camarilla R3 and S3 levels
+    R3 = typical_price + (range_hl * 1.2500)
+    S3 = typical_price - (range_hl * 1.2500)
+    # Align daily levels to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
-    # Calculate daily open (using previous day's close as reference for breakout)
-    # For simplicity, use close as proxy for open in daily context
-    daily_open = close_1d  # This is acceptable for breakout calculations
-    
-    # Breakout levels: daily open ± ATR(14) * multiplier
-    multiplier = 1.5
-    upper_break = daily_open + (atr_14 * multiplier)
-    lower_break = daily_open - (atr_14 * multiplier)
-    
-    # Align daily levels to 6h timeframe
-    upper_break_aligned = align_htf_to_ltf(prices, df_1d, upper_break)
-    lower_break_aligned = align_htf_to_ltf(prices, df_1d, lower_break)
-    
-    # Volume confirmation (20-period average on 6h)
+    # Volume confirmation (12-period average on 12h = ~6 days)
+    vol_ma_period = 12
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, 20)
+    vol_ma = mean_arr(volume, vol_ma_period)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14) + 5  # need enough history
+    start_idx = max(12, 34) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
-        if np.isnan(upper_break_aligned[i]) or np.isnan(lower_break_aligned[i]) or \
-           np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
+           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.8x average
-        volume_confirm = volume[i] > 1.8 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume confirmation: current volume > 2.0x average (stricter for fewer trades)
+        volume_confirm = volume[i] > 2.0 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: price breaks above upper level with volume, above weekly EMA20 (uptrend)
-            if close[i] > upper_break_aligned[i] and volume_confirm and close[i] > ema_1w_aligned[i]:
+            # Long: price breaks above R3 with volume, above daily EMA34 (uptrend)
+            if close[i] > R3_aligned[i] and volume_confirm and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower level with volume, below weekly EMA20 (downtrend)
-            elif close[i] < lower_break_aligned[i] and volume_confirm and close[i] < ema_1w_aligned[i]:
+            # Short: price breaks below S3 with volume, below daily EMA34 (downtrend)
+            elif close[i] < S3_aligned[i] and volume_confirm and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below lower break level or below weekly EMA20
-            if close[i] < lower_break_aligned[i] or close[i] < ema_1w_aligned[i]:
+            # Long exit: price closes below S3 or breaks below daily EMA34
+            if close[i] < S3_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above upper break level or above weekly EMA20
-            if close[i] > upper_break_aligned[i] or close[i] > ema_1w_aligned[i]:
+            # Short exit: price closes above R3 or breaks above daily EMA34
+            if close[i] > R3_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
