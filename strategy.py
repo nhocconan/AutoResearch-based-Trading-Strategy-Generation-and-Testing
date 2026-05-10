@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12H_Vortex_RSI_1wTrend_Filter
-Hypothesis: Combines Vortex indicator (VI+ > VI- for uptrend) with RSI mean-reversion on 12h timeframe, filtered by weekly trend. In bull markets, VI+ dominance with RSI < 40 signals long; in bear markets, VI- dominance with RSI > 60 signals short. Weekly trend filter ensures alignment with higher timeframe momentum. Designed for low trade frequency (12-37/year) to minimize fee drag, using discrete position sizing (0.25) to reduce churn.
+1D_Camarilla_Pivot_Bounce_1wTrend_Volume
+Hypothesis: Daily bounces off weekly Camarilla S3/R3 levels with volume confirmation and weekly trend filter. 
+This strategy aims to capture mean-reversion bounces in ranging markets and continuation in trending markets 
+by combining weekly trend alignment with daily price action at key weekly support/resistance levels. 
+Designed for low trade frequency (<25/year) to minimize fee drift and work in both bull and bear markets.
 """
 
-name = "12H_Vortex_RSI_1wTrend_Filter"
-timeframe = "12h"
+name = "1D_Camarilla_Pivot_Bounce_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,87 +25,74 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
+    # Weekly data for Camarilla calculation and trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Weekly trend filter: EMA 34
+    # Use previous weekly bar to calculate Camarilla levels (non-lookahad)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    
+    # Calculate weekly range and Camarilla levels
+    range_1w = high_1w - low_1w
+    s3 = close_1w - (range_1w * 1.5)  # S3 level
+    r3 = close_1w + (range_1w * 1.5)   # R3 level
+    
+    # Align weekly levels to daily timeframe (wait for weekly bar close)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    
+    # Weekly trend filter: EMA 34 on weekly close
     ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Vortex indicator (14-period) on 12h
-    period = 14
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[np.nan], tr])  # align with original index
-    
-    vm_plus = np.abs(high - low[:-1])
-    vm_minus = np.abs(low - high[:-1])
-    
-    vi_plus = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    
-    vi_plus = vi_plus / tr_sum
-    vi_minus = vi_minus / tr_sum
-    
-    # RSI (14-period) on 12h
-    delta = np.diff(close, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 2.0x 20-day average (strict to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20, 14)  # Warmup for indicators
+    start_idx = max(34, 20)  # Warmup for weekly EMA and volume MA
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or np.isnan(rsi[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
+        # Determine weekly trend direction
         is_uptrend = close[i] > ema_34_1w_aligned[i]
         is_downtrend = close[i] < ema_34_1w_aligned[i]
         
         if position == 0:
-            # Long entry: VI+ > VI- (bullish vortex) + RSI < 40 (oversold) + weekly uptrend + volume confirmation
-            if (vi_plus[i] > vi_minus[i] and 
-                rsi[i] < 40 and 
-                is_uptrend and 
-                volume[i] > vol_threshold[i]):
+            # Long entry: Price touches/bounces off S3 + volume + weekly uptrend
+            if (low[i] <= s3_aligned[i] and 
+                close[i] > s3_aligned[i] and  # Confirmed bounce
+                volume[i] > vol_threshold[i] and 
+                is_uptrend):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: VI- > VI+ (bearish vortex) + RSI > 60 (overbought) + weekly downtrend + volume confirmation
-            elif (vi_minus[i] > vi_plus[i] and 
-                  rsi[i] > 60 and 
-                  is_downtrend and 
-                  volume[i] > vol_threshold[i]):
+            # Short entry: Price touches/rejects at R3 + volume + weekly downtrend
+            elif (high[i] >= r3_aligned[i] and 
+                  close[i] < r3_aligned[i] and  # Confirmed rejection
+                  volume[i] > vol_threshold[i] and 
+                  is_downtrend):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: VI- > VI+ (vortex bearish crossover) or RSI > 70 (overbought)
-            if vi_minus[i] > vi_plus[i] or rsi[i] > 70:
+            # Long exit: Price reaches opposite R3 level or loses weekly uptrend
+            if high[i] >= r3_aligned[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: VI+ > VI- (vortex bullish crossover) or RSI < 30 (oversold)
-            if vi_plus[i] > vi_minus[i] or rsi[i] < 30:
+            # Short exit: Price reaches opposite S3 level or loses weekly downtrend
+            if low[i] <= s3_aligned[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
