@@ -1,15 +1,11 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_Follow_With_RSI_Confirmation
-# Hypothesis: KAMA adapts to market noise, reducing whipsaws in choppy markets.
-# In trending markets, price stays on one side of KAMA. RSI(14) filters
-# overextended entries. Works in bull markets by following uptrends and
-# bear markets by following downtrends. Uses 1w trend filter for higher timeframe
-# confirmation to avoid counter-trend trades. Low trade frequency (~15-25/year)
-# minimizes fee drag.
+# 1h_4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Use 4h Camarilla R1/S1 levels for breakout signals, 1d EMA34 for trend filter, and volume confirmation.
+# Trades only during 08-20 UTC to reduce noise. Position size fixed at 0.20 to limit drawdown.
+# Works in bull markets by buying breakouts in uptrends, and in bear markets by selling breakdowns in downtrends.
 
-name = "1d_KAMA_Trend_Follow_With_RSI_Confirmation"
-timeframe = "1d"
+name = "1h_4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,107 +22,94 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 4h data for Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # Calculate weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Calculate KAMA on daily close
-    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[1]|) over 10 periods
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, axis=0)), axis=0) if len(close) > 1 else 0
-    # Vectorized volatility sum over 10 periods
-    volatility_sum = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility_sum[i] = np.sum(np.abs(close[i-9:i+1] - np.roll(close[i-9:i+1], 1)))
-    er = np.zeros_like(close)
-    er[10:] = change[10:] / np.where(volatility_sum[10:] == 0, 1, volatility_sum[10:])
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Calculate 4h Camarilla levels (based on previous 4h bar)
+    # Typical Price = (H + L + C) / 3
+    # Range = H - L
+    # R1 = Close + 1.1 * (Range) / 12
+    # S1 = Close - 1.1 * (Range) / 12
+    fourh_close = df_4h['close'].values
+    fourh_high = df_4h['high'].values
+    fourh_low = df_4h['low'].values
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    typical_price = (fourh_high + fourh_low + fourh_close) / 3
+    range_hl = fourh_high - fourh_low
+    camarilla_r1 = fourh_close + 1.1 * range_hl / 12
+    camarilla_s1 = fourh_close - 1.1 * range_hl / 12
     
-    # Calculate RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1)
     
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
+    # Volume confirmation (24-period MA on 1h = 1 day)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Align weekly EMA20 to daily
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (10), RSI (14), weekly EMA (20)
-    start_idx = max(20, 14)
+    # Warmup: need daily EMA34 (34), volume MA (24)
+    start_idx = max(34, 24)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # Price relative to KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # RSI filters for overextension
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: weekly uptrend + price above KAMA + RSI not overbought
-            if weekly_uptrend and price_above_kama and rsi_not_overbought:
-                signals[i] = 0.25
-                position = 1
-            # Short entry: weekly downtrend + price below KAMA + RSI not oversold
-            elif weekly_downtrend and price_below_kama and rsi_not_oversold:
-                signals[i] = -0.25
-                position = -1
+            if in_session:
+                # Long entry: uptrend + price breaks above Camarilla R1 + volume
+                if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
+                    signals[i] = 0.20
+                    position = 1
+                # Short entry: downtrend + price breaks below Camarilla S1 + volume
+                elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
+                    signals[i] = -0.20
+                    position = -1
         elif position == 1:
-            # Long exit: weekly trend turns down OR price crosses below KAMA
-            if not weekly_uptrend or price_below_kama:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: weekly trend turns up OR price crosses above KAMA
-            if not weekly_downtrend or price_above_kama:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
