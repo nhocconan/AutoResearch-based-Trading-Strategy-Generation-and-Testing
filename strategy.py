@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Price reversal at Camarilla R1/S1 levels on 12h chart confirmed by 1d trend and volume spike.
-Works in bull/bear via trend filter + avoids false signals in low volume.
-Targets 12-37 trades/year by requiring confluence of price level, trend, and volume.
+4h_Momentum_Turn_With_Volume
+Hypothesis: Capture momentum reversals at price extremes using RSI divergence and volume confirmation.
+Works in bull/bear by requiring volume surge and RSI extremes to filter false signals.
+Targets ~25-35 trades/year by combining RSI(14) < 30/ > 70 with volume spike and 1d trend filter.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Momentum_Turn_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,79 +24,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend and volume filters
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate 1d EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate 1d average volume for volume filter
-    vol_avg_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # Calculate RSI(14) on 4h close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We use previous day's OHLC, so shift by 1
-    prev_close = np.concatenate([[df_1d['close'].iloc[0]], df_1d['close'].values[:-1]])
-    prev_high = np.concatenate([[df_1d['high'].iloc[0]], df_1d['high'].values[:-1]])
-    prev_low = np.concatenate([[df_1d['low'].iloc[0]], df_1d['low'].values[:-1]])
-    
-    camarilla_range = prev_high - prev_low
-    r1 = prev_close + camarilla_range * 1.1 / 12
-    s1 = prev_close - camarilla_range * 1.1 / 12
-    
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Calculate 20-period volume average for volume spike detection
+    vol_avg_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA34 (34) and 1d vol avg (20)
-    start_idx = max(34, 20)
+    # Warmup: need RSI(14) and vol_avg_20
+    start_idx = max(14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(vol_avg_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Higher timeframe trend filter (1d)
-        uptrend_1d = close[i] > ema_34_1d_aligned[i]
-        downtrend_1d = close[i] < ema_34_1d_aligned[i]
+        # Trend filter from 1d EMA50
+        uptrend_1d = close[i] > ema_50_1d_aligned[i]
+        downtrend_1d = close[i] < ema_50_1d_aligned[i]
         
-        # Volume filter: current 12h volume > 1.5x average 1d volume (scaled)
-        vol_12h = volume[i]
-        # Scale 1d volume to 12h equivalent (1d = 2x 12h)
-        vol_12h_equiv = vol_avg_1d_aligned[i] / 2.0
-        volume_filter = vol_12h > vol_12h_equiv * 1.5
+        # Volume filter: current volume > 2.0x 20-period average
+        volume_filter = volume[i] > vol_avg_20[i] * 2.0
         
         if position == 0:
-            # Long entry: price at S1 support + uptrend + volume participation
-            if close[i] <= s1_aligned[i] and uptrend_1d and volume_filter:
+            # Long entry: RSI oversold (<30) + volume spike + uptrend bias
+            if rsi[i] < 30 and volume_filter and uptrend_1d:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price at R1 resistance + downtrend + volume participation
-            elif close[i] >= r1_aligned[i] and downtrend_1d and volume_filter:
+            # Short entry: RSI overbought (>70) + volume spike + downtrend bias
+            elif rsi[i] > 70 and volume_filter and downtrend_1d:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches R1 or trend breaks
-            if close[i] >= r1_aligned[i] or not uptrend_1d:
+            # Long exit: RSI returns to neutral (>50) or momentum fails
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches S1 or trend breaks
-            if close[i] <= s1_aligned[i] or not downtrend_1d:
+            # Short exit: RSI returns to neutral (<50) or momentum fails
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
