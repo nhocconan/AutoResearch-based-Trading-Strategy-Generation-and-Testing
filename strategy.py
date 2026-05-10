@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Combines Camarilla pivot levels on 12h with 1d EMA trend filter and volume confirmation.
-# Uses Camarilla R1/S1 levels for breakout entries, trades only in direction of 1d EMA34 trend.
-# Volume confirmation (>1.5x average) reduces false breaks. Designed for 12-37 trades/year to avoid fee drag.
+# 4h_Donchian20_Breakout_12hTrend_Volume
+# Hypothesis: Breakout above/below Donchian channel (20) on 4h, filtered by 12h EMA50 trend and volume confirmation (>1.5x average).
+# Uses ATR-based stoploss. Designed for 20-50 trades/year to avoid fee drag. Works in bull/bear via trend filter.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,70 +21,68 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12-period ATR for stoploss
+    # Calculate ATR(20) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_12 = np.full(n, np.nan)
-    for i in range(12, n):
-        atr_12[i] = np.nanmean(tr[i-11:i+1])
+    atr = np.full(n, np.nan)
+    for i in range(20, n):
+        atr[i] = np.nanmean(tr[i-19:i+1])
     
-    # Get 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Get 12h EMA50 for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla levels for 12h (based on previous bar)
-    camarilla_R1 = np.full(n, np.nan)
-    camarilla_S1 = np.full(n, np.nan)
-    for i in range(1, n):
-        if not (np.isnan(high[i-1]) or np.isnan(low[i-1]) or np.isnan(close[i-1])):
-            range_prev = high[i-1] - low[i-1]
-            camarilla_R1[i] = close[i-1] + range_prev * 1.1 / 12
-            camarilla_S1[i] = close[i-1] - range_prev * 1.1 / 12
+    # Donchian channel (20) on 4h
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.nanmax(high[i-20:i])
+        donchian_low[i] = np.nanmin(low[i-20:i])
     
-    # Volume average (24 periods = 2 days)
+    # Volume average (20 periods)
     vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.nanmean(volume[i-24:i])
+    for i in range(20, n):
+        vol_ma[i] = np.nanmean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Ensure sufficient warmup
+    start_idx = 20  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_R1[i]) or np.isnan(camarilla_S1[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trade only in direction of 1d EMA34 trend
-            if close[i] > ema_34_1d_aligned[i]:  # Uptrend
-                # Long: Breakout above Camarilla R1 with volume confirmation
-                if close[i] > camarilla_R1[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Trade only in direction of 12h EMA50 trend
+            if close[i] > ema_50_12h_aligned[i]:  # Uptrend
+                # Long: Breakout above Donchian high with volume confirmation
+                if close[i] > donchian_high[i] and volume[i] > 1.5 * vol_ma[i]:
                     signals[i] = 0.25
                     position = 1
             else:  # Downtrend
-                # Short: Breakout below Camarilla S1 with volume confirmation
-                if close[i] < camarilla_S1[i] and volume[i] > 1.5 * vol_ma[i]:
+                # Short: Breakout below Donchian low with volume confirmation
+                if close[i] < donchian_low[i] and volume[i] > 1.5 * vol_ma[i]:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: Price closes below EMA34 or stoploss hit
-            if close[i] < ema_34_1d_aligned[i] or (i > 0 and low[i] < high[i-1] - 2.0 * atr_12[i-1]):
+            # Exit: Price closes below EMA50 or stoploss hit
+            if close[i] < ema_50_12h_aligned[i] or (i > 0 and low[i] < donchian_low[i] - 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price closes above EMA34 or stoploss hit
-            if close[i] > ema_34_1d_aligned[i] or (i > 0 and high[i] > low[i-1] + 2.0 * atr_12[i-1]):
+            # Exit: Price closes above EMA50 or stoploss hit
+            if close[i] > ema_50_12h_aligned[i] or (i > 0 and high[i] > donchian_high[i] + 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
