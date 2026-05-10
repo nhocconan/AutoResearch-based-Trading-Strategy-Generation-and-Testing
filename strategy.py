@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-# 6H_1W_1D_ElderRay_BullBearPower_Regime
-# Hypothesis: On 6h timeframe, use weekly Elder Ray (bull/bear power) for trend direction and daily Elder Ray for entry timing.
-# Bull power = high - EMA(13), Bear power = EMA(13) - low. Long when bull power rising and bear power negative (bullish momentum).
-# Short when bear power rising and bull power negative (bearish momentum). Uses 13-period EMA for responsiveness.
-# Includes volume confirmation to avoid false signals. Designed to work in both bull and bear markets by following momentum.
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
+# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
+# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
+# Target: 12-37 trades/year per symbol (48-148 total over 4 years).
 
-name = "6H_1W_1D_ElderRay_BullBearPower_Regime"
-timeframe = "6h"
+name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,115 +22,69 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend direction (Elder Ray)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate EMA(13) for weekly close
-    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Weekly Elder Ray: Bull power = high - EMA13, Bear power = EMA13 - low
-    bull_power_1w = high_1w - ema13_1w
-    bear_power_1w = ema13_1w - low_1w
-    
-    # Weekly trend: rising bull power and falling bear power indicates bullish momentum
-    bull_power_rising = bull_power_1w > np.roll(bull_power_1w, 1)
-    bear_power_falling = bear_power_1w < np.roll(bear_power_1w, 1)
-    bear_power_rising = bear_power_1w > np.roll(bear_power_1w, 1)
-    bull_power_falling = bull_power_1w < np.roll(bull_power_1w, 1)
-    
-    # Handle first value for rolling comparison
-    bull_power_rising[0] = False
-    bear_power_falling[0] = False
-    bear_power_rising[0] = False
-    bull_power_falling[0] = False
-    
-    weekly_bullish = bull_power_rising & bear_power_falling
-    weekly_bearish = bear_power_rising & bull_power_falling
-    
-    # Get daily data for entry timing (Elder Ray)
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(13) for daily close
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate Camarilla levels for 1d: R1, S1 based on previous day
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Daily Elder Ray
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = ema13_1d - low_1d
+    # 1d trend: EMA(34) on close
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema_34
     
-    # Daily signals: look for momentum shifts
-    bull_power_rising_1d = bull_power_1d > np.roll(bull_power_1d, 1)
-    bear_power_rising_1d = bear_power_1d > np.roll(bear_power_1d, 1)
-    
-    # Handle first value
-    bull_power_rising_1d[0] = False
-    bear_power_rising_1d[0] = False
-    
-    # Volume confirmation: current volume > 1.3x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.3)
+    volume_confirm = volume > (volume_avg * 1.5)
     
-    # Align weekly and daily indicators to 6h
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
-    bull_power_rising_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_rising_1d.astype(float))
-    bear_power_rising_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_rising_1d.astype(float))
-    volume_confirm_aligned = align_htf_to_ltf(prices, df_1d, volume_confirm.astype(float))
+    # Align 1d indicators to 12h
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or
-            np.isnan(bull_power_rising_1d_aligned[i]) or np.isnan(bear_power_rising_1d_aligned[i]) or
-            np.isnan(volume_confirm_aligned[i])):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Enter long: weekly bullish momentum + daily bull power rising + volume confirmation
-            if (weekly_bullish_aligned[i] == 1 and 
-                bull_power_rising_1d_aligned[i] == 1 and 
-                volume_confirm_aligned[i] == 1):
+            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly bearish momentum + daily bear power rising + volume confirmation
-            elif (weekly_bearish_aligned[i] == 1 and 
-                  bear_power_rising_1d_aligned[i] == 1 and 
-                  volume_confirm_aligned[i] == 1):
+            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly momentum turns bearish or daily bear power rises
-            if (weekly_bearish_aligned[i] == 1 or 
-                bear_power_rising_1d_aligned[i] == 1):
+            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
+            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly momentum turns bullish or daily bull power rises
-            if (weekly_bullish_aligned[i] == 1 or 
-                bull_power_rising_1d_aligned[i] == 1):
+            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
+            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
