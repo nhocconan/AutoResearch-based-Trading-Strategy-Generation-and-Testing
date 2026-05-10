@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
-# Hypothesis: Breakout above/below Camarilla R1/S1 levels on 1h, filtered by 4h EMA50 trend and volume confirmation (>1.5x average).
-# Uses 1h ATR-based stoploss. Designed for 15-37 trades/year on 1h to avoid fee drag. Works in bull/bear via 4h trend filter.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking above/below Camarilla R1/S1 levels on 4h, filtered by 1d EMA34 trend and volume (>1.3x average).
+# Uses ATR-based stoploss. Designed for 20-30 trades/year to minimize fee drag.
+# Works in bull/bear via trend filter: long only in uptrend, short only in downtrend.
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,52 +22,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(14) for stoploss
+    # Calculate ATR(20) for stoploss
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = np.full(n, np.nan)
-    for i in range(14, n):
-        atr[i] = np.nanmean(tr[i-13:i+1])
+    for i in range(20, n):
+        atr[i] = np.nanmean(tr[i-19:i+1])
     
-    # Get 4h EMA50 for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Get 1d EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Camarilla levels (1h) - calculated from previous day's OHLC
-    camarilla_high = np.full(n, np.nan)
-    camarilla_low = np.full(n, np.nan)
-    camarilla_range = np.full(n, np.nan)
+    # Calculate Camarilla levels from previous day
+    # For each 4h bar, we need the previous day's OHLC
+    # We'll compute daily OHLC first, then shift by 1 to get previous day
+    # Since we don't have daily data in prices, we use the 1d data we fetched
+    daily_open = df_1d['open'].values
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # Calculate daily OHLC for Camarilla
-    df = prices.copy()
-    df['date'] = pd.to_datetime(df['open_time']).dt.date
-    daily_agg = df.groupby('date').agg({
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    })
-    daily_high = daily_agg['high'].values
-    daily_low = daily_agg['low'].values
-    daily_close = daily_agg['close'].values
+    # Calculate Camarilla levels for each day
+    # R1 = Close + (High - Low) * 1.0833
+    # S1 = Close - (High - Low) * 1.0833
+    camarilla_r1 = daily_close + (daily_high - daily_low) * 1.0833
+    camarilla_s1 = daily_close - (daily_high - daily_low) * 1.0833
     
-    # Map daily values to each 1h bar
-    date_map = pd.Series(df['date'].values)
-    daily_high_map = np.full(n, np.nan)
-    daily_low_map = np.full(n, np.nan)
-    daily_close_map = np.full(n, np.nan)
-    
-    for date_val, dh, dl, dc in zip(daily_agg.index, daily_high, daily_low, daily_close):
-        mask = (date_map == date_val)
-        daily_high_map[mask] = dh
-        daily_low_map[mask] = dl
-        daily_close_map[mask] = dc
-    
-    # Camarilla R1 and S1
-    camarilla_high = daily_close_map + 1.1 * (daily_high_map - daily_low_map) / 12
-    camarilla_low = daily_close_map - 1.1 * (daily_high_map - daily_low_map) / 12
+    # Align Camarilla levels to 4h timeframe (previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume average (20 periods)
     vol_ma = np.full(n, np.nan)
@@ -76,42 +63,44 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100  # Ensure sufficient warmup
+    start_idx = 20  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(camarilla_high[i]) or np.isnan(camarilla_low[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
+            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trade only in direction of 4h EMA50 trend
-            if close[i] > ema_50_4h_aligned[i]:  # Uptrend
+            # Trade only in direction of 1d EMA34 trend
+            if close[i] > ema_34_1d_aligned[i]:  # Uptrend
                 # Long: Breakout above Camarilla R1 with volume confirmation
-                if close[i] > camarilla_high[i] and volume[i] > 1.5 * vol_ma[i]:
-                    signals[i] = 0.20
+                if close[i] > camarilla_r1_aligned[i] and volume[i] > 1.3 * vol_ma[i]:
+                    signals[i] = 0.25
                     position = 1
             else:  # Downtrend
                 # Short: Breakout below Camarilla S1 with volume confirmation
-                if close[i] < camarilla_low[i] and volume[i] > 1.5 * vol_ma[i]:
-                    signals[i] = -0.20
+                if close[i] < camarilla_s1_aligned[i] and volume[i] > 1.3 * vol_ma[i]:
+                    signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: Price closes below EMA50 or stoploss hit
-            if close[i] < ema_50_4h_aligned[i] or (i > 0 and low[i] < camarilla_low[i] - 2.0 * atr[i-1]):
+            # Exit: Price closes below EMA34 or stoploss hit
+            if close[i] < ema_34_1d_aligned[i] or (i > 0 and low[i] < camarilla_s1_aligned[i] - 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price closes above EMA50 or stoploss hit
-            if close[i] > ema_50_4h_aligned[i] or (i > 0 and high[i] > camarilla_high[i] + 2.0 * atr[i-1]):
+            # Exit: Price closes above EMA34 or stoploss hit
+            if close[i] > ema_34_1d_aligned[i] or (i > 0 and high[i] > camarilla_r1_aligned[i] + 2.0 * atr[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
