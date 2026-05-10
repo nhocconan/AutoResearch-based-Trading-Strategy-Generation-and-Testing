@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Donchian_Breakout_Volume_Trend
-# Hypothesis: Combines Donchian channel breakouts with volume confirmation and trend filter.
-# Long when price breaks above Donchian(20) high with volume > 1.5x average and price > 50-period EMA.
-# Short when price breaks below Donchian(20) low with volume > 1.5x average and price < 50-period EMA.
-# Uses 1-day EMA as trend filter to avoid counter-trend trades.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
-# Works in bull markets via breakout longs and in bear markets via breakdown shorts.
+# 6h_VWAP_Rebound_Volume_Trend
+# Hypothesis: Mean-reversion to VWAP with volume confirmation and 12h trend filter.
+# Long when price pulls back to VWAP from below with volume surge and 12h uptrend.
+# Short when price pulls back to VWAP from above with volume surge and 12h downtrend.
+# Uses 12h EMA as trend filter to align with higher timeframe momentum.
+# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+# Works in bull markets via buying dips and in bear markets via selling rallies.
 
-name = "4h_Donchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "6h_VWAP_Rebound_Volume_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,75 +20,77 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 12h EMA30 for trend filter
+    close_12h = df_12h['close'].values
+    ema_30_12h = pd.Series(close_12h).ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_30_12h)
     
-    # 4h data
+    # 6h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # VWAP calculation (typical price * volume)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = pd.Series(typical_price * volume).rolling(window=24, min_periods=24).sum().values  # 24 periods = 6h * 4 = 1 day
+    vwap_denominator = pd.Series(volume).rolling(window=24, min_periods=24).sum().values
+    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, typical_price)
     
-    # Volume average (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # 4h EMA50 for trend filter
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Volume average (24-period)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Donchian (20) + EMA (50)
-    start_idx = 50
+    # Warmup: need VWAP (24) + EMA (30)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(ema_50[i]) or
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(vwap[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(ema_30_12h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend from daily EMA
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d)
-        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        # Determine trend from 12h EMA
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+        uptrend = close_12h_aligned[i] > ema_30_12h_aligned[i]
+        downtrend = close_12h_aligned[i] < ema_30_12h_aligned[i]
         
         # Volume confirmation
-        volume_surge = volume[i] > 1.5 * vol_ma[i]
+        volume_surge = volume[i] > 1.8 * vol_ma[i]
+        
+        # Price position relative to VWAP
+        price_above_vwap = close[i] > vwap[i]
+        price_below_vwap = close[i] < vwap[i]
         
         if position == 0:
-            # Long: breakout above Donchian high + volume surge + uptrend
-            if close[i] > donchian_high[i] and volume_surge and uptrend and close[i] > ema_50[i]:
+            # Long: pullback to VWAP from below + volume surge + 12h uptrend
+            if price_below_vwap and close[i] >= vwap[i] * 0.998 and volume_surge and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian low + volume surge + downtrend
-            elif close[i] < donchian_low[i] and volume_surge and downtrend and close[i] < ema_50[i]:
+            # Short: pullback to VWAP from above + volume surge + 12h downtrend
+            elif price_above_vwap and close[i] <= vwap[i] * 1.002 and volume_surge and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: breakdown below Donchian low OR trend change
-            if close[i] < donchian_low[i] or not uptrend:
+            # Long exit: price moves above VWAP significantly OR trend changes
+            if close[i] > vwap[i] * 1.015 or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: breakout above Donchian high OR trend change
-            if close[i] > donchian_high[i] or not downtrend:
+            # Short exit: price moves below VWAP significantly OR trend changes
+            if close[i] < vwap[i] * 0.985 or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
