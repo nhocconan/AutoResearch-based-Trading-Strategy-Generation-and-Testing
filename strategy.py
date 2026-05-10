@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_2Period_Trend_Filter
-Hypothesis: Elder Ray (Bull Power/Bear Power) uses EMA13 trend and price extremes to capture trend strength.
-Long when Bull Power > 0 and rising; Short when Bear Power < 0 and falling.
-Works in bull/bear by following the trend defined by EMA13. Uses 12h EMA200 as higher timeframe filter to avoid counter-trend trades.
-Target: 15-25 trades/year (60-100 total) to minimize fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend
+Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
+Camarilla levels act as intraday support/resistance; breakouts with volume and trend alignment capture directional moves.
+Works in bull/bear by filtering trades in direction of daily trend.
+Target: 25-40 trades/year (100-160 total) to minimize fee drag.
 """
 
-name = "6h_ElderRay_2Period_Trend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,72 +25,79 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray
-    ema13 = np.full(n, np.nan)
-    if n >= 13:
-        ema13[12] = np.mean(close[:13])
-        alpha = 2 / (13 + 1)
-        for i in range(13, n):
-            ema13[i] = alpha * close[i] + (1 - alpha) * ema13[i-1]
+    # 1d data
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Camarilla levels from prior day: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # 1d EMA50 for trend filter
+    ema50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema50_1d[49] = np.mean(close_1d[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1d)):
+            ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
-    # EMA200 on 12h for higher timeframe trend filter
-    ema200_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 200:
-        ema200_12h[199] = np.mean(close_12h[:200])
-        alpha = 2 / (200 + 1)
-        for i in range(200, len(close_12h)):
-            ema200_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema200_12h[i-1]
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(vol_1d), np.nan)
+    if len(vol_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(vol_1d[:20])
+        for i in range(20, len(vol_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + vol_1d[i]) / 20
     
-    # Align 12h EMA200 to 6h
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
+    # Align 1d indicators to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Wait for EMA200
+    start_idx = 50  # Wait for EMA50
     
     for i in range(start_idx, n):
-        if np.isnan(ema200_12h_aligned[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below 12h EMA200
-        uptrend_12h = close[i] > ema200_12h_aligned[i]
-        downtrend_12h = close[i] < ema200_12h_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 6.0  # 6x 4h bars in 1d
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Elder Ray conditions with slope (current > previous)
-        bull_power_rising = bull_power[i] > bull_power[i-1]
-        bear_power_falling = bear_power[i] < bear_power[i-1]
+        # Trend and price relative to Camarilla levels
+        is_uptrend = close[i] > ema50_1d_aligned[i]
+        is_downtrend = close[i] < ema50_1d_aligned[i]
+        price_above_r1 = close[i] > r1_aligned[i]
+        price_below_s1 = close[i] < s1_aligned[i]
         
         if position == 0:
-            # Long: Bull Power > 0 and rising, in uptrend
-            if bull_power[i] > 0 and bull_power_rising and uptrend_12h:
+            # Long: price breaks above R1, in uptrend, with volume
+            if price_above_r1 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 and falling, in downtrend
-            elif bear_power[i] < 0 and bear_power_falling and downtrend_12h:
+            # Short: price breaks below S1, in downtrend, with volume
+            elif price_below_s1 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Bull Power <= 0 or not rising or trend turns down
-            if bull_power[i] <= 0 or not bull_power_rising or not uptrend_12h:
+            # Exit: price falls back below R1 or trend turns down
+            if not price_above_r1 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Bear Power >= 0 or not falling or trend turns up
-            if bear_power[i] >= 0 or not bear_power_falling or not downtrend_12h:
+            # Exit: price rises back above S1 or trend turns up
+            if not price_below_s1 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
