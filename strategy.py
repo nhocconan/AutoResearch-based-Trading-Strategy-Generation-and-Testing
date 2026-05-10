@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Direction_RSI_Trend_Chop_Filter
-# Hypothesis: KAMA adapts to market efficiency, capturing trends in bull and sideways moves in bear. RSI filters extremes, Choppiness index avoids whipsaws in low volatility. Designed for ~30-60 trades/year to minimize fee drag.
+# 4h_Ichimoku_Kumo_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking above/below Ichimoku Cloud with daily trend filter and volume confirmation.
+# Ichimoku provides dynamic support/resistance, daily trend avoids counter-trend trades, volume reduces false signals.
+# Designed for low frequency (~20-50 trades/year) to minimize fee drift in both bull and bear markets.
 
-name = "4h_KAMA_Direction_RSI_Trend_Chop_Filter"
+name = "4h_Ichimoku_Kumo_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -12,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,46 +24,33 @@ def generate_signals(prices):
     
     # Daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # KAMA on close (ER=10, fast=2, slow=30)
+    # Ichimoku Cloud: Tenkan-sen (9), Kijun-sen (26), Senkou Span A/B (26, 52)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     close_series = pd.Series(close)
-    change = abs(close_series.diff(10))
-    volatility = close_series.diff().abs().rolling(10).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = [close[0]]
-    for i in range(1, len(close)):
-        kama.append(kama[-1] + sc.iloc[i] * (close[i] - kama[-1]))
-    kama = np.array(kama)
     
-    # RSI(14)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (high_series.rolling(window=9, min_periods=9).max() + 
+                  low_series.rolling(window=9, min_periods=9).min()) / 2
     
-    # Choppiness Index (14)
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (high_series.rolling(window=26, min_periods=26).max() + 
+                 low_series.rolling(window=26, min_periods=26).min()) / 2
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
     
-    sum_atr14 = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = 100 * np.log10(sum_atr14 / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.where((highest_high - lowest_low) == 0, 50, chop)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((high_series.rolling(window=52, min_periods=52).max() + 
+                 low_series.rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    
+    # Kumo (Cloud): between Senkou Span A and B
+    # For simplicity, we use the cloud's top and bottom as support/resistance
+    kumo_top = np.maximum(senkou_a, senkou_b)
+    kumo_bottom = np.minimum(senkou_a, senkou_b)
     
     # Daily trend: EMA34 on daily close
     close_1d = df_1d['close'].values
@@ -73,40 +62,45 @@ def generate_signals(prices):
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
+    # Volume confirmation: 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 50
+    # Start after we have enough data (accounting for Ichomoku shifts)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
+        if (np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
+            np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        volume_confirm = vol_ratio > 1.5
+        
         if position == 0:
-            # Enter long: price above KAMA, RSI not overbought, chop not extreme, daily uptrend
-            if (close[i] > kama[i] and 
-                rsi[i] < 70 and 
-                chop[i] < 61.8 and 
-                trend_1d_up_aligned[i] > 0.5):
+            # Enter long: price breaks above Kumo top with daily uptrend and volume
+            if (close[i] > kumo_top[i] and 
+                trend_1d_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA, RSI not oversold, chop not extreme, daily downtrend
-            elif (close[i] < kama[i] and 
-                  rsi[i] > 30 and 
-                  chop[i] < 61.8 and 
-                  trend_1d_down_aligned[i] > 0.5):
+            # Enter short: price breaks below Kumo bottom with daily downtrend and volume
+            elif (close[i] < kumo_bottom[i] and 
+                  trend_1d_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below KAMA or trend fails
-            if (close[i] < kama[i] or 
+            # Exit when price returns below Kumo bottom or trend fails
+            if (close[i] < kumo_bottom[i] or 
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -114,8 +108,8 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above KAMA or trend fails
-            if (close[i] > kama[i] or 
+            # Exit when price returns above Kumo top or trend fails
+            if (close[i] > kumo_top[i] or 
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
