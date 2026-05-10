@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_PremiumDiscount_PremiumZone_Short_DiscountZone_Long
-# Hypothesis: Price above 1-week premium zone (above VWAP) signals short opportunity; price below discount zone (below VWAP) signals long opportunity.
-# Uses weekly VWAP with 1-standard deviation bands to define premium/discount zones.
-# Mean-reversion logic: extended moves away from weekly VWAP tend to revert.
-# Works in both bull and bear markets as it fades extremes rather than chasing momentum.
-# Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+# 12h_KAMA_Trend_With_Volume_Spike_and_CHOP_Filter
+# Hypothesis: Kaufman's Adaptive Moving Average (KAMA) on 12h chart combined with volume confirmation and Choppiness Index regime filter.
+# Uses KAMA's adaptive nature to capture trends in both bull and bear markets.
+# Volume confirmation ensures participation, while Choppiness Index filters out range-bound periods.
+# Designed for low trade frequency on 12h timeframe to minimize fee drag.
 
-name = "1d_PremiumDiscount_PremiumZone_Short_DiscountZone_Long"
-timeframe = "1d"
+name = "12h_KAMA_Trend_With_Volume_Spike_and_CHOP_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,86 +23,117 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for VWAP calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for trend filter and Choppiness Index
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate weekly typical price and VWAP components
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    pv = typical_price * df_1w['volume']
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(df_1w['volume'])
-    vwap = cum_pv / cum_vol
+    # Calculate KAMA on 12h data
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |diff| over 10 periods
+    # Handle the first 9 values where we don't have 10-period lookback
+    change = np.concatenate([np.full(9, np.nan), change])
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.divide(change, volatility, out=np.full_like(change, np.nan), where=volatility!=0)
     
-    # Calculate weekly standard deviation of price from VWAP
-    squared_dev = (typical_price - vwap) ** 2
-    cum_squared_dev = np.cumsum(squared_dev * df_1w['volume'])
-    variance = cum_squared_dev / cum_vol
-    std_dev = np.sqrt(variance)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # for EMA(2)
+    slow_sc = 2 / (30 + 1)  # for EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Define premium zone (VWAP + 1 std dev) and discount zone (VWAP - 1 std dev)
-    premium_zone = vwap + std_dev
-    discount_zone = vwap - std_dev
+    # Calculate KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start from the 10th element
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Align weekly VWAP bands to daily timeframe
-    premium_aligned = align_htf_to_ltf(prices, df_1w, premium_zone)
-    discount_aligned = align_htf_to_ltf(prices, df_1w, discount_zone)
-    vwap_aligned = align_htf_to_ltf(prices, df_1w, vwap)
+    # Get daily typical price and range for Choppiness Index
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    atr_1d = np.zeros(len(df_1d))
+    tr = np.maximum(df_1d['high'] - df_1d['low'],
+                    np.maximum(np.abs(df_1d['high'] - np.roll(df_1d['close'], 1)),
+                               np.abs(df_1d['low'] - np.roll(df_1d['close'], 1))))
+    tr[0] = df_1d['high'][0] - df_1d['low'][0]  # first TR
+    for i in range(1, len(df_1d)):
+        atr_1d[i] = np.mean(tr[max(0, i-13):i+1])  # 14-period ATR
     
-    # Daily RSI for overbought/oversold confirmation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Calculate Choppiness Index (14-period)
+    sum_tr_14 = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if i >= 13:
+            sum_tr_14[i] = np.sum(tr[i-13:i+1])
+        else:
+            sum_tr_14[i] = np.sum(tr[0:i+1])
+    
+    high_low_range_14 = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if i >= 13:
+            high_low_range_14[i] = np.max(df_1d['high'][i-13:i+1]) - np.min(df_1d['low'][i-13:i+1])
+        else:
+            high_low_range_14[i] = np.max(df_1d['high'][0:i+1]) - np.min(df_1d['low'][0:i+1])
+    
+    chop = np.zeros(len(df_1d))
+    for i in range(len(df_1d)):
+        if high_low_range_14[i] != 0 and i >= 13:
+            chop[i] = 100 * np.log10(sum_tr_14[i] / high_low_range_14[i]) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral when undefined
+    
+    # Align KAMA and Choppiness Index to 12h timeframe
+    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop, additional_delay_bars=0)  # no extra delay needed
+    
+    # Volume confirmation (20-period MA on 12h chart)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly VWAP calculation (need at least 1 week) and RSI (14)
-    start_idx = 14
+    # Warmup: need KAMA (10), volume MA (20), and Choppiness (need at least 14 days)
+    start_idx = max(10, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(premium_aligned[i]) or np.isnan(discount_aligned[i]) or 
-            np.isnan(vwap_aligned[i]) or np.isnan(rsi[i])):
+        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Price relative to weekly VWAP bands
-        above_premium = close[i] > premium_aligned[i]
-        below_discount = close[i] < discount_aligned[i]
-        near_vwap = abs(close[i] - vwap_aligned[i]) < (0.5 * std_dev[i])  # Within half std dev of VWAP
+        # Trend filter: price relative to KAMA
+        above_kama = close[i] > kama_aligned[i]
+        below_kama = close[i] < kama_aligned[i]
         
-        # RSI conditions
-        rsi_overbought = rsi[i] > 70
-        rsi_oversold = rsi[i] < 30
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        
+        # Choppiness regime filter: only trade when trending (CHOP < 38.2)
+        trending = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Long entry: price below discount zone + RSI oversold
-            if below_discount and rsi_oversold:
+            # Long entry: price above KAMA + volume spike + trending market
+            if above_kama and volume_confirm and trending:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price above premium zone + RSI overbought
-            elif above_premium and rsi_overbought:
+            # Short entry: price below KAMA + volume spike + trending market
+            elif below_kama and volume_confirm and trending:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price returns near VWAP or RSI becomes overbought
-            if near_vwap or rsi_overbought:
+            # Long exit: price crosses below KAMA or market becomes choppy
+            if below_kama or not trending:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price returns near VWAP or RSI becomes oversold
-            if near_vwap or rsi_oversold:
+            # Short exit: price crosses above KAMA or market becomes choppy
+            if above_kama or not trending:
                 signals[i] = 0.0
                 position = 0
             else:
