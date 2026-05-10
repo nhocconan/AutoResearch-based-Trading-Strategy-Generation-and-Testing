@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_BullBearPower_1dTrend_Volume
-Hypothesis: Elder Ray (Bull/Bear Power) with 1d EMA20 trend filter and volume confirmation.
-Bull Power = High - EMA13, Bear Power = EMA13 - Low.
-Long when Bull Power > 0 and Bear Power < 0 (bullish momentum) in uptrend (price > 1d EMA20).
-Short when Bear Power > 0 and Bull Power < 0 (bearish momentum) in downtrend (price < 1d EMA20).
-Works in bull/bear by following 1d trend and using momentum exhaustion signals.
-Target: 15-35 trades/year on 6h to avoid fee drag.
+4h_RSI_Confluence_TrendFilter
+Hypothesis: RSI(14) with 4h trend filter (1d EMA34) and volume confirmation.
+Long when RSI < 30 (oversold) in uptrend, short when RSI > 70 (overbought) in downtrend.
+Volume filter avoids false signals. Target: 20-40 trades/year to minimize fee drag.
+Works in bull by buying dips, in bear by selling rallies.
 """
 
-name = "6h_ElderRay_BullBearPower_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_RSI_Confluence_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -28,61 +26,61 @@ def generate_signals(prices):
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Daily EMA20 for trend filter
-    ema_20_1d = pd.Series(df_1d['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    # Daily EMA34 for trend filter
+    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Calculate EMA13 for Elder Ray (using 6h data)
+    # RSI(14) calculation
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    
-    # Elder Ray components
-    bull_power = high - ema_13  # High - EMA13
-    bear_power = ema_13 - low   # EMA13 - Low
+    # Wilder's smoothing (equivalent to EMA with alpha=1/14)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Volume filter: current volume > 1.3x 20-period EMA
+    volume = prices['volume'].values
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_filter = volume > vol_ema20 * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA13 (13) and enough for trend
-    start_idx = 20
+    # Warmup: need RSI (14) and EMA34 (34)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_20_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i])):
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: bullish momentum (Bull Power > 0 AND Bear Power < 0) AND uptrend (price > EMA20) AND volume
-            if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_20_1d_aligned[i] and volume_filter[i]:
+            # Long: oversold RSI in uptrend with volume
+            if rsi[i] < 30 and close[i] > ema_34_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish momentum (Bear Power > 0 AND Bull Power < 0) AND downtrend (price < EMA20) AND volume
-            elif bear_power[i] > 0 and bull_power[i] < 0 and close[i] < ema_20_1d_aligned[i] and volume_filter[i]:
+            # Short: overbought RSI in downtrend with volume
+            elif rsi[i] > 70 and close[i] < ema_34_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: momentum turns bearish OR trend turns bearish
-            if bull_power[i] <= 0 or bear_power[i] >= 0 or close[i] < ema_20_1d_aligned[i]:
+            # Long exit: RSI returns to neutral OR trend turns bearish
+            if rsi[i] > 50 or close[i] < ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: momentum turns bullish OR trend turns bullish
-            if bear_power[i] <= 0 or bull_power[i] >= 0 or close[i] > ema_20_1d_aligned[i]:
+            # Short exit: RSI returns to neutral OR trend turns bullish
+            if rsi[i] < 50 or close[i] > ema_34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
