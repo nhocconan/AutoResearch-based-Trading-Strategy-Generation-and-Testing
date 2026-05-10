@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
-# Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
-# Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years).
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_Adaptive
+# Hypothesis: Enter long when price breaks above previous day's Camarilla R1 with 1d uptrend and volume spike (>2x average).
+# Enter short when price breaks below previous day's Camarilla S1 with 1d downtrend and volume spike.
+# Uses volume spike (not just >1.5x) to reduce false signals and trades. Adaptive exit: hold until opposite Camarilla level is breached.
+# Target: 25-40 trades/year per symbol (100-160 total over 4 years) to avoid fee drag.
 
-name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume_Adaptive"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -33,11 +33,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for 1d: R1, S1 based on previous day
-    # Typical price = (high + low + close) / 3
     typical_price = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
-    # Camarilla R1 = close + (range * 1.1/12)
-    # Camarilla S1 = close - (range * 1.1/12)
     camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
     camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
@@ -45,11 +42,11 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_up = close_1d > ema_34
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average (stricter to reduce trades)
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    volume_confirm = volume > (volume_avg * 2.0)
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
@@ -69,26 +66,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume confirmation
+            # Enter long: price breaks above Camarilla R1 + 1d uptrend + volume spike
             if close[i] > camarilla_r1_aligned[i] and trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume confirmation
+            # Enter short: price breaks below Camarilla S1 + 1d downtrend + volume spike
             elif close[i] < camarilla_s1_aligned[i] and not trend_up_aligned[i] and volume_confirm[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: price breaks below Camarilla S1 (reversal) or trend changes
-            if close[i] < camarilla_s1_aligned[i] or not trend_up_aligned[i]:
+            # Exit long: price breaks below Camarilla S1 (reversal)
+            if close[i] < camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price breaks above Camarilla R1 (reversal) or trend changes
-            if close[i] > camarilla_r1_aligned[i] or trend_up_aligned[i]:
+            # Exit short: price breaks above Camarilla R1 (reversal)
+            if close[i] > camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
