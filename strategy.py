@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Trading breakouts at inner Camarilla levels (R1/S1) from daily pivot with volume confirmation and 1-day trend filter captures strong momentum moves in both bull and bear markets. Timeframe: 4h balances trade frequency and signal quality for 1-day trend alignment, targeting 20-50 trades/year with low fee drift.
+6h_Ichimoku_Kumo_Twist_1wTrend
+Hypothesis: Ichimoku cloud twist (TK cross) combined with weekly trend filter (price vs weekly EMA) captures trend reversals in both bull and bear markets. The cloud acts as dynamic support/resistance, reducing whipsaws. Weekly trend filter ensures alignment with higher timeframe momentum, improving win rate during strong trends while avoiding counter-trend trades in ranging markets. Target: 15-30 trades/year on 6H timeframe.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Ichimoku_Kumo_Twist_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,87 +17,112 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivot calculation
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 26:
+        return np.zeros(n)
+    
+    # Calculate weekly EMA26 for trend filter
+    close_1w = df_1w['close'].values
+    ema26_1w = pd.Series(close_1w).ewm(span=26, adjust=False, min_periods=26).mean().values
+    ema26_1w_aligned = align_htf_to_ltf(prices, df_1w, ema26_1w)
+    
+    # Get daily data for Ichimoku components
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for current day (using previous day's OHLC)
-    # Standard Camarilla formula
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # First value uses current day's high as placeholder
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Ichimoku parameters (standard)
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # Calculate Camarilla levels (focusing on R1/S1 for breakout)
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    # Get 1d data for EMA trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # 4h data for signal generation
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+    senkou_span_b = senkou_span_b.values
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # 6h data for signal generation
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA34 (34 periods)
-    start_idx = 34
+    # Warmup: need Ichimoku (52 periods) and weekly EMA (26 periods)
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_span_a_aligned[i]) or
+            np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(ema26_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs 1d EMA34
-        uptrend_1d = close[i] > ema34_1d_aligned[i]
-        downtrend_1d = close[i] < ema34_1d_aligned[i]
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Volume filter: current volume > 1.5x 20-period EMA
-        vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-        volume_filter = volume[i] > vol_ema20[i] * 1.5
+        # TK Cross (Tenkan-sen crosses Kijun-sen)
+        tk_cross_up = tenkan_sen_aligned[i] > kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1]
+        tk_cross_down = tenkan_sen_aligned[i] < kijun_sen_aligned[i] and tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1]
+        
+        # Price relative to cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema26_1w_aligned[i]
+        weekly_downtrend = close[i] < ema26_1w_aligned[i]
         
         if position == 0:
-            # Long breakout: price breaks above R1 with volume and uptrend
-            if high[i] > R1_aligned[i] and uptrend_1d and volume_filter:
+            # Long entry: TK cross up + price above cloud + weekly uptrend
+            if tk_cross_up and price_above_cloud and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price breaks below S1 with volume and downtrend
-            elif low[i] < S1_aligned[i] and downtrend_1d and volume_filter:
+            # Short entry: TK cross down + price below cloud + weekly downtrend
+            elif tk_cross_down and price_below_cloud and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches midpoint between R1 and S1 or trend fails
-            midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
-            if low[i] <= midpoint or not uptrend_1d:
+            # Long exit: TK cross down OR price falls below cloud bottom
+            if tk_cross_down or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches midpoint between R1 and S1 or trend fails
-            midpoint = (R1_aligned[i] + S1_aligned[i]) / 2
-            if high[i] >= midpoint or not downtrend_1d:
+            # Short exit: TK cross up OR price rises above cloud top
+            if tk_cross_up or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
