@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_1dRSI_34
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 4h provides trend direction with low lag.
-# Daily RSI(34) acts as a filter: long only when RSI > 50, short only when RSI < 50.
-# Volume > 1.5x 20-period MA confirms momentum. This combination reduces whipsaw in both bull and bear markets.
-# Target: 15-40 trades/year on 4h, avoiding excessive trade frequency.
+# 1D_WeeklyPivot_Cross_TrendFollow
+# Hypothesis: Uses weekly pivot points (PP, R1, S1) as key support/resistance levels on daily timeframe.
+# Price crossing above/below weekly pivot with trend alignment (EMA50) and volume confirmation.
+# Weekly pivot provides structure; daily EMA50 filters trend direction; volume confirms momentum.
+# Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year).
+# Works in bull/bear by aligning with EMA50 trend and using pivot levels as dynamic S/R.
 
-name = "4h_KAMA_Trend_1dRSI_34"
-timeframe = "4h"
+name = "1D_WeeklyPivot_Cross_TrendFollow"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,53 +24,39 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for RSI filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 4h close
-    # Parameters: ER fast=2, slow=30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    vol = np.sum(np.abs(np.diff(close, prepend=close[0]))[:1])  # placeholder, will compute properly
-    # Proper ER calculation
-    dir = np.abs(np.subtract(close[9:], close[:-9]))  # 10-period change
-    vol_sum = np.array([np.sum(np.abs(np.diff(close[i:i+10])) for i in range(len(close)-9))])
-    # Simplified approach: use standard KAMA calculation
-    fast_end = 0.6667  # 2/(2+1)
-    slow_end = 0.0645  # 2/(30+1)
-    er = np.zeros_like(close)
-    ssc = np.zeros_like(close)
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
+    # Calculate ATR for volatility filter and stop
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate efficiency ratio and smoothing constant
-    for i in range(10, n):
-        if i >= 10:
-            direction = np.abs(close[i] - close[i-9])
-            volatility = np.sum(np.abs(np.diff(close[i-9:i+1])))
-            if volatility > 0:
-                er[i] = direction / volatility
-            else:
-                er[i] = 0
-            sc = (er[i] * (fast_end - slow_end) + slow_end) ** 2
-            kama[i] = kama[i-1] + sc * (close[i] - kama[i-1])
-        else:
-            kama[i] = close[i]
+    # Calculate weekly pivot points from previous week's OHLC
+    prev_weekly_close = df_1w['close'].shift(1).values
+    prev_weekly_high = df_1w['high'].shift(1).values
+    prev_weekly_low = df_1w['low'].shift(1).values
     
-    # Calculate daily RSI(34)
-    delta = np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/34, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/34, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([[np.nan] * 34, rsi[34:]])  # align with df_1d index
+    # Standard pivot point: PP = (H + L + C) / 3
+    pp = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
+    # R1 = 2*PP - L, S1 = 2*PP - H
+    r1 = 2 * pp - prev_weekly_low
+    s1 = 2 * pp - prev_weekly_high
     
-    # Align KAMA and daily RSI to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, prices, kama)  # same index
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align weekly pivot levels to daily timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Get daily EMA for trend filter
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
     # Calculate volume average for confirmation (20-period MA)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -77,43 +64,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)  # Warmup for RSI and volume MA
+    start_idx = max(50, 20, 14)  # Warmup for EMA50, volume MA, ATR
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(ema_50[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily RSI filter: long when RSI > 50, short when RSI < 50
-        rsi_long = rsi_aligned[i] > 50
-        rsi_short = rsi_aligned[i] < 50
+        # Daily trend filter
+        uptrend = close[i] > ema_50[i]
+        downtrend = close[i] < ema_50[i]
         
-        # Volume confirmation
+        # Volume confirmation and volatility filter
         volume_confirm = volume[i] > volume_ma[i] * 1.5
+        volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
-            # Long entry: price above KAMA with RSI > 50 and volume confirmation
-            if close[i] > kama_aligned[i] and rsi_long and volume_confirm:
+            # Long entry: price crosses above weekly R1 with volume confirmation, uptrend
+            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below KAMA with RSI < 50 and volume confirmation
-            elif close[i] < kama_aligned[i] and rsi_short and volume_confirm:
+            # Short entry: price crosses below weekly S1 with volume confirmation, downtrend
+            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls back below KAMA or RSI drops below 50
-            if close[i] < kama_aligned[i] or not rsi_long:
+            # Long exit: price falls back below weekly PP or trend turns down
+            if close[i] < pp_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises back above KAMA or RSI rises above 50
-            if close[i] > kama_aligned[i] or not rsi_short:
+            # Short exit: price rises back above weekly PP or trend turns up
+            if close[i] > pp_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
