@@ -1,11 +1,12 @@
-#!/usr/bin/env python3
-# 12h_Turtle_Channel_1dTrend_Volume
-# Hypothesis: 12h Turtle Channel (Donchian 20) breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses 1d trend direction for signal bias, 12h for precise entry timing. Volume filter ensures breakouts have conviction.
-# Turtle Channel provides clear entry/exit levels. Trend filter avoids counter-trend trades. Works in bull/bear by trading breakouts with trend alignment.
+# #!/usr/bin/env python3
+# 4h_Donchian_20_Breakout_1dTrend_Volume
+# Hypothesis: 4h Donchian channel breakout with 1d EMA200 trend filter and volume confirmation.
+# Uses daily trend direction for signal bias, 4h for precise entry timing. Volume filter ensures
+# breakouts have conviction. Targets 20-50 trades/year to minimize fee drag.
+# Works in bull/bear by trading breakouts with trend alignment.
 
-name = "12h_Turtle_Channel_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Donchian_20_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,33 +25,33 @@ def generate_signals(prices):
     
     # 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 1d EMA50 trend
+    # 1d EMA200 trend
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_1d_up = close_1d > ema200_1d
+    trend_1d_down = close_1d < ema200_1d
     
-    # Align 1d trend to 12h
+    # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # 12h Donchian channel (20-period)
+    # Donchian channel (20-period) on 4h data
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: current volume > 1.3 * 20-period average
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
@@ -62,7 +63,7 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 1.3
+        volume_filter = vol_ratio > 1.5
         
         if position == 0:
             # Long: price breaks above Donchian high with uptrend and volume
