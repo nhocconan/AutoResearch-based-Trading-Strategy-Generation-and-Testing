@@ -1,14 +1,16 @@
-# #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
-1d_WeeklyPivot_Breakout_1wTrend
-Hypothesis: Price breaks weekly pivot-based resistance (R1) or support (S1) levels, with weekly EMA50 trend filter and daily volume confirmation. 
-Weekly pivots act as significant support/resistance; breakouts with volume and trend alignment capture directional moves.
-Works in bull/bear by filtering trades in direction of weekly trend.
-Target: 10-25 trades/year (40-100 total) to minimize fee drag.
+6h_MultiTimeframe_ElderRay_Strategy
+Hypothesis: Elder Ray (Bull Power/Bear Power) from 1d data combined with 6s EMA crossover and volume confirmation.
+Bull Power = High - EMA13, Bear Power = EMA13 - Low. 
+Long when Bull Power > 0, EMA9 > EMA21, and volume > 1.5x average.
+Short when Bear Power > 0, EMA9 < EMA21, and volume > 1.5x average.
+Uses 1d Elder Ray for regime and 6s EMA for timing to work in both bull and bear markets.
+Target: 20-30 trades/year (80-120 total) to minimize fee drag.
 """
 
-name = "1d_WeeklyPivot_Breakout_1wTrend"
-timeframe = "1d"
+name = "6h_MultiTimeframe_ElderRay_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,77 +27,90 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 1d data
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly pivot-based levels from prior week: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    weekly_r1 = close_1w + 1.1 * (high_1w - low_1w) / 12
-    weekly_s1 = close_1w - 1.1 * (high_1w - low_1w) / 12
+    # 1d EMA13 for Elder Ray
+    ema13_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 13:
+        ema13_1d[12] = np.mean(close_1d[:13])
+        alpha = 2 / (13 + 1)
+        for i in range(13, len(close_1d)):
+            ema13_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema13_1d[i-1]
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
+    # Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    bull_power = high_1d - ema13_1d
+    bear_power = ema13_1d - low_1d
     
-    # Daily volume SMA20 for volume confirmation
-    vol_sma20_d = np.full(len(prices), np.nan)
-    if len(prices) >= 20:
-        vol_sma20_d[19] = np.mean(volume[:20])
-        for i in range(20, len(prices)):
-            vol_sma20_d[i] = (vol_sma20_d[i-1] * 19 + volume[i]) / 20
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
-    # Align weekly indicators to daily
-    r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 6s EMA9 and EMA21 for entry timing
+    ema9 = np.full(n, np.nan)
+    ema21 = np.full(n, np.nan)
+    if n >= 21:
+        ema9[8] = np.mean(close[:9])
+        ema21[20] = np.mean(close[:21])
+        alpha9 = 2 / (9 + 1)
+        alpha21 = 2 / (21 + 1)
+        for i in range(9, n):
+            ema9[i] = alpha9 * close[i] + (1 - alpha9) * ema9[i-1]
+        for i in range(21, n):
+            ema21[i] = alpha21 * close[i] + (1 - alpha21) * ema21[i-1]
+    
+    # Align 1d indicators to 6s
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for weekly EMA50
+    start_idx = 21  # Wait for EMA21
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_d[i]):
+        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(ema9[i]) or np.isnan(ema21[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current daily volume > 1.5x average daily volume
-        volume_confirm = volume[i] > 1.5 * vol_sma20_d[i]
+        # Volume confirmation: current 6s volume > 1.5x average 1d volume (scaled)
+        # 4x 6s bars in 1d (24h / 6h = 4)
+        vol_1d_scaled = vol_sma20_1d_aligned[i] / 4.0
+        volume_confirm = volume[i] > 1.5 * vol_1d_scaled
         
-        # Trend and price relative to weekly pivot levels
-        is_uptrend = close[i] > ema50_1w_aligned[i]
-        is_downtrend = close[i] < ema50_1w_aligned[i]
-        price_above_r1 = close[i] > r1_aligned[i]
-        price_below_s1 = close[i] < s1_aligned[i]
+        # 6s EMA trend
+        ema9_above_ema21 = ema9[i] > ema21[i]
+        ema9_below_ema21 = ema9[i] < ema21[i]
         
         if position == 0:
-            # Long: price breaks above weekly R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
+            # Long: Bull Power > 0, EMA9 > EMA21, volume confirmation
+            if bull_power_aligned[i] > 0 and ema9_above_ema21 and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
+            # Short: Bear Power > 0, EMA9 < EMA21, volume confirmation
+            elif bear_power_aligned[i] > 0 and ema9_below_ema21 and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below weekly R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+            # Exit: Bull Power <= 0 or EMA9 <= EMA21
+            if bull_power_aligned[i] <= 0 or not ema9_above_ema21:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above weekly S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+            # Exit: Bear Power <= 0 or EMA9 >= EMA21
+            if bear_power_aligned[i] <= 0 or not ema9_below_ema21:
                 signals[i] = 0.0
                 position = 0
             else:
