@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1wTrend_Volume
-# Hypothesis: Breakouts from weekly Camarilla R3/S3 levels on 12h with 1w trend filter (EMA34) and volume confirmation.
-# Weekly levels provide stronger institutional support/resistance; EMA34 filters long-term trend; volume confirms breakout strength.
-# Designed for 12h to achieve 12-37 trades/year, suitable for both bull and bear markets.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
+# Camarilla levels provide institutional support/resistance; EMA34 filters trend direction; volume confirms breakout strength.
+# Designed for 4h to achieve 19-50 trades/year, suitable for both bull and bear markets.
 
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,28 +22,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data for Camarilla levels, EMA34 trend, and volume
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 1d data for Camarilla levels, EMA34 trend, and volume
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Weekly Camarilla levels (based on previous week)
+    # Camarilla levels (based on previous day)
     def calculate_camarilla(h, l, c):
+        # Typical price for the day
         typical = (h + l + c) / 3.0
         range_ = h - l
+        # Camarilla levels
         R3 = c + (range_ * 1.1000 / 4)
         S3 = c - (range_ * 1.1000 / 4)
         return R3, S3
     
-    R3 = np.full_like(close_1w, np.nan)
-    S3 = np.full_like(close_1w, np.nan)
-    for i in range(1, len(close_1w)):
-        R3[i], S3[i] = calculate_camarilla(high_1w[i-1], low_1w[i-1], close_1w[i-1])
+    R3 = np.full_like(close_1d, np.nan)
+    S3 = np.full_like(close_1d, np.nan)
+    for i in range(1, len(close_1d)):
+        R3[i], S3[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # 1w EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Volume confirmation: 20-period average
     def mean_arr(arr, p):
@@ -52,18 +54,18 @@ def generate_signals(prices):
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume_1w, 20)
+    vol_ma_20 = mean_arr(volume_1d, 20)
     
-    # Align all indicators to lower timeframe (wait for 1w bar to close)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    # Align all indicators to lower timeframe (wait for 1d bar to close)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 40  # Need enough history for indicators
     
     for i in range(start_idx, n):
         if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
