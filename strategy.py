@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 6h_KAMA_Trend_Filter_With_RSI_Pullback
-# Hypothesis: Uses KAMA trend direction from 1d timeframe to filter entries on 6h timeframe.
-# Enters on RSI pullback (30 for long, 70 for short) in the direction of the higher timeframe trend.
-# Includes volume confirmation to avoid false signals. Designed to work in both bull and bear markets
-# by following the higher timeframe trend and entering on pullbacks.
-# Position size 0.25 for balanced risk. Targets 15-30 trades per year to avoid fee drag.
+# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filtered
+# Hypothesis: Uses Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
+# Designed to reduce trade frequency by requiring volume > 2.0x 20-bar average and price > 1d EMA34.
+# Targets 15-25 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
+# Position size 0.25 for balanced risk.
 
-name = "6h_KAMA_Trend_Filter_With_RSI_Pullback"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filtered"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,38 +18,42 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend filter and RSI calculation
+    # Get 1d data for Camarilla pivot levels (using previous day's data)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA on 1d timeframe
-    # Efficiency Ratio (ER)
-    change = abs(df_1d['close'].diff(10).values)
-    volatility = df_1d['close'].diff().abs().rolling(window=10).sum().values
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    # Smoothing Constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # KAMA calculation
-    kama = np.zeros_like(df_1d['close'].values)
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(kama)):
-        kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
+    # Calculate ATR for volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align KAMA to 6h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate Camarilla levels from previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Calculate RSI on 6h timeframe
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate R1 and S1 (tighter levels than R2/S2)
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Get 1d data for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume average for confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,41 +61,42 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 14)  # Warmup for volume MA and RSI
+    start_idx = max(20, 34, 14)  # Warmup for volume MA, 1d EMA, and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1d KAMA
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
+        # Trend filter from 1d
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Stronger volume confirmation and volatility filter
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        volatility_filter = atr[i] > 0  # Ensure valid ATR
         
         if position == 0:
-            # Long entry: RSI pullback (30) in uptrend with volume confirmation
-            if rsi[i] < 30 and uptrend and volume_confirm:
+            # Long entry: price breaks above R1 with volume confirmation, 1d uptrend, and volatility
+            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI pullback (70) in downtrend with volume confirmation
-            elif rsi[i] > 70 and downtrend and volume_confirm:
+            # Short entry: price breaks below S1 with volume confirmation, 1d downtrend, and volatility
+            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI reaches overbought (70) or trend turns down
-            if rsi[i] > 70 or not uptrend:
+            # Long exit: price falls below R1 or trend turns down
+            if close[i] < r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI reaches oversold (30) or trend turns up
-            if rsi[i] < 30 or not downtrend:
+            # Short exit: price rises above S1 or trend turns up
+            if close[i] > s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
