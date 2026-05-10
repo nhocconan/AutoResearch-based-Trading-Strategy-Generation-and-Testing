@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-# 1d_WeeklyPivot_Trend_Breakout_Volume
-# Hypothesis: Weekly pivot points (R1/S1) on the 1d chart provide key support/resistance. Price breaking above R1 in a weekly uptrend or below S1 in a weekly downtrend indicates momentum. Volume confirmation filters false breakouts. This strategy uses the 1d timeframe with 1h trend filter (via 1d EMA50) to reduce whipsaw and improve performance in both bull and bear markets. Targeting 30-100 trades over 4 years.
+# 6h_ElderRay_RayBand_Breakout
+# Hypothesis: Elder Ray (Bull/Bear Power) identifies institutional buying/selling pressure. 
+# Combines with 1d trend (EMA34) and volume confirmation to filter false signals.
+# Works in bull markets by capturing strong bullish power breakouts and in bear markets 
+# by capturing bearish power breakdowns. Uses Elder Ray bands (EMA13 of Bull/Bear Power) 
+# as dynamic support/resistance for breakout entries.
 
-name = "1d_WeeklyPivot_Trend_Breakout_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_RayBand_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,73 +24,76 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data for Elder Ray calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate daily EMA13 for Elder Ray
+    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate weekly pivot levels (standard formula)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate Bull Power and Bear Power
+    bull_power = (df_1d['high'].values - ema13_1d)
+    bear_power = (df_1d['low'].values - ema13_1d)
     
-    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * pivot_point - weekly_low
-    weekly_s1 = 2 * pivot_point - weekly_high
+    # Calculate Elder Ray Bands (EMA13 of Bull/Bear Power)
+    bull_ema13 = pd.Series(bull_power).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bear_ema13 = pd.Series(bear_power).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # Align Elder Ray bands to 6t
+    bull_ema13_aligned = align_htf_to_ltf(prices, df_1d, bull_ema13)
+    bear_ema13_aligned = align_htf_to_ltf(prices, df_1d, bear_ema13)
     
-    # Volume confirmation (20-period MA on 1d = ~20 days)
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume confirmation (20-period MA on 6h = ~5 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly EMA50 (50) and volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: need EMA13 (13) and volume MA (20)
+    start_idx = max(13, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or 
+        if (np.isnan(bull_ema13_aligned[i]) or 
+            np.isnan(bear_ema13_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend filter
-        uptrend = close[i] > ema_50_1w_aligned[i]
-        downtrend = close[i] < ema_50_1w_aligned[i]
+        # Daily trend filter
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
         
-        # Volume confirmation (strict: >2.0x MA to reduce false signals)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume confirmation (>1.5x MA to balance sensitivity and filtering)
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + price breaks above weekly R1 + volume
-            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
+            # Long entry: bullish power above its EMA13 + uptrend + volume
+            if bull_power[i] > bull_ema13_aligned[i] and uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below weekly S1 + volume
-            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
+            # Short entry: bearish power below its EMA13 + downtrend + volume
+            elif bear_power[i] < bear_ema13_aligned[i] and downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1
-            if not uptrend or close[i] < weekly_r1_aligned[i]:
+            # Long exit: bullish power crosses below EMA13 or trend breaks
+            if bull_power[i] < bull_ema13_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1
-            if not downtrend or close[i] > weekly_s1_aligned[i]:
+            # Short exit: bearish power crosses above EMA13 or trend breaks
+            if bear_power[i] > bear_ema13_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
