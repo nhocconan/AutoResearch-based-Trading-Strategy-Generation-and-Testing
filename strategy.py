@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6H_1D_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use daily Camarilla R3/S3 levels as breakout levels with daily trend filter (EMA34) and volume confirmation.
-# Enters long when price breaks above R3 in bullish daily trend with volume > 1.5x average.
-# Enters short when price breaks below S3 in bearish daily trend with volume > 1.5x average.
-# Uses tight entries to avoid overtrading, works in bull/bear by following daily trend direction.
-# Target: 15-30 trades/year per symbol.
+# 12h_Donchian20_1dTrend_VolumeFilter
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+# Long: price breaks above Donchian upper band + 1d close > EMA50 + volume > 1.5x 20-period average.
+# Short: price breaks below Donchian lower band + 1d close < EMA50 + volume > 1.5x 20-period average.
+# Exit: trend reversal (price crosses EMA50 on 1d) or opposite Donchian break.
+# Works in bull/bear by following 1d trend direction. Target: 15-30 trades/year per symbol.
 
-name = "6H_1D_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -29,85 +29,72 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Daily EMA34 for trend
+    # 1d EMA50 for trend
     close_1d_series = pd.Series(close_1d)
-    ema34_1d = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema50_1d = close_1d_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Daily Camarilla levels (using prior day's OHLC)
-    # Typical price = (H + L + C) / 3
-    # Range = H - L
-    # R3 = Close + 1.1 * (High - Low) * 1.1/2
-    # S3 = Close - 1.1 * (High - Low) * 1.1/2
-    typical_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = close_1d + 1.1 * range_1d * 1.1 / 2.0
-    s3_1d = close_1d - 1.1 * range_1d * 1.1 / 2.0
+    # 12h Donchian channels (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Prepend NaN for alignment (current day's levels use prior day's data)
-    r3_1d = np.concatenate([[np.nan], r3_1d])
-    s3_1d = np.concatenate([[np.nan], s3_1d])
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
-    # Trend: bullish if close > EMA34, bearish if close < EMA34
-    bullish_trend = close_1d > ema34_1d
-    bearish_trend = close_1d < ema34_1d
+    # Volume filter: 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i - 19:i + 1])
+    volume_threshold = vol_ma * 1.5
     
-    # Volume average (20-period)
-    vol_series = pd.Series(volume)
-    vol_avg = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_threshold = 1.5  # volume must be > 1.5x average
-    
-    # Align to 6h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_trend.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_trend.astype(float))
-    vol_avg_aligned = align_htf_to_ltf(prices, df_1d, vol_avg)
+    # Align 1d EMA50 trend to 12h
+    ema50_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 50
+    start_idx = max(50, 20)  # need EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(vol_avg_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        bullish = bullish_aligned[i] > 0.5
-        bearish = bearish_aligned[i] > 0.5
-        vol_ok = volume[i] > vol_avg_aligned[i] * vol_threshold
+        # Trend: bullish if close > EMA50, bearish if close < EMA50
+        bullish_trend = close[i] > ema50_aligned[i]
+        bearish_trend = close[i] < ema50_aligned[i]
+        
+        # Volume confirmation
+        vol_ok = volume[i] > volume_threshold[i]
         
         if position == 0:
-            # Enter long: bullish trend + price breaks above R3 + volume confirmation
-            if bullish and close[i] > r3_aligned[i] and vol_ok:
+            # Enter long: bullish trend + price breaks above Donchian upper + volume
+            if bullish_trend and close[i] > highest_high[i] and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish trend + price breaks below S3 + volume confirmation
-            elif bearish and close[i] < s3_aligned[i] and vol_ok:
+            # Enter short: bearish trend + price breaks below Donchian lower + volume
+            elif bearish_trend and close[i] < lowest_low[i] and vol_ok:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: bearish trend or price falls back below R3
-            if bearish or close[i] < r3_aligned[i]:
+            # Exit long: bearish trend reversal or price breaks below Donchian lower
+            if bearish_trend or close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: bullish trend or price rises back above S3
-            if bullish or close[i] > s3_aligned[i]:
+            # Exit short: bullish trend reversal or price breaks above Donchian upper
+            if bullish_trend or close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
