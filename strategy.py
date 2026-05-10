@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Trix_Momentum_Volume
-# Hypothesis: TRIX momentum combined with volume spike and 1-day trend filter captures short-term momentum bursts in both bull and bear markets.
-# Uses TRIX(12) for momentum, volume > 1.5x 20-period average for confirmation, and 1-day EMA50 for trend filter.
-# Target: 25-35 trades/year to minimize fee drag while maintaining edge.
+# 12h_KeltnerChannel_Breakout_1wTrend_VolumeFilter
+# Hypothesis: Keltner Channel breakouts on 12h timeframe with weekly trend filter (EMA50) and volume confirmation (2x 20-period average) capture institutional breakouts in both bull and bear markets. Uses ATR-based dynamic bands to adapt to volatility, reducing false signals. Designed for low trade frequency (<30/year) to minimize fee drag.
 
-name = "4h_Trix_Momentum_Volume"
-timeframe = "4h"
+name = "12h_KeltnerChannel_Breakout_1wTrend_VolumeFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +15,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day trend filter (EMA50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w_up = close_1w > ema50_1w
+    trend_1w_down = close_1w < ema50_1w
     
-    # Align 1-day trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align 1w trend to 12h
+    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
+    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
     
-    # TRIX calculation: triple EMA of ROC
-    # ROC = (close - close[n]) / close[n] * 100
-    roc = np.zeros_like(close)
-    for i in range(1, n):
-        if close[i-1] != 0:
-            roc[i] = (close[i] - close[i-1]) / close[i-1] * 100.0
-        else:
-            roc[i] = 0.0
+    # ATR for Keltner Channel (20-period)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Triple EMA of ROC
-    ema1 = pd.Series(roc).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix = ema3  # TRIX is the triple EMA of ROC
+    # 20-period EMA for Keltner Channel middle
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume spike: > 1.5x 20-period average
+    # Keltner Channel bands
+    upper = ema20 + 2 * atr
+    lower = ema20 - 2 * atr
+    
+    # Volume spike filter (2x 20-period average)
     vol_ma = np.zeros_like(volume)
     vol_sum = 0
     for i in range(n):
@@ -62,48 +59,49 @@ def generate_signals(prices):
             vol_ma[i] = vol_sum / 20
         else:
             vol_ma[i] = np.nan
-    volume_spike = volume > (1.5 * vol_ma)
+    volume_spike = volume > (2 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for TRIX and volume MA
+    start_idx = 50  # Need enough data for EMA50 and ATR
     
     for i in range(start_idx, n):
-        if (np.isnan(trix[i]) or np.isnan(volume_spike[i]) or
-            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
+        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: TRIX turning up (>0) with volume spike and uptrend
-            if (trix[i] > 0 and trix[i-1] <= 0 and
-                trend_1d_up_aligned[i] > 0.5 and
+            # Long: price breaks above upper Keltner band with volume spike and weekly uptrend
+            if (high[i] > upper[i] and
+                trend_1w_up_aligned[i] > 0.5 and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX turning down (<0) with volume spike and downtrend
-            elif (trix[i] < 0 and trix[i-1] >= 0 and
-                  trend_1d_down_aligned[i] > 0.5 and
+            # Short: price breaks below lower Keltner band with volume spike and weekly downtrend
+            elif (low[i] < lower[i] and
+                  trend_1w_down_aligned[i] > 0.5 and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: TRIX turns down or trend changes
-            if (trix[i] < 0 and trix[i-1] >= 0) or \
-               (trend_1d_up_aligned[i] < 0.5):
+            # Exit: price breaks below lower band or trend changes
+            if (low[i] < lower[i] or
+                trend_1w_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: TRIX turns up or trend changes
-            if (trix[i] > 0 and trix[i-1] <= 0) or \
-               (trend_1d_down_aligned[i] < 0.5):
+            # Exit: price breaks above upper band or trend changes
+            if (high[i] > upper[i] or
+                trend_1w_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
