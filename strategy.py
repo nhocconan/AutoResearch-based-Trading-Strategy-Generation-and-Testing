@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_ZeroCross_VolumeSpike
-Hypothesis: Use TRIX (triple smoothed EMA) on 1d for momentum, with zero-cross signals.
-Enter long when TRIX crosses above zero with volume spike (>2x 20-period average).
-Enter short when TRIX crosses below zero with volume spike.
-Use 1w trend filter: only take long when price > 200 EMA on 1w, short when price < 200 EMA on 1w.
-Targets 50-120 trades over 4 years (12-30/year) to minimize fee drag.
-TRIX reduces whipsaw vs single EMA, volume confirms momentum, 1w trend filter avoids counter-trend trades.
-Works in bull (rides momentum with trend) and bear (captures reversal spikes with trend filter).
+1h_ADX_Regime_ADX14_DI_Cross
+Hypothesis: Use ADX(14) to filter regime and DI crossover for entry in 1h timeframe.
+Long when +DI crosses above -DI AND ADX > 25 (trending up).
+Short when -DI crosses above +DI AND ADX > 25 (trending down).
+Exit when ADX falls below 20 (range) or opposite DI cross.
+Uses 4h EMA50 as higher timeframe trend filter: only take longs when price > EMA50_4h, shorts when price < EMA50_4h.
+Adds session filter (08-20 UTC) to avoid low-volume Asian session.
+Target: 15-35 trades/year (~60-140 over 4 years) to minimize fee drag.
+Works in bull (trend following) and bear (trend following) markets.
 """
 
-name = "12h_TRIX_ZeroCross_VolumeSpike"
-timeframe = "12h"
+name = "1h_ADX_Regime_ADX14_DI_Cross"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,102 +21,119 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d TRIX (15-period triple EMA)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    # Precompute session hours (08-20 UTC) to avoid low-volume sessions
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate TRIX: EMA(EMA(EMA(close, 15), 15), 15)
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan, dtype=float)
-        res = np.full_like(arr, np.nan, dtype=float)
-        alpha = 2 / (period + 1)
-        res[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            res[i] = alpha * arr[i] + (1 - alpha) * res[i-1]
-        return res
+    # ADX calculation (14 period)
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First TR is just high-low
+        
+        # Directional Movement
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm[0] = 0.0
+        minus_dm[0] = 0.0
+        
+        # Smoothed values (Wilder's smoothing = EMA with alpha=1/period)
+        atr = np.zeros_like(tr)
+        plus_dm_smooth = np.zeros_like(plus_dm)
+        minus_dm_smooth = np.zeros_like(minus_dm)
+        
+        if len(tr) >= period:
+            atr[period-1] = np.mean(tr[:period])
+            plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+            minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+            for i in range(period, len(tr)):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Avoid division by zero
+        dx = np.zeros_like(atr)
+        mask = (plus_dm_smooth + minus_dm_smooth) > 0
+        dx[mask] = 100 * np.abs(plus_dm_smooth[mask] - minus_dm_smooth[mask]) / (plus_dm_smooth[mask] + minus_dm_smooth[mask])
+        
+        # ADX = smoothed DX
+        adx = np.full_like(dx, np.nan)
+        if len(dx) >= period:
+            # First ADX is average of first 'period' DX values
+            valid_dx = dx[period-1:2*(period-1)+1]  # DX[13] to DX[27] for period=14
+            if len(valid_dx) >= period and not np.all(np.isnan(valid_dx)):
+                adx[2*(period-1)] = np.nanmean(valid_dx)  # ADX[27] for period=14
+                for i in range(2*(period-1)+1, len(dx)):
+                    if not np.isnan(dx[i]):
+                        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+                    else:
+                        adx[i] = adx[i-1]
+        return adx, plus_dm_smooth, minus_dm_smooth
     
-    ema1 = ema(close_1d, 15)
-    ema2 = ema(ema1, 15)
-    ema3 = ema(ema2, 15)
-    trix = np.full_like(close_1d, np.nan, dtype=float)
-    # TRIX = 100 * (ema3 - previous ema3) / previous ema3
-    for i in range(1, len(ema3)):
-        if not np.isnan(ema3[i]) and not np.isnan(ema3[i-1]) and ema3[i-1] != 0:
-            trix[i] = 100 * (ema3[i] - ema3[i-1]) / ema3[i-1]
+    adx, plus_di, minus_di = calculate_adx(high, low, close, 14)
     
-    # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full_like(vol_1d, np.nan, dtype=float)
-    if len(vol_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(vol_1d[:20])
-        for i in range(20, len(vol_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + vol_1d[i]) / 20
-    
-    # 1w EMA200 for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema200_1w = np.full_like(close_1w, np.nan, dtype=float)
-    if len(close_1w) >= 200:
-        ema200_1w[199] = np.mean(close_1w[:200])
-        alpha = 2 / (200 + 1)
-        for i in range(200, len(close_1w)):
-            ema200_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema200_1w[i-1]
-    
-    # Align all to 12h timeframe
-    trix_12h = align_htf_to_ltf(prices, df_1d, trix)
-    vol_sma20_12h = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
-    ema200_12h = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # 4h EMA50 for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 50:
+        ema50_4h[49] = np.mean(close_4h[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_4h)):
+            ema50_4h[i] = alpha * close_4h[i] + (1 - alpha) * ema50_4h[i-1]
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 1)  # Need TRIX and volume
+    # Start after sufficient data for ADX calculation
+    start_idx = max(40, 1)  # Need ADX(14) to stabilize
     
     for i in range(start_idx, n):
-        if np.isnan(trix_12h[i]) or np.isnan(vol_sma20_12h[i]) or np.isnan(ema200_12h[i]):
+        if (not in_session[i] or 
+            np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or
+            np.isnan(ema50_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 2x average 1d volume (scaled to 12h)
-        # 2x 12h periods in 1d, so scale factor is 2
-        vol_12h_avg = vol_sma20_12h[i] * 2
-        volume_confirm = volume[i] > 2.0 * vol_12h_avg
-        
-        # TRIX zero-cross detection
-        trix_prev = trix_12h[i-1] if i > 0 else 0
-        trix_cross_up = trix_prev <= 0 and trix_12h[i] > 0
-        trix_cross_down = trix_prev >= 0 and trix_12h[i] < 0
-        
         if position == 0:
-            # Long: TRIX crosses up with volume and price above 1w EMA200
-            if trix_cross_up and volume_confirm and close[i] > ema200_12h[i]:
+            # Long entry: +DI crosses above -DI, ADX > 25 (strong uptrend), price above 4h EMA50
+            if (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1] and  # Cross above
+                adx[i] > 25 and close[i] > ema50_4h_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses down with volume and price below 1w EMA200
-            elif trix_cross_down and volume_confirm and close[i] < ema200_12h[i]:
+            # Short entry: -DI crosses above +DI, ADX > 25 (strong downtrend), price below 4h EMA50
+            elif (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1] and  # Cross above
+                  adx[i] > 25 and close[i] < ema50_4h_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX crosses down or trend fails
-            if trix_cross_down or close[i] < ema200_12h[i]:
+            # Long exit: ADX < 20 (weakening trend) OR -DI crosses above +DI
+            if (adx[i] < 20 or 
+                (minus_di[i] > plus_di[i] and minus_di[i-1] <= plus_di[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX crosses up or trend fails
-            if trix_cross_up or close[i] > ema200_12h[i]:
+            # Short exit: ADX < 20 (weakening trend) OR +DI crosses above -DI
+            if (adx[i] < 20 or 
+                (plus_di[i] > minus_di[i] and plus_di[i-1] <= minus_di[i-1])):
                 signals[i] = 0.0
                 position = 0
             else:
