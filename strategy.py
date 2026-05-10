@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_Filter_With_RSI_Pullback_v1
-# Hypothesis: Uses KAMA trend direction on 1d timeframe with RSI(14) pullback on 1d for entry.
-# Trend filter avoids counter-trend trades; RSI pullback provides entry during retracements.
-# Works in bull markets (trend following) and bear markets (avoids longs in downtrend, takes shorts on pullbacks).
-# Position size 0.25 for balanced risk; targets ~15-25 trades/year to minimize fee drag.
+# 6h_WeeklyPivot_Reversal_1dTrend_Filter
+# Hypothesis: Uses weekly pivot levels (S1/S2/R1/R2) from previous week with 1d trend filter.
+# In ranging markets (common in 2025+), price tends to revert from weekly S1/S2 and R1/R2.
+# In trending markets, we filter by 1d EMA to only take trades in trend direction.
+# This combines mean reversion at key weekly levels with trend filtering to work in both bull/bear.
+# Position size 0.25 to manage drawdown. Target: 20-40 trades/year.
 
-name = "1d_KAMA_Trend_Filter_With_RSI_Pullback_v1"
-timeframe = "1d"
+name = "6h_WeeklyPivot_Reversal_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,90 +20,77 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # Get 1d data for KAMA trend and RSI
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for pivot levels (using previous week's data)
+    df_w = get_htf_data(prices, '1w')
+    if len(df_w) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) - trend filter
-    close_1d = df_1d['close'].values
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=1)  # 10-period volatility sum
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, np.nan), change])
-    volatility = np.concatenate([np.full(10, np.nan), volatility])
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Align KAMA to 1d timeframe (already aligned, but keep for consistency)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Calculate weekly pivot points from previous week's OHLC
+    prev_week_high = df_w['high'].shift(1).values
+    prev_week_low = df_w['low'].shift(1).values
+    prev_week_close = df_w['close'].shift(1).values
     
-    # Calculate RSI(14) on 1d
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    # First average
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    # Subsequent averages
-    for i in range(15, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = np.nan  # First 14 values undefined
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pivot - prev_week_low
+    s1 = 2 * pivot - prev_week_high
+    r2 = pivot + (prev_week_high - prev_week_low)
+    s2 = pivot - (prev_week_high - prev_week_low)
     
-    # Align RSI to 1d timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
+    
+    # Calculate 1d EMA for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Warmup for KAMA and RSI
+    start_idx = max(50, 1)  # Warmup for 1d EMA
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from KAMA
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
+        # Trend filter from 1d
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price in uptrend and RSI pulling back from overbought (< 40)
-            if uptrend and rsi_aligned[i] < 40:
+            # Long entry: price touches or goes below S1/S2 with 1d uptrend (mean reversion in uptrend)
+            # or price touches or goes below S2 with any trend (stronger signal)
+            if (close[i] <= s1_aligned[i] and uptrend) or close[i] <= s2_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price in downtrend and RSI pulling back from oversold (> 60)
-            elif downtrend and rsi_aligned[i] > 60:
+            # Short entry: price touches or goes above R1/R2 with 1d downtrend (mean reversion in downtrend)
+            # or price touches or goes above R2 with any trend (stronger signal)
+            elif (close[i] >= r1_aligned[i] and downtrend) or close[i] >= r2_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend turns down or RSI becomes overbought (> 70)
-            if not uptrend or rsi_aligned[i] > 70:
+            # Long exit: price reaches pivot or R1, or trend turns down
+            if close[i] >= pivot[i] or close[i] >= r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend turns up or RSI becomes oversold (< 30)
-            if not downtrend or rsi_aligned[i] < 30:
+            # Short exit: price reaches pivot or S1, or trend turns up
+            if close[i] <= pivot[i] or close[i] <= s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
