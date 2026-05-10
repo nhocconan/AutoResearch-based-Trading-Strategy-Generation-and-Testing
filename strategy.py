@@ -1,21 +1,18 @@
-#!/usr/bin/env python3
-# 6h_Weekly_Pivot_Range_Exhaustion
-# Hypothesis: Weekly pivot ranges act as institutional support/resistance zones. Price exhaustion at
-# weekly R4/S4 levels (extreme weekly ranges) with volume confirmation and alignment with daily trend
-# provides high-probability mean-reversion entries. Works in bull/bear by fading extremes rather than
-# chasing trends. Targets 20-50 trades/year via strict weekly level confluence.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla R3/S3 levels act as key intraday support/resistance. A breakout above R3 or below S3 with 1d trend alignment and volume confirmation indicates strong momentum.
+# Uses 1d EMA for trend filter and volume spike for confirmation. Designed for low trade frequency (20-40/year) to minimize fee drag.
 
-name = "6h_Weekly_Pivot_Range_Exhaustion"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_hlf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,56 +20,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === DAILY TREND FILTER ===
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Daily EMA50 for trend direction
-    close_1d = pd.Series(df_1d['close'].values)
-    ema50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla levels from previous day's OHLC
+    # We'll use the 1d data to get daily OHLC
+    # Camarilla: Close +- (High-Low) * 1.1/12 for R3/S3
+    # R3 = Close + (High-Low) * 1.1/12 * 4
+    # S3 = Close - (High-Low) * 1.1/12 * 4
+    # Actually: R3 = Close + (High-Low) * 1.1/6, S3 = Close - (High-Low) * 1.1/6
+    # Let's compute properly:
+    # Typical Camarilla: 
+    # R4 = Close + (High-Low) * 1.1/2
+    # R3 = Close + (High-Low) * 1.1/4
+    # R2 = Close + (High-Low) * 1.1/6
+    # R1 = Close + (High-Low) * 1.1/12
+    # S1 = Close - (High-Low) * 1.1/12
+    # S2 = Close - (High-Low) * 1.1/6
+    # S3 = Close - (High-Low) * 1.1/4
+    # S4 = Close - (High-Low) * 1.1/2
+    # We want R3 and S3: multiplier = 1.1/4
     
-    # === WEEKLY PIVOT CALCULATION ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Get previous day's OHLC (shift by 1 to avoid look-ahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    # First day has no previous, so we'll skip until we have data
+    prev_close[0] = close_1d[0]  # Will be filtered by min_periods anyway
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
     
-    # Calculate weekly pivot points using prior week's OHLC
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    camarilla_mult = 1.1 / 4  # For R3/S3
+    camarilla_range = (prev_high - prev_low) * camarilla_mult
+    r3_level = prev_close + camarilla_range
+    s3_level = prev_close - camarilla_range
     
-    # Pivot point = (H + L + C)/3
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    # Weekly range
-    weekly_range = weekly_high - weekly_low
-    # Support/resistance levels
-    r1 = 2 * pivot - weekly_low
-    s1 = 2 * pivot - weekly_high
-    r2 = pivot + weekly_range
-    s2 = pivot - weekly_range
-    r3 = weekly_high + 2 * (pivot - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pivot)
-    r4 = weekly_high + 3 * (weekly_high - weekly_low)  # Extreme resistance
-    s4 = weekly_low - 3 * (weekly_high - weekly_low)   # Extreme support
+    # Align Camarilla levels to 4h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
     
-    # Align weekly levels to 6t
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    
-    # === VOLUME CONFIRMATION ===
-    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values  # 24 * 6h = 4d
+    # Volume confirmation (20-period average)
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p-1, len(arr)):
+                res[i] = np.mean(arr[i-p+1:i+1])
+        return res
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 24) + 1
+    start_idx = max(34, 20) + 1  # Need EMA34 and volume MA20
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(r4_aligned[i]) or \
-           np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
+           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,24 +87,24 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long setup: price at or below weekly S4 (extreme support) + daily uptrend + volume
-            if close[i] <= s4_aligned[i] and close[i] > ema50_1d_aligned[i] and vol_confirm:
+            # Long breakout: price closes above R3 AND 1d uptrend AND volume confirmation
+            if close[i] > r3_aligned[i] and close[i] > ema_1d_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short setup: price at or above weekly R4 (extreme resistance) + daily downtrend + volume
-            elif close[i] >= r4_aligned[i] and close[i] < ema50_1d_aligned[i] and vol_confirm:
+            # Short breakout: price closes below S3 AND 1d downtrend AND volume confirmation
+            elif close[i] < s3_aligned[i] and close[i] < ema_1d_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses above daily EMA50 OR reaches weekly pivot
-            if close[i] >= ema50_1d_aligned[i] or close[i] >= pivot_aligned[i]:
+            # Long exit: price closes below EMA (trend change) OR loses volume momentum
+            if close[i] < ema_1d_aligned[i] or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses below daily EMA50 OR reaches weekly pivot
-            if close[i] <= ema50_1d_aligned[i] or close[i] <= pivot_aligned[i]:
+            # Short exit: price closes above EMA (trend change) OR loses volume momentum
+            if close[i] > ema_1d_aligned[i] or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
