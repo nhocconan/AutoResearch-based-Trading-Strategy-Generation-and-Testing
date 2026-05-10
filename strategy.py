@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_With_Price_Action_Filter
-# Hypothesis: KAMA adapts to market efficiency, reducing lag in trends and noise in ranges.
-# In trending markets, price stays above/below KAMA with momentum. We add price action
-# confirmation: price must close beyond KAMA + ATR multiplier to avoid whipsaws.
-# Works in bull markets (follows uptrends) and bear markets (follows downtrends) by
-# only trading in direction of KAMA trend. Uses volume confirmation to avoid false signals.
-# Target: 20-50 trades/year to minimize fee drag.
+# 12h_KAMA_Trend_With_RSI_and_Chop_Filter
+# Hypothesis: KAMA adapts to market noise, providing a reliable trend filter in both trending and ranging markets.
+# Combined with RSI for momentum and Choppiness Index for regime detection, this strategy avoids false signals.
+# Trades only in the direction of the 12h KAMA trend, with RSI avoiding overbought/oversold extremes and chop filter ensuring trades occur in trending regimes.
+# Target: 12-37 trades/year to minimize fee drag.
 
-name = "4h_KAMA_Trend_With_Price_Action_Filter"
-timeframe = "4h"
+name = "12h_KAMA_Trend_With_RSI_and_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,97 +23,106 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (adaptive moving average)
-    # Efficiency Ratio (ER) = |close - close[10]| / sum(|close - close[-1]|) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[i] - close[i-10]|
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=1)  # sum |close - close[-1]| over 10
-    # Avoid division by zero
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    # Calculate KAMA
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # start after 10 periods
-    for i in range(10, n):
-        if not np.isnan(sc[i-10]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
+    # Get 1w data for trend filter (more stable for 12h strategy)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
+        return np.zeros(n)
     
-    # Get 1d data for trend filter (slower, more reliable)
+    # Get 1d data for RSI and Chop calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate 1w KAMA for trend filter
+    # KAMA: ER = |Price Change| / Volatility, SC = [ER * (fastest - slowest) + slowest]^2
+    close_1w = pd.Series(df_1w['close'])
+    change = abs(close_1w.diff(10))  # 10-period change for ER
+    volatility = close_1w.diff().abs().rolling(window=10).sum()  # 10-period volatility
+    er = change / volatility.replace(0, np.nan)
+    fastest = 2 / (2 + 1)  # EMA(2)
+    slowest = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fastest - slowest) + slowest) ** 2
+    kama = [close_1w.iloc[0]]  # Initialize with first value
+    for i in range(1, len(close_1w)):
+        if np.isnan(sc.iloc[i]):
+            kama.append(kama[-1])
+        else:
+            kama.append(kama[-1] + sc.iloc[i] * (close_1w.iloc[i] - kama[-1]))
+    kama = np.array(kama)
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
     
-    # ATR for volatility and price action filter
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full_like(close, np.nan)
-    for i in range(14, len(tr)):
-        if not np.isnan(tr[i-14:i]).any():
-            atr[i] = np.mean(tr[i-14:i])
+    # Calculate daily RSI(14)
+    close_1d = pd.Series(df_1d['close'])
+    delta = close_1d.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Volume confirmation (20-period MA on 4h = ~3.3 days)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily Choppiness Index(14)
+    # CHOP = 100 * log10(sum(ATR) / (max_high - min_low)) / log10(period)
+    atr_list = []
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=14).sum()
+    max_high = df_1d['high'].rolling(window=14).max()
+    min_low = df_1d['low'].rolling(window=14).min()
+    chop = 100 * np.log10(atr / (max_high - min_low)) / np.log10(14)
+    chop_values = chop.values
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (10), ATR (14), EMA50 (50), volume MA (20)
-    start_idx = max(50, 20)
+    # Warmup: need 1w KAMA (30), RSI (14), Chop (14)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or 
+            np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filters: both KAMA and 1d EMA50 must agree
-        kama_uptrend = close[i] > kama[i]
-        kama_downtrend = close[i] < kama[i]
-        ema_uptrend = close[i] > ema_50_1d_aligned[i]
-        ema_downtrend = close[i] < ema_50_1d_aligned[i]
+        # 1w trend filter
+        uptrend = close[i] > kama_aligned[i]
+        downtrend = close[i] < kama_aligned[i]
         
-        uptrend = kama_uptrend and ema_uptrend
-        downtrend = kama_downtrend and ema_downtrend
+        # RSI filter: avoid extremes
+        rsi_ok_long = rsi_aligned[i] < 70  # Not overbought
+        rsi_ok_short = rsi_aligned[i] > 30  # Not oversold
         
-        # Price action filter: price must be beyond KAMA by 0.5*ATR
-        pa_long = close[i] > kama[i] + 0.5 * atr[i]
-        pa_short = close[i] < kama[i] - 0.5 * atr[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Chop filter: only trade in trending markets (CHOP < 38.2)
+        chop_ok = chop_aligned[i] < 38.2
         
         if position == 0:
-            # Long entry: uptrend + price action + volume
-            if uptrend and pa_long and volume_confirm:
+            # Long entry: uptrend + RSI not overbought + trending regime
+            if uptrend and rsi_ok_long and chop_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price action + volume
-            elif downtrend and pa_short and volume_confirm:
+            # Short entry: downtrend + RSI not oversold + trending regime
+            elif downtrend and rsi_ok_short and chop_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price action reverses
-            if not uptrend or not pa_long:
+            # Long exit: trend breaks or RSI overbought or choppy market
+            if not uptrend or rsi_aligned[i] >= 70 or chop_aligned[i] >= 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price action reverses
-            if not downtrend or not pa_short:
+            # Short exit: trend breaks or RSI oversold or choppy market
+            if not downtrend or rsi_aligned[i] <= 30 or chop_aligned[i] >= 38.2:
                 signals[i] = 0.0
                 position = 0
             else:
