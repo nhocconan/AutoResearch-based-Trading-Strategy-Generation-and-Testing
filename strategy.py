@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-# 4H_TripleConfirmation_Scalp
-# Hypothesis: Combines RSI(14) mean reversion at extremes with Bollinger Band squeeze breakout
-# and volume confirmation. Uses 1d ADX for regime filtering (ADX>25 = trend, <20 = range).
-# Long when RSI<30 + BB squeeze breakout up + volume spike + ADX>25.
-# Short when RSI>70 + BB squeeze breakout down + volume spike + ADX>25.
-# Designed for 4h timeframe to capture reversal moves in trending markets with low trade frequency.
-# Works in both bull and bear markets by following trend direction via ADX filter.
-# Uses discrete position sizing (0.25) to minimize fee churn.
+"""
+1D_KAMA_Direction_1wTrend_Filter_Volume
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) on 1d identifies trend direction; 1w EMA200 filters long/short bias; volume spike >2x average confirms momentum.
+Works in bull markets (trend following) and bear markets (avoids counter-trend trades via 1w filter). Target: 15-25 trades/year.
+"""
 
-name = "4H_TripleConfirmation_Scalp"
-timeframe = "4h"
+name = "1D_KAMA_Direction_1wTrend_Filter_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,108 +18,72 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ADX regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # --- 1d KAMA (trend) ---
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[t] - close[t-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum |close[t] - close[t-1]| over 10
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # --- 1w EMA200 (trend filter) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
+    ema_200_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Calculate 1d ADX(14) for trend strength
-    # TR = max(high-low, abs(high-prev_close), abs(low-prev_close))
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean()
-    
-    # +DM and -DM
-    up_move = df_1d['high'] - df_1d['high'].shift(1)
-    down_move = df_1d['low'].shift(1) - df_1d['low']
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed +DM, -DM, TR
-    plus_di = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
-    
-    adx_values = adx.values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    
-    # Bollinger Bands (20, 2) on 4h
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    bb_upper = sma_20 + 2 * std_20
-    bb_lower = sma_20 - 2 * std_20
-    bb_width = bb_upper - bb_lower
-    
-    # Bollinger Band squeeze detection (width < 20-period average width)
-    bb_width_ma = bb_width.rolling(window=20, min_periods=20).mean()
-    bb_squeeze = bb_width < bb_width_ma
-    
-    # RSI(14) on 4h
-    delta = pd.Series(close).diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # Volume filter: volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_threshold = vol_ma * 2
+    # --- Volume filter ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_threshold = vol_ma * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for indicators
+    start_idx = max(20, 10)  # warmup for volume and KAMA
     
     for i in range(start_idx, n):
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(bb_squeeze[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(kama[i]) or np.isnan(ema_200_1w_aligned[i]) or np.isnan(vol_threshold[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Regime filter: ADX > 25 for trending market
-        is_trending = adx_1d_aligned[i] > 25
-        
-        # Breakout conditions
-        breakout_up = close[i] > bb_upper[i]
-        breakout_down = close[i] < bb_lower[i]
-        
-        # RSI extremes
-        rsi_oversold = rsi_values[i] < 30
-        rsi_overbought = rsi_values[i] > 70
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        price_above_ema200w = close[i] > ema_200_1w_aligned[i]
+        price_below_ema200w = close[i] < ema_200_1w_aligned[i]
         
         if position == 0:
-            # Long entry: RSI oversold + BB breakout up + volume spike + trending market
-            if (rsi_oversold and breakout_up and 
-                volume[i] > vol_threshold[i] and is_trending):
+            # Long: price > KAMA, price > 1w EMA200, volume spike
+            if price_above_kama and price_above_ema200w and volume[i] > vol_threshold[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought + BB breakout down + volume spike + trending market
-            elif (rsi_overbought and breakout_down and 
-                  volume[i] > vol_threshold[i] and is_trending):
+            # Short: price < KAMA, price < 1w EMA200, volume spike
+            elif price_below_kama and price_below_ema200w and volume[i] > vol_threshold[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 50 or BB breakout down or volume drops
-            if (rsi_values[i] > 50 or breakout_down or volume[i] < vol_ma[i]):
+            # Exit long: price < KAMA or volume drops
+            if price_below_kama or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 50 or BB breakout up or volume drops
-            if (rsi_values[i] < 50 or breakout_up or volume[i] < vol_ma[i]):
+            # Exit short: price > KAMA or volume drops
+            if price_above_kama or volume[i] < vol_ma[i]:
                 signals[i] = 0.0
                 position = 0
             else:
