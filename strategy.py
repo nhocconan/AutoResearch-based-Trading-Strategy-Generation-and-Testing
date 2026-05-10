@@ -1,12 +1,13 @@
-#!/usr/bin/env python3
-# 12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: On 12h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
+# #!/usr/bin/env python3
+# 4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: On 4h timeframe, enter long when price breaks above Camarilla R1 level from previous 1d candle with 1d uptrend and volume confirmation.
 # Short when price breaks below Camarilla S1 level with 1d downtrend and volume confirmation.
 # Uses 1d trend filter to avoid counter-trend trades and Camarilla levels from 1d for precise entries.
-# Target: 12-37 trades/year per symbol (50-150 total over 4 years) to minimize fee drag.
+# Target: 20-50 trades/year per symbol (80-200 total over 4 years).
+# This version uses tighter volume confirmation (2.0x average) and requires both bullish/bearish conditions to reduce trades.
 
-name = "12H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_1D_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -45,11 +46,11 @@ def generate_signals(prices):
     ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_up = close_1d > ema_34
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average (tighter than before)
     volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (volume_avg * 1.5)
+    volume_confirm = volume > (volume_avg * 2.0)
     
-    # Align 1d indicators to 12h
+    # Align 1d indicators to 4h
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
