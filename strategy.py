@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-# 6h_12h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: 6h breakout at daily Camarilla R3/S3 levels with daily trend filter and volume confirmation.
-# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 20-period MA) confirms institutional participation.
-# Designed for 6h timeframe targeting 12-37 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
+# 6h_12h_Adaptive_Keltner_Breakout_Trend
+# Hypothesis: 6h breakout from adaptive Keltner channels (ATR-based) with 12h trend filter and volume confirmation.
+# Uses ATR multiplier that adapts to volatility regime (lower multiplier in high vol = tighter bands).
+# Long: breakout above upper band in uptrend with volume spike. Short: breakdown below lower band in downtrend with volume spike.
+# Designed for 6h timeframe targeting 12-30 trades/year per symbol. Works in bull/bear by requiring trend alignment.
+# Keltner channels adapt to volatility, reducing whipsaws in ranging markets and capturing trends effectively.
 
-name = "6h_12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "6h_12h_Adaptive_Keltner_Breakout_Trend"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,9 +19,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend and Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend and volatility calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
     # 6h OHLCV
@@ -28,79 +30,85 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily EMA50 for trend filter
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate 12h ATR for volatility regime
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # First value NaN
     
-    camarilla_r3 = np.full(len(df_1d), np.nan)
-    camarilla_s3 = np.full(len(df_1d), np.nan)
+    atr_12h = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
     
-    for i in range(1, len(df_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        diff = prev_high - prev_low
-        
-        camarilla_r3[i] = prev_close + diff * 1.1 / 4
-        camarilla_s3[i] = prev_close - diff * 1.1 / 4
+    # Calculate adaptive multiplier based on ATR percentile (20-period)
+    atr_ma = pd.Series(atr_12h).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_12h / atr_ma  # Current ATR vs average ATR
+    # Adaptive multiplier: 1.5 in low vol, 2.5 in high vol (clipped)
+    multiplier = 1.5 + np.clip((atr_ratio - 1.0) * 2.0, 0.0, 1.0)  # Range 1.5 to 2.5
     
-    # Align daily indicators to 6h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate 12h EMA for trend (middle of Keltner)
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Volume average (20-period for 6h)
+    # Calculate Keltner channels
+    upper_12h = ema_12h + multiplier * atr_12h
+    lower_12h = ema_12h - multiplier * atr_12h
+    
+    # Align 12h indicators to 6h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
+    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    
+    # Volume confirmation (20-period for 6h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough history for daily EMA50 + vol MA
-    start_idx = 50
+    # Warmup: need enough history for ATR calculation + EMA + vol MA
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(ema_12h_aligned[i]) or
+            np.isnan(upper_12h_aligned[i]) or
+            np.isnan(lower_12h_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine trend: daily close > EMA50
-        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
-        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
-        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
+        # Determine trend: 12h close > EMA
+        close_12h_aligned = align_htf_to_ltf(prices, df_12h, close_12h)
+        uptrend = close_12h_aligned[i] > ema_12h_aligned[i]
+        downtrend = close_12h_aligned[i] < ema_12h_aligned[i]
         
         # Volume confirmation (2x average for significance)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: Breakout above Camarilla R3 in uptrend with volume spike
-            if close[i] > camarilla_r3_aligned[i] and uptrend and volume_surge:
+            # Long: Breakout above upper Keltner band in uptrend with volume spike
+            if close[i] > upper_12h_aligned[i] and uptrend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Camarilla S3 in downtrend with volume spike
-            elif close[i] < camarilla_s3_aligned[i] and downtrend and volume_surge:
+            # Short: Breakdown below lower Keltner band in downtrend with volume spike
+            elif close[i] < lower_12h_aligned[i] and downtrend and volume_surge:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Long exit: close below Camarilla R3 or trend fails
-                if close[i] < camarilla_r3_aligned[i] or not uptrend:
+                # Long exit: close below EMA (middle band) or trend fails
+                if close[i] < ema_12h_aligned[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit: close above Camarilla S3 or trend fails
-                if close[i] > camarilla_s3_aligned[i] or not downtrend:
+                # Short exit: close above EMA (middle band) or trend fails
+                if close[i] > ema_12h_aligned[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
