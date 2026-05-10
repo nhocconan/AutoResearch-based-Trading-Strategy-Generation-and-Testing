@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
 Hypothesis: Price breaks Camarilla R1 (long) or S1 (short) levels calculated from prior day's range, with 1d EMA50 trend filter and volume confirmation.
 Camarilla levels act as intraday support/resistance; breakouts with volume and trend alignment capture directional moves.
 Works in bull/bear by filtering trades in direction of daily trend.
-Target: 25-40 trades/year (100-160 total) to minimize fee drag.
+Target: 20-30 trades/year (80-120 total) to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,7 +30,7 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
+    volume_1d = df_1d['volume'].values
     
     # Camarilla levels from prior day: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
@@ -45,11 +45,11 @@ def generate_signals(prices):
             ema50_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema50_1d[i-1]
     
     # 1d volume SMA20 for volume confirmation
-    vol_sma20_1d = np.full(len(vol_1d), np.nan)
-    if len(vol_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(vol_1d[:20])
-        for i in range(20, len(vol_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + vol_1d[i]) / 20
+    vol_sma20_1d = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_sma20_1d[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
     
     # Align 1d indicators to 4h
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
