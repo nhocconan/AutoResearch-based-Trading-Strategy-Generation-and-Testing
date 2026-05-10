@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_Filter
-Hypothesis: Uses Donchian channel breakout (20-period) on 4h timeframe with volume confirmation
-and 1-day EMA50 trend filter to capture strong momentum moves in both bull and bear markets.
-Designed for low trade frequency (20-30/year) to minimize fee drift while capturing trends.
+6h_ElderRay_BullBearPower_TrendFilter
+Hypothesis: Combines Elder Ray Bull/Bear Power with 1d ADX trend filter to capture momentum in both trending and ranging markets. 
+Bull Power measures buying strength (high - EMA13), Bear Power measures selling strength (low - EMA13). 
+Long when Bull Power > 0 and Bear Power rising from negative, with 1d ADX > 25 (trending). 
+Short when Bear Power < 0 and Bull Power falling from positive, with 1d ADX > 25. 
+Uses 6m timeframe for entries with 1d trend filter to avoid counter-trend trades. 
+Designed for low trade frequency (15-25/year) to minimize fee drag while capturing sustained moves.
 """
 
-name = "4h_Donchian_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,69 +19,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donch_period = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Elder Ray: EMA13 of close
+    ema_period = 13
+    close_series = pd.Series(close)
+    ema13 = close_series.ewm(span=ema_period, adjust=False).mean().values
     
-    # Use pandas rolling for vectorized min/max with min_periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=donch_period, min_periods=donch_period).max().values
-    lower = low_series.rolling(window=donch_period, min_periods=donch_period).min().values
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
-    # 1-day EMA50 for trend filter
+    # 1d ADX for trend filter (need +DI, -DI, DX)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume confirmation (20-period average)
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
+    # Calculate +DM, -DM, TR
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    tr = np.maximum(
+        high_1d[1:] - low_1d[1:],
+        np.maximum(high_1d[1:] - close_1d[:-1], low_1d[1:] - close_1d[:-1])
+    )
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(arr, period):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= period:
+            # First value is simple average
+            res[period-1] = np.nansum(arr[:period])
+            for i in range(period, len(arr)):
+                res[i] = res[i-1] - (res[i-1] / period) + arr[i]
+        return res
+    
+    adx_period = 14
+    tr_sum = wilder_smooth(tr, adx_period)
+    dm_plus_sum = wilder_smooth(dm_plus, adx_period)
+    dm_minus_sum = wilder_smooth(dm_minus, adx_period)
+    
+    # Avoid division by zero
+    dx = np.where(tr_sum > 0, 
+                  np.abs(dm_plus_sum - dm_minus_sum) / tr_sum * 100, 
+                  0)
+    
+    # ADX is smoothed DX
+    adx = wilder_smooth(dx, adx_period)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = donch_period + 5  # Ensure indicators are warm
+    start_idx = max(ema_period, adx_period*2) + 5
     
     for i in range(start_idx, n):
-        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or \
+           np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x average
-        volume_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Trend filter: only trade when ADX > 25 (trending market)
+        strong_trend = adx_aligned[i] > 25
         
         if position == 0:
-            # Long: price breaks above upper Donchian band with volume, above 1-day EMA50
-            if close[i] > upper[i] and volume_confirm and close[i] > ema_1d_aligned[i]:
+            # Long: Bull Power > 0 (buying pressure) AND Bear Power turning up from negative
+            if bull_power[i] > 0 and bear_power[i] > bear_power[i-1] and bear_power[i-1] < 0 and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below lower Donchian band with volume, below 1-day EMA50
-            elif close[i] < lower[i] and volume_confirm and close[i] < ema_1d_aligned[i]:
+            # Short: Bear Power < 0 (selling pressure) AND Bull Power turning down from positive
+            elif bear_power[i] < 0 and bull_power[i] < bull_power[i-1] and bull_power[i-1] > 0 and strong_trend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below lower Donchian band or breaks below 1-day EMA50
-            if close[i] < lower[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: Bull Power turns negative OR Bear Power turns positive (momentum fade)
+            if bull_power[i] <= 0 or bear_power[i] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above upper Donchian band or breaks above 1-day EMA50
-            if close[i] > upper[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: Bear Power turns positive OR Bull Power turns negative (momentum fade)
+            if bear_power[i] >= 0 or bull_power[i] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
