@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4
 # Hypothesis: 4h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
 # Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 24-period MA) confirms institutional participation.
 # Designed for 4h timeframe targeting 20-50 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4"
 timeframe = "4h"
 leverage = 1.0
 
