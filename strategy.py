@@ -1,152 +1,106 @@
 #!/usr/bin/env python3
-# 1d_KAMA_RSI_Chop_Trend
-# Hypothesis: Daily KAMA trend direction combined with RSI overbought/oversold and Choppiness Index regime filter.
-# KAMA adapts to market noise, reducing whipsaws in ranging markets. RSI identifies extreme momentum.
-# Choppiness Index > 61.8 indicates ranging (mean reversion), < 38.2 indicates trending (trend follow).
-# In trending regimes (CHOP < 38.2): follow KAMA direction.
-# In ranging regimes (CHOP > 61.8): fade RSI extremes (sell overbought, buy oversold).
-# Volume confirmation (1.5x 20-day average) filters low-conviction moves.
-# Designed for 1d timeframe targeting 15-25 trades/year per symbol.
-# Works in bull/bear by adapting to market regime via Choppiness Index.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 4h breakout at daily Camarilla R1/S1 levels with daily trend filter and volume confirmation.
+# Uses daily trend (close > EMA50) to avoid counter-trend trades. Volume surge (2x 24-period MA) confirms institutional participation.
+# Designed for 4h timeframe targeting 20-50 trades/year per symbol. Works in bull/bear by requiring trend alignment and volume confirmation to reduce whipsaws.
 
-name = "1d_KAMA_RSI_Chop_Trend"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    # Get daily data for trend and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - 10-period ER, 2/30 SC
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
+    # Calculate daily EMA50 for trend filter
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Proper volatility calculation for ER
-    volatility = np.zeros(n)
-    for i in range(1, n):
-        volatility[i] = np.sum(np.abs(np.diff(close[max(0, i-9):i+1])))
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    er = np.zeros(n)
-    er[:9] = 0  # not enough data
-    for i in range(9, n):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
+    camarilla_r1 = np.full(len(df_1d), np.nan)
+    camarilla_s1 = np.full(len(df_1d), np.nan)
     
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
+    for i in range(1, len(df_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        diff = prev_high - prev_low
+        
+        camarilla_r1[i] = prev_close + diff * 1.1 / 6
+        camarilla_s1[i] = prev_close - diff * 1.1 / 6
     
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Align daily indicators to 4h timeframe
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Choppiness Index (14-period)
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR calculation
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Sum of true ranges over 14 periods
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Max/min close over 14 periods
-    max_close = pd.Series(close).rolling(window=14, min_periods=14).max().values
-    min_close = pd.Series(close).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = np.zeros(n)
-    for i in range(13, n):
-        if max_close[i] - min_close[i] > 0:
-            chop[i] = 100 * np.log10(sum_tr[i] / (max_close[i] - min_close[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral when no range
-    
-    # Volume average (20-day)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (24-period for 4h = 4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for all indicators
-    start_idx = 20
+    # Warmup: need enough history for daily EMA50 + vol MA
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(chop[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(camarilla_r1_aligned[i]) or
+            np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine market regime
-        is_trending = chop[i] < 38.2
-        is_ranging = chop[i] > 61.8
+        # Determine trend: daily close > EMA50
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, df_1d['close'].values)
+        uptrend = close_1d_aligned[i] > ema_50_1d_aligned[i]
+        downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation
-        volume_surge = volume[i] > 1.5 * vol_ma[i]
+        # Volume confirmation (2x average for significance)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            if is_trending:
-                # In trending regime: follow KAMA direction
-                if close[i] > kama[i] and volume_surge:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama[i] and volume_surge:
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging:
-                # In ranging regime: fade RSI extremes
-                if rsi[i] < 30 and volume_surge:  # oversold
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 70 and volume_surge:  # overbought
-                    signals[i] = -0.25
-                    position = -1
+            # Long: Breakout above Camarilla R1 in uptrend with volume spike
+            if close[i] > camarilla_r1_aligned[i] and uptrend and volume_surge:
+                signals[i] = 0.25
+                position = 1
+            # Short: Breakdown below Camarilla S1 in downtrend with volume spike
+            elif close[i] < camarilla_s1_aligned[i] and downtrend and volume_surge:
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Long exit conditions
-                if is_trending and close[i] < kama[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif is_ranging and rsi[i] > 50:  # exit mean reversion at midpoint
+                # Long exit: close below Camarilla R1 or trend fails
+                if close[i] < camarilla_r1_aligned[i] or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short exit conditions
-                if is_trending and close[i] > kama[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif is_ranging and rsi[i] < 50:  # exit mean reversion at midpoint
+                # Short exit: close above Camarilla S1 or trend fails
+                if close[i] > camarilla_s1_aligned[i] or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
