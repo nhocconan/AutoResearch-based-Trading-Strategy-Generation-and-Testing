@@ -1,9 +1,11 @@
-# 4H_1D_1W_Keltner_Breakout_Trend_Signal
-# Hypothesis: Use weekly Keltner Channel breakout with daily trend filter (ADX) to capture strong trends in both bull and bear markets.
-# Weekly Keltner provides volatility-adjusted breakout levels, daily ADX filters for trending conditions.
-# Target: 15-30 trades/year per symbol (60-120 total over 4 years).
+#!/usr/bin/env python3
+# 4H_1D_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Use 1d Camarilla R1/S1 levels for breakout entries on 4h, filtered by 12h EMA trend and volume confirmation.
+# Camarilla levels provide institutional pivot points with proven mean-reversion/breakout behavior.
+# Works in bull/bear by filtering with 12h EMA trend, reducing whipsaws in choppy markets.
+# Target: 20-40 trades/year per symbol (80-160 total over 4 years).
 
-name = "4H_1D_1W_Keltner_Breakout_Trend_Signal"
+name = "4H_1D_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,87 +21,41 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Keltner Channel
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly Keltner Channel (20, 1.5)
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        multiplier = 2 / (period + 1)
-        result[0] = arr[0]
-        for i in range(1, len(arr)):
-            result[i] = (arr[i] - result[i-1]) * multiplier + result[i-1]
-        return result
-    
-    def atr(high, low, close, period):
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr2[0] = tr1[0]
-        tr3[0] = tr1[0]
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        return ema(tr, period)
-    
-    keltner_mid = ema(close_1w, 20)
-    keltner_atr = atr(high_1w, low_1w, close_1w, 10)
-    keltner_upper = keltner_mid + 1.5 * keltner_atr
-    keltner_lower = keltner_mid - 1.5 * keltner_atr
-    
-    # Get daily data for ADX trend filter
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily ADX (14)
-    def wilders_smoothing(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        result = np.full_like(arr, np.nan)
-        result[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Calculate Camarilla levels for each 1d bar
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1 = close_1d + camarilla_range
+    s1 = close_1d - camarilla_range
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_data = wilders_smoothing(tr, 14)
+    # Get 12h data for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    close_12h = df_12h['close'].values
+    # 12h EMA-50 for trend filter
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Calculate 4h volume average (20-period) for volume confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr_data
-    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr_data
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = wilders_smoothing(dx, 14)
-    
-    # Align weekly Keltner to 4h
-    keltner_upper_aligned = align_htf_to_ltf(prices, df_1w, keltner_upper)
-    keltner_lower_aligned = align_htf_to_ltf(prices, df_1w, keltner_lower)
-    
-    # Align daily ADX to 4h
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align all indicators to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    vol_avg_aligned = align_htf_to_ltf(prices, df_12h, vol_avg)  # Use 12h vol avg for stability
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -109,37 +65,43 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(keltner_upper_aligned[i]) or np.isnan(keltner_lower_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_avg_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        adx_val = adx_aligned[i]
-        is_trending = adx_val > 25
+        # Volume confirmation: current volume > 1.5x average
+        volume_confirm = volume[i] > (vol_avg_aligned[i] * 1.5)
         
         if position == 0:
-            # Enter long: weekly breakout above upper + daily trend
-            if close[i] > keltner_upper_aligned[i] and is_trending:
+            # Enter long: price breaks above R1 + 12h EMA uptrend + volume confirmation
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
+                volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: weekly breakout below lower + daily trend
-            elif close[i] < keltner_lower_aligned[i] and is_trending:
+            # Enter short: price breaks below S1 + 12h EMA downtrend + volume confirmation
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
+                  volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit long: weekly break below lower or trend weakens
-            if close[i] < keltner_lower_aligned[i] or adx_val < 20:
+            # Exit long: price falls back below S1 or 12h EMA turns down
+            if (close[i] < s1_aligned[i] or 
+                close[i] < ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: weekly break above upper or trend weakens
-            if close[i] > keltner_upper_aligned[i] or adx_val < 20:
+            # Exit short: price rises back above R1 or 12h EMA turns up
+            if (close[i] > r1_aligned[i] or 
+                close[i] > ema_50_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
