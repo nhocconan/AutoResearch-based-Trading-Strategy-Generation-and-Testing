@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R1S1_Breakout_1wTrend_Volume
-# Hypothesis: On daily timeframe, price breaking Camarilla R1/S1 levels with weekly trend filter and volume confirmation captures strong directional moves. Weekly trend avoids counter-trend trades, volume reduces false breakouts. Designed for low frequency (10-25 trades/year) to minimize fee drift. Works in bull via R1 breakouts, in bear via S1 breakdowns.
+# 6h_Donchian_Breakout_20_12hTrend_Volume
+# Hypothesis: On 6h timeframe, price breaking Donchian(20) channels with 12h trend filter and volume confirmation captures sustained moves while avoiding whipsaws. The 12h trend filter ensures trades align with intermediate-term momentum, reducing counter-trend entries. Volume confirmation filters breakouts with low conviction. Designed for 12-30 trades/year to minimize fee drag in both bull and bear markets.
 
-name = "1d_Camarilla_R1S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Donchian_Breakout_20_12hTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,35 +20,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Daily Camarilla levels (based on previous day)
-    # R1 = close + 1.12*(high - low)/12
-    # S1 = close - 1.12*(high - low)/12
-    close_series = pd.Series(close)
+    # 6h Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    prev_close = close_series.shift(1)
-    prev_high = high_series.shift(1)
-    prev_low = low_series.shift(1)
-    cam_range = prev_high - prev_low
-    r1 = prev_close + 1.12 * cam_range / 12
-    s1 = prev_close - 1.12 * cam_range / 12
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend: EMA34 on weekly close
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
+    # 12h trend: EMA34 on 12h close (responsive but smooth)
+    close_12h = df_12h['close'].values
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_12h_up = close_12h > ema34_12h
+    trend_12h_down = close_12h < ema34_12h
     
-    # Align weekly trend to daily
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Align 12h trend to 6h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
     
-    # Volume confirmation: 20-day average
+    # Volume confirmation: 20-period average on 6h
     volume_s = pd.Series(volume)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
@@ -60,8 +53,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(r1[i]) or np.isnan(s1[i]) or
-            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -69,33 +62,33 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 1.8
+        volume_confirm = vol_ratio > 1.5
         
         if position == 0:
-            # Enter long: break above R1 with weekly uptrend and volume
-            if (close[i] > r1[i] and 
-                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: break above Donchian high with 12h uptrend and volume
+            if (close[i] > donchian_high[i] and 
+                trend_12h_up_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: break below S1 with weekly downtrend and volume
-            elif (close[i] < s1[i] and 
-                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: break below Donchian low with 12h downtrend and volume
+            elif (close[i] < donchian_low[i] and 
+                  trend_12h_down_aligned[i] > 0.5 and volume_confirm):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price returns to S1 or trend fails
-            if (close[i] < s1[i] or 
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit when price returns to Donchian low or trend fails
+            if (close[i] < donchian_low[i] or 
+                trend_12h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price returns to R1 or trend fails
-            if (close[i] > r1[i] or 
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit when price returns to Donchian high or trend fails
+            if (close[i] > donchian_high[i] or 
+                trend_12h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
