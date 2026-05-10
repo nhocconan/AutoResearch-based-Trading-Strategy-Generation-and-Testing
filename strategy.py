@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
 # Hypothesis: Uses Camarilla pivot levels from daily timeframe. Enters long when price breaks above R1 with volume confirmation and 1-day uptrend (close > EMA34).
 # Enters short when price breaks below S1 with volume confirmation and 1-day downtrend (close < EMA34).
