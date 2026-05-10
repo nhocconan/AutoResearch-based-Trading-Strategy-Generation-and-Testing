@@ -1,29 +1,17 @@
 #!/usr/bin/env python3
-# 12h_KAMA_Trend_1wTrend_Volume
-# Hypothesis: 12-hour entries in direction of weekly KAMA trend with volume confirmation.
-# Weekly KAMA filters trend to avoid counter-trend trades. Entry when price crosses above/below
-# 12-period KAMA on 12h chart with volume > 1.5x 20-period average. Designed for 12h to achieve
-# 12-37 trades/year, suitable for both bull and bear markets by following the higher timeframe trend.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: 1-hour breakouts from 4-hour Camarilla R1/S1 levels with 4-hour trend filter (EMA34) and volume confirmation.
+# The 4-hour EMA34 filters trend direction to avoid counter-trend trades; 4-hour Camarilla levels provide precise entry/exit;
+# Volume confirmation ensures breakout strength. Designed for 1h to achieve 15-37 trades/year by using 4h for signal direction
+# and 1h only for entry timing, with session filter (08-20 UTC) to reduce noise trades. Works in both bull and bear markets.
 
-name = "12h_KAMA_Trend_1wTrend_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def kama(close, er_len=10, fast_len=2, slow_len=30):
-    """Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, n=er_len))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast_len+1) - 2/(slow_len+1)) + 2/(slow_len+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[er_len] = close[er_len]
-    for i in range(er_len + 1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i-1] - kama[i-1])
-    return kama
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,28 +23,46 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for KAMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 4-hour data for EMA34 trend filter and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    volume_4h = df_4h['volume'].values
     
-    # Weekly KAMA for trend filter
-    kama_1w = kama(close_1w, er_len=10, fast_len=2, slow_len=30)
+    # 4-hour EMA34 for trend filter
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 12h KAMA for entry signal
-    kama_12h = kama(close, er_len=10, fast_len=2, slow_len=30)
+    # Camarilla levels (based on previous 4h bar)
+    def calculate_camarilla(h, l, c):
+        typical = (h + l + c) / 3.0
+        range_ = h - l
+        R1 = c + (range_ * 1.1000 / 12)
+        S1 = c - (range_ * 1.1000 / 12)
+        return R1, S1
     
-    # Volume confirmation: 20-period average
+    R1 = np.full_like(close_4h, np.nan)
+    S1 = np.full_like(close_4h, np.nan)
+    for i in range(1, len(close_4h)):
+        R1[i], S1[i] = calculate_camarilla(high_4h[i-1], low_4h[i-1], close_4h[i-1])
+    
+    # 4-hour volume confirmation: 20-period average
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p - 1, len(arr)):
                 res[i] = np.mean(arr[i - p + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume, 20)
+    vol_ma_20 = mean_arr(volume_4h, 20)
     
-    # Align weekly KAMA to 12h timeframe (wait for 1w bar to close)
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Align 4-hour indicators to 1h timeframe (wait for 4h bar to close)
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_20)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,35 +70,45 @@ def generate_signals(prices):
     start_idx = 50  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kama_1w_aligned[i]) or np.isnan(kama_12h[i]) or \
-           np.isnan(vol_ma_20[i]):
+        # Session filter: only trade between 08:00 and 20:00 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price above 12h KAMA, above weekly KAMA, strong volume
-            if close[i] > kama_12h[i] and close[i] > kama_1w_aligned[i] and volume[i] > 1.5 * vol_ma_20[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1, above 4h EMA34, strong volume
+            if close[i] > R1_aligned[i] and close[i] > ema_34_4h_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price below 12h KAMA, below weekly KAMA, strong volume
-            elif close[i] < kama_12h[i] and close[i] < kama_1w_aligned[i] and volume[i] > 1.5 * vol_ma_20[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1, below 4h EMA34, strong volume
+            elif close[i] < S1_aligned[i] and close[i] < ema_34_4h_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price drops below 12h KAMA or below weekly KAMA
-            if close[i] < kama_12h[i] or close[i] < kama_1w_aligned[i]:
+            # Long exit: price drops below S1 or below 4h EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price rises above 12h KAMA or above weekly KAMA
-            if close[i] > kama_12h[i] or close[i] > kama_1w_aligned[i]:
+            # Short exit: price rises above R1 or above 4h EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema_34_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
