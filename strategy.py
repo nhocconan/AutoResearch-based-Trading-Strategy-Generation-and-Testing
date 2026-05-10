@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1h_4h_1d_PriceAction_Volume_Breakout
-# Hypothesis: Capture breakouts from 4-hour price consolidation (high-low range) confirmed by
-# 1-day trend (EMA50) and volume spikes, executed on 1h for timing. Works in bull/bear by
-# following higher-timeframe trend. Target: 15-30 trades/year (~60-120 total) to avoid fee drag.
+# 6h_Weekly_Pivot_Breakout_1dTrend_Volume
+# Hypothesis: Weekly pivot levels from 1w timeframe provide strong support/resistance.
+# Breakouts above R1 or below S1 with 1d EMA trend alignment and volume confirmation
+# capture institutional flow. Works in bull/bear by following weekly structure.
+# Target: 15-25 trades/year (~60-100 total over 4 years) to stay within optimal trade frequency for 6h.
 
-name = "1h_4h_1d_PriceAction_Volume_Breakout"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,32 +23,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h consolidation range (20-period high-low range)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly pivot levels (R1, S1) - calculated from prior week
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    range_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    range_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    range_high_aligned = align_htf_to_ltf(prices, df_4h, range_high)
-    range_low_aligned = align_htf_to_ltf(prices, df_4h, range_low)
+    # Use previous week's OHLC for pivot calculation (avoid look-ahead)
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
     
-    # 1d EMA trend filter (50-period)
+    pivot_point = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pivot_point - prev_week_low
+    s1 = 2 * pivot_point - prev_week_high
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # 1d EMA trend filter (34-period)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume confirmation: current volume > 1.5 * 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (1.5 * vol_ma)
     
     # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
+    hours = prices.index.hour  # already datetime64[ms], .hour works
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
@@ -56,45 +63,45 @@ def generate_signals(prices):
     start_idx = 100  # Ensure sufficient warmup for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(range_high_aligned[i]) or np.isnan(range_low_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 4h range high, 1d EMA uptrend, volume confirmation, session active
-            if (close[i] > range_high_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long: price breaks above weekly R1, 1d EMA uptrend, volume confirmation, session active
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_filter[i] and 
                 session_filter[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h range low, 1d EMA downtrend, volume confirmation, session active
-            elif (close[i] < range_low_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short: price breaks below weekly S1, 1d EMA downtrend, volume confirmation, session active
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_filter[i] and 
                   session_filter[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below 4h range low OR 1d EMA turns down
-            if (close[i] < range_low_aligned[i] or 
-                close[i] < ema_50_1d_aligned[i]):
+            # Exit: price breaks below weekly S1 OR 1d EMA turns down
+            if (close[i] < s1_aligned[i] or 
+                close[i] < ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price breaks above 4h range high OR 1d EMA turns up
-            if (close[i] > range_high_aligned[i] or 
-                close[i] > ema_50_1d_aligned[i]):
+            # Exit: price breaks above weekly R1 OR 1d EMA turns up
+            if (close[i] > r1_aligned[i] or 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
