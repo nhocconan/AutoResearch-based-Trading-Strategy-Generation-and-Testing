@@ -1,9 +1,11 @@
-# 1d_KAMA_Trend_Filter_Volume_Confirm
-# Hypothesis: On 1d timeframe, use KAMA to determine trend direction, enter long when KAMA trending up and RSI below 50, enter short when KAMA trending down and RSI above 50, filtered by 1w volume surge.
-# This captures trend-following entries with mean-reversion timing, reducing whipsaw. Weekly filter ensures we trade with higher timeframe momentum, limiting trades to 10-25/year to avoid fee drag. Works in bull/bear via trend filter.
+#!/usr/bin/env python3
+"""
+6h_KAMA_Trend_Filter_Volume_Spike
+Hypothesis: On 6h timeframe, use Kaufman's Adaptive Moving Average (KAMA) for trend detection, filtered by volume spike and price position relative to KAMA. This strategy captures trend continuation with low frequency to avoid fee drag. Works in both bull and bear markets as KAMA adapts to market volatility, reducing whipsaw during sideways periods. Target: 50-150 total trades over 4 years.
+"""
 
-name = "1d_KAMA_Trend_Filter_Volume_Confirm"
-timeframe = "1d"
+name = "6h_KAMA_Trend_Filter_Volume_Spike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,95 +17,113 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for volume filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend context (optional filter)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    volume_1w = df_1w['volume'].values
-    vol_ma10_1w = pd.Series(volume_1w).rolling(window=10, min_periods=10).mean().values
-    vol_ma10_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma10_1w)
+    close_12h = df_12h['close'].values
+    # Simple trend: price vs close 20 periods ago on 12h
+    trend_12h = np.zeros(len(close_12h), dtype=bool)
+    for i in range(20, len(close_12h)):
+        trend_12h[i] = close_12h[i] > close_12h[i-20]
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h.astype(float))
     
-    # 1d data for KAMA and price
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    volume_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    
+    # 6h data for KAMA and price
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
     # Calculate KAMA(10, 2, 30)
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # needs correction
+    # ER = Efficiency Ratio, SC = Smoothing Constant
+    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # This needs fixing
     
-    # Correct volatility calculation: sum of absolute changes over 10 periods
+    # Proper KAMA calculation
+    diff = np.diff(close, prepend=close[0])
+    abs_diff = np.abs(diff)
+    
+    # Direction over 10 periods
+    direction = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    
+    # Volatility sum over 10 periods
     volatility = np.zeros_like(close)
-    for i in range(10, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + abs_diff[i]
+        if i >= 10:
+            volatility[i] -= abs_diff[i-10]
     
     # Avoid division by zero
-    er = np.where(volatility > 0, change / volatility, 0)
+    er = np.zeros_like(close)
+    mask = volatility != 0
+    er[mask] = direction[mask] / volatility[mask]
     
     # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # KAMA calculation
+    # Calculate KAMA
     kama = np.zeros_like(close)
     kama[0] = close[0]
     for i in range(1, len(close)):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (30) and RSI (14)
-    start_idx = 30
+    # Warmup: need KAMA (10) and volume MA (20)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vol_ma10_1w_aligned[i]) or
-            np.isnan(kama[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(trend_12h_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: KAMA direction (up if current > previous)
-        kama_rising = kama[i] > kama[i-1]
-        kama_falling = kama[i] < kama[i-1]
+        # Price relative to KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # Volume filter: current 1d volume > 1.5x 1w 10-period MA
-        volume_filter = volume[i] > vol_ma10_1w_aligned[i] * 1.5
+        # Volume filter: current 6h volume > 1.8x 1d 20-period MA
+        volume_filter = volume[i] > vol_ma20_1d_aligned[i] * 1.8
+        
+        # Session filter: 00-24 UTC (trade all hours for 6h)
+        # No session filter for 6h to capture global moves
         
         if position == 0:
-            # Long: KAMA rising and RSI below 50 (mean reversion within uptrend)
-            if kama_rising and rsi[i] < 50 and volume_filter:
+            # Long: price above KAMA with volume spike and 12h trend up
+            if price_above_kama and volume_filter and trend_12h_aligned[i] > 0.5:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling and RSI above 50 (mean reversion within downtrend)
-            elif kama_falling and rsi[i] > 50 and volume_filter:
+            # Short: price below KAMA with volume spike and 12h trend down
+            elif price_below_kama and volume_filter and trend_12h_aligned[i] < 0.5:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: KAMA falling or RSI overbought
-            if not kama_rising or rsi[i] > 70:
+            # Long exit: price below KAMA or volume dries up
+            if price_below_kama or volume[i] < vol_ma20_1d_aligned[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: KAMA rising or RSI oversold
-            if not kama_falling or rsi[i] < 30:
+            # Short exit: price above KAMA or volume dries up
+            if price_above_kama or volume[i] < vol_ma20_1d_aligned[i] * 0.8:
                 signals[i] = 0.0
                 position = 0
             else:
