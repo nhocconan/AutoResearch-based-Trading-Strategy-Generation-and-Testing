@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (S3/S4 and R3/R4) from the daily timeframe act as strong support/resistance.
-# A breakout beyond these levels with volume confirmation and aligned daily trend (EMA34) signals a sustained move.
-# Designed for low trade frequency (15-30/year) to minimize fee drift on 12h chart.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1, S1) on 1d chart identify key intraday support/resistance.
+# Breakout above R1 with 1d uptrend (price > EMA34) and volume confirmation signals bullish momentum.
+# Breakdown below S1 with 1d downtrend (price < EMA34) and volume confirmation signals bearish momentum.
+# Uses 1d timeframe for trend and pivot levels to avoid noise, 4h for execution.
+# Designed for low trade frequency (20-40/year) to minimize fee drift.
 
-name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,78 +24,80 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily HTF data for Camarilla and trend ---
+    # Fetch 1d data once before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) == 0:
         return np.zeros(n)
     
-    # Daily high, low, close for Camarilla
+    # Calculate 1d EMA34 for trend
+    close_1d = pd.Series(df_1d['close'].values)
+    ema34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # Calculate Camarilla levels for 1d: R1, S1
+    # Camarilla: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1d_arr = df_1d['close'].values
+    camarilla_width = 1.1 * (high_1d - low_1d) / 12
+    r1_1d = close_1d_arr + camarilla_width
+    s1_1d = close_1d_arr - camarilla_width
     
-    # Camarilla levels: R3, R4, S3, S4
-    # R4 = close + 1.5 * (high - low)
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # S4 = close - 1.5 * (high - low)
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + 1.5 * range_1d
-    r3_1d = close_1d + 1.1 * range_1d
-    s3_1d = close_1d - 1.1 * range_1d
-    s4_1d = close_1d - 1.5 * range_1d
-    
-    # Align Camarilla levels to 12h chart (wait for daily close)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Align 1d indicators to 4h timeframe (wait for close of 1d bar)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # --- 12h indicators ---
-    # Volume confirmation: 24-period average (2 days of 12h bars)
+    # 4h EMA50 for entry filter (optional trend alignment)
     close_series = pd.Series(close)
-    vol_ma = close_series.rolling(window=24, min_periods=24).mean()  # using close as proxy, will replace
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    ema50_4h = close_series.ewm(span=50, adjust=False, min_periods=50).mean()
+    
+    # Volume confirmation: 20-period average
+    def mean_arr(arr, p):
+        res = np.full_like(arr, np.nan)
+        if len(arr) >= p:
+            for i in range(p-1, len(arr)):
+                res[i] = np.mean(arr[i-p+1:i+1])
+        return res
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 35)  # enough for vol_ma and daily indicators
+    start_idx = max(50, 34) + 5  # Enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or \
-           np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or \
-           np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or \
+           np.isnan(s1_1d_aligned[i]) or np.isnan(ema50_4h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Trend condition: 1d EMA34 slope (use level as proxy)
+        uptrend_1d = close > ema34_1d_aligned[i]
+        downtrend_1d = close < ema34_1d_aligned[i]
+        
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long breakout: price closes above R4 AND daily uptrend (close > EMA34)
-            if close[i] > r4_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and vol_confirm:
+            # Long breakout: price crosses above R1 with uptrend and volume
+            if close[i] > r1_1d_aligned[i] and uptrend_1d and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below S4 AND daily downtrend (close < EMA34)
-            elif close[i] < s4_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and vol_confirm:
+            # Short breakdown: price crosses below S1 with downtrend and volume
+            elif close[i] < s1_1d_aligned[i] and downtrend_1d and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below R3 OR trend turns down
-            if close[i] < r3_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Long exit: price crosses below EMA50 or trend reverses
+            if close[i] < ema50_4h[i] or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above S3 OR trend turns up
-            if close[i] > s3_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Short exit: price crosses above EMA50 or trend reverses
+            if close[i] > ema50_4h[i] or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
