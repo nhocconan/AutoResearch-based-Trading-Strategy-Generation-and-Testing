@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Volume
 # Hypothesis: Breakouts from Camarilla R3/S3 levels on 4h with 1d trend filter (EMA34) and volume confirmation.
-# Uses proper alignment and filters to avoid overtrading. Target: 20-50 trades/year.
+# Camarilla levels provide institutional support/resistance; EMA34 filters trend direction; volume confirms breakout strength.
+# Designed for 4h to achieve 19-50 trades/year, suitable for both bull and bear markets.
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume_v2"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -64,7 +65,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 40  # Need enough history for indicators
     
     for i in range(start_idx, n):
         if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
@@ -76,11 +77,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R3, above EMA34, strong volume
-            if close[i] > R3_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 1.8 * vol_ma_20_aligned[i]:
+            if close[i] > R3_aligned[i] and close[i] > ema_34_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3, below EMA34, strong volume
-            elif close[i] < S3_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 1.8 * vol_ma_20_aligned[i]:
+            elif close[i] < S3_aligned[i] and close[i] < ema_34_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
