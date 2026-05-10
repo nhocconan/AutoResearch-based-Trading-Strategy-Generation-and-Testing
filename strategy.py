@@ -1,11 +1,12 @@
-#/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-# Hypothesis: Breakouts at daily Camarilla R3/S3 levels with 1w EMA trend filter and volume confirmation (2x 24-period average).
-# Uses 12h timeframe for institutional entries, works in bull/bear markets via trend alignment.
-# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
+#!/usr/bin/env python3
+# 1h_MidTrend_Momentum_Filter
+# Hypothesis: On 1h timeframe, use 4h EMA trend for direction and 1h RSI momentum for entry timing.
+# Enter long when price > 4h EMA50 and RSI(14) crosses above 50; enter short when price < 4h EMA50 and RSI crosses below 50.
+# Exit on opposite RSI cross or trend reversal. Uses session filter (08-20 UTC) to avoid low-volume hours.
+# Target: 20-40 trades/year to minimize fee drag on 1h timeframe.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1h_MidTrend_Momentum_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,57 +21,42 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # 1w trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 4h trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1w_up = close_1w > ema50_1w
-    trend_1w_down = close_1w < ema50_1w
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_4h_up = close_4h > ema50_4h
+    trend_4h_down = close_4h < ema50_4h
     
-    # Align 1w trend to 12h
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Align 4h trend to 1h
+    trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
+    trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    # Volume confirmation (2x 24-period average)
-    vol_ma = np.full(n, np.nan)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 24:
-            vol_sum -= volume[i-24]
-        if i >= 23:
-            vol_ma[i] = vol_sum / 24
-    volume_confirm = volume > (2.0 * vol_ma)
+    # 1h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Camarilla levels from previous 1d bar
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # RSI cross signals
+    rsi_above_50 = rsi > 50
+    rsi_below_50 = rsi < 50
+    rsi_cross_up = np.zeros(n, dtype=bool)
+    rsi_cross_down = np.zeros(n, dtype=bool)
+    rsi_cross_up[1:] = (rsi_above_50[1:] & ~rsi_above_50[:-1])
+    rsi_cross_down[1:] = (rsi_below_50[1:] & ~rsi_below_50[:-1])
     
-    # Shift to get previous 1d bar values
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
-    
-    # Calculate Camarilla levels (R3, S3)
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Align Camarilla levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,44 +64,43 @@ def generate_signals(prices):
     start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i]) or
-            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with volume confirmation, 1w uptrend
-            if (high[i] > R3_aligned[i] and
-                trend_1w_up_aligned[i] > 0.5 and
-                volume_confirm[i]):
-                signals[i] = 0.25
+            # Long: price > 4h EMA50, RSI crosses above 50, in session
+            if (close[i] > ema50_4h[i] and
+                rsi_cross_up[i] and
+                session_mask[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 with volume confirmation, 1w downtrend
-            elif (low[i] < S3_aligned[i] and
-                  trend_1w_down_aligned[i] > 0.5 and
-                  volume_confirm[i]):
-                signals[i] = -0.25
+            # Short: price < 4h EMA50, RSI crosses below 50, in session
+            elif (close[i] < ema50_4h[i] and
+                  rsi_cross_down[i] and
+                  session_mask[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below S3 or 1w trend turns down
-            if (low[i] < S3_aligned[i] or
-                trend_1w_up_aligned[i] < 0.5):
+            # Exit: RSI crosses below 50 or trend turns down
+            if (rsi_cross_down[i] or
+                trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price breaks above R3 or 1w trend turns up
-            if (high[i] > R3_aligned[i] or
-                trend_1w_down_aligned[i] < 0.5):
+            # Exit: RSI crosses above 50 or trend turns up
+            if (rsi_cross_up[i] or
+                trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
