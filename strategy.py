@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Daily breakouts from weekly Camarilla R1/S1 levels with weekly EMA34 trend filter and volume confirmation.
-# Weekly trend filter avoids counter-trend trades; daily Camarilla levels provide precise entry/exit;
-# Volume confirmation ensures breakout strength. Designed for 1d to achieve 7-25 trades/year.
+# 6h_Ichimoku_Cloud_Trend_1d_Adx_Filter
+# Hypothesis: Uses 1d Ichimoku cloud for trend direction and 6h ADX for trend strength.
+# Long when price is above 1d cloud and 6h ADX > 25; short when price is below 1d cloud and 6h ADX > 25.
+# This avoids whipsaws in weak trends and works in both bull and bear markets by following the dominant trend.
+# Target: 50-150 total trades over 4 years = 12-37/year.
 
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Trend_1d_Adx_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,79 +23,128 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly data for EMA34 trend filter and Camarilla levels
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # 1d data for Ichimoku cloud
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA34 for trend filter
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # 1d Ichimoku components (standard periods: 9, 26, 52)
+    def calculate_ichimoku(h, l, c):
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        period9_high = np.maximum.accumulate(h)
+        period9_low = np.minimum.accumulate(l)
+        tenkan = (period9_high + period9_low) / 2
+        
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        period26_high = np.maximum.accumulate(h)
+        period26_low = np.minimum.accumulate(l)
+        kijun = (period26_high + period26_low) / 2
+        
+        # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+        senkou_a = (tenkan + kijun) / 2
+        
+        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+        period52_high = np.maximum.accumulate(h)
+        period52_low = np.minimum.accumulate(l)
+        senkou_b = (period52_high + period52_low) / 2
+        
+        return tenkan, kijun, senkou_a, senkou_b
     
-    # Weekly Camarilla levels (based on previous week)
-    def calculate_camarilla(h, l, c):
-        typical = (h + l + c) / 3.0
-        range_ = h - l
-        R1 = c + (range_ * 1.1000 / 12)
-        S1 = c - (range_ * 1.1000 / 12)
-        return R1, S1
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d = calculate_ichimoku(high_1d, low_1d, close_1d)
     
-    R1 = np.full_like(close_1w, np.nan)
-    S1 = np.full_like(close_1w, np.nan)
-    for i in range(1, len(close_1w)):
-        R1[i], S1[i] = calculate_camarilla(high_1w[i-1], low_1w[i-1], close_1w[i-1])
+    # Kumo (cloud) top and bottom
+    cloud_top = np.maximum(senkou_a_1d, senkou_b_1d)
+    cloud_bottom = np.minimum(senkou_a_1d, senkou_b_1d)
     
-    # Weekly volume confirmation: 20-period average
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
-        return res
-    vol_ma_20 = mean_arr(volume_1w, 20)
+    # 6h ADX for trend strength
+    def calculate_adx(h, l, c, period=14):
+        # True Range
+        tr1 = h - l
+        tr2 = np.abs(h - np.concatenate([[c[0]], c[:-1]]))
+        tr3 = np.abs(l - np.concatenate([[c[0]], c[:-1]]))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        
+        # Directional Movement
+        up_move = h - np.concatenate([[h[0]], h[:-1]])
+        down_move = np.concatenate([[l[0]], l[:-1]]) - l
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+        
+        # Smoothed values
+        def smooth_rma(arr, period):
+            result = np.full_like(arr, np.nan)
+            if len(arr) >= period:
+                # First value is simple average
+                result[period-1] = np.nanmean(arr[:period])
+                # Subsequent values: Wilder's smoothing
+                for i in range(period, len(arr)):
+                    result[i] = (result[i-1] * (period-1) + arr[i]) / period
+            return result
+        
+        tr_smooth = smooth_rma(tr, period)
+        plus_dm_smooth = smooth_rma(plus_dm, period)
+        minus_dm_smooth = smooth_rma(minus_dm, period)
+        
+        # Avoid division by zero
+        plus_di = 100 * plus_dm_smooth / tr_smooth
+        minus_di = 100 * minus_dm_smooth / tr_smooth
+        
+        # DX and ADX
+        dx = np.where(tr_smooth != 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+        adx = smooth_rma(dx, period)
+        
+        return adx
     
-    # Align weekly indicators to 1d timeframe (wait for 1w bar to close)
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    R1_aligned = align_htf_to_ltf(prices, df_1w, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1w, S1)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_20)
+    adx_6h = calculate_adx(high, low, close, 14)
+    
+    # Align 1d Ichimoku to 6s timeframe (wait for 1d bar to close)
+    cloud_top_aligned = align_htf_to_ltf(prices, df_1d, cloud_top)
+    cloud_bottom_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 100  # Need enough history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_1w_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+        if np.isnan(cloud_top_aligned[i]) or np.isnan(cloud_bottom_aligned[i]) or \
+           np.isnan(adx_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        if position == 0:
-            # Long: price breaks above R1, above weekly EMA34, strong volume
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S1, below weekly EMA34, strong volume
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Long exit: price drops below S1 or below weekly EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema_34_1w_aligned[i]:
+        # Only trade when ADX indicates strong trend (ADX > 25)
+        if adx_6h[i] > 25:
+            if position == 0:
+                # Long: price above cloud
+                if close[i] > cloud_top_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price below cloud
+                elif close[i] < cloud_bottom_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif position == 1:
+                # Long exit: price drops below cloud bottom
+                if close[i] < cloud_bottom_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short exit: price rises above cloud top
+                if close[i] > cloud_top_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:
+            # Weak trend: exit any position
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price rises above R1 or above weekly EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema_34_1w_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
