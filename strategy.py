@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm
-Hypothesis: On 12h timeframe, use Camarilla R1/S1 levels from prior 1d for breakout entries, filtered by 1d EMA34 trend and volume spike. This captures institutional levels with trend alignment and avoids whipsaw. Targets 15-30 trades/year to minimize fee drag while maintaining edge in both bull/bear regimes.
+6h_WeeklyPivot_Confluence_1dTrend_Volume
+Hypothesis: On 6h timeframe, use weekly pivot points (S1/S2/S3/R1/R2/R3) for mean reversion entries when price reaches support/resistance, filtered by 1d trend (price above/below EMA50) and volume confirmation. This captures reversals at institutional levels while avoiding counter-trend trades. Weekly pivots provide structure, 1d trend ensures we trade with momentum, and volume filters out weak moves. Designed for 15-35 trades/year to minimize fee drag in both bull and bear markets.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeConfirm"
-timeframe = "12h"
+name = "6h_WeeklyPivot_Confluence_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,39 +14,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels, trend, and volume
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 5:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L, etc.
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    
+    pivot = (weekly_high + weekly_low + weekly_close) / 3
+    s1 = 2 * pivot - weekly_high
+    s2 = pivot - (weekly_high - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pivot)
+    r1 = 2 * pivot - weekly_low
+    r2 = pivot + (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pivot - weekly_low)
+    
+    # Align weekly pivots to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla R1 and S1 (using previous day's data)
-    # R1 = close + (high - low) * 1.1 / 12
-    # S1 = close - (high - low) * 1.1 / 12
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # 1d volume filter (20-period MA)
+    # Get 1d data for volume filter
     volume_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
-    # 12h price data
+    # 6h data for price
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -55,46 +67,55 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Camarilla levels and EMA34
-    start_idx = 34
+    # Warmup: need weekly pivots and 1d indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema34_1d_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
             np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs 1d EMA34
-        uptrend_1d = close[i] > ema34_1d_aligned[i]
-        downtrend_1d = close[i] < ema34_1d_aligned[i]
+        # Trend filter: price vs 1d EMA50
+        uptrend_1d = close[i] > ema50_1d_aligned[i]
+        downtrend_1d = close[i] < ema50_1d_aligned[i]
         
-        # Volume filter: current 12h volume > 1.8x 1d 20-period MA
-        volume_filter = volume[i] > vol_ma20_1d_aligned[i] * 1.8
+        # Volume filter: current 6h volume > 1.3x 1d 20-period MA
+        volume_filter = volume[i] > vol_ma20_1d_aligned[i] * 1.3
+        
+        # Proximity to pivot levels (within 0.3% for entry)
+        proximity_threshold = 0.003
+        near_s1 = abs(close[i] - s1_aligned[i]) / close[i] <= proximity_threshold
+        near_s2 = abs(close[i] - s2_aligned[i]) / close[i] <= proximity_threshold
+        near_s3 = abs(close[i] - s3_aligned[i]) / close[i] <= proximity_threshold
+        near_r1 = abs(close[i] - r1_aligned[i]) / close[i] <= proximity_threshold
+        near_r2 = abs(close[i] - r2_aligned[i]) / close[i] <= proximity_threshold
+        near_r3 = abs(close[i] - r3_aligned[i]) / close[i] <= proximity_threshold
         
         if position == 0:
-            # Long: break above R1 in uptrend with volume
-            if high[i] > camarilla_r1_aligned[i] and uptrend_1d and volume_filter:
+            # Long: price near support in uptrend with volume
+            if (near_s1 or near_s2 or near_s3) and uptrend_1d and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 in downtrend with volume
-            elif low[i] < camarilla_s1_aligned[i] and downtrend_1d and volume_filter:
+            # Short: price near resistance in downtrend with volume
+            elif (near_r1 or near_r2 or near_r3) and downtrend_1d and volume_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops back below R1 or trend fails
-            if close[i] < camarilla_r1_aligned[i] or not uptrend_1d:
+            # Long exit: price reaches resistance or trend fails
+            if (near_r1 or near_r2 or near_r3) or not uptrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises back above S1 or trend fails
-            if close[i] > camarilla_s1_aligned[i] or not downtrend_1d:
+            # Short exit: price reaches support or trend fails
+            if (near_s1 or near_s2 or near_s3) or not downtrend_1d:
                 signals[i] = 0.0
                 position = 0
             else:
