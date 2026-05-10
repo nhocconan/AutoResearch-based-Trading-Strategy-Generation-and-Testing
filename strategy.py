@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_WickReversal_VolumeSpike
-Hypothesis: Captures reversals at long-wick rejections of daily highs/lows with volume confirmation.
-Works in bull markets by buying dips rejected at daily lows and in bear markets by selling rallies rejected at daily highs.
-Uses 1d timeframe for signal generation and 1w trend filter. Target: 15-25 trades/year per symbol.
+6h_Camarilla_R4_S4_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels from 1d define strong support/resistance.
+Breakouts above R4 or below S4 with volume confirmation and 1d trend alignment
+capture strong momentum moves. Works in bull markets (buy R4 breaks) and bear
+markets (sell S4 breaks). Target: 15-30 trades/year per symbol.
 """
 
-name = "1d_WickReversal_VolumeSpike"
-timeframe = "1d"
+name = "6h_Camarilla_R4_S4_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,44 +20,54 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
     # Convert to Series for indicator calculations
+    close_s = pd.Series(close)
     high_s = pd.Series(high)
     low_s = pd.Series(low)
-    close_s = pd.Series(close)
     volume_s = pd.Series(volume)
     
-    # Daily body and wick calculations
-    body = np.abs(close - open_price)
-    total_range = high - low
-    lower_wick = np.minimum(open_price, close) - low
-    upper_wick = high - np.maximum(open_price, close)
-    
-    # Wick ratio (wick as % of total range) - avoids division by zero
-    lower_wick_ratio = np.divide(lower_wick, total_range, out=np.zeros_like(lower_wick), where=total_range!=0)
-    upper_wick_ratio = np.divide(upper_wick, total_range, out=np.zeros_like(upper_wick), where=total_range!=0)
-    
-    # Volume confirmation (20-period average)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # 1w trend filter: EMA34 on weekly closes
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 1d data for Camarilla calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1w_up = close_1w > ema34_1w
-    trend_1w_down = close_1w < ema34_1w
+    # Calculate Camarilla levels using previous day's OHLC
+    # Camarilla: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
+    # where C = (H+L+C)/3 (typical price)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align 1w trend to daily
-    trend_1w_up_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_up.astype(float))
-    trend_1w_down_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_down.astype(float))
+    # Typical price (pivot)
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Range
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels
+    r4 = typical_price + (range_1d * 1.1 / 2.0)
+    s4 = typical_price - (range_1d * 1.1 / 2.0)
+    
+    # Align Camarilla levels to 6h (1d levels are fixed for the day)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 1d trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
+    
+    # Align 1d trend to 6h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    
+    # Volume average (20-period)
+    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,9 +77,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(lower_wick_ratio[i]) or np.isnan(upper_wick_ratio[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(trend_1w_up_aligned[i]) or np.isnan(trend_1w_down_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema34_1d[i]) if i < len(ema34_1d) else True or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,37 +89,29 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         volume_confirm = vol_ratio > 2.0
         
-        # Conditions for long entry: bullish rejection at low
-        long_wick_rejection = lower_wick_ratio[i] > 0.6
-        not_overbought = upper_wick_ratio[i] < 0.3
-        
-        # Conditions for short entry: bearish rejection at high
-        short_wick_rejection = upper_wick_ratio[i] > 0.6
-        not_oversold = lower_wick_ratio[i] < 0.3
-        
         if position == 0:
-            # Enter long: bullish rejection + 1w uptrend + volume
-            if (long_wick_rejection and not_overbought and
-                trend_1w_up_aligned[i] > 0.5 and volume_confirm):
+            # Enter long: price breaks above R4 with volume and 1d uptrend
+            if (close[i] > r4_aligned[i] and volume_confirm and
+                trend_1d_up_aligned[i] > 0.5):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: bearish rejection + 1w downtrend + volume
-            elif (short_wick_rejection and not_oversold and
-                  trend_1w_down_aligned[i] > 0.5 and volume_confirm):
+            # Enter short: price breaks below S4 with volume and 1d downtrend
+            elif (close[i] < s4_aligned[i] and volume_confirm and
+                  trend_1d_down_aligned[i] > 0.5):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when rejection fails or trend changes
-            if (lower_wick_ratio[i] < 0.3 or trend_1w_up_aligned[i] < 0.5):
+            # Exit when price returns below R4 or trend changes
+            if (close[i] < r4_aligned[i] or trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when rejection fails or trend changes
-            if (upper_wick_ratio[i] < 0.3 or trend_1w_down_aligned[i] < 0.5):
+            # Exit when price returns above S4 or trend changes
+            if (close[i] > s4_aligned[i] or trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
