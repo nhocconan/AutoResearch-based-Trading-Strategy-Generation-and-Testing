@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_4hTrend_1dVolatilityBreakout
-# Hypothesis: In trending markets (4h ADX > 25), volatility contractions (Bollinger Bandwidth < 50th percentile) on 1d
-# precede explosive moves. Breakouts from the 1d Bollinger Bands with volume confirmation capture these moves.
-# Works in bull markets (buy breakouts above upper band) and bear markets (sell breakdowns below lower band)
-# by only trading in the direction of the 4h trend. Uses 12h timeframe for lower frequency and reduced fee drag.
+# 4h_KAMA_Trend_With_RSI_and_Chop_Filter
+# Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both trending and ranging markets.
+# Combined with RSI for momentum confirmation and Choppiness Index to avoid false signals in low-volatility chop,
+# this strategy aims to capture sustained moves while minimizing whipsaws. Works in bull markets by following
+# upward KAMA slope and in bear markets by following downward slope, with volatility filter to avoid ranging conditions.
 
-name = "12h_4hTrend_1dVolatilityBreakout"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_RSI_and_Chop_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,122 +23,135 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter (ADX)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 35:
-        return np.zeros(n)
-    
-    # Get 1d data for Bollinger Bands
+    # Get daily data for trend filter and chop filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 21:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 4h ADX(14) for trend filter
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # True Range
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    
-    # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    def smoothed_ma(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nanmean(arr[:period])
-        # Subsequent values: Wilder's smoothing
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
-    
-    tr_smoothed = smoothed_ma(tr, 14)
-    dm_plus_smoothed = smoothed_ma(dm_plus, 14)
-    dm_minus_smoothed = smoothed_ma(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smoothed != 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
-    di_minus = np.where(tr_smoothed != 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = smoothed_ma(dx, 14)
-    
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Calculate 1d Bollinger Bands (20, 2)
+    # Calculate KAMA (Kaufman Adaptive Moving Average) on daily close
+    # ER = |Close - Close(past 10)| / Sum|Close - Close(past 1)| over 10 periods
+    # SSC = [ER * (fastest - slowest) + slowest]^2
+    # KAMA = prior KAMA + SSC * (Close - prior KAMA)
     close_1d = df_1d['close'].values
-    bb_period = 20
-    bb_std = 2
+    if len(close_1d) < 10:
+        return np.zeros(n)
     
-    # Middle Bollinger Band (SMA)
-    sma_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
-    # Standard deviation
-    std_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
-    # Upper and Lower Bands
-    upper_bb = sma_1d + (std_1d * bb_std)
-    lower_bb = sma_1d - (std_1d * bb_std)
+    change = np.abs(np.diff(close_1d))
+    volatility = np.sum(change[:10]) if len(change) >= 10 else np.sum(change)
+    er = np.zeros_like(close_1d)
+    for i in range(10, len(close_1d)):
+        price_change = np.abs(close_1d[i] - close_1d[i-10])
+        volatility = np.sum(np.abs(np.diff(close_1d[i-9:i+1])))
+        er[i] = price_change / volatility if volatility > 0 else 0
     
-    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
-    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    ss = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    kama = np.zeros_like(close_1d)
+    kama[9] = close_1d[9]  # Initialize
+    for i in range(10, len(close_1d)):
+        kama[i] = kama[i-1] + ss[i] * (close_1d[i] - kama[i-1])
     
-    # Volume confirmation (20-period MA on 12h)
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
+    
+    # Calculate RSI(14) on daily close
+    delta = np.diff(close_1d)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros_like(close_1d)
+    avg_loss = np.zeros_like(close_1d)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d = np.concatenate([np.full(13, np.nan), rsi])
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # Calculate Choppiness Index on daily data
+    # CI = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
+    atr_data = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        tr1 = df_1d['high'].iloc[i] - df_1d['low'].iloc[i]
+        tr2 = np.abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1])
+        tr3 = np.abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+        atr_data[i] = max(tr1, tr2, tr3)
+    
+    atr_sum = np.zeros(len(df_1d))
+    for i in range(14, len(df_1d)):
+        atr_sum[i] = np.sum(atr_data[i-13:i+1])
+    
+    max_high = np.zeros(len(df_1d))
+    min_low = np.zeros(len(df_1d))
+    for i in range(14, len(df_1d)):
+        max_high[i] = np.max(df_1d['high'].iloc[i-13:i+1])
+        min_low[i] = np.min(df_1d['low'].iloc[i-13:i+1])
+    
+    chop = np.zeros(len(df_1d))
+    for i in range(14, len(df_1d)):
+        if max_high[i] - min_low[i] > 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral when no range
+    chop_1d = chop
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # Volume confirmation (20-period MA on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need ADX (35), Bollinger Bands (20), volume MA (20)
-    start_idx = max(35, 20)
+    # Warmup: need KAMA (10), RSI (14), Chop (14), Vol MA (20)
+    start_idx = max(10, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(adx_4h_aligned[i]) or 
-            np.isnan(upper_bb_aligned[i]) or 
-            np.isnan(lower_bb_aligned[i]) or 
+        if (np.isnan(kama_1d_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(chop_1d_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_4h_aligned[i] > 25
+        # Trend filter: price vs KAMA
+        above_kama = close[i] > kama_1d_aligned[i]
+        below_kama = close[i] < kama_1d_aligned[i]
+        
+        # Momentum filter: RSI
+        rsi_bull = rsi_1d_aligned[i] > 50
+        rsi_bear = rsi_1d_aligned[i] < 50
+        
+        # Chop filter: avoid low volatility chop (Chop > 61.8 = ranging)
+        chop_low = chop_1d_aligned[i] < 61.8
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: trending + price breaks above upper BB + volume
-            if trending and close[i] > upper_bb_aligned[i] and volume_confirm:
+            # Long entry: above KAMA + RSI bull + not chop + volume
+            if above_kama and rsi_bull and chop_low and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: trending + price breaks below lower BB + volume
-            elif trending and close[i] < lower_bb_aligned[i] and volume_confirm:
+            # Short entry: below KAMA + RSI bear + not chop + volume
+            elif below_kama and rsi_bear and chop_low and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend weakens or price re-enters below upper BB
-            if not trending or close[i] < upper_bb_aligned[i]:
+            # Long exit: below KAMA or RSI turns bear or chop high
+            if not above_kama or not rsi_bull or not chop_low:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend weakens or price re-enters above lower BB
-            if not trending or close[i] > lower_bb_aligned[i]:
+            # Short exit: above KAMA or RSI turns bull or chop high
+            if not below_kama or not rsi_bear or not chop_low:
                 signals[i] = 0.0
                 position = 0
             else:
