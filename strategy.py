@@ -1,10 +1,11 @@
-# 4h_RVOL_Trend_Pullback_Breakout
-# Hypothesis: Combines 1d volatility regime (RVOL > 1.5) with 4h pullback to EMA20 in direction of 1d trend. 
-# Enters on breakout of pullback high/low with volume confirmation. Works in both bull/bear via trend filter.
-# Target: 20-40 trades/year to minimize fee drag on 4h timeframe.
+#!/usr/bin/env python3
+# 12h_Donchian_20_1dTrend_WeeklyPivot_Filter
+# Hypothesis: Breakouts at 20-period Donchian channels on 12h with 1d EMA trend filter and weekly pivot reversal filter.
+# Uses 12h timeframe for fewer trades, works in bull/bear via trend alignment and pivot rejection of false breaks.
+# Target: 15-30 trades/year to minimize fee drag on 12h timeframe.
 
-name = "4h_RVOL_Trend_Pullback_Breakout"
-timeframe = "4h"
+name = "12h_Donchian_20_1dTrend_WeeklyPivot_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -13,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -21,48 +22,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA50)
+    # 1d trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d_up = close_1d > ema50_1d
-    trend_1d_down = close_1d < ema50_1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
-    # Align 1d trend to 4h
+    # Align 1d trend to 12h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # 1d RVOL (volume / 20-day average)
-    vol_20 = np.full(len(df_1d), np.nan)
-    vol_sum = 0
-    for i in range(len(df_1d)):
-        vol_sum += df_1d['volume'].iloc[i]
-        if i >= 20:
-            vol_sum -= df_1d['volume'].iloc[i-20]
-        if i >= 19:
-            vol_20[i] = vol_sum / 20
-    rvol = df_1d['volume'].values / vol_20
-    vol_regime = rvol > 1.5  # High volatility regime
+    # Weekly pivot points (using 1w data)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Align volatility regime to 4h
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime.astype(float))
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # 4h EMA20 for pullback
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points
+    pp_1w = (high_1w + low_1w + close_1w) / 3
+    r1_1w = 2 * pp_1w - low_1w
+    s1_1w = 2 * pp_1w - high_1w
     
-    # Volume confirmation (1.5x 20-period average)
-    vol_ma = np.full(n, np.nan)
-    vol_sum = 0
+    # Align weekly pivots to 12h
+    pp_1w_aligned = align_htf_to_ltf(prices, df_1w, pp_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # Donchian channel (20-period) on 12h
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
     for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
         if i >= 19:
-            vol_ma[i] = vol_sum / 20
-    volume_confirm = volume > (1.5 * vol_ma)
+            start_idx = i - 19
+            donchian_high[i] = np.max(high[start_idx:i+1])
+            donchian_low[i] = np.min(low[start_idx:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,43 +71,40 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(vol_regime_aligned[i]) or np.isnan(volume_confirm[i])):
+            np.isnan(pp_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: pullback to EMA20 in uptrend, then break above pullback high
-            if (trend_1d_up_aligned[i] > 0.5 and
-                vol_regime_aligned[i] > 0.5 and
-                low[i] <= ema20[i] and  # Pulled back to EMA20
-                high[i] > ema20[i] and  # Closed above EMA20
-                volume_confirm[i]):
+            # Long: price breaks above Donchian high with 1d uptrend and above weekly pivot
+            if (high[i] > donchian_high[i] and
+                trend_1d_up_aligned[i] > 0.5 and
+                close[i] > pp_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: pullback to EMA20 in downtrend, then break below pullback low
-            elif (trend_1d_down_aligned[i] > 0.5 and
-                  vol_regime_aligned[i] > 0.5 and
-                  high[i] >= ema20[i] and  # Pulled back to EMA20
-                  low[i] < ema20[i] and    # Closed below EMA20
-                  volume_confirm[i]):
+            # Short: price breaks below Donchian low with 1d downtrend and below weekly pivot
+            elif (low[i] < donchian_low[i] and
+                  trend_1d_down_aligned[i] > 0.5 and
+                  close[i] < pp_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: trend reversal or volatility drops
-            if (trend_1d_up_aligned[i] < 0.5 or
-                vol_regime_aligned[i] < 0.5):
+            # Exit: price breaks below Donchian low or 1d trend turns down
+            if (low[i] < donchian_low[i] or
+                trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: trend reversal or volatility drops
-            if (trend_1d_down_aligned[i] < 0.5 or
-                vol_regime_aligned[i] < 0.5):
+            # Exit: price breaks above Donchian high or 1d trend turns up
+            if (high[i] > donchian_high[i] or
+                trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
