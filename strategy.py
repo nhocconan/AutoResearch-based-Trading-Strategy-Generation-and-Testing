@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
-# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) on 4h timeframe for breakout entries.
-# Enters long when price breaks above R1 with volume spike and 1d uptrend (close > EMA34).
-# Enters short when price breaks below S1 with volume spike and 1d downtrend (close < EMA34).
-# Exits when price returns to the 1d VWAP or when volatility collapses (low volume).
-# Designed for moderate trade frequency (target: 25-40 trades/year) with strong trend follow-through.
-# Works in bull markets via breakouts and in bear markets via breakdowns with trend filter.
+# 1d_KAMA_Direction_RSI_Overbought_Oversold_with_1w_Trend_Filter
+# Hypothesis: Uses KAMA (adaptive moving average) on 1d timeframe to determine trend direction,
+# combined with RSI(14) for entry timing (oversold in uptrend, overbought in downtrend).
+# Uses 1w EMA(34) as higher timeframe trend filter to ensure alignment with weekly trend.
+# Designed for low trade frequency (target: 10-25 trades/year) with strong trend persistence.
+# Works in both bull and bear markets by following the higher timeframe trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Overbought_Oversold_with_1w_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,87 +19,104 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Calculate 1d VWAP for exit condition
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # KAMA parameters
+    er_length = 10
+    fast_ema = 2
+    slow_ema = 30
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_length))  # |close - close[er_length]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # sum of |diff| over er_length window
+    
+    # Handle first er_length elements
+    change_padded = np.full(n, np.nan)
+    volatility_padded = np.full(n, np.nan)
+    change_padded[er_length:] = change
+    for i in range(er_length, n):
+        volatility_padded[i] = np.sum(np.abs(np.diff(close[i-er_length:i+1])))
+    
+    er = np.where(volatility_padded > 0, change_padded / volatility_padded, 0)
+    
+    # Calculate smoothing constant SC
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    
+    # First average
+    avg_gain[14] = np.mean(gain[1:15]) if n >= 15 else np.nan
+    avg_loss[14] = np.mean(loss[1:15]) if n >= 15 else np.nan
+    
+    # Wilder smoothing
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss > 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1w EMA(34) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    vwap_1d = vwap_1d.values
-    
-    # 1d EMA(34) for trend filter
-    if len(df_1d) < 34:
-        return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate daily Camarilla levels (based on previous day's OHLC)
-    # R1 = close + 1.1*(high - low)/12
-    # S1 = close - 1.1*(high - low)/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    camarilla_range = (high_1d - low_1d) * 1.1 / 12.0
-    r1_1d = close_1d + camarilla_range
-    s1_1d = close_1d - camarilla_range
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Volume spike detection: current volume > 1.5 * 20-period average volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (1.5 * vol_ma)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Ensure sufficient warmup for all indicators
+    start_idx = max(50, 34)  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if (np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vwap_1d[i]) if i < len(vwap_1d) else True or
-            np.isnan(volume_spike[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_34_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Need to check if we have valid VWAP value for current day
-        if i >= len(vwap_1d):
-            vwap_current = vwap_1d[-1] if len(vwap_1d) > 0 else 0
-        else:
-            vwap_current = vwap_1d[i]
+        # Determine trend direction from KAMA
+        kama_rising = kama[i] > kama[i-1]
+        kama_falling = kama[i] < kama[i-1]
         
         if position == 0:
-            # Long: Break above R1 + volume spike + 1d uptrend (close > EMA34)
-            if close[i] > r1_1d_aligned[i] and volume_spike[i] and close[i] > ema_34_1d_aligned[i]:
+            # Long: KAMA rising (uptrend) + RSI oversold (<30) + price above 1w EMA
+            if kama_rising and rsi[i] < 30 and close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 + volume spike + 1d downtrend (close < EMA34)
-            elif close[i] < s1_1d_aligned[i] and volume_spike[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: KAMA falling (downtrend) + RSI overbought (>70) + price below 1w EMA
+            elif kama_falling and rsi[i] > 70 and close[i] < ema_34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: Price returns to 1d VWAP or volume dries up (no spike)
-            if close[i] <= vwap_current or not volume_spike[i]:
+            # Exit: KAMA falling or RSI overbought (>70)
+            if kama_falling or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price returns to 1d VWAP or volume dries up (no spike)
-            if close[i] >= vwap_current or not volume_spike[i]:
+            # Exit: KAMA rising or RSI oversold (<30)
+            if kama_rising or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
