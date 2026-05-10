@@ -1,40 +1,18 @@
-#!/usr/bin/env python3
-# 1D_HMA_Trend_Filter_With_Williams_Alligator_Signal
-# Hypothesis: Uses HMA on 1d for trend direction and Williams Alligator on 1d for entry timing, with volume confirmation.
-# Designed for low trade frequency (10-20/year) to avoid fee drag. Works in bull/bear markets by combining trend and momentum.
-# HMA(21) determines trend; Alligator (Jaw/Teeth/Lips) gives entry when aligned with trend. Volume > 1.5x average confirms.
-# Position size 0.25 for balanced risk. Target: 15-25 trades/year.
+# 6h_WeeklyPivot_VolumeRegime_Signal
+# Hypothesis: Uses weekly pivot points from 1w data with volume regime filter and 1d trend filter.
+# Long when price breaks above weekly R1 with volume expansion and 1d uptrend.
+# Short when price breaks below weekly S1 with volume expansion and 1d downtrend.
+# Weekly pivots provide structural support/resistance that works in both bull and bear markets.
+# Volume regime filter ensures trades occur during high conviction moves.
+# Target: 15-30 trades/year to avoid fee drag on 6h timeframe.
 
-name = "1D_HMA_Trend_Filter_With_Williams_Alligator_Signal"
-timeframe = "1d"
+name = "6h_WeeklyPivot_VolumeRegime_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def hull_moving_average(arr, period):
-    """Calculate Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan)
-    half = int(period / 2)
-    sqrt = int(np.sqrt(period))
-    wma1 = pd.Series(arr).ewm(span=half, adjust=False).mean()
-    wma2 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-    raw = 2 * wma1 - wma2
-    hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
-    return hma.values
-
-def williams_alligator(high, low, close):
-    """Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs shifted"""
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
-    # Shift as per Williams: Jaw by 8, Teeth by 5, Lips by 3
-    jaw = jaw.shift(8)
-    teeth = teeth.shift(5)
-    lips = lips.shift(3)
-    return jaw.values, teeth.values, lips.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,70 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for indicators
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for weekly pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate HMA for trend (21 period)
-    hma_21 = hull_moving_average(df_1d['close'].values, 21)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Calculate Williams Alligator
-    jaw, teeth, lips = williams_alligator(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values
-    )
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # Calculate weekly pivot points from previous week's OHLC
+    prev_week_close = df_1w['close'].shift(1).values
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
     
-    # Volume confirmation
+    # Weekly pivot point calculation
+    pp = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pp - prev_week_low
+    s1 = 2 * pp - prev_week_high
+    
+    # Align weekly pivot levels to 6h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Get 1d data for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # Volume regime filter: volume > 1.5x 20-period MA
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 13, 20)  # Warmup for HMA, Alligator, volume
+    start_idx = max(20, 50)  # Warmup for volume MA and 1d EMA
     
     for i in range(start_idx, n):
-        if np.isnan(hma_21_aligned[i]) or np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from HMA
-        uptrend = close[i] > hma_21_aligned[i]
-        downtrend = close[i] < hma_21_aligned[i]
+        # Trend filter from 1d
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Alligator alignment: Lips > Teeth > Jaw for uptrend, reverse for downtrend
-        alligator_long = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        alligator_short = lips_aligned[i] < teeth_aligned[i] and teeth_aligned[i] < jaw_aligned[i]
-        
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Volume regime filter
+        volume_regime = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: HMA uptrend + Alligator aligned long + volume
-            if uptrend and alligator_long and volume_confirm:
+            # Long entry: price breaks above weekly R1 with volume expansion and 1d uptrend
+            if close[i] > r1_aligned[i] and volume_regime and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: HMA downtrend + Alligator aligned short + volume
-            elif downtrend and alligator_short and volume_confirm:
+            # Short entry: price breaks below weekly S1 with volume expansion and 1d downtrend
+            elif close[i] < s1_aligned[i] and volume_regime and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend change or Alligator misalignment
-            if not uptrend or not alligator_long:
+            # Long exit: price falls back below weekly R1 or trend turns down
+            if close[i] < r1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend change or Alligator misalignment
-            if not downtrend or not alligator_short:
+            # Short exit: price rises back above weekly S1 or trend turns up
+            if close[i] > s1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
