@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Direction_1dTrend_Volume_Spike
-# Hypothesis: KAMA adapts to market efficiency, providing smooth trend direction.
-# Combined with daily trend filter and volume spike, it captures strong moves while avoiding whipsaws.
-# Works in bull markets (trend following) and bear markets (avoids counter-trend trades).
-# Target: 20-50 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Camarilla pivot levels (R1/S1) act as support/resistance; breakouts with
+# 12h trend and volume filter capture strong moves. Works in bull (breakouts) and bear
+# (mean reversion at extremes) with tight entries to avoid overtrading.
 
-name = "4h_KAMA_Direction_1dTrend_Volume_Spike"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,51 +17,55 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for trend filter
+    # 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    # 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # KAMA (ER=10, fast=2, slow=30)
-    close_series = pd.Series(close)
-    change = abs(close_series.diff(10)).values
-    volatility = close_series.diff().abs().rolling(window=10, min_periods=10).sum().values
-    er = np.where(volatility > 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # 12h EMA50 trend
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_12h_up = close_12h > ema50_12h
+    trend_12h_down = close_12h < ema50_12h
     
-    # Daily trend: EMA34 on daily close
+    # Align 12h trend to 4h
+    trend_12h_up_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
+    trend_12h_down_aligned = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
+    
+    # Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    range_1d = high_1d - low_1d
+    R1 = close_1d + 1.1 * range_1d / 12
+    S1 = close_1d - 1.1 * range_1d / 12
     
-    # Align daily trend to 4h
-    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
-    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume spike: current volume > 2.0 * 20-period average
+    # Volume spike: current > 2.0 * 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(kama[i]) or np.isnan(trend_1d_up_aligned[i]) or 
-            np.isnan(trend_1d_down_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(trend_12h_up_aligned[i]) or np.isnan(trend_12h_down_aligned[i]) or
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,30 +75,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if position == 0:
-            # Enter long: price above KAMA with daily uptrend and volume spike
-            if (close[i] > kama[i] and 
-                trend_1d_up_aligned[i] > 0.5 and volume_spike):
+            # Long: break above R1 with 12h uptrend and volume spike
+            if (close[i] > R1_aligned[i] and 
+                trend_12h_up_aligned[i] > 0.5 and volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price below KAMA with daily downtrend and volume spike
-            elif (close[i] < kama[i] and 
-                  trend_1d_down_aligned[i] > 0.5 and volume_spike):
+            # Short: break below S1 with 12h downtrend and volume spike
+            elif (close[i] < S1_aligned[i] and 
+                  trend_12h_down_aligned[i] > 0.5 and volume_spike):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below KAMA or trend fails
-            if (close[i] < kama[i] or 
-                trend_1d_up_aligned[i] < 0.5):
+            # Exit: close below S1 or trend fails
+            if (close[i] < S1_aligned[i] or 
+                trend_12h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above KAMA or trend fails
-            if (close[i] > kama[i] or 
-                trend_1d_down_aligned[i] < 0.5):
+            # Exit: close above R1 or trend fails
+            if (close[i] > R1_aligned[i] or 
+                trend_12h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
