@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Trend_Filter_with_Camarilla_Entry
-# Hypothesis: Combining 4h trend (EMA34) and 1d momentum (ROC5) filters with Camarilla breakouts on 1h
-# provides institutional-level entries with trend alignment, working in both bull and bear markets.
-# Uses volume confirmation (1.5x average) to filter false breakouts.
-# Target: 15-35 trades/year to minimize fee drag on 1h timeframe.
+# 1h_4h1d_VolumeBreakout_Camarilla_Trend
+# Hypothesis: Combines 4h EMA trend filter with 1d ROC momentum and 1h volume-confirmed
+# Camarilla breakouts (R3/S3) to capture institutional moves. Uses tight entry conditions
+# (max 30 trades/year) to minimize fee drag on 1h. Works in bull/bear via trend alignment.
 
-name = "1h_4h1d_Trend_Filter_with_Camarilla_Entry"
+name = "1h_4h1d_VolumeBreakout_Camarilla_Trend"
 timeframe = "1h"
 leverage = 1.0
 
@@ -53,7 +52,7 @@ def generate_signals(prices):
     mom_1d_down_aligned = align_htf_to_ltf(prices, df_1d, mom_1d_down.astype(float))
     
     # Volume confirmation (1.5x 24-period average)
-    vol_ma = np.zeros_like(volume)
+    vol_ma = np.full(n, np.nan)
     vol_sum = 0
     for i in range(n):
         vol_sum += volume[i]
@@ -61,8 +60,6 @@ def generate_signals(prices):
             vol_sum -= volume[i-24]
         if i >= 23:
             vol_ma[i] = vol_sum / 24
-        else:
-            vol_ma[i] = np.nan
     volume_confirm = volume > (1.5 * vol_ma)
     
     # Calculate Camarilla levels from previous 4h bar
@@ -78,17 +75,13 @@ def generate_signals(prices):
     prev_low[0] = np.nan
     prev_close[0] = np.nan
     
-    # Calculate Camarilla levels (R3, S3, R4, S4)
+    # Calculate Camarilla levels (R3, S3)
     R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    R4 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    S4 = prev_close - (prev_high - prev_low) * 1.1 / 2
     
     # Align Camarilla levels to 1h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
     S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_4h, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_4h, S4)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -99,7 +92,6 @@ def generate_signals(prices):
         if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
             np.isnan(mom_1d_up_aligned[i]) or np.isnan(mom_1d_down_aligned[i]) or
             np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or
             np.isnan(volume_confirm[i])):
             if position != 0:
                 signals[i] = 0.0
