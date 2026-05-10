@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Engulfing_Trend_Trig
-# Hypothesis: Bullish/bearish engulfing candles on 4h aligned with daily trend (EMA34) and volume > 1.5x 20-bar MA capture momentum moves. Engulfing patterns signal strong reversals/continuations; trend filter avoids counter-trend trades; volume filter ensures conviction. Works in bull markets by buying dips in uptrend and in bear markets by selling rallies in downtrend. Target: 20-40 trades/year.
+# 1d_WeeklyPivot_Trend_Breakout_Volume
+# Hypothesis: Weekly pivot points (R1/S1) on the 1d chart provide key support/resistance. Price breaking above R1 in a weekly uptrend or below S1 in a weekly downtrend indicates momentum. Volume confirmation filters false breakouts. This strategy uses the 1d timeframe with 1h trend filter (via 1d EMA50) to reduce whipsaw and improve performance in both bull and bear markets. Targeting 30-100 trades over 4 years.
 
-name = "4h_Engulfing_Trend_Trig"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Trend_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,79 +12,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for pivot levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate weekly EMA50 for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # Volume confirmation (20-period MA on 4h)
+    # Calculate weekly pivot levels (standard formula)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    pivot_point = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_r1 = 2 * pivot_point - weekly_low
+    weekly_s1 = 2 * pivot_point - weekly_high
+    
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    
+    # Volume confirmation (20-period MA on 1d = ~20 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Engulfing detection
-    bullish_engulf = (close > open_) & (open_ < close) & (close >= open_) & (open_ <= close) & \
-                     (close >= open_.shift(1)) & (open_ <= close.shift(1)) & \
-                     (close > close.shift(1)) & (open_ < open_.shift(1))
-    bearish_engulf = (open_ > close) & (close < open_) & (open_ >= close) & (close <= open_) & \
-                     (open_ >= close.shift(1)) & (close <= open_.shift(1)) & \
-                     (open_ > open_.shift(1)) & (close < close.shift(1))
-    # Fix: proper engulfing conditions
-    bullish_engulf = (close > open_) & (open_.shift(1) > close.shift(1)) & (close >= open_.shift(1)) & (open_ <= close.shift(1))
-    bearish_engulf = (open_ > close) & (close.shift(1) > open_.shift(1)) & (open_ >= close.shift(1)) & (close <= open_.shift(1))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need daily EMA34 (34) and volume MA (20)
-    start_idx = max(34, 20)
+    # Warmup: need weekly EMA50 (50) and volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
+        if (np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or 
+            np.isnan(weekly_s1_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Weekly trend filter
+        uptrend = close[i] > ema_50_1w_aligned[i]
+        downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Volume confirmation (>1.5x MA)
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Volume confirmation (strict: >2.0x MA to reduce false signals)
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: bullish engulf + uptrend + volume
-            if bullish_engulf[i] and uptrend and volume_confirm:
+            # Long entry: uptrend + price breaks above weekly R1 + volume
+            if uptrend and close[i] > weekly_r1_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: bearish engulf + downtrend + volume
-            elif bearish_engulf[i] and downtrend and volume_confirm:
+            # Short entry: downtrend + price breaks below weekly S1 + volume
+            elif downtrend and close[i] < weekly_s1_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or bearish engulf
-            if not uptrend or bearish_engulf[i]:
+            # Long exit: trend breaks or price re-enters below R1
+            if not uptrend or close[i] < weekly_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or bullish engulf
-            if not downtrend or bullish_engulf[i]:
+            # Short exit: trend breaks or price re-enters above S1
+            if not downtrend or close[i] > weekly_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
