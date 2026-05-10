@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_RSI2_TrendFilter_1dVWAP
-Hypothesis: 2-period RSI with 1d VWAP trend filter and volume confirmation.
-RSI2 is sensitive to short-term reversals; filtered by 1d VWAP trend to avoid counter-trend trades.
-In bull markets, buy dips above VWAP; in bear markets, sell rallies below VWAP.
-Volume confirmation ensures institutional participation. Target: 50-150 trades over 4 years.
+1d_CCI_Trend_Filter_Volume
+Hypothesis: CCI(20) on daily timeframe captures overbought/oversold conditions with mean reversion tendency.
+In trending markets, CCI stays above/below zero for extended periods; in ranging markets, it oscillates around zero.
+Combined with 1-week EMA50 trend filter and volume confirmation to avoid false signals.
+Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
-name = "6h_RSI2_TrendFilter_1dVWAP"
-timeframe = "6h"
+name = "1d_CCI_Trend_Filter_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,101 +18,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d VWAP calculation
-    df_1d = get_htf_data(prices, '1d')
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    volume_1d = df_1d['volume'].values
+    # 1d CCI(20) calculation
+    typical_price = (high + low + close) / 3.0
+    sma_tp = np.full(n, np.nan)
+    mad = np.full(n, np.nan)
     
-    vwap_1d = np.full(len(typical_price_1d), np.nan)
-    cumulative_tpv = 0.0
-    cumulative_volume = 0.0
-    for i in range(len(typical_price_1d)):
-        cumulative_tpv += typical_price_1d[i] * volume_1d[i]
-        cumulative_volume += volume_1d[i]
-        if cumulative_volume > 0:
-            vwap_1d[i] = cumulative_tpv / cumulative_volume
-    
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # 2-period RSI on 6h data
-    rsi2 = np.full(n, np.nan)
-    if n >= 2:
-        # Calculate price changes
-        delta = np.diff(close, prepend=close[0])
-        gain = np.where(delta > 0, delta, 0.0)
-        loss = np.where(delta < 0, -delta, 0.0)
+    if n >= 20:
+        # Calculate SMA of typical price
+        sma_tp[19] = np.mean(typical_price[:20])
+        for i in range(20, n):
+            sma_tp[i] = (sma_tp[i-1] * 19 + typical_price[i]) / 20
         
-        # Wilder's smoothing for RSI
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
+        # Calculate Mean Absolute Deviation
+        for i in range(19, n):
+            tp_slice = typical_price[i-19:i+1]
+            sma_tp_val = sma_tp[i]
+            mad[i] = np.mean(np.abs(tp_slice - sma_tp_val))
         
-        # Initial average
-        if n >= 2:
-            avg_gain[1] = np.mean(gain[:2])
-            avg_loss[1] = np.mean(loss[:2])
-            
-            # Wilder smoothing
-            for i in range(2, n):
-                avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
-                avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
-        
-        # Calculate RSI
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-        rsi2 = 100 - (100 / (1 + rs))
-        # Handle division by zero
-        rsi2 = np.where(avg_loss == 0, 100, rsi2)
-        rsi2 = np.where(avg_gain == 0, 0, rsi2)
+        # CCI calculation
+        cci = np.full(n, np.nan)
+        for i in range(19, n):
+            if mad[i] > 0:
+                cci[i] = (typical_price[i] - sma_tp[i]) / (0.015 * mad[i])
+            else:
+                cci[i] = 0.0
+    else:
+        cci = np.full(n, np.nan)
     
-    # Volume confirmation: 6h volume > 1.5x average 6h volume from 1d
-    # Approximate average 6h volume from 1d: volume_1d / 4
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
-    vol_6h_avg_approx = vol_sma20_1d_aligned / 4.0
-    volume_confirm = volume > 1.5 * vol_6h_avg_approx
+    # 1w EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema50_1w[49] = np.mean(close_1w[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
+            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # 1d volume SMA20 for volume confirmation
+    vol_sma20 = np.full(n, np.nan)
+    if n >= 20:
+        vol_sma20[19] = np.mean(volume[:20])
+        for i in range(20, n):
+            vol_sma20[i] = (vol_sma20[i-1] * 19 + volume[i]) / 20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 2)  # warmup
+    start_idx = max(20, 50)  # warmup for CCI and EMA calculations
     
     for i in range(start_idx, n):
-        if np.isnan(vwap_1d_aligned[i]) or np.isnan(rsi2[i]) or np.isnan(vol_sma20_1d_aligned[i]):
+        if np.isnan(cci[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * vol_sma20[i]
+        
         if position == 0:
-            # Long: RSI2 < 15 (oversold) and price above VWAP (uptrend) with volume
-            if rsi2[i] < 15 and close[i] > vwap_1d_aligned[i] and volume_confirm[i]:
+            # Long: CCI oversold (< -100) in uptrend (price > weekly EMA50) with volume
+            if cci[i] < -100 and close[i] > ema50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI2 > 85 (overbought) and price below VWAP (downtrend) with volume
-            elif rsi2[i] > 85 and close[i] < vwap_1d_aligned[i] and volume_confirm[i]:
+            # Short: CCI overbought (> 100) in downtrend (price < weekly EMA50) with volume
+            elif cci[i] > 100 and close[i] < ema50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: RSI2 > 70 (overbought) or price below VWAP (trend change)
-            if rsi2[i] > 70 or close[i] < vwap_1d_aligned[i]:
+            # Exit: CCI returns above -50 (mean reversion) or trend reversal
+            if cci[i] > -50 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: RSI2 < 30 (oversold) or price above VWAP (trend change)
-            if rsi2[i] < 30 or close[i] > vwap_1d_aligned[i]:
+            # Exit: CCI returns below 50 (mean reversion) or trend reversal
+            if cci[i] < 50 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
