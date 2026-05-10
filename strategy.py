@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4h_KAMA_Trend_With_Volume_Filter_v1
-# Hypothesis: KAMA adapts to market noise, providing a reliable trend signal in both trending and ranging markets.
-# Combining KAMA trend direction with volume confirmation and a 4h Donchian(20) breakout filter creates high-probability entries.
-# The strategy reduces whipsaws by requiring volume > 1.5x 20-period average and only taking trades in the direction of the KAMA trend.
-# Designed for ~20-40 trades/year per symbol to minimize fee drag while capturing sustained moves.
+# 12h_Donchian_Breakout_Trend_Volume_Filter
+# Hypothesis: Price breaking above/below 12h Donchian(20) channels with 1d EMA trend filter and volume confirmation (2x MA) captures breakouts in both bull and bear markets. Low-frequency signals reduce fee drag while capturing strong trends.
 
-name = "4h_KAMA_Trend_With_Volume_Filter_v1"
-timeframe = "4h"
+name = "12h_Donchian_Breakout_Trend_Volume_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,81 +20,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA trend filter (using 4h data)
-    def calculate_kama(close_series, er_length=10, fast_sc=2, slow_sc=30):
-        change = np.abs(np.diff(close_series, n=er_length))
-        volatility = np.sum(np.abs(np.diff(close_series)), axis=1)
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-        kama = np.zeros_like(close_series)
-        kama[0] = close_series[0]
-        for i in range(1, len(close_series)):
-            kama[i] = kama[i-1] + sc[i] * (close_series[i] - kama[i-1])
-        return kama
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    kama = calculate_kama(close)
+    # Calculate daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Donchian(20) for breakout filter
-    def donchian_channels(high, low, length):
-        upper = np.zeros_like(high)
-        lower = np.zeros_like(low)
-        for i in range(len(high)):
-            if i < length:
-                upper[i] = np.max(high[:i+1])
-                lower[i] = np.min(low[:i+1])
-            else:
-                upper[i] = np.max(high[i-length+1:i+1])
-                lower[i] = np.min(low[i-length+1:i+1])
-        return upper, lower
+    # Calculate 12h Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    donchian_upper, donchian_lower = donchian_channels(high, low, 20)
-    
-    # Volume confirmation (20-period MA)
+    # Volume confirmation (20-period MA on 12h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (er_length=10) and Donchian (20) and volume MA (20)
-    start_idx = max(20, 20)  # Donchian and volume MA both need 20
+    # Warmup: need daily EMA34 (34) and Donchian (20) and volume MA (20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or 
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below KAMA
-        uptrend = close[i] > kama[i]
-        downtrend = close[i] < kama[i]
+        # Daily trend filter
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        # Volume confirmation (>1.5x MA to filter low-volume noise)
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Volume confirmation (2.0x MA to reduce false signals)
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above Donchian upper + volume
-            if uptrend and close[i] > donchian_upper[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above Donchian high + volume
+            if uptrend and close[i] > donchian_high[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below Donchian lower + volume
-            elif downtrend and close[i] < donchian_lower[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below Donchian low + volume
+            elif downtrend and close[i] < donchian_low[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below Donchian upper
-            if not uptrend or close[i] < donchian_upper[i]:
+            # Long exit: trend breaks or price re-enters below Donchian low
+            if not uptrend or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above Donchian lower
-            if not downtrend or close[i] > donchian_lower[i]:
+            # Short exit: trend breaks or price re-enters above Donchian high
+            if not downtrend or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
