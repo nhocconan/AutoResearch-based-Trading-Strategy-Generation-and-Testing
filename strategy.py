@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume_Improved
+# 4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume_Enhanced
 # Hypothesis: 4h breakout of 12h Camarilla R3/S3 levels with 12h trend filter and volume confirmation.
 # Uses tighter levels (R3/S3) for stronger signals and 12h trend filter for better trend alignment.
 # Designed to work in both bull and bear markets by following the 12h trend direction.
 # Expected trade count: ~10-20 per year per symbol to avoid fee drag.
 
-name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume_Improved"
+name = "4h_12h_Camarilla_R3_S3_Breakout_12hTrend_Volume_Enhanced"
 timeframe = "4h"
 leverage = 1.0
 
