@@ -1,13 +1,12 @@
-# 6H_200EMA_Cross_Signal
-# Hypothesis: For 6h timeframe, use 200-period EMA on daily data as trend filter.
-# Long when price crosses above 200EMA with volume confirmation and price above 50EMA.
-# Short when price crosses below 200EMA with volume confirmation and price below 50EMA.
-# Exit when price crosses back over 50EMA in opposite direction.
-# Uses daily EMA200 as primary trend filter (works in bull/bear by following longer trend).
-# Target: 20-40 trades/year per symbol.
-
-name = "6H_200EMA_Cross_Signal"
-timeframe = "6h"
+#!/usr/bin/env python3
+"""
+12H_Donchian_20_Breakout_1dTrend_Volume
+Hypothesis: Breakouts from 20-period Donchian Channel with 1-day trend filter and volume confirmation.
+Works in bull markets by following the daily trend; in bear markets, the trend filter prevents counter-trend entries.
+Target: 15-25 trades/year per symbol. Low frequency reduces fee drag.
+"""
+name = "12H_Donchian_20_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,36 +23,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h indicators
-    close_s = pd.Series(close)
-    volume_s = pd.Series(volume)
-    
-    # 50 EMA for entry/exit timing
-    ema50 = close_s.ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 12h Donchian Channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    dc_upper = high_series.rolling(window=20, min_periods=20).max().values
+    dc_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume average (20-period)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
-    # Daily 200 EMA as trend filter
+    # 1d trend (EMA50) - using daily timeframe
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # Align daily 200 EMA to 6h
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align 1d trend to 12h
+    trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
+    trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after we have enough data
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(ema50[i]) or np.isnan(vol_ma[i]) or np.isnan(ema200_1d_aligned[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,33 +65,32 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         volume_confirm = vol_ratio > 1.5
         
-        price_above_ema50 = close[i] > ema50[i]
-        price_below_ema50 = close[i] < ema50[i]
-        
-        price_above_ema200 = close[i] > ema200_1d_aligned[i]
-        price_below_ema200 = close[i] < ema200_1d_aligned[i]
+        trend_up = trend_1d_up_aligned[i] > 0.5
+        trend_down = trend_1d_down_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: price crosses above 200EMA + above 50EMA + volume
-            if price_above_ema200 and price_above_ema50 and volume_confirm and close[i-1] <= ema200_1d_aligned[i-1]:
+            # Enter long: breakout above upper Donchian + 1d uptrend + volume
+            if close[i] > dc_upper[i] and trend_up and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Enter short: price crosses below 200EMA + below 50EMA + volume
-            elif price_below_ema200 and price_below_ema50 and volume_confirm and close[i-1] >= ema200_1d_aligned[i-1]:
+            # Enter short: breakout below lower Donchian + 1d downtrend + volume
+            elif close[i] < dc_lower[i] and trend_down and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit when price crosses below 50EMA
-            if price_below_ema50 and close[i-1] >= ema50[i-1]:
+            # Exit when price closes back below the Donchian middle (mean reversion)
+            dc_middle = (dc_upper[i] + dc_lower[i]) / 2
+            if close[i] < dc_middle:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit when price crosses above 50EMA
-            if price_above_ema50 and close[i-1] <= ema50[i-1]:
+            # Exit when price closes back above the Donchian middle
+            dc_middle = (dc_upper[i] + dc_lower[i]) / 2
+            if close[i] > dc_middle:
                 signals[i] = 0.0
                 position = 0
             else:
