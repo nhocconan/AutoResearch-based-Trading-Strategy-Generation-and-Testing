@@ -1,20 +1,31 @@
 #!/usr/bin/env python3
-# 1h_4h1d_Trend_Follow_With_Volume_Confirmation
-# Hypothesis: In 1h timeframe, follow the higher timeframe trend (4h/1d) with volume confirmation
-# to avoid false breakouts. Use 4h EMA50 for trend direction and 1d EMA200 for regime filter.
-# Enter on pullbacks to 4h EMA20 in direction of higher timeframe trend.
-# Long when: 4h trend up (close > EMA50_4h) AND 1d regime bullish (close > EMA200_1d) AND price pulls back to 4h EMA20 from below with volume confirmation.
-# Short when: 4h trend down (close < EMA50_4h) AND 1d regime bearish (close < EMA200_1d) AND price pulls back to 4h EMA20 from above with volume confirmation.
-# Exit when trend breaks or reverse signal occurs.
-# Uses session filter (08-20 UTC) to reduce noise. Position size: 0.20.
+# 6h_Williams_Alligator_WeeklyTrend_Filter
+# Hypothesis: The Williams Alligator (Jaw/Teeth/Lips) identifies trending vs ranging markets.
+# In strong trends (Alligator aligned and mouth open), we trade pullbacks to the Teeth (SMMA8).
+# Weekly trend filter (price vs 50-week SMA) ensures we only trade in the direction of the higher-timeframe trend.
+# This avoids counter-trend trades and works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
+# Williams Alligator uses SMMA (Smoothed Moving Average) which is less reactive than EMA/SMA, reducing whipsaws.
+# Weekly timeframe provides strong trend filter for 6h chart, suitable for 6-12 month trends.
 
-name = "1h_4h1d_Trend_Follow_With_Volume_Confirmation"
-timeframe = "1h"
+name = "6h_Williams_Alligator_WeeklyTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def smma(arr, period):
+    """Smoothed Moving Average (SMMA) - also called Wilder's Smoothing"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    result = np.full_like(arr, np.nan, dtype=float)
+    # First value is SMA
+    result[period-1] = np.mean(arr[:period])
+    # Subsequent values: SMMA = (prev_SMMA * (period-1) + current_price) / period
+    for i in range(period, len(arr)):
+        result[i] = (result[i-1] * (period-1) + arr[i]) / period
+    return result
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,97 +35,78 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Get 4h data for trend and entry signals
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Get 1d data for regime filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
-        return np.zeros(n)
+    # Calculate weekly SMA50 for trend filter
+    sma_50_1w = pd.Series(df_1w['close']).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
     
-    # Calculate 4h EMA50 for trend direction
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # Calculate 4h EMA20 for entry pullback signals
-    ema_20_4h = pd.Series(df_4h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    
-    # Calculate 1d EMA200 for regime filter
-    ema_200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # Volume confirmation (20-period MA on 1h chart)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Williams Alligator on 6h chart: Jaw (SMMA13), Teeth (SMMA8), Lips (SMMA5)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA50_4h (50), EMA20_4h (20), EMA200_1d (200), volume MA (20)
-    start_idx = max(50, 20, 200, 20)
-    
-    # Pre-compute session hours for efficiency
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Warmup: need all SMMA values (13, 8, 5) and weekly SMA50
+    start_idx = max(13, 8, 5)
     
     for i in range(start_idx, n):
-        # Session filter: 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(ema_20_4h_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(sma_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Higher timeframe trend and regime filters
-        uptrend_4h = close[i] > ema_50_4h_aligned[i]
-        downtrend_4h = close[i] < ema_50_4h_aligned[i]
-        bullish_regime = close[i] > ema_200_1d_aligned[i]
-        bearish_regime = close[i] < ema_200_1d_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > sma_50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma_50_1w_aligned[i]
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Alligator alignment and direction
+        # Alligator is aligned when Jaw > Teeth > Lips (downtrend) or Lips > Teeth > Jaw (uptrend)
+        aligned_down = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        aligned_up = lips[i] > teeth[i] and teeth[i] > jaw[i]
         
-        # Price relative to 4h EMA20 for pullback detection
+        # Mouth open: gap between Jaw and Lips
+        mouth_open = abs(jaw[i] - lips[i]) > (teeth[i] * 0.001)  # 0.1% of teeth value
+        
+        # Price position relative to Teeth (SMMA8) for pullback entries
         if i > 0:
-            cross_above_ema20_4h = (close[i] > ema_20_4h_aligned[i]) and (close[i-1] <= ema_20_4h_aligned[i-1])
-            cross_below_ema20_4h = (close[i] < ema_20_4h_aligned[i]) and (close[i-1] >= ema_20_4h_aligned[i-1])
+            cross_above_teeth = (close[i] > teeth[i]) and (close[i-1] <= teeth[i-1])
+            cross_below_teeth = (close[i] < teeth[i]) and (close[i-1] >= teeth[i-1])
         else:
-            cross_above_ema20_4h = False
-            cross_below_ema20_4h = False
+            cross_above_teeth = False
+            cross_below_teeth = False
         
         if position == 0:
-            # Long entry: 4h uptrend + bullish regime + pullback to EMA20 from below + volume
-            if uptrend_4h and bullish_regime and cross_above_ema20_4h and volume_confirm:
-                signals[i] = 0.20
+            # Long entry: weekly uptrend + Alligator aligned up + mouth open + pullback to Teeth from below
+            if weekly_uptrend and aligned_up and mouth_open and cross_above_teeth:
+                signals[i] = 0.25
                 position = 1
-            # Short entry: 4h downtrend + bearish regime + pullback to EMA20 from above + volume
-            elif downtrend_4h and bearish_regime and cross_below_ema20_4h and volume_confirm:
-                signals[i] = -0.20
+            # Short entry: weekly downtrend + Alligator aligned down + mouth open + pullback to Teeth from above
+            elif weekly_downtrend and aligned_down and mouth_open and cross_below_teeth:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 4h trend breaks, regime turns bearish, or reverse signal
-            if not uptrend_4h or not bullish_regime or cross_below_ema20_4h:
+            # Long exit: weekly trend breaks, Alligator misaligns, or reverse signal
+            if (not weekly_uptrend) or (not aligned_up) or (not mouth_open) or cross_below_teeth:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: 4h trend breaks, regime turns bullish, or reverse signal
-            if not downtrend_4h or not bearish_regime or cross_above_ema20_4h:
+            # Short exit: weekly trend breaks, Alligator misaligns, or reverse signal
+            if (not weekly_downtrend) or (not aligned_down) or (not mouth_open) or cross_above_teeth:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
