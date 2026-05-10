@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4h_Donchian20_VolumeSpike_TrendFollow_1dEMA
-# Hypothesis: Donchian(20) breakout with volume spike and 1d EMA trend filter.
-# Works in bull/bear markets by only taking breakouts in direction of 1d trend.
-# Volume confirmation ensures breakouts are genuine. Low trade frequency (<30/year) avoids fee drag.
-# Position size 0.25 for balanced risk.
+# 1d_KAMA_Trend_RSI_ChopFilter_v1
+# Hypothesis: Uses Kaufman Adaptive Moving Average (KAMA) for trend direction, RSI for momentum filter, and Choppiness Index for regime filtering on daily timeframe. Designed to capture trends while avoiding whipsaws in choppy markets. Targets 15-25 trades/year to minimize fee drag. Works in both bull and bear markets by adapting trend sensitivity and using mean-reversion in ranging conditions.
 
-name = "4h_Donchian20_VolumeSpike_TrendFollow_1dEMA"
-timeframe = "4h"
+name = "1d_KAMA_Trend_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,71 +20,106 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate KAMA (2-period ER, 30-period smoothing)
+    change = np.abs(np.diff(close, k=10))
+    volatility = np.sum(np.abs(np.diff(close)), axis=1) if len(change) > 0 else np.array([])
+    # Handle array dimensions
+    if len(change) > 0 and len(volatility) > 0:
+        er = np.where(volatility != 0, change / volatility, 0)
+    else:
+        er = np.zeros_like(change)
+    # Pad er to match close length
+    er_padded = np.concatenate([np.full(10, np.nan), er])
+    sc = (er_padded * 0.0645) ** 2  # (2/(2+1))^2 = 0.0645, (30/(30+1))^2 ≈ 0.946
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # Start at index 9
+    for i in range(10, n):
+        if np.isnan(kama[i-1]) or np.isnan(sc[i]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Calculate RSI (14-period)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Pad RSI to match length
+    rsi_padded = np.concatenate([np.full(14, np.nan), rsi])
     
-    # Calculate 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Calculate Choppiness Index (14-period)
+    atr1 = high - low
+    atr2 = np.abs(high - np.roll(close, 1))
+    atr3 = np.abs(low - np.roll(close, 1))
+    atr1[0] = 0
+    atr2[0] = 0
+    atr3[0] = 0
+    tr = np.maximum(atr1, np.maximum(atr2, atr3))
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.where((hh - ll) != 0, 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14), 50)
+    # Pad CHOP to match length
+    chop_padded = np.concatenate([np.full(13, np.nan), chop])
     
-    # Calculate volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Get weekly EMA for trend filter
+    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Warmup for Donchian, 1d EMA, and ATR
+    start_idx = 50  # Warmup for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi_padded[i]) or np.isnan(chop_padded[i]) or np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1d
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filters
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
         
-        # Volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
-        volatility_filter = atr[i] > 0
+        # Momentum filter
+        rsi_middle = 40 < rsi_padded[i] < 60
+        rsi_overbought = rsi_padded[i] > 60
+        rsi_oversold = rsi_padded[i] < 40
+        
+        # Regime filter: Chop > 61.8 = range, Chop < 38.2 = trend
+        chop_high = chop_padded[i] > 61.8  # Choppy/ranging
+        chop_low = chop_padded[i] < 38.2   # Trending
         
         if position == 0:
-            # Long entry: price breaks above Donchian high with volume confirmation and 1d uptrend
-            if close[i] > highest_high[i] and volume_confirm and uptrend and volatility_filter:
+            # Long: KAMA uptrend + weekly uptrend + RSI not overbought + trending OR (choppy + RSI oversold)
+            if (price_above_kama and weekly_uptrend and not rsi_overbought and (chop_low or (chop_high and rsi_oversold))):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low with volume confirmation and 1d downtrend
-            elif close[i] < lowest_low[i] and volume_confirm and downtrend and volatility_filter:
+            # Short: KAMA downtrend + weekly downtrend + RSI not oversold + trending OR (choppy + RSI overbought)
+            elif (price_below_kama and weekly_downtrend and not rsi_oversold and (chop_low or (chop_high and rsi_overbought))):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below Donchian low or trend turns down
-            if close[i] < lowest_low[i] or not uptrend:
+            # Long exit: KAMA downtrend OR weekly downtrend OR RSI overbought in chop
+            if price_below_kama or not weekly_uptrend or (chop_high and rsi_overbought):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above Donchian high or trend turns up
-            if close[i] > highest_high[i] or not downtrend:
+            # Short exit: KAMA uptrend OR weekly uptrend OR RSI oversold in chop
+            if price_above_kama or not weekly_downtrend or (chop_high and rsi_oversold):
                 signals[i] = 0.0
                 position = 0
             else:
