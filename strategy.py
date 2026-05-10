@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_12h_PriceChannel_Breakout
-# Hypothesis: Combines 12h price channel breakout with 4h trend filter and volume confirmation
-# Works in both bull and bear markets by capturing breakouts aligned with higher timeframe trend
-# Price channel acts as support/resistance structure, reducing whipsaw
-# Target: 20-40 trades/year to minimize fee drag on 4h timeframe
+# 1h_4h1d_Momentum_Squeeze_Trend_Filter
+# Hypothesis: Combines 4h EMA34 trend filter with 1d Bollinger Band squeeze (low volatility) 
+# and 1h RSI(2) extreme reversals for precise entries. Works in bull/bear by only taking 
+# trades aligned with 4h trend during low-volatility periods, reducing false breakouts.
+# Target: 20-40 trades/year to minimize fee drag on 1h timeframe.
 
-name = "4h_12h_PriceChannel_Breakout"
-timeframe = "4h"
+name = "1h_4h1d_Momentum_Squeeze_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,27 +23,6 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h price channel (20-period high/low)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate 20-period high/low channels
-    high_ch = np.full(len(high_12h), np.nan)
-    low_ch = np.full(len(low_12h), np.nan)
-    
-    for i in range(20, len(high_12h)):
-        high_ch[i] = np.max(high_12h[i-20:i])
-        low_ch[i] = np.min(low_12h[i-20:i])
-    
-    # Align 12h channels to 4h timeframe
-    high_ch_aligned = align_htf_to_ltf(prices, df_12h, high_ch)
-    low_ch_aligned = align_htf_to_ltf(prices, df_12h, low_ch)
-    
     # 4h trend filter (EMA34)
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) < 34:
@@ -54,22 +33,40 @@ def generate_signals(prices):
     trend_4h_up = close_4h > ema34_4h
     trend_4h_down = close_4h < ema34_4h
     
-    # Align 4h trend to 4h (no shift needed as we're on same timeframe)
+    # Align 4h trend to 1h
     trend_4h_up_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_up.astype(float))
     trend_4h_down_aligned = align_htf_to_ltf(prices, df_4h, trend_4h_down.astype(float))
     
-    # Volume confirmation (1.5x 20-period average)
-    vol_ma = np.zeros_like(volume)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i >= 19:
-            vol_ma[i] = vol_sum / 20
-        else:
-            vol_ma[i] = np.nan
-    volume_confirm = volume > (1.5 * vol_ma)
+    # 1d Bollinger Band squeeze (volatility filter)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20_1d + 2 * std20_1d
+    lower_bb = sma20_1d - 2 * std20_1d
+    bb_width = (upper_bb - lower_bb) / sma20_1d
+    # Squeeze when BB width is below 20-period mean (low volatility)
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
+    
+    # Align squeeze to 1h
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))
+    
+    # 1h RSI(2) for mean reversion entries
+    rsi_period = 2
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    # RSI < 10 = oversold, RSI > 90 = overbought
+    rsi_oversold = rsi < 10
+    rsi_overbought = rsi > 90
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,44 +74,44 @@ def generate_signals(prices):
     start_idx = 40  # Need enough data for all indicators
     
     for i in range(start_idx, n):
-        if (np.isnan(high_ch_aligned[i]) or np.isnan(low_ch_aligned[i]) or
-            np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(trend_4h_up_aligned[i]) or np.isnan(trend_4h_down_aligned[i]) or
+            np.isnan(squeeze_aligned[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above 12h high channel with volume confirmation and 4h uptrend
-            if (high[i] > high_ch_aligned[i] and
+            # Long: RSI oversold + 4h uptrend + volatility squeeze
+            if (rsi_oversold[i] and
                 trend_4h_up_aligned[i] > 0.5 and
-                volume_confirm[i]):
-                signals[i] = 0.25
+                squeeze_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below 12h low channel with volume confirmation and 4h downtrend
-            elif (low[i] < low_ch_aligned[i] and
+            # Short: RSI overbought + 4h downtrend + volatility squeeze
+            elif (rsi_overbought[i] and
                   trend_4h_down_aligned[i] > 0.5 and
-                  volume_confirm[i]):
-                signals[i] = -0.25
+                  squeeze_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         
         elif position == 1:
-            # Exit: price breaks below 12h low channel or 4h trend turns down
-            if (low[i] < low_ch_aligned[i] or
+            # Exit: RSI > 50 (mean reversion complete) or 4h trend turns down
+            if (rsi[i] > 50 or
                 trend_4h_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit: price breaks above 12h high channel or 4h trend turns up
-            if (high[i] > high_ch_aligned[i] or
+            # Exit: RSI < 50 (mean reversion complete) or 4h trend turns up
+            if (rsi[i] < 50 or
                 trend_4h_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
