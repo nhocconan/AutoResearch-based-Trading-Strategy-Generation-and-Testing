@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume
-# Hypothesis: Camarilla pivot levels (R1/S1) act as key support/resistance in intraday trading. Breakouts beyond these levels with volume confirmation and daily EMA trend filter capture strong moves in both bull and bear markets. Using 1d EMA34 as trend filter reduces whipsaws by ensuring trades align with higher timeframe momentum. Low trade frequency expected due to strict breakout conditions + volume confirmation + trend filter.
+# 1d_Weekly_Close_Reversion_With_Volume_Filter
+# Hypothesis: Weekly close reversion with volume confirmation exploits weekly mean reversion
+# while filtering out low-probability setups. Works in bull/bear by fading extreme weekly closes.
+# Weekly close above upper Bollinger Band = short signal, below lower band = long signal.
+# Volume confirmation ensures institutional participation. Low trade frequency expected.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_Weekly_Close_Reversion_With_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -20,70 +23,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d EMA34 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Weekly close data for Bollinger Bands
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # Previous day's Camarilla levels (using prior 1d close)
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = np.nan  # First value invalid
+    # Weekly Bollinger Bands (20-period, 2 std dev)
+    period = 20
+    std_dev = 2
+    close_series = pd.Series(close_1w)
+    sma = close_series.rolling(window=period, min_periods=period).mean()
+    std = close_series.rolling(window=period, min_periods=period).std()
+    upper_band = (sma + std * std_dev).values
+    lower_band = (sma - std * std_dev).values
     
-    # Camarilla R1 and S1 levels
-    r1 = prev_close_1d + (1.1/12) * (high_1d := np.roll(df_1d['high'].values, 1)) - (1.1/12) * (low_1d := np.roll(df_1d['low'].values, 1))
-    s1 = prev_close_1d - (1.1/12) * (high_1d) + (1.1/12) * (low_1d)
+    # Weekly volume average (20-period)
+    vol_series = pd.Series(volume_1w)
+    vol_ma = vol_series.rolling(window=period, min_periods=period).mean().values
     
-    # Align Camarilla levels to 4h timeframe (wait for 1d bar to close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 4h ATR for volatility filter
-    tr1 = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr1[0] = np.nan
-    atr = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Volume confirmation (20-period average)
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
-        return res
-    vol_ma = mean_arr(volume, 20)
+    # Align weekly data to daily timeframe (wait for weekly bar to close)
+    upper_band_aligned = align_htf_to_ltf(prices, df_1w, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1w, lower_band)
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough history for EMA and calculations
+    start_idx = period  # Need enough history for weekly BB
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or \
-           np.isnan(ema_34_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or \
+           np.isnan(vol_ma_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Volume confirmation: current weekly volume > 1.5 * 20-week average
+        vol_confirm = volume_1w[i] > 1.5 * vol_ma_aligned[i] if vol_ma_aligned[i] > 0 else False
+        
         if position == 0:
-            # Long: price breaks above R1, above daily EMA34, volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Long: weekly close below lower Bollinger Band with volume confirmation
+            if close_1w[i] < lower_band_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below daily EMA34, volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Short: weekly close above upper Bollinger Band with volume confirmation
+            elif close_1w[i] > upper_band_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1 OR below daily EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Long exit: weekly close returns above weekly SMA (mean reversion)
+            if close_1w[i] > sma.iloc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 OR above daily EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Short exit: weekly close returns below weekly SMA (mean reversion)
+            if close_1w[i] < sma.iloc[i]:
                 signals[i] = 0.0
                 position = 0
             else:
