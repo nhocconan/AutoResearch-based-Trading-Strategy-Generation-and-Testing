@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume
-Hypothesis: 4-hour Camarilla R1/S1 breakout in direction of 12-hour EMA50 trend with volume confirmation.
-Uses proven structure from top performers: tight entry conditions (target 15-40 trades/year), 
-volume confirmation, and trend filter. Works in bull/bear by following 12h trend.
+1d_Camarilla_R1_S1_Breakout_1wTrend_Volume
+Hypothesis: Daily Camarilla R1/S1 breakout in direction of weekly trend with volume confirmation.
+Uses weekly EMA34 for trend filter to work in both bull and bear markets. Target: 15-25 trades/year.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,40 +23,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_50_12h[i-1]
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly EMA34 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_34_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 34:
+        ema_34_1w[33] = np.mean(close_1w[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1w)):
+            ema_34_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_34_1w[i-1]
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels from previous day
-    # Use 1d data to get prior day's OHLC
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily Camarilla levels (based on previous day)
+    # R1 = close + 1.1*(high-low)/12
+    # S1 = close - 1.1*(high-low)/12
+    r1 = np.full(n, np.nan)
+    s1 = np.full(n, np.nan)
+    for i in range(1, n):
+        if not np.isnan(high[i-1]) and not np.isnan(low[i-1]) and not np.isnan(close[i-1]):
+            r1[i] = close[i-1] + 1.1 * (high[i-1] - low[i-1]) / 12
+            s1[i] = close[i-1] - 1.1 * (high[i-1] - low[i-1]) / 12
     
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_R1 = np.full(len(close_1d), np.nan)
-    camarilla_S1 = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if i > 0:  # Need previous day
-            ph = high_1d[i-1]
-            pl = low_1d[i-1]
-            pc = close_1d[i-1]
-            camarilla_R1[i] = pc + (ph - pl) * 1.1 / 12
-            camarilla_S1[i] = pc - (ph - pl) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    
-    # Volume spike: current volume > 1.5x average volume (20-period)
+    # Volume spike: current volume > 2.0x average volume (20-period)
     vol_sma = np.full(n, np.nan)
     for i in range(20, n):
         vol_sma[i] = np.mean(volume[i-20:i])
@@ -65,37 +52,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)  # Volume + EMA warmup
+    start_idx = max(1, 34, 20)  # Camarilla + weekly EMA + volume warmup
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         # Volume confirmation
-        volume_confirm = volume[i] > 1.5 * vol_sma[i]
+        volume_confirm = volume[i] > 2.0 * vol_sma[i]
         
         if position == 0:
-            # Long: Break above R1 and above 12h EMA50
-            if close[i] > camarilla_R1_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_confirm:
+            # Long: Break above R1 and above weekly EMA34
+            if close[i] > r1[i] and close[i] > ema_34_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S1 and below 12h EMA50
-            elif close[i] < camarilla_S1_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_confirm:
+            # Short: Break below S1 and below weekly EMA34
+            elif close[i] < s1[i] and close[i] < ema_34_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below 12h EMA50
-            if close[i] < ema_50_12h_aligned[i]:
+            # Exit: Close below weekly EMA34
+            if close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above 12h EMA50
-            if close[i] > ema_50_12h_aligned[i]:
+            # Exit: Close above weekly EMA34
+            if close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
