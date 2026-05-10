@@ -1,8 +1,9 @@
-# 4H_Supertrend_RSI_Range
-# Hypothesis: Supertrend identifies trend direction while RSI identifies overbought/oversold conditions for mean reversion entries within the trend. Combines trend-following with mean-reversion to work in both bull and bear markets. Designed for low trade frequency with discrete sizing (0.25) to minimize fee drag.
+#!/usr/bin/env python3
+# 12H_Camarilla_Pivot_S1R1_Breakout_1dTrend_Filter
+# Hypothesis: Camarilla pivot levels on daily chart provide key support/resistance levels. Price breaking above S1 or below R1 with daily trend filter captures institutional order flow. Designed for low trade frequency (~20-40/year) with discrete sizing (0.25) to minimize fee drag and work in both bull and bear markets.
 
-name = "4H_Supertrend_RSI_Range"
-timeframe = "4h"
+name = "12H_Camarilla_Pivot_S1R1_Breakout_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,66 +20,37 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Supertrend (ATR period 10, multiplier 3.0)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[tr1[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/10, adjust=False, min_periods=10).mean().values
-    
-    hl2 = (high + low) / 2
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
-    
-    supertrend = np.zeros(n)
-    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    trend[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            trend[i] = 1
-        elif close[i] < supertrend[i-1]:
-            trend[i] = -1
-        else:
-            trend[i] = trend[i-1]
-        
-        if trend[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 1d trend filter (EMA 50)
+    # Daily Camarilla pivot levels (S1, R1)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels: S1 = C - (H-L)*1.12/12, R1 = C + (H-L)*1.12/12
+    camarilla_S1 = close_1d - (high_1d - low_1d) * 1.12 / 12
+    camarilla_R1 = close_1d + (high_1d - low_1d) * 1.12 / 12
+    
+    # Align Camarilla levels to 12h timeframe (no additional delay needed for pivot levels)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    
+    # Daily trend filter: EMA 50
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough history for indicators
+    start_idx = 50  # Need enough history for EMA
     
     for i in range(start_idx, n):
-        if np.isnan(atr[i]) or np.isnan(rsi[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(ema_50_1d_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_R1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Get 1d close for trend determination
+        # Get daily close for trend determination
         close_1d_series = pd.Series(close_1d)
         close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_series.values)
         
@@ -86,24 +58,24 @@ def generate_signals(prices):
         is_downtrend = close_1d_aligned[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: RSI oversold (<30) and Supertrend uptrend and 1d uptrend
-            if rsi[i] < 30 and trend[i] == 1 and is_uptrend:
+            # Long entry: Price breaks above S1 and daily uptrend
+            if close[i] > camarilla_S1_aligned[i] and is_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought (>70) and Supertrend downtrend and 1d downtrend
-            elif rsi[i] > 70 and trend[i] == -1 and is_downtrend:
+            # Short entry: Price breaks below R1 and daily downtrend
+            elif close[i] < camarilla_R1_aligned[i] and is_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI overbought (>70) or Supertrend turns down
-            if rsi[i] > 70 or trend[i] == -1:
+            # Long exit: Price breaks below S1 or daily trend turns down
+            if close[i] < camarilla_S1_aligned[i] or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI oversold (<30) or Supertrend turns up
-            if rsi[i] < 30 or trend[i] == 1:
+            # Short exit: Price breaks above R1 or daily trend turns up
+            if close[i] > camarilla_R1_aligned[i] or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
