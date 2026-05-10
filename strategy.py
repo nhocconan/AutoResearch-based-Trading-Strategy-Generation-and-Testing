@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2
-# Hypothesis: Refined version with stricter volume confirmation and stricter trend filter to reduce trade frequency and avoid overtrading.
-# Long when price breaks above R1 with volume > 2.5x average and price > daily EMA34.
-# Short when price breaks below S1 with volume > 2.5x average and price < daily EMA34.
+# 12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe with breakout logic on 12h timeframe.
+# Long when price breaks above R1 with volume > 2x average and price > daily EMA34.
+# Short when price breaks below S1 with volume > 2x average and price < daily EMA34.
 # Exits when price crosses back below/above EMA34.
-# Designed for 15-25 trades/year to avoid overtrading and work in both bull and bear markets.
+# Designed for 20-30 trades/year on 12h to avoid overtrading and work in both bull and bear markets.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v2"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dEMA34_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -38,7 +38,7 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.1 / 12
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
@@ -46,10 +46,10 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume average (30 periods for smoother average)
+    # Volume average (20 periods)
     vol_ma = np.full(n, np.nan)
-    for i in range(30, n):
-        vol_ma[i] = np.mean(volume[i-30:i])
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,11 +65,11 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Breakout above R1 with volume confirmation and uptrend
-            if close[i] > camarilla_r1_aligned[i] and volume[i] > 2.5 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
+            if close[i] > camarilla_r1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Breakout below S1 with volume confirmation and downtrend
-            elif close[i] < camarilla_s1_aligned[i] and volume[i] > 2.5 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
+            elif close[i] < camarilla_s1_aligned[i] and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         
