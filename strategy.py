@@ -1,58 +1,60 @@
 #!/usr/bin/env python3
-# 4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: 4h breakout from daily Camarilla R1/S1 levels with daily EMA34 trend filter and volume confirmation.
-# Uses daily trend to avoid counter-trend trades, volume surge to confirm breakout strength, and tight entry conditions to limit trades.
-# Designed for low trade frequency (<50/year) to minimize fee drag in both bull and bear markets.
+# 6h_1d_1w_WilliamsFractal_Trend_Volume
+# Hypothesis: Use 1w Williams Fractals to identify long-term support/resistance levels.
+# Breakout above weekly bearish fractal in uptrend (1d EMA34 slope > 0) with volume surge (2x 20-period avg) goes long.
+# Breakdown below weekly bullish fractal in downtrend (1d EMA34 slope < 0) with volume surge goes short.
+# Williams Fractals require 2-bar confirmation (additional_delay_bars=2) to avoid look-ahead.
+# Designed for low trade frequency (15-30/year) to minimize fee drag, works in both bull and bear markets by following the weekly trend.
 
-name = "4h_1d_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_1d_1w_WilliamsFractal_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivot and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for Williams Fractals
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 40:
+        return np.zeros(n)
+    
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Shift by 1 to use previous day's data (no look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Calculate Camarilla R1 and S1 for previous day
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 4h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate weekly Williams Fractals (requires 5-bar window: t-2, t-1, t, t+1, t+2)
+    bearish_fractal, bullish_fractal = compute_williams_fractals(
+        df_1w['high'].values,
+        df_1w['low'].values
+    )
+    # Bearish fractal: high[t] is highest among [t-2, t-1, t, t+1, t+2]
+    # Bullish fractal: low[t] is lowest among [t-2, t-1, t, t+1, t+2]
+    # These are confirmed only after 2 additional bars close, so use additional_delay_bars=2
+    bearish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bearish_fractal, additional_delay_bars=2
+    )
+    bullish_fractal_aligned = align_htf_to_ltf(
+        prices, df_1w, bullish_fractal, additional_delay_bars=2
+    )
     
     # Daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_slope_1d = np.diff(ema_34_1d, prepend=ema_34_1d[0])  # slope = today - yesterday
-    ema_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_1d)
+    ema_slope_34_1d = np.diff(ema_34_1d, prepend=ema_34_1d[0])  # slope = today - yesterday
+    ema_slope_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_34_1d)
     
     # ATR for volatility and trailing stop
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -74,9 +76,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_slope_1d_aligned[i]) or
+        if (np.isnan(bearish_fractal_aligned[i]) or
+            np.isnan(bullish_fractal_aligned[i]) or
+            np.isnan(ema_slope_34_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -87,20 +89,20 @@ def generate_signals(prices):
             continue
         
         # Trend filter from daily EMA34 slope
-        bullish_trend = ema_slope_1d_aligned[i] > 0
-        bearish_trend = ema_slope_1d_aligned[i] < 0
+        bullish_trend = ema_slope_34_1d_aligned[i] > 0
+        bearish_trend = ema_slope_34_1d_aligned[i] < 0
         
         # Volume confirmation (2.0x average)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: breakout above Camarilla R1 in bullish trend with volume surge
-            if close[i] > camarilla_r1_aligned[i] and bullish_trend and volume_surge:
+            # Long: breakout above weekly bearish fractal in bullish trend with volume surge
+            if close[i] > bearish_fractal_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: breakdown below Camarilla S1 in bearish trend with volume surge
-            elif close[i] < camarilla_s1_aligned[i] and bearish_trend and volume_surge:
+            # Short: breakdown below weekly bullish fractal in bearish trend with volume surge
+            elif close[i] < bullish_fractal_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
