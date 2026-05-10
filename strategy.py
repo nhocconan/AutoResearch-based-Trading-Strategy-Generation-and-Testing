@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Volume_Trend
-Hypothesis: Camarilla pivot levels from 1d provide strong support/resistance on 12h timeframe.
-Breakouts above R3 or below S3 with volume confirmation and 1w EMA trend filter capture
-strong momentum moves. Works in both bull and bear markets by following the 1w trend direction,
-avoiding counter-trend trades. Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
+4h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike
+Hypothesis: Camarilla pivot levels from 1d provide strong support/resistance.
+Breakouts above R4 or below S4 with volume confirmation and 12h EMA50 trend filter
+capture strong momentum moves while avoiding false breaks. Uses higher timeframe
+trend (12h) to align with major market direction, reducing whipsaw in sideways
+markets. Designed for low trade frequency (target: 20-40 trades/year) to minimize
+fee drag and improve generalization to bear markets.
 """
 
-name = "12h_Camarilla_Pivot_Volume_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R4_S4_Breakout_12hTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -30,43 +32,43 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # Calculate Camarilla levels from previous 1d bar (avoid look-ahead)
     prev_high = df_1d['high'].shift(1).values
     prev_low = df_1d['low'].shift(1).values
     prev_close = df_1d['close'].shift(1).values
     
-    # Calculate Camarilla levels
+    # Calculate Camarilla R4 and S4 levels
     rng = prev_high - prev_low
-    r3 = prev_close + (rng * 1.1 / 4)  # R3 = C + (H-L) * 1.1/4
-    s3 = prev_close - (rng * 1.1 / 4)  # S3 = C - (H-L) * 1.1/4
+    r4 = prev_close + (rng * 1.1 / 2)  # R4 = C + (H-L) * 1.1/2
+    s4 = prev_close - (rng * 1.1 / 2)  # S4 = C - (H-L) * 1.1/2
     
-    # Align 1d levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align 1d levels to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Calculate 12h EMA50 for trend filter
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate 1w EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Volume confirmation (20-period MA on 12h)
+    # Volume confirmation (20-period MA on 4h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1w EMA50 (50) and volume MA (20)
+    # Warmup: need 12h EMA50 (50) and volume MA (20)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or 
+        if (np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -74,31 +76,31 @@ def generate_signals(prices):
             continue
         
         # Higher timeframe trend filter
-        uptrend_1w = close[i] > ema_50_1w_aligned[i]
-        downtrend_1w = close[i] < ema_50_1w_aligned[i]
+        uptrend_12h = close[i] > ema_50_12h_aligned[i]
+        downtrend_12h = close[i] < ema_50_12h_aligned[i]
         
-        # Volume confirmation (>1.5x average volume)
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Volume confirmation (>2x average volume)
+        volume_confirm = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above R3 + volume confirmation
-            if uptrend_1w and close[i] > r3_aligned[i] and volume_confirm:
+            # Long entry: uptrend + price breaks above R4 + volume confirmation
+            if uptrend_12h and close[i] > r4_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below S3 + volume confirmation
-            elif downtrend_1w and close[i] < s3_aligned[i] and volume_confirm:
+            # Short entry: downtrend + price breaks below S4 + volume confirmation
+            elif downtrend_12h and close[i] < s4_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R3
-            if not uptrend_1w or close[i] < r3_aligned[i]:
+            # Long exit: trend breaks or price re-enters below R4
+            if not uptrend_12h or close[i] < r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S3
-            if not downtrend_1w or close[i] > s3_aligned[i]:
+            # Short exit: trend breaks or price re-enters above S4
+            if not downtrend_12h or close[i] > s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
