@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 1d_KAMA_Trend_With_RSI_and_Chop_Filter
-# Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing a reliable trend filter.
-# In trending markets (price > KAMA), we look for RSI pullbacks to enter with momentum.
-# In ranging markets (Choppiness Index > 61.8), we avoid trades to prevent whipsaws.
-# This combines adaptive trend following with mean-reversion entries, working in both bull and bear markets
-# by only taking trades aligned with the adaptive trend and avoiding choppy conditions.
+# 12h_4hTrend_1dVolatilityBreakout
+# Hypothesis: In trending markets (4h ADX > 25), volatility contractions (Bollinger Bandwidth < 50th percentile) on 1d
+# precede explosive moves. Breakouts from the 1d Bollinger Bands with volume confirmation capture these moves.
+# Works in bull markets (buy breakouts above upper band) and bear markets (sell breakdowns below lower band)
+# by only trading in the direction of the 4h trend. Uses 12h timeframe for lower frequency and reduced fee drag.
 
-name = "1d_KAMA_Trend_With_RSI_and_Chop_Filter"
-timeframe = "1d"
+name = "12h_4hTrend_1dVolatilityBreakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,121 +23,122 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter and chop filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 4h data for trend filter (ADX)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 35:
         return np.zeros(n)
     
-    # Calculate weekly KAMA for trend filter
-    # KAMA: ER = |Change| / Sum|Δ|, SSC = [ER*(fastest- slowest) + slowest]^2
-    # We'll use a simplified adaptive approach: fast EMA(2), slow EMA(30), weight based on volatility
-    close_w = df_1w['close'].values
-    # Calculate efficiency ratio
-    change = np.abs(np.diff(close_w, prepend=close_w[0]))
-    volatility = np.sum(np.abs(np.diff(close_w, prepend=close_w[0])), axis=0) if len(close_w) > 1 else 1
-    # Avoid division by zero
-    volatility = np.where(volatility == 0, 1, volatility)
-    er = change / volatility
-    # Smoothing constants
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fastest=2, slowest=30
-    # Calculate KAMA
-    kama = np.zeros_like(close_w)
-    kama[0] = close_w[0]
-    for i in range(1, len(close_w)):
-        kama[i] = kama[i-1] + sc[i] * (close_w[i] - kama[i-1])
+    # Get 1d data for Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 21:
+        return np.zeros(n)
     
-    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
+    # Calculate 4h ADX(14) for trend filter
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate weekly Choppiness Index for regime filter
-    # CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(n)
-    atr_w = np.zeros_like(close_w)
-    tr_w = np.zeros_like(close_w)
-    for i in range(len(close_w)):
-        if i == 0:
-            tr_w[i] = high[i] - low[i]
-        else:
-            tr_w[i] = max(high[i] - low[i], abs(high[i] - close_w[i-1]), abs(low[i] - close_w[i-1]))
-        atr_w[i] = tr_w[i]  # Simple ATR for chop calculation (not smoothed)
+    # True Range
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Calculate chopping index over 14 periods
-    chop = np.full_like(close_w, 50.0)  # Default to middle range
-    for i in range(14, len(close_w)):
-        atr_sum = np.sum(atr_w[i-13:i+1])
-        hh = np.max(high[i-13:i+1])
-        ll = np.min(low[i-13:i+1])
-        if hh - ll > 0:
-            chop[i] = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(14)
-        else:
-            chop[i] = 50.0
+    # Directional Movement
+    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
+                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
+    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
+                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Smoothed values
+    def smoothed_ma(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # First value is simple average
+        result[period-1] = np.nanmean(arr[:period])
+        # Subsequent values: Wilder's smoothing
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Calculate daily RSI for entry timing
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    tr_smoothed = smoothed_ma(tr, 14)
+    dm_plus_smoothed = smoothed_ma(dm_plus, 14)
+    dm_minus_smoothed = smoothed_ma(dm_minus, 14)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
-    for i in range(1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # DI+ and DI-
+    di_plus = np.where(tr_smoothed != 0, 100 * dm_plus_smoothed / tr_smoothed, 0)
+    di_minus = np.where(tr_smoothed != 0, 100 * dm_minus_smoothed / tr_smoothed, 0)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smoothed_ma(dx, 14)
     
-    # Volume confirmation (20-period MA)
+    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx)
+    
+    # Calculate 1d Bollinger Bands (20, 2)
+    close_1d = df_1d['close'].values
+    bb_period = 20
+    bb_std = 2
+    
+    # Middle Bollinger Band (SMA)
+    sma_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).mean().values
+    # Standard deviation
+    std_1d = pd.Series(close_1d).rolling(window=bb_period, min_periods=bb_period).std().values
+    # Upper and Lower Bands
+    upper_bb = sma_1d + (std_1d * bb_std)
+    lower_bb = sma_1d - (std_1d * bb_std)
+    
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    
+    # Volume confirmation (20-period MA on 12h)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need KAMA (20), chop (14), RSI (14), volume MA (20)
-    start_idx = max(20, 14, 20)
+    # Warmup: need ADX (35), Bollinger Bands (20), volume MA (20)
+    start_idx = max(35, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or 
-            np.isnan(rsi[i]) or 
+        if (np.isnan(adx_4h_aligned[i]) or 
+            np.isnan(upper_bb_aligned[i]) or 
+            np.isnan(lower_bb_aligned[i]) or 
             np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price vs weekly KAMA
-        uptrend = close[i] > kama_aligned[i]
-        downtrend = close[i] < kama_aligned[i]
-        
-        # Regime filter: avoid choppy markets (CHOP > 61.8)
-        ranging = chop_aligned[i] > 61.8
+        # Trend filter: ADX > 25 indicates trending market
+        trending = adx_4h_aligned[i] > 25
         
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: uptrend + RSI pullback (30-50) + volume + not ranging
-            if uptrend and 30 <= rsi[i] <= 50 and volume_confirm and not ranging:
+            # Long entry: trending + price breaks above upper BB + volume
+            if trending and close[i] > upper_bb_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + RSI bounce (50-70) + volume + not ranging
-            elif downtrend and 50 <= rsi[i] <= 70 and volume_confirm and not ranging:
+            # Short entry: trending + price breaks below lower BB + volume
+            elif trending and close[i] < lower_bb_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks, RSI overbought, or ranging market
-            if not uptrend or rsi[i] > 70 or ranging:
+            # Long exit: trend weakens or price re-enters below upper BB
+            if not trending or close[i] < upper_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks, RSI oversold, or ranging market
-            if not downtrend or rsi[i] < 30 or ranging:
+            # Short exit: trend weakens or price re-enters above lower BB
+            if not trending or close[i] > lower_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
