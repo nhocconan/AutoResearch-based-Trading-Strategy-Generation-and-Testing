@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined
-# Hypothesis: In trending markets (1d EMA50), price breaking above R1 or below S1
-# from the previous day's Camarilla levels continues with momentum. Volume
-# confirmation filters false breakouts. This version reduces trade frequency by
-# using a higher volume threshold (2.0x) and requiring close outside the
-# opposite level (R1 for shorts, S1 for longs) to avoid whipsaw.
-# Target: 20-50 trades/year to minimize fee drag.
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v1
+# Hypothesis: Price breaking above Camarilla R1 in a 1d uptrend (price above EMA50) with volume surge
+# indicates institutional buying and continuation. Similarly, breaking below S1 in a 1d downtrend
+# with volume surge indicates institutional selling. This works in both bull and bear markets by
+# aligning with the higher timeframe trend, reducing false breakouts. Volume spike confirms
+# institutional participation, filtering out low-conviction moves. Target: 20-40 trades/year.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,13 +41,13 @@ def generate_signals(prices):
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1.values)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1.values)
     
-    # Volume confirmation (20-period MA on 4h = ~3.3 days)
+    # Volume spike detection: current volume > 2.0 * 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d EMA50 (50), Camarilla (needs 1d), volume MA (20)
+    # Warmup: need 1d EMA50 (50) and volume MA (20)
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
@@ -66,27 +65,27 @@ def generate_signals(prices):
         uptrend = close[i] > ema_50_1d_aligned[i]
         downtrend = close[i] < ema_50_1d_aligned[i]
         
-        # Volume confirmation (higher threshold to reduce trades)
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
+        # Volume spike confirmation
+        volume_spike = volume[i] > volume_ma[i] * 2.0
         
         if position == 0:
-            # Long entry: uptrend + price breaks above R1 + volume
-            if uptrend and close[i] > camarilla_r1_aligned[i] and volume_confirm:
+            # Long entry: 1d uptrend + price breaks above R1 + volume spike
+            if uptrend and close[i] > camarilla_r1_aligned[i] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: downtrend + price breaks below S1 + volume
-            elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_confirm:
+            # Short entry: 1d downtrend + price breaks below S1 + volume spike
+            elif downtrend and close[i] < camarilla_s1_aligned[i] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks or price re-enters below R1 (to avoid whipsaw)
+            # Long exit: trend breaks or price re-enters below R1
             if not uptrend or close[i] < camarilla_r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend breaks or price re-enters above S1 (to avoid whipsaw)
+            # Short exit: trend breaks or price re-enters above S1
             if not downtrend or close[i] > camarilla_s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
