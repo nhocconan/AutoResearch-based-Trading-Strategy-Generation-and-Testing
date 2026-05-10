@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_WeeklyPivot_RangeReversion
-Hypothesis: Use weekly pivot points from 1w data to identify key support/resistance levels.
-In range-bound markets (identified by 1d Choppiness Index > 61.8), mean revert from S1/R1 and S2/R2 levels.
-In trending markets (Choppiness Index < 38.2), breakout trades from S2/R2 levels.
-This adapts to both bull/bear regimes via the 1d chop filter and uses weekly structure for level significance.
-Target: 15-30 trades/year on 6b timeframe.
+4h_KAMA_Direction_RSI_Filter
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) adapts to market noise, providing smooth trend direction.
+In trending markets, KAMA follows price with low lag; in ranging markets, it flattens, reducing false signals.
+Combined with RSI(14) for overbought/oversold conditions and volume confirmation, this filters entries to high-probability breakouts.
+Designed for 20-30 trades/year, works in bull/bear via adaptive trend filter.
 """
 
-name = "6h_WeeklyPivot_RangeReversion"
-timeframe = "6h"
+name = "4h_KAMA_Direction_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -21,136 +20,86 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
-    
-    # Get daily data for chop filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points (using prior week)
-    high_prev = df_1w['high'].shift(1).values
-    low_prev = df_1w['low'].shift(1).values
-    close_prev = df_1w['close'].shift(1).values
-    
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    r1 = 2 * pivot - low_prev
-    s1 = 2 * pivot - high_prev
-    r2 = pivot + (high_prev - low_prev)
-    s2 = pivot - (high_prev - low_prev)
-    
-    # Align weekly pivots to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # Calculate 1d Choppiness Index for regime detection
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with close_1d
-    
-    # ATR(14)
-    atr_14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Sum of true ranges over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Choppiness Index: 100 * log10(tr_sum / (atr_14 * 14)) / log10(14)
-    chop_raw = 100 * np.log10(tr_sum / (atr_14 * 14)) / np.log10(14)
-    
-    # Align chop to 6h timeframe
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
-    
-    # Get 6h price data
+    # Get 4h data for KAMA calculation
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Calculate Efficiency Ratio (ER) and Smoothing Constants
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)  # placeholder, will compute properly below
+    
+    # Proper ER calculation: |close[i] - close[i-10]| / sum(|close[j] - close[j-1]|) for j=i-9 to i
+    lookback = 10
+    er = np.zeros(n)
+    for i in range(lookback, n):
+        price_change = np.abs(close[i] - close[i-lookback])
+        price_volatility = np.sum(np.abs(np.diff(close[i-lookback:i+1])))
+        if price_volatility > 0:
+            er[i] = price_change / price_volatility
+        else:
+            er[i] = 0
+    
+    # Smoothing constants: fastest SC = 2/(2+1) = 0.67, slowest SC = 2/(30+1) = 0.0645
+    sc = (er * (0.67 - 0.0645) + 0.0645) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14) for overbought/oversold
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    for i in range(14, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: current volume > 1.3x 20-period EMA
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_filter = volume > vol_ema20 * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need weekly pivot (needs 1w bar), chop (14 periods)
-    start_idx = 30
+    # Warmup: need KAMA (needs ~10 bars), RSI (14), volume EMA (20)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or
-            np.isnan(chop_aligned[i])):
-            if position != 0:
+        if position == 0:
+            # Long: price above KAMA (uptrend) AND RSI < 30 (oversold) AND volume confirmation
+            if close[i] > kama[i] and rsi[i] < 30 and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price below KAMA (downtrend) AND RSI > 70 (overbought) AND volume confirmation
+            elif close[i] < kama[i] and rsi[i] > 70 and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Long exit: price crosses below KAMA OR RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
-            continue
-        
-        chop = chop_aligned[i]
-        
-        if position == 0:
-            # Range market: chop > 61.8 -> mean revert from S1/R1
-            if chop > 61.8:
-                # Long from S1 with rejection (low touches S1 but close above)
-                if low[i] <= s1_aligned[i] and close[i] > s1_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short from R1 with rejection (high touches R1 but close below)
-                elif high[i] >= r1_aligned[i] and close[i] < r1_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-            # Trending market: chop < 38.2 -> breakout from S2/R2
-            elif chop < 38.2:
-                # Long breakout above R2
-                if high[i] > r2_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                # Short breakdown below S2
-                elif low[i] < s2_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-        elif position == 1:
-            # Long exit conditions
-            if chop > 61.8:
-                # In range: exit at pivot or R1
-                if close[i] >= pivot_aligned[i] or close[i] >= r1_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
             else:
-                # In trend: trail with S2 or exit if chop turns to range
-                if chop > 61.8 or low[i] < s2_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit conditions
-            if chop > 61.8:
-                # In range: exit at pivot or S1
-                if close[i] <= pivot_aligned[i] or close[i] <= s1_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: price crosses above KAMA OR RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
+                signals[i] = 0.0
+                position = 0
             else:
-                # In trend: trail with R2 or exit if chop turns to range
-                if chop > 61.8 or high[i] > r2_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                signals[i] = -0.25
     
     return signals
