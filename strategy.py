@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4
-# Hypothesis: Uses Camarilla R1/S1 breakout with 1d EMA trend filter and volume confirmation.
-# Designed to reduce trade frequency vs previous version by increasing volume threshold to 3.0x and adding ATR filter.
-# Targets 15-30 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
-# Position size 0.25 for balanced risk.
+# 1d_Weekly_Keltner_Channel_Breakout_v1
+# Hypothesis: Use weekly Keltner Channel breakouts on daily timeframe with volatility filter.
+# In bull markets: break above upper KC signals momentum continuation.
+# In bear markets: break below lower KC signals continuation of downtrend.
+# Weekly timeframe reduces noise, daily provides timely entries. Volatility filter (ATR) avoids chop.
+# Targets 10-20 trades/year to minimize fee drag. Works across BTC, ETH, SOL.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v4"
-timeframe = "4h"
+name = "1d_Weekly_Keltner_Channel_Breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,80 +24,77 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (using previous day's data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for Keltner Channel calculation
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Calculate ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
+    # Calculate ATR for Keltner Channel (using weekly data)
+    tr1 = df_weekly['high'] - df_weekly['low']
+    tr2 = np.abs(df_weekly['high'] - np.roll(df_weekly['close'], 1))
+    tr3 = np.abs(df_weekly['low'] - np.roll(df_weekly['close'], 1))
+    tr1.iloc[0] = 0
+    tr2.iloc[0] = 0
+    tr3.iloc[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_weekly = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate weekly EMA (middle of KC)
+    ema_weekly = pd.Series(df_weekly['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Calculate R1 and S1 (tighter levels than R2/S2)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    # Calculate upper and lower Keltner Channel bands
+    kc_upper = ema_weekly + (atr_weekly * 2.0)
+    kc_lower = ema_weekly - (atr_weekly * 2.0)
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Align weekly KC levels to daily timeframe
+    kc_upper_aligned = align_htf_to_ltf(prices, df_weekly, kc_upper)
+    kc_lower_aligned = align_htf_to_ltf(prices, df_weekly, kc_lower)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Get 1d data for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Calculate volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate daily ATR for volatility filter
+    tr1_d = high - low
+    tr2_d = np.abs(high - np.roll(close, 1))
+    tr3_d = np.abs(low - np.roll(close, 1))
+    tr1_d[0] = 0
+    tr2_d[0] = 0
+    tr3_d[0] = 0
+    tr_d = np.maximum(tr1_d, np.maximum(tr2_d, tr3_d))
+    atr_daily = pd.Series(tr_d).rolling(window=10, min_periods=10).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Warmup for volume MA, 1d EMA, and ATR
+    start_idx = max(20, 10)  # Warmup for weekly EMA and ATR
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(kc_upper_aligned[i]) or np.isnan(kc_lower_aligned[i]) or np.isnan(ema_weekly_aligned[i]) or np.isnan(atr_daily[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1d
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Stronger volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 3.0
-        volatility_filter = atr[i] > 0  # Ensure valid ATR
+        # Volatility filter: avoid extremely low volatility periods
+        volatility_ok = atr_daily[i] > 0
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation, 1d uptrend, and volatility
-            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
+            # Long entry: price breaks above upper KC with adequate volatility
+            if close[i] > kc_upper_aligned[i] and volatility_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation, 1d downtrend, and volatility
-            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
+            # Short entry: price breaks below lower KC with adequate volatility
+            elif close[i] < kc_lower_aligned[i] and volatility_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or trend turns down
-            if close[i] < r1_aligned[i] or not uptrend:
+            # Long exit: price falls back below weekly EMA (middle of KC)
+            if close[i] < ema_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or trend turns up
-            if close[i] > s1_aligned[i] or not downtrend:
+            # Short exit: price rises back above weekly EMA (middle of KC)
+            if close[i] > ema_weekly_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
