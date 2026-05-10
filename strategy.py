@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 6h_WeeklyTrend_Camarilla_R3_S3_Breakout_Volume
+# 12h_1W_Trend_Camarilla_R3_S3_Breakout_Volume
 # Hypothesis: Weekly trend filter (EMA20) reduces false breakouts in choppy markets,
-# while daily Camarilla R3/S3 levels provide precise entries. Volume confirmation ensures
-# breakout strength. Designed for low trade frequency (12-37/year) to minimize fee drag.
-# Works in bull markets via trend-following breakouts and in bear via mean-reversion
-# at extreme levels when trend aligns.
+# while daily Camarilla R3/S3 levels provide precise entries on 12h timeframe.
+# Volume confirmation ensures breakout strength. Designed for low trade frequency
+# (12-37/year) to minimize fee drag. Works in bull markets via trend-following
+# breakouts and in bear via mean-reversion at extreme levels when trend aligns.
 
-name = "6h_WeeklyTrend_Camarilla_R3_S3_Breakout_Volume"
-timeframe = "6h"
+name = "12h_1W_Trend_Camarilla_R3_S3_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -39,12 +39,12 @@ def generate_signals(prices):
     # Camarilla R3 and S3 levels
     R3 = typical_price + (range_hl * 1.2500)
     S3 = typical_price - (range_hl * 1.2500)
-    # Align daily levels to 6h timeframe
+    # Align daily levels to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3.values)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3.values)
     
-    # Volume confirmation (24-period average on 6h = ~6 days)
-    vol_ma_period = 24
+    # Volume confirmation (12-period average on 12h = ~6 days)
+    vol_ma_period = 12
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
@@ -56,7 +56,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(24, 20) + 5  # need enough history for calculations
+    start_idx = max(12, 20) + 5  # need enough history for calculations
     
     for i in range(start_idx, n):
         if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
