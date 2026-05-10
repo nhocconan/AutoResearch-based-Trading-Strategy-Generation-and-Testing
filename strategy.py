@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-# 6h_WilliamsR_Alligator_Trend_Combo
-# Hypothesis: Williams %R identifies overbought/oversold conditions while Alligator (SMAs) defines trend. Long when %R < -80 (oversold) and price > Alligator teeth (uptrend). Short when %R > -20 (overbought) and price < Alligator teeth (downtrend). Uses 1d Williams %R for higher timeframe context to avoid counter-trend trades. Works in both bull/bear by following trend with mean-reversion entries.
+# 1h_Keltner_MeanReversion_4hTrend
+# Hypothesis: In 1h timeframe, price often reverts to the mean during range-bound periods, but only when aligned with the 4h trend. 
+# Uses Keltner Channel (20, 1.5) for mean reversion signals and 4h EMA50 for trend filter. 
+# Long when price touches lower KC in 4h uptrend, short when price touches upper KC in 4h downtrend. 
+# Volume filter (>1.5x 20-period MA) confirms momentum. 
+# Session filter (08-20 UTC) reduces noise. 
+# Target: 15-30 trades/year per symbol via tight entry conditions.
 
-name = "6h_WilliamsR_Alligator_Trend_Combo"
-timeframe = "6h"
+name = "1h_Keltner_MeanReversion_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,87 +23,77 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for Williams %R and Alligator
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    # Using 14-period lookback
-    highest_high = pd.Series(df_1d['high']).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(df_1d['low']).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - df_1d['close'].values) / (highest_high - lowest_low) * -100
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid division by zero
+    # Calculate 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    williams_r_aligned = align_htf_to_ltf(prices, df_1d, williams_r)
+    # 1h Keltner Channel (20, 1.5)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
+    atr = pd.Series(np.abs(high - low)).rolling(window=20, min_periods=20).mean()
+    upper_kc = ema_20 + 1.5 * atr
+    lower_kc = ema_20 - 1.5 * atr
     
-    # Alligator: Jaw (13-period SMA, shifted 8), Teeth (8-period SMA, shifted 5), Lips (5-period SMA, shifted 3)
-    jaw = pd.Series(df_1d['close']).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(df_1d['close']).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().values
+    # Volume confirmation (20-period MA)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    # Set shifted values to NaN for invalid periods
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw_shifted)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth_shifted)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips_shifted)
-    
-    # Alligator teeth as trend filter
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Williams %R (14) and Alligator components (13,8,5 with shifts)
-    start_idx = max(14, 13+8, 8+5, 5+3)  # max of lookbacks and shifts
+    # Warmup: need EMA50_4h (50), EMA20 (20), ATR (20), volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(williams_r_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_20[i]) or 
+            np.isnan(upper_kc[i]) or 
+            np.isnan(lower_kc[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Williams %R conditions
-        oversold = williams_r_aligned[i] < -80
-        overbought = williams_r_aligned[i] > -20
+        # 4h trend filter
+        uptrend_4h = close[i] > ema_50_4h_aligned[i]
+        downtrend_4h = close[i] < ema_50_4h_aligned[i]
         
-        # Alligator alignment: price > teeth = uptrend, price < teeth = downtrend
-        # Using close vs teeth for trend
-        price_vs_teeth = close[i] - teeth_aligned[i]
-        uptrend = price_vs_teeth > 0
-        downtrend = price_vs_teeth < 0
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
         
         if position == 0:
-            # Long entry: oversold + uptrend (price above teeth)
-            if oversold and uptrend:
-                signals[i] = 0.25
+            # Long entry: 4h uptrend + price touches lower KC + volume + session
+            if uptrend_4h and close[i] <= lower_kc[i] and volume_confirm and in_session[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short entry: overbought + downtrend (price below teeth)
-            elif overbought and downtrend:
-                signals[i] = -0.25
+            # Short entry: 4h downtrend + price touches upper KC + volume + session
+            elif downtrend_4h and close[i] >= upper_kc[i] and volume_confirm and in_session[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: overbought or trend breaks (price below lips)
-            if overbought or close[i] < lips_aligned[i]:
+            # Long exit: 4h trend breaks or price crosses above EMA20
+            if not uptrend_4h or close[i] >= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: oversold or trend breaks (price above lips)
-            if oversold or close[i] > lips_aligned[i]:
+            # Short exit: 4h trend breaks or price crosses below EMA20
+            if not downtrend_4h or close[i] <= ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
