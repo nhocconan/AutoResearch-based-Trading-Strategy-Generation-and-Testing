@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-1D_Camarilla_Pivot_Bounce_1wTrend_Volume
-Hypothesis: Daily bounces off weekly Camarilla S3/R3 levels with volume confirmation and weekly trend filter. 
-This strategy aims to capture mean-reversion bounces in ranging markets and continuation in trending markets 
-by combining weekly trend alignment with daily price action at key weekly support/resistance levels. 
+1D_Camarilla_R3_S3_Bounce_1wTrend_Volume
+Hypothesis: Daily bounces off weekly Camarilla S3/R3 levels with volume confirmation and weekly trend filter.
+This strategy aims to capture mean-reversion bounces in ranging markets and continuation in trending markets
+by combining weekly trend alignment with daily price action at key weekly support/resistance levels.
 Designed for low trade frequency (<25/year) to minimize fee drift and work in both bull and bear markets.
 """
 
-name = "1D_Camarilla_Pivot_Bounce_1wTrend_Volume"
+name = "1D_Camarilla_R3_S3_Bounce_1wTrend_Volume"
 timeframe = "1d"
 leverage = 1.0
 
