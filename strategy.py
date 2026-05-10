@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_20_Trend_Volume
-Hypothesis: Price breaks Donchian(20) high/low with trend confirmation from 1d EMA200 and volume > 1.5x 20-day average. Donchian breakouts capture momentum in trending markets; EMA200 ensures alignment with higher timeframe trend; volume confirmation filters false breakouts. Designed for low trade frequency (<30/year) to minimize fee drag and work in both bull and bear markets.
+1d_WeeklyPivot_Donchian_Breakout_Trend_1w
+Hypothesis: Price breaks Donchian(20) high (long) or low (short) calculated from prior 1d candles, with confirmation from weekly EMA50 trend and volume spike. Weekly pivot provides structural levels, Donchian breakout captures momentum, EMA50 trend filter ensures alignment with higher timeframe direction. Volume confirmation reduces false breakouts. Designed for low trade frequency (~15-25/year) to minimize fee drag and work in both bull and bear markets.
 """
 
-name = "4h_Donchian_Breakout_20_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_Donchian_Breakout_Trend_1w"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,76 +22,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels - calculated on 4h data
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # Weekly data for EMA50 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Weekly EMA50
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_50_1w[i-1]
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # 1d EMA200 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_200_1d = np.full(len(close_1d), np.nan)
+    # Weekly volume SMA20 for volume confirmation
+    volume_1w = df_1w['volume'].values
+    vol_sma_20_1w = np.full(len(volume_1w), np.nan)
+    if len(volume_1w) >= 20:
+        vol_sma_20_1w[19] = np.mean(volume_1w[:20])
+        for i in range(20, len(volume_1w)):
+            vol_sma_20_1w[i] = (vol_sma_20_1w[i-1] * 19 + volume_1w[i]) / 20
+    vol_sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma_20_1w)
     
-    if len(close_1d) >= 200:
-        # Calculate EMA200 with proper initialization
-        ema_200_1d[199] = np.mean(close_1d[:200])
-        alpha = 2 / (200 + 1)
-        for i in range(200, len(close_1d)):
-            ema_200_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_200_1d[i-1]
+    # Daily Donchian channels (20-period) - calculated from prior completed daily candles
+    # We need at least 20 days of data to calculate Donchian channels
+    highest_20 = np.full(n, np.nan)
+    lowest_20 = np.full(n, np.nan)
     
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    
-    # 1d volume SMA20 for volume confirmation
-    volume_1d = df_1d['volume'].values
-    vol_sma_20_1d = np.full(len(volume_1d), np.nan)
-    
-    if len(volume_1d) >= 20:
-        vol_sma_20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma_20_1d[i] = (vol_sma_20_1d[i-1] * 19 + volume_1d[i]) / 20
-    
-    vol_sma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma_20_1d)
+    for i in range(20, n):
+        highest_20[i] = np.max(high[i-20:i])
+        lowest_20[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 20)  # warmup for EMA200 and Donchian
+    start_idx = max(50, 20)  # warmup for EMA50 and Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_sma_20_1d_aligned[i]) or \
-           np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        if np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_sma_20_1w_aligned[i]) or \
+           np.isnan(highest_20[i]) or np.isnan(lowest_20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 4h volume > 1.5x average 1d volume (scaled to 4h)
-        vol_4h_approx = vol_sma_20_1d_aligned[i] / 6.0  # 24h/4h = 6
-        volume_confirm = volume[i] > 1.5 * vol_4h_approx
+        # Volume approximation: daily volume from weekly (weekly / 5)
+        vol_daily_approx = vol_sma_20_1w_aligned[i] / 5.0
+        volume_confirm = volume[i] > 1.5 * vol_daily_approx
         
         if position == 0:
             # Long: Break above Donchian high with uptrend and volume
-            if close[i] > highest_high[i] and close[i] > ema_200_1d_aligned[i] and volume_confirm:
+            if close[i] > highest_20[i] and close[i] > ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
             # Short: Break below Donchian low with downtrend and volume
-            elif close[i] < lowest_low[i] and close[i] < ema_200_1d_aligned[i] and volume_confirm:
+            elif close[i] < lowest_20[i] and close[i] < ema_50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: Close below Donchian low (trend reversal)
-            if close[i] < lowest_low[i]:
+            # Exit: Close below EMA50 (trend reversal)
+            if close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: Close above Donchian high (trend reversal)
-            if close[i] > highest_high[i]:
+            # Exit: Close above EMA50 (trend reversal)
+            if close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
