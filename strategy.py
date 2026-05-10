@@ -1,101 +1,123 @@
 #!/usr/bin/env python3
-# 1d_Keltner_Channel_Squeeze_Breakout_1wTrend
-# Hypothesis: On daily timeframe, Keltner Channel squeeze (BB width < KC width) indicates low volatility.
-# Breakout from squeezed KC with 1-week trend alignment (EMA50) and volume confirmation.
-# Works in bull/bear by filtering breakouts with higher timeframe trend.
-# Target: 15-25 trades/year, low frequency to minimize fee drag.
+# 6h_Ichimoku_Trend_Follow
+# Hypothesis: Ichimoku system (Tenkan/Kijun cross + Cloud) on 1d provides trend direction,
+# while 6h Tenkan/Kijun cross provides entry timing. Works in bull/bear by following
+# the higher timeframe trend. Uses volume confirmation to avoid false breakouts.
+# Target: 15-35 trades/year (60-140 total over 4 years).
 
-name = "1d_Keltner_Channel_Squeeze_Breakout_1wTrend"
-timeframe = "1d"
+name = "6h_Ichimoku_Trend_Follow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    close_series = pd.Series(close)
-    bb_mid = close_series.rolling(window=20, min_periods=20).mean()
-    bb_std = close_series.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_mid + 2 * bb_std
-    bb_lower = bb_mid - 2 * bb_std
-    bb_width = bb_upper - bb_lower
-    
-    # Keltner Channel (20, ATR*1.5)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean()
-    kc_mid = close_series.rolling(window=20, min_periods=20).mean()
-    kc_upper = kc_mid + 1.5 * atr
-    kc_lower = kc_mid - 1.5 * atr
-    kc_width = kc_upper - kc_lower
-    
-    # Squeeze condition: BB width < KC width
-    squeeze = bb_width < kc_width
-    
-    # Breakout conditions
-    breakout_up = close > kc_upper
-    breakout_down = close < kc_lower
-    
-    # Weekly trend filter (EMA 50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Ichimoku trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    uptrend_1w = close > ema_50_1w_aligned
-    downtrend_1w = close < ema_50_1w_aligned
     
-    # Volume confirmation (20-period average)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_confirm = volume > volume_ma * 1.5
+    # Calculate Ichimoku components on daily data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(df_1d['high']).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(df_1d['low']).rolling(window=9, min_periods=9).min().values
+    tenkan_1d = (high_9 + low_9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(df_1d['high']).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(df_1d['low']).rolling(window=26, min_periods=26).min().values
+    kijun_1d = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(df_1d['high']).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(df_1d['low']).rolling(window=52, min_periods=52).min().values
+    senkou_b_1d = (high_52 + low_52) / 2
+    
+    # Align Ichimoku components to 6h timeframe (wait for daily close)
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    
+    # Calculate Ichimoku components on 6h for entry signals
+    high_9_6h = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    low_9_6h = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan_6h = (high_9_6h + low_9_6h) / 2
+    
+    high_26_6h = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    low_26_6h = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun_6h = (high_26_6h + low_26_6h) / 2
+    
+    # Volume confirmation (24-period MA on 6h chart)
+    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 20 periods for BB/KC/ATR/volume
-    start_idx = 20
+    # Warmup: need 52 periods for Senkou B
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(squeeze[i]) or np.isnan(breakout_up[i]) or np.isnan(breakout_down[i]) or
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(tenkan_1d_aligned[i]) or np.isnan(kijun_1d_aligned[i]) or
+            np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]) or
+            np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine if price is above or below the cloud
+        cloud_top = np.maximum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        cloud_bottom = np.minimum(senkou_a_1d_aligned[i], senkou_b_1d_aligned[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
+        
+        # 1d trend: Tenkan/Kijun cross
+        bullish_trend_1d = tenkan_1d_aligned[i] > kijun_1d_aligned[i]
+        bearish_trend_1d = tenkan_1d_aligned[i] < kijun_1d_aligned[i]
+        
+        # 6h entry signal: Tenkan/Kijun cross
+        bullish_cross_6h = tenkan_6h[i] > kijun_6h[i]
+        bearish_cross_6h = tenkan_6h[i] < kijun_6h[i]
+        
+        # Volume confirmation
+        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        
         if position == 0:
-            # Long entry: squeeze breakout up + weekly uptrend + volume
-            if squeeze[i-1] and breakout_up[i] and uptrend_1w[i] and volume_confirm[i]:
+            # Long entry: 1d bullish trend + price above cloud + 6h bullish cross + volume
+            if bullish_trend_1d and price_above_cloud and bullish_cross_6h and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: squeeze breakout down + weekly downtrend + volume
-            elif squeeze[i-1] and breakout_down[i] and downtrend_1w[i] and volume_confirm[i]:
+            # Short entry: 1d bearish trend + price below cloud + 6h bearish cross + volume
+            elif bearish_trend_1d and price_below_cloud and bearish_cross_6h and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KC mid or weekly trend turns down
-            if close[i] < kc_mid[i] or not uptrend_1w[i]:
+            # Long exit: trend turns bearish or price drops below cloud
+            if not bullish_trend_1d or not price_above_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KC mid or weekly trend turns up
-            if close[i] > kc_mid[i] or not downtrend_1w[i]:
+            # Short exit: trend turns bullish or price rises above cloud
+            if not bearish_trend_1d or not price_below_cloud:
                 signals[i] = 0.0
                 position = 0
             else:
