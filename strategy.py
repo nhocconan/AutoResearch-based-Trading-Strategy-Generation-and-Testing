@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
-Hypothesis: Use 12h timeframe with 1d EMA34 trend filter and Camarilla R3/S3 breakout, requiring volume confirmation.
-This strategy aims to capture breakouts with daily trend alignment and volume confirmation to reduce false signals.
-Designed for 12h timeframe to limit trade frequency (target: 50-150 total over 4 years) and improve robustness.
-Works in both bull and bear markets via trend filter (EMA34) and volatility-based volume filter.
+4h_4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
+Hypothesis: Use 1d EMA trend filter with Camarilla R3/S3 breakout on 4h, requiring volume confirmation. 
+Camarilla levels provide high-probability reversal/breakout points. EMA filter ensures trading with daily trend.
+Volume filter avoids false breakouts. Target: 25-35 trades/year, works in bull/bear via trend filter.
 """
 
-name = "12h_12H_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,11 +39,11 @@ def generate_signals(prices):
     camarilla_r3 = close_prev + 1.1 * camarilla_range * 1.1 / 4  # Close + 1.1*(HL)/4 * 1.1
     camarilla_s3 = close_prev - 1.1 * camarilla_range * 1.1 / 4  # Close - 1.1*(HL)/4 * 1.1
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Get 12h price and volume
+    # Get 4h price and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
