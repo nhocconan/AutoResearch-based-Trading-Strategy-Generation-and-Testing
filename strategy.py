@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_With_Volume_Filter
-# Hypothesis: Camarilla pivot levels (R1/S1) from daily act as strong support/resistance.
-# Breakouts above R1 or below S1 with daily trend filter (price > 1d EMA34) and volume confirmation
-# capture institutional breakouts. Works in bull (breakouts up) and bear (breakdowns down) by following
-# daily trend. Low trade frequency expected due to strict breakout conditions + volume + trend filter.
+"""
+12h_RSI_MeanReversion_with_ADX_Filter
+Hypothesis: In crypto markets, RSI extremes often precede mean reversion, especially during consolidation periods.
+Combines RSI(14) with ADX(14) to identify overbought/oversold conditions in ranging markets (ADX < 25).
+Uses 1-day timeframe for trend filter to avoid counter-trend trades in strong trends.
+Designed for low trade frequency (<30/year) to minimize fee drag on 12h timeframe.
+Works in both bull and bear markets by fading extremes during ranging conditions.
+"""
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_With_Volume_Filter"
-timeframe = "4h"
+name = "12h_RSI_MeanReversion_with_ADX_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,73 +26,81 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla pivots and trend filter
+    # 1-day trend filter (avoid counter-trend trades)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's close for Camarilla calculation
-    prev_close_1d = np.append([np.nan], close_1d[:-1])
+    # 1-day EMA(50) for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate Camarilla levels for each day
-    range_1d = high_1d - low_1d
-    R1 = prev_close_1d + (range_1d * 1.0833)
-    S1 = prev_close_1d - (range_1d * 1.0833)
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Daily EMA34 for trend filter
-    close_ser = pd.Series(close_1d)
-    ema_34_1d = close_ser.ewm(span=34, adjust=False, min_periods=34).mean().values
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     
-    # Align 1d indicators to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Volume confirmation (24-period average = 4 days on 4h chart)
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
-        return res
-    vol_ma = mean_arr(volume, 24)
+    # ADX(14) calculation for trend strength
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr + 1e-10)
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34 + 24  # Need EMA34 and volume MA
+    start_idx = 30  # Need enough data for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(rsi[i]) or np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Range condition: ADX < 25 (not trending strongly)
+        is_ranging = adx[i] < 25
         
         if position == 0:
-            # Long: price breaks above R1, above daily EMA34 (uptrend), volume confirmation
-            if close[i] > R1_aligned[i] and close[i] > ema_34_aligned[i] and vol_confirm:
+            # Enter long: RSI oversold (<30) in ranging market, price above 1-day EMA
+            if is_ranging and rsi[i] < 30 and close[i] > ema_50_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below daily EMA34 (downtrend), volume confirmation
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_aligned[i] and vol_confirm:
+            # Enter short: RSI overbought (>70) in ranging market, price below 1-day EMA
+            elif is_ranging and rsi[i] > 70 and close[i] < ema_50_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops back below R1 OR below daily EMA34
-            if close[i] < R1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Exit long: RSI returns to neutral (>50) or trend strengthens (ADX >= 25)
+            if rsi[i] > 50 or adx[i] >= 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises back above S1 OR above daily EMA34
-            if close[i] > S1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Exit short: RSI returns to neutral (<50) or trend strengthens (ADX >= 25)
+            if rsi[i] < 50 or adx[i] >= 25:
                 signals[i] = 0.0
                 position = 0
             else:
