@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 6h_Keltner_Breakout_Squeeze_Volume
-# Hypothesis: Keltner Channel (KC) breakouts during low volatility squeezes with volume capture
-# institutional participation. Squeeze identified by KC width percentile < 20% over 50 periods.
-# Works in bull/bear as volatility expansion precedes directional moves regardless of trend.
+# 12h_Donchian_Breakout_Volume_Trend
+# Hypothesis: 12h Donchian channel breakouts with volume confirmation and 1d EMA trend filter capture major moves while minimizing false signals in ranging markets.
+# The 12h timeframe reduces trade frequency to avoid fee drag, while volume confirmation ensures breakouts have participation.
+# The 1d EMA filter ensures we only trade in the direction of the higher timeframe trend, improving win rate in both bull and bear markets.
+# Designed for 15-25 trades/year to minimize fee drag and maximize edge.
 
-name = "6h_Keltner_Breakout_Squeeze_Volume"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,34 +23,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Keltner Channel (20, ATR multiplier 1.5)
-    kc_period = 20
-    kc_mult = 1.5
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # ATR
-    atr = pd.Series(tr).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
-    
-    # KC middle line (EMA of close)
-    kc_middle = pd.Series(close).ewm(span=kc_period, adjust=False, min_periods=kc_period).mean().values
-    kc_upper = kc_middle + kc_mult * atr
-    kc_lower = kc_middle - kc_mult * atr
-    
-    # KC Width for squeeze detection
-    kc_width = (kc_upper - kc_lower) / kc_middle
-    
-    # Squeeze condition: KC width below 20th percentile over 50 periods
-    kc_width_series = pd.Series(kc_width)
-    kc_width_rank = kc_width_series.rolling(window=50, min_periods=50).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False
-    ).values
-    squeeze_condition = kc_width_rank < 0.2
+    # Donchian Channel (20-period)
+    dc_period = 20
+    # Upper band: highest high over last 20 periods
+    dc_upper = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
+    # Lower band: lowest low over last 20 periods
+    dc_lower = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
     
     # Volume confirmation (20-period average)
     def mean_arr(arr, p):
@@ -60,14 +39,22 @@ def generate_signals(prices):
         return res
     vol_ma = mean_arr(volume, 20)
     
-    signals = np.zeros(n)
-    position = 0
+    # 1d EMA trend filter (34-period)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    start_idx = max(50, kc_period) + 5
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    start_idx = max(20, 34)  # Need enough history for all indicators
     
     for i in range(start_idx, n):
-        if np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(squeeze_condition[i]):
+        if np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,24 +63,24 @@ def generate_signals(prices):
         vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long breakout: price closes above upper KC AND volatility squeeze
-            if close[i] > kc_upper[i] and squeeze_condition[i] and vol_confirm:
+            # Long breakout: price closes above upper DC AND volume confirmation AND 1d EMA uptrend
+            if close[i] > dc_upper[i] and vol_confirm and close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price closes below lower KC AND volatility squeeze
-            elif close[i] < kc_lower[i] and squeeze_condition[i] and vol_confirm:
+            # Short breakout: price closes below lower DC AND volume confirmation AND 1d EMA downtrend
+            elif close[i] < dc_lower[i] and vol_confirm and close[i] < ema_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below middle KC OR volatility expansion (end of squeeze)
-            if close[i] < kc_middle[i] or not squeeze_condition[i]:
+            # Long exit: price closes below lower DC OR loss of volume confirmation
+            if close[i] < dc_lower[i] or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above middle KC OR volatility expansion
-            if close[i] > kc_middle[i] or not squeeze_condition[i]:
+            # Short exit: price closes above upper DC OR loss of volume confirmation
+            if close[i] > dc_upper[i] or not vol_confirm:
                 signals[i] = 0.0
                 position = 0
             else:
