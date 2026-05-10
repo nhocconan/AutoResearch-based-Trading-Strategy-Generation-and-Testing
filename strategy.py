@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 4h_RSI_Trend_Reversal
-# Hypothesis: Long when RSI(14) crosses above 30 in an uptrend (price > 1d EMA200) with volume > 1.3x average.
-# Short when RSI(14) crosses below 70 in a downtrend (price < 1d EMA200) with volume > 1.3x average.
-# Exit when RSI crosses back to neutral (50) or ATR-based stoploss hit.
-# Designed for 20-50 trades/year to avoid fee drag, works in both bull and bear markets by following higher timeframe trend.
+# 4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike
+# Hypothesis: Long when price breaks above Camarilla R3 level with volume > 2x average and price above 1d EMA34.
+# Short when price breaks below Camarilla S3 level with volume > 2x average and price below 1d EMA34.
+# Exit when price crosses back below R3 (long) or above S3 (short).
+# Uses Camarilla pivot levels for institutional support/resistance, effective in both bull and bear markets.
+# Designed for 20-50 trades/year to avoid fee drag.
 
-name = "4h_RSI_Trend_Reversal"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,31 +19,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    rs = np.full(n, np.nan)
-    rsi = np.full(n, np.nan)
-    
-    # Wilder's smoothing
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100
     
     # Calculate ATR(20) for stoploss
     tr1 = high[1:] - low[1:]
@@ -53,10 +33,22 @@ def generate_signals(prices):
     for i in range(20, n):
         atr[i] = np.nanmean(tr[i-19:i+1])
     
-    # Get 1d EMA200 for trend filter
+    # Calculate Camarilla levels from previous day
+    camarilla_R3 = np.full(n, np.nan)
+    camarilla_S3 = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        range_ = prev_high - prev_low
+        camarilla_R3[i] = prev_close + range_ * 1.1 / 4
+        camarilla_S3[i] = prev_close - range_ * 1.1 / 4
+    
+    # Get 1d EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Volume average (20 periods)
     vol_ma = np.full(n, np.nan)
@@ -66,39 +58,36 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup for RSI and EMA
+    start_idx = 35  # Ensure sufficient warmup for EMA34
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(camarilla_R3[i]) or np.isnan(camarilla_S3[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Trade only in direction of 1d EMA200 trend
-            if close[i] > ema_200_1d_aligned[i]:  # Uptrend
-                # Long: RSI crosses above 30 with volume confirmation
-                if rsi[i] > 30 and rsi[i-1] <= 30 and volume[i] > 1.3 * vol_ma[i]:
-                    signals[i] = 0.25
-                    position = 1
-            else:  # Downtrend
-                # Short: RSI crosses below 70 with volume confirmation
-                if rsi[i] < 70 and rsi[i-1] >= 70 and volume[i] > 1.3 * vol_ma[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above R3 with volume spike and price above 1d EMA34
+            if close[i] > camarilla_R3[i] and close[i-1] <= camarilla_R3[i-1] and volume[i] > 2.0 * vol_ma[i] and close[i] > ema_34_1d_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below S3 with volume spike and price below 1d EMA34
+            elif close[i] < camarilla_S3[i] and close[i-1] >= camarilla_S3[i-1] and volume[i] > 2.0 * vol_ma[i] and close[i] < ema_34_1d_aligned[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: RSI crosses back to 50 or stoploss hit
-            if rsi[i] < 50 or (i > 0 and low[i] < close[i-1] - 2.0 * atr[i-1]):
+            # Exit: price crosses back below R3
+            if close[i] < camarilla_R3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: RSI crosses back to 50 or stoploss hit
-            if rsi[i] > 50 or (i > 0 and high[i] > close[i-1] + 2.0 * atr[i-1]):
+            # Exit: price crosses back above S3
+            if close[i] > camarilla_S3[i]:
                 signals[i] = 0.0
                 position = 0
             else:
