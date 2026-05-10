@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 12h_1d_Camarilla_R1_S1_Breakout_TrendFilter
-# Hypothesis: 12h breakout from daily Camarilla pivot R1/S1 levels with trend filter using daily EMA34 slope and volume confirmation.
-# Uses daily trend via EMA34 slope for bias and volume spike to avoid false breakouts.
-# Designed for low trade frequency (~15-30/year) to minimize fee drag in bear markets.
-# Camarilla levels provide precise support/resistance; EMA34 slope filters trend direction; volume surge confirms breakout validity.
+# 4h_12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: 4h breakout from daily Camarilla R1/S1 levels with 12h EMA trend filter and volume confirmation.
+# Uses Camarilla pivot levels for precise support/resistance, EMA12h for trend bias, and volume surge to avoid false breakouts.
+# Designed for low trade frequency (20-40/year) to minimize fee drag in bull and bear markets.
+# Camarilla levels provide institutional-relevant price levels that work across regimes.
 
-name = "12h_1d_Camarilla_R1_S1_Breakout_TrendFilter"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,42 +18,49 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivots and trend filter
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily OHLC for Camarilla calculation
+    # Calculate daily Camarilla levels (using previous day's OHLC)
+    # Camarilla formulas: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily Camarilla levels (based on previous day)
-    # Camarilla formulas: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
-    range_1d = high_1d - low_1d
-    camarilla_r1 = close_1d + range_1d * 1.1 / 12
-    camarilla_s1 = close_1d - range_1d * 1.1 / 12
+    # Shift by 1 to use previous day's data (no look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # first bar
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
-    # Shift by 1 to use previous day's levels (avoid look-ahead)
-    camarilla_r1 = np.roll(camarilla_r1, 1)
-    camarilla_s1 = np.roll(camarilla_s1, 1)
-    camarilla_r1[0] = np.nan  # First value invalid
-    camarilla_s1[0] = np.nan
+    # Calculate Camarilla R1 and S1 for previous day
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Daily EMA34 for trend filter (using slope)
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_slope = np.diff(ema_34_1d, prepend=ema_34_1d[0])  # slope = today - yesterday
-    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope_12h = np.diff(ema_50_12h, prepend=ema_50_12h[0])  # slope = today - yesterday
+    ema_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_12h)
     
     # ATR for volatility and trailing stop
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -77,7 +84,7 @@ def generate_signals(prices):
         # Skip if any critical values are NaN
         if (np.isnan(camarilla_r1_aligned[i]) or
             np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema_slope_aligned[i]) or
+            np.isnan(ema_slope_12h_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -87,9 +94,9 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from daily EMA34 slope
-        bullish_trend = ema_slope_aligned[i] > 0
-        bearish_trend = ema_slope_aligned[i] < 0
+        # Trend filter from 12h EMA50 slope
+        bullish_trend = ema_slope_12h_aligned[i] > 0
+        bearish_trend = ema_slope_12h_aligned[i] < 0
         
         # Volume confirmation (2.0x average)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
