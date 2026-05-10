@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 6H_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: Trade breakouts of Camarilla R3/S3 levels in direction of 12h EMA50 trend
-# with volume confirmation. Works in bull/bear by following trend and using volume to
-# filter false breakouts. Target: 15-30 trades/year per symbol.
+# 4H_Parabolic_SAR_Direction_Trend
+# Hypothesis: Trade long when Parabolic SAR is below price and ADX>25, short when SAR above price and ADX>25.
+# Uses 1d EMA50 trend filter to align with higher timeframe direction.
+# Parabolic SAR provides clear trend direction with built-in stop/reverse mechanism.
+# Works in both bull and bear markets by following the trend and using volume confirmation.
+# Target: 20-40 trades/year per symbol.
 
-name = "6H_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "6h"
+name = "4H_Parabolic_SAR_Direction_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,91 +19,162 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels from previous day
-    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
-    # We need previous day's close, high, low
-    # Use 1d data to get daily OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Parabolic SAR calculation
+    def calculate_parabolic_sar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+        n = len(high)
+        sar = np.zeros(n)
+        trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
+        af = np.zeros(n)
+        ep = np.zeros(n)  # extreme point
+        
+        # Initialize
+        sar[0] = low[0]
+        trend[0] = 1
+        af[0] = af_start
+        ep[0] = high[0]
+        
+        for i in range(1, n):
+            if trend[i-1] == 1:  # was in uptrend
+                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+                # Check for reversal
+                if low[i] <= sar[i]:
+                    trend[i] = -1
+                    sar[i] = ep[i-1]  # SAR becomes previous EP
+                    af[i] = af_start
+                    ep[i] = low[i]
+                else:
+                    trend[i] = 1
+                    if high[i] > ep[i-1]:
+                        ep[i] = high[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+            else:  # was in downtrend
+                sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+                # Check for reversal
+                if high[i] >= sar[i]:
+                    trend[i] = 1
+                    sar[i] = ep[i-1]  # SAR becomes previous EP
+                    af[i] = af_start
+                    ep[i] = high[i]
+                else:
+                    trend[i] = -1
+                    if low[i] < ep[i-1]:
+                        ep[i] = low[i]
+                        af[i] = min(af[i-1] + af_increment, af_max)
+                    else:
+                        ep[i] = ep[i-1]
+                        af[i] = af[i-1]
+        return sar, trend
     
-    # Previous day's OHLC (shifted by 1 to avoid look-ahead)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    sar, psar_trend = calculate_parabolic_sar(high, low)
     
-    # Calculate Camarilla R3 and S3 for previous day
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 2
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 2
+    # ADX for trend strength (14-period)
+    close_s = pd.Series(close)
+    high_s = pd.Series(high)
+    low_s = pd.Series(low)
     
-    # Align to 6h timeframe (previous day's levels are available at next bar)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # +DM and -DM
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Wilder's smoothing
+    atr = np.zeros_like(tr)
+    if len(tr) > 0:
+        atr[0] = tr[0]
+        for i in range(1, len(tr)):
+            atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    # +DI and -DI
+    plus_di = 100 * (pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean() / 
+                     pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
+    minus_di = 100 * (pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean() / 
+                      pd.Series(atr).ewm(alpha=1/14, adjust=False).mean())
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    # Prepend NaN for alignment (since we lost first bar in calculations)
+    sar = np.concatenate([np.full(1, np.nan), sar])
+    psar_trend = np.concatenate([np.full(1, np.nan), psar_trend])
+    adx = np.concatenate([np.full(1, np.nan), adx])
     
-    # 12h trend filter: EMA50
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    # Trend: price above EMA50 = uptrend, below = downtrend
-    trend_12h = close_12h > ema50_12h  # True for uptrend
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h.astype(float))
-    
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume average (20-period)
     volume_s = pd.Series(volume)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Daily trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_uptrend = close_1d > ema50_1d
+    daily_downtrend = close_1d < ema50_1d
+    
+    # Align daily trend to 4h
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for indicators
+    # Start after we have enough data
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(sar[i]) or np.isnan(psar_trend[i]) or np.isnan(adx[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(daily_uptrend_aligned[i]) or 
+            np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
+        strong_trend = adx[i] > 25
         volume_confirm = vol_ratio > 1.5
         
-        # Trend direction
-        is_uptrend = trend_12h_aligned[i] > 0.5
-        is_downtrend = trend_12h_aligned[i] < 0.5
+        daily_up = daily_uptrend_aligned[i] > 0.5
+        daily_down = daily_downtrend_aligned[i] > 0.5
+        
+        # SAR signals: price above SAR = bullish, price below SAR = bearish
+        price_above_sar = close[i] > sar[i]
+        price_below_sar = close[i] < sar[i]
         
         if position == 0:
-            # Enter long: price breaks above R3 in uptrend with volume
-            if is_uptrend and volume_confirm:
-                if close[i] > camarilla_r3_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short: price breaks below S3 in downtrend with volume
-            elif is_downtrend and volume_confirm:
-                if close[i] < camarilla_s3_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: price above SAR + daily uptrend + strong trend + volume
+            if price_above_sar and daily_up and strong_trend and volume_confirm:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: price below SAR + daily downtrend + strong trend + volume
+            elif price_below_sar and daily_down and strong_trend and volume_confirm:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit: trend reverses or price moves back below R3
-            if not is_uptrend or close[i] < camarilla_r3_aligned[i]:
+            # Exit long: price below SAR or trend weakens
+            if price_below_sar or not daily_up or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: trend reverses or price moves back above S3
-            if not is_downtrend or close[i] > camarilla_s3_aligned[i]:
+            # Exit short: price above SAR or trend weakens
+            if price_above_sar or not daily_down or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
