@@ -1,13 +1,14 @@
-# 1d_KAMA_Trend_RSI_Overbought_Oversold
-# Hypothesis: Use Kaufman Adaptive Moving Average (KAMA) on daily timeframe to determine trend direction.
-# In uptrend (price above KAMA), look for RSI oversold (<30) for long entries.
-# In downtrend (price below KAMA), look for RSI overbought (>70) for short entries.
-# This mean-reversion within trend strategy works in both bull and bear markets by trading pullbacks.
-# Uses daily timeframe with weekly trend filter for higher reliability.
-# Target: 15-25 trades/year to minimize fee drag.
+#!/usr/bin/env python3
+"""
+6h_Liquidity_Grab_Reversal
+Hypothesis: Price often sweeps liquidity (equal highs/lows) before reversing.
+Look for equal highs/lows formation on 1d, then wait for 6h price to breach that level
+with volume spike, then enter reversal. Works in ranging markets (common in 2025+)
+and during pullbacks in trends. Targets 50-120 trades over 4 years (12-30/year).
+"""
 
-name = "1d_KAMA_Trend_RSI_Overbought_Oversold"
-timeframe = "1d"
+name = "6h_Liquidity_Grab_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,112 +21,95 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get daily data for KAMA and RSI calculation
+    # 1d equal highs/lows detection (liquidity zones)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate KAMA ( Kaufman Adaptive Moving Average ) on daily data
-    # Parameters: ER length=10, Fast SC=2, Slow SC=30
-    er_len = 10
-    fast_sc = 2
-    slow_sc = 30
+    # Find equal highs/lows within 0.1% tolerance
+    equal_high = np.zeros(len(high_1d), dtype=bool)
+    equal_low = np.zeros(len(low_1d), dtype=bool)
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.zeros_like(close_1d)
-    for i in range(1, len(close_1d)):
-        volatility[i] = volatility[i-1] + np.abs(close_1d[i] - close_1d[i-1])
+    for i in range(2, len(high_1d)):
+        # Equal high: current high within 0.1% of previous high
+        if abs(high_1d[i] - high_1d[i-1]) / high_1d[i-1] < 0.001:
+            equal_high[i] = True
+        # Equal low: current low within 0.1% of previous low
+        if abs(low_1d[i] - low_1d[i-1]) / low_1d[i-1] < 0.001:
+            equal_low[i] = True
     
-    # Avoid division by zero
-    er = np.zeros_like(close_1d)
-    for i in range(er_len, len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 0
+    # Store liquidity levels
+    liq_high = np.where(equal_high, high_1d, np.nan)
+    liq_low = np.where(equal_low, low_1d, np.nan)
     
-    # Smoothing Constant
-    sc = np.zeros_like(close_1d)
-    fast_sc_val = 2 / (fast_sc + 1)
-    slow_sc_val = 2 / (slow_sc + 1)
-    sc = er * (fast_sc_val - slow_sc_val) + slow_sc_val
-    sc = sc * sc  # Square for exponential smoothing
+    # Forward fill to maintain levels until broken
+    for i in range(1, len(liq_high)):
+        if not np.isnan(liq_high[i-1]) and np.isnan(liq_high[i]):
+            liq_high[i] = liq_high[i-1]
+        if not np.isnan(liq_low[i-1]) and np.isnan(liq_low[i]):
+            liq_low[i] = liq_low[i-1]
     
-    # KAMA calculation
-    kama = np.full_like(close_1d, np.nan)
-    kama[er_len] = close_1d[er_len]  # Start with close
-    for i in range(er_len + 1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # Align to 6h
+    liq_high_aligned = align_htf_to_ltf(prices, df_1d, liq_high)
+    liq_low_aligned = align_htf_to_ltf(prices, df_1d, liq_low)
     
-    # Align KAMA to daily timeframe (no additional delay needed)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Calculate RSI on daily data
-    rsi_len = 14
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    
-    if len(close_1d) >= rsi_len:
-        avg_gain[rsi_len-1] = np.mean(gain[:rsi_len])
-        avg_loss[rsi_len-1] = np.mean(loss[:rsi_len])
-        
-        for i in range(rsi_len, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * (rsi_len-1) + gain[i]) / rsi_len
-            avg_loss[i] = (avg_loss[i-1] * (rsi_len-1) + loss[i]) / rsi_len
-    
-    rs = np.zeros_like(close_1d)
-    rsi = np.zeros_like(close_1d)
-    for i in range(rsi_len, len(close_1d)):
-        if avg_loss[i] != 0:
-            rs[i] = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs[i]))
-        else:
-            rsi[i] = 100  # Avoid division by zero
-    
-    # Align RSI to daily timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # Weekly trend filter: use weekly EMA34 to determine higher timeframe trend
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly EMA34
-    ema_len = 34
-    alpha = 2 / (ema_len + 1)
-    ema_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= ema_len:
-        ema_1w[ema_len-1] = np.mean(close_1w[:ema_len])
-        for i in range(ema_len, len(close_1w)):
-            ema_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema_1w[i-1]
-    
-    # Align weekly EMA to daily timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # 1d volume spike detection
+    vol_ma20 = np.full(len(volume_1d), np.nan)
+    if len(volume_1d) >= 20:
+        vol_ma20[19] = np.mean(volume_1d[:20])
+        for i in range(20, len(volume_1d)):
+            vol_ma20[i] = np.mean(volume_1d[i-19:i+1])
+    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
     
     signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after enough data for all indicators
-    start_idx = max(er_len, rsi_len, ema_len)
+    start_idx = max(20, 2)  # Need volume MA and lookback
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(ema_1w_aligned[i]):
+        if np.isnan(liq_high_aligned[i]) or np.isnan(liq_low_aligned[i]) or \
+           np.isnan(vol_ma20_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
             continue
-            
-        # Long conditions: price above KAMA (uptrend), RSI oversold, and weekly uptrend
-        if (close[i] > kama_aligned[i] and 
-            rsi_aligned[i] < 30 and 
-            close[i] > ema_1w_aligned[i]):
-            signals[i] = 0.25
-            
-        # Short conditions: price below KAMA (downtrend), RSI overbought, and weekly downtrend
-        elif (close[i] < kama_aligned[i] and 
-              rsi_aligned[i] > 70 and 
-              close[i] < ema_1w_aligned[i]):
-            signals[i] = -0.25
+        
+        # Volume spike: current 6h volume > 2x average 1d volume (scaled)
+        vol_6h_approx = vol_ma20_aligned[i] / 4.0  # 4x 6h in 1d
+        volume_spike = volume[i] > 2.0 * vol_6h_approx
+        
+        if position == 0:
+            # Long: price takes out liquidity low then reverses up
+            if (low[i] <= liq_low_aligned[i] * 1.001 and  # breached low
+                close[i] > liq_low_aligned[i] and        # closed back above
+                volume_spike):
+                signals[i] = 0.25
+                position = 1
+            # Short: price takes out liquidity high then reverses down
+            elif (high[i] >= liq_high_aligned[i] * 0.999 and  # breached high
+                  close[i] < liq_high_aligned[i] and          # closed back below
+                  volume_spike):
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Exit: price takes out liquidity high or loses momentum
+            if high[i] >= liq_high_aligned[i] * 0.999 or volume[i] < vol_6h_approx:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit: price takes out liquidity low or loses momentum
+            if low[i] <= liq_low_aligned[i] * 1.001 or volume[i] < vol_6h_approx:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
