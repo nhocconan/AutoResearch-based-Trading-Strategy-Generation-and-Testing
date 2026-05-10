@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v2
-# Hypothesis: Uses tighter breakout at Camarilla R1/S1 with 1d EMA trend filter and volume confirmation.
-# Designed to reduce trade frequency vs previous version by increasing volume threshold to 2.0x and adding ATR filter.
-# Targets 15-30 trades/year to avoid fee drag. Works in bull/bear markets by aligning with 1d trend.
-# Position size 0.25 for balanced risk.
+# 12h_WeeklyPivot_VolumeRegime_Signal
+# Hypothesis: Uses weekly pivot points (R1/S1) from 1w data, combined with daily volume regime filter (volume > 1.5x 20-day average) and ADX trend filter on 1d.
+# Designed for low-frequency, high-conviction trades on 12h timeframe to avoid fee drag.
+# Works in bull markets via long breakouts above weekly R1 in uptrend, and in bear markets via short breakdowns below weekly S1 in downtrend.
+# Volume regime avoids low-liquidity chop; ADX ensures trades align with stronger trends.
+# Position size: 0.25 to balance risk and return. Target: 20-40 trades/year.
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Tight_v2"
-timeframe = "4h"
+name = "12h_WeeklyPivot_VolumeRegime_Signal"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,80 +24,104 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels (using previous day's data)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for pivot points (using prior week's OHLC)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
+    # Get daily data for volume regime and ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points: R1, S1 from prior week
+    # Formula: R1 = (2 * PP) - Low, S1 = (2 * PP) - High, where PP = (High + Low + Close)/3
+    prev_weekly_high = df_1w['high'].shift(1).values
+    prev_weekly_low = df_1w['low'].shift(1).values
+    prev_weekly_close = df_1w['close'].shift(1).values
+    pp = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
+    r1 = (2 * pp) - prev_weekly_low
+    s1 = (2 * pp) - prev_weekly_high
+    
+    # Align weekly pivot levels to 12h timeframe (waits for weekly bar close)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    
+    # Daily volume regime: volume > 1.5x 20-day average
+    vol_ma_20d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20d)
+    volume_regime = volume > (vol_ma_20d_aligned * 1.5)
+    
+    # Daily ADX trend filter (14-period)
+    # TR = max(high-low, |high-prev_close|, |low-prev_close|)
+    prev_close_1d = df_1d['close'].shift(1).values
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - prev_close_1d)
+    tr3 = np.abs(df_1d['low'] - prev_close_1d)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # +DM = high - prev_high (if > prev_low - low and > 0)
+    prev_high_1d = df_1d['high'].shift(1).values
+    prev_low_1d = df_1d['low'].shift(1).values
+    plus_dm = df_1d['high'] - prev_high_1d
+    minus_dm = prev_low_1d - df_1d['low']
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0.0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0.0)
     
-    # Calculate R1 and S1 (tighter levels than R2/S2)
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    # Smoothed +DM, -DM, TR
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values
+    tr_smooth = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # +DI = 100 * (+DM_smoothed / TR_smoothed), -DI = 100 * (-DM_smoothed / TR_smoothed)
+    plus_di = 100 * (plus_dm_smooth / tr_smooth)
+    minus_di = 100 * (minus_dm_smooth / tr_smooth)
     
-    # Get 1d data for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # DX = 100 * |(+DI - -DI)| / ((+DI) + (-DI))
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    # ADX = smoothed DX
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Calculate volume average for confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume and ADX arrays aligned to 12h
+    volume_regime_aligned = align_htf_to_ltf(prices, df_1d, volume_regime.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Warmup for volume MA, 1d EMA, and ATR
+    start_idx = max(20, 14)  # Warmup for vol MA, ADX
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(adx_aligned[i]) or np.isnan(volume_regime_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 1d
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
-        
-        # Stronger volume confirmation and volatility filter
-        volume_confirm = volume[i] > volume_ma[i] * 2.0
-        volatility_filter = atr[i] > 0  # Ensure valid ATR
+        # Only trade if ADX > 20 (trending market) and volume regime is active
+        strong_trend = adx_aligned[i] > 20
+        vol_ok = volume_regime_aligned[i] > 0.5  # boolean as float
         
         if position == 0:
-            # Long entry: price breaks above R1 with volume confirmation, 1d uptrend, and volatility
-            if close[i] > r1_aligned[i] and volume_confirm and uptrend and volatility_filter:
+            # Long: price breaks above weekly R1, in uptrend, with volume
+            if close[i] > r1_aligned[i] and strong_trend and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S1 with volume confirmation, 1d downtrend, and volatility
-            elif close[i] < s1_aligned[i] and volume_confirm and downtrend and volatility_filter:
+            # Short: price breaks below weekly S1, in downtrend, with volume
+            elif close[i] < s1_aligned[i] and strong_trend and vol_ok:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or trend turns down
-            if close[i] < r1_aligned[i] or not uptrend:
+            # Long exit: price falls back below weekly R1 or trend weakens
+            if close[i] < r1_aligned[i] or not strong_trend or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or trend turns up
-            if close[i] > s1_aligned[i] or not downtrend:
+            # Short exit: price rises back above weekly S1 or trend weakens
+            if close[i] > s1_aligned[i] or not strong_trend or not vol_ok:
                 signals[i] = 0.0
                 position = 0
             else:
