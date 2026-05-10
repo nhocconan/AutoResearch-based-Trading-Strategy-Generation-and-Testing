@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-# Hypothesis: Long when price breaks above Camarilla R1 (1d) during weekly uptrend with volume > 2x average.
-# Short when price breaks below Camarilla S1 (1d) during weekly downtrend with volume > 2x average.
-# Uses weekly trend filter: only trade in direction of weekly EMA50 trend.
-# Camarilla levels provide mean-reversion structure in ranging markets, breakouts capture trends.
-# Weekly trend filter avoids counter-trend trades in strong moves. Volume confirms institutional participation.
-# Target: 15-30 trades/year per symbol.
+# 1H_4H1D_Trend_Filter_Momentum
+# Hypothesis: Use 4h for primary trend direction (EMA50 slope) and 1d for regime filter (price vs EMA200).
+# Enter on 1h momentum bursts (RSI > 60 for long, < 40 for short) only when aligned with 4h/1d trends.
+# Exit when momentum fades (RSI returns to 40-60 range) or trend breaks.
+# Designed for low trade frequency: ~20-40/year by requiring 3-timeframe alignment.
+# Works in bull/bear by following higher timeframe trends and using momentum for timing.
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "1H_4H1D_Trend_Filter_Momentum"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,97 +22,90 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 12h indicators
-    close_s = pd.Series(close)
-    volume_s = pd.Series(volume)
+    # 1h RSI for momentum timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume average (20-period)
-    vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
-    
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 4h trend: EMA50 slope (rising/falling)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_slope = np.diff(ema50_4h, prepend=ema50_4h[0])
+    ema50_4h_rising = ema50_4h_slope > 0
+    ema50_4h_falling = ema50_4h_slope < 0
+    ema50_4h_rising_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h_rising.astype(float))
+    ema50_4h_falling_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h_falling.astype(float))
     
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_uptrend = close_1w > ema50_1w
-    weekly_downtrend = close_1w < ema50_1w
-    
-    # Align weekly trend to 12h
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
-    
-    # Daily OHLC for Camarilla levels (1d)
+    # 1d regime: price vs EMA200 (bull/bear filter)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels: R1, S1
-    # R1 = close + (high - low) * 1.12 / 12
-    # S1 = close - (high - low) * 1.12 / 12
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.12 / 12
-    s1 = close_1d - camarilla_range * 1.12 / 12
-    
-    # Align Camarilla levels to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    price_above_ema200 = close_1d > ema200_1d
+    price_below_ema200 = close_1d < ema200_1d
+    price_above_ema200_aligned = align_htf_to_ltf(prices, df_1d, price_above_ema200.astype(float))
+    price_below_ema200_aligned = align_htf_to_ltf(prices, df_1d, price_below_ema200.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data
-    start_idx = 30
+    start_idx = 50  # need enough data for all indicators
     
     for i in range(start_idx, n):
-        # Skip if data not ready
-        if (np.isnan(vol_ma[i]) or
-            np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+        # Skip if any data not ready
+        if (np.isnan(rsi[i]) or 
+            np.isnan(ema50_4h_rising_aligned[i]) or np.isnan(ema50_4h_falling_aligned[i]) or
+            np.isnan(price_above_ema200_aligned[i]) or np.isnan(price_below_ema200_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_confirm = vol_ratio > 2.0
+        rsi_val = rsi[i]
+        bull_momentum = rsi_val > 60
+        bear_momentum = rsi_val < 40
         
-        weekly_up = weekly_uptrend_aligned[i] > 0.5
-        weekly_down = weekly_downtrend_aligned[i] > 0.5
+        # 4h trend direction
+        up4h = ema50_4h_rising_aligned[i] > 0.5
+        down4h = ema50_4h_falling_aligned[i] > 0.5
+        
+        # 1d regime
+        bull_regime = price_above_ema200_aligned[i] > 0.5
+        bear_regime = price_below_ema200_aligned[i] > 0.5
         
         if position == 0:
-            # Enter long: weekly uptrend + price breaks above R1 + volume
-            if weekly_up and volume_confirm:
-                if close[i] > r1_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short: weekly downtrend + price breaks below S1 + volume
-            elif weekly_down and volume_confirm:
-                if close[i] < s1_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: 4h uptrend + 1d bull regime + bullish momentum
+            if up4h and bull_regime and bull_momentum:
+                signals[i] = 0.20
+                position = 1
+            # Enter short: 4h downtrend + 1d bear regime + bearish momentum
+            elif down4h and bear_regime and bear_momentum:
+                signals[i] = -0.20
+                position = -1
         
         elif position == 1:
-            # Exit conditions: weekly trend weakens or price breaks below S1 (mean reversion)
-            if not weekly_up or close[i] < s1_aligned[i]:
+            # Exit long: momentum fades (RSI < 50) or trend breaks
+            if rsi_val < 50 or not (up4h and bull_regime):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         
         elif position == -1:
-            # Exit conditions: weekly trend weakens or price breaks above R1 (mean reversion)
-            if not weekly_down or close[i] > r1_aligned[i]:
+            # Exit short: momentum fades (RSI > 50) or trend breaks
+            if rsi_val > 50 or not (down4h and bear_regime):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
