@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn
-# Hypothesis: Camarilla pivot levels (R1/S1) on 4h chart with 1d EMA34 trend filter and volume spike confirmation.
-# Long when price breaks above R1 with 1d uptrend and volume spike; short when breaks below S1 with 1d downtrend and volume spike.
-# Uses daily trend for multi-timeframe alignment and volume confirmation to reduce false signals.
-# Designed for moderate trade frequency (target: 25-50 trades/year) with clear structure.
+# 6h_Liquidity_Vacuum_Reversal
+# Hypothesis: After extended moves, liquidity vacuums form where price moves with low volume, creating reversal opportunities.
+# Uses 12h trend filter, volume imbalance detection, and price rejection at extremes.
+# Works in bull/bear markets by fading exhausted moves during low-volume conditions.
 
-name = "4H_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "6h_Liquidity_Vacuum_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,83 +17,90 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 4h bar using previous day's OHLC
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # We need previous day's close, high, low
-    prev_day_close = df_1d['close'].shift(1).values
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
+    # Calculate 12h EMA(50) for trend
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # Calculate Camarilla R1 and S1 for each day
-    camarilla_r1 = prev_day_close + (prev_day_high - prev_day_low) * 1.1 / 12
-    camarilla_s1 = prev_day_close - (prev_day_high - prev_day_low) * 1.1 / 12
-    
-    # Align to 4h timeframe (wait for daily close)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Calculate daily EMA for trend filter (34-period)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation (20-period MA on 4h chart)
+    # Volume imbalance: current volume vs 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = np.where(volume_ma > 0, volume / volume_ma, 1.0)
+    
+    # Price position in recent range (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    range_width = highest_high - lowest_low
+    # Avoid division by zero
+    range_width = np.where(range_width == 0, 1e-10, range_width)
+    price_position = (close - lowest_low) / range_width  # 0 = at low, 1 = at high
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1 for previous day, 34 for EMA, 20 for volume
-    start_idx = max(1, 34, 20)
+    # Warmup: need 20-period calculations
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ratio[i]) or 
+            np.isnan(price_position[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Trend filter: 12h EMA50
+        uptrend = close[i] > ema_50_12h_aligned[i]
+        downtrend = close[i] < ema_50_12h_aligned[i]
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # Liquidity vacuum conditions: low volume + price at extreme
+        low_volume = volume_ratio[i] < 0.6  # Volume significantly below average
+        at_high_extreme = price_position[i] > 0.85  # Near 20-period high
+        at_low_extreme = price_position[i] < 0.15   # Near 20-period low
         
-        # Price relative to Camarilla levels
-        price_above_r1 = close[i] > camarilla_r1_aligned[i]
-        price_below_s1 = close[i] < camarilla_s1_aligned[i]
+        # Price rejection signals: long wick at extreme
+        body_size = abs(close[i] - prices['open'].iloc[i])
+        total_range = high[i] - low[i]
+        upper_wick = high[i] - max(close[i], prices['open'].iloc[i])
+        lower_wick = min(close[i], prices['open'].iloc[i]) - low[i]
+        
+        # Avoid division by zero
+        if total_range == 0:
+            total_range = 1e-10
+        upper_wick_ratio = upper_wick / total_range
+        lower_wick_ratio = lower_wick / total_range
+        
+        rejection_at_high = upper_wick_ratio > 0.6  # Long upper wick
+        rejection_at_low = lower_wick_ratio > 0.6   # Long lower wick
         
         if position == 0:
-            # Long entry: price above R1 + daily uptrend + volume spike
-            if price_above_r1 and uptrend and volume_confirm:
+            # Long: price rejecting low extreme in uptrend with low volume (liquidity vacuum)
+            if at_low_extreme and rejection_at_low and low_volume and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below S1 + daily downtrend + volume spike
-            elif price_below_s1 and downtrend and volume_confirm:
+            # Short: price rejecting high extreme in downtrend with low volume
+            elif at_high_extreme and rejection_at_high and low_volume and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S1 or daily trend turns down
-            if close[i] < camarilla_s1_aligned[i] or not uptrend:
+            # Long exit: price breaks above extreme or volume returns
+            if price_position[i] > 0.95 or volume_ratio[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above R1 or daily trend turns up
-            if close[i] > camarilla_r1_aligned[i] or not downtrend:
+            # Short exit: price breaks below extreme or volume returns
+            if price_position[i] < 0.05 or volume_ratio[i] > 1.2:
                 signals[i] = 0.0
                 position = 0
             else:
