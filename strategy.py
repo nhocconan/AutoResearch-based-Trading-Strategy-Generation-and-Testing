@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_Breakout_With_Volume
-Hypothesis: Daily breakout above/below weekly pivot S1/R1 with volume confirmation and trend filter from weekly EMA34. 
-Weekly pivot levels provide institutional support/resistance, weekly EMA34 ensures trend alignment, 
-volume > 1.5x 20-period EMA confirms breakout strength. Designed for low trade frequency (target: 10-30 trades/year) 
-to minimize fee drag and work in both bull/bear markets by following higher timeframe trend.
+4h_Donchian20_Breakout_12hEMA50_Trend_Volume
+Hypothesis: 4h Donchian(20) breakouts in the direction of 12h EMA50 trend, with volume confirmation.
+Works in bull markets by buying breakouts in uptrends, and in bear markets by selling breakdowns in downtrends.
+Target: 20-50 trades/year to minimize fee drag.
 """
 
-name = "1d_WeeklyPivot_Breakout_With_Volume"
-timeframe = "1d"
+name = "4h_Donchian20_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +16,34 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for pivot levels and trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 1:
+    if len(df_12h) < 1:
         return np.zeros(n)
     
-    # Weekly EMA34 for trend filter
-    ema_34 = pd.Series(df_1w['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
+    # 12h EMA50 for trend filter
+    ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
-    # Calculate weekly pivot levels (using previous week's OHLC)
-    # Standard pivot: P = (H + L + C) / 3
-    # Support 1: S1 = (2 * P) - H
-    # Resistance 1: R1 = (2 * P) - L
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    pivot = (high_1w + low_1w + close_1w) / 3
-    r1 = (2 * pivot) - high_1w
-    s1 = (2 * pivot) - low_1w
-    
-    # Align weekly pivot levels to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Get price, volume
+    # Get price and volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Calculate 4h Donchian channels (20-period)
+    # We need to calculate highest high and lowest low over the last 20 periods
+    highest_high = np.zeros(n)
+    lowest_low = np.zeros(n)
+    
+    for i in range(n):
+        start_idx = max(0, i - 19)  # Look back 20 periods including current
+        highest_high[i] = np.max(high[start_idx:i+1])
+        lowest_low[i] = np.min(low[start_idx:i+1])
     
     # Volume filter: current volume > 1.5x 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -59,38 +52,40 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA34 (34) and enough history for pivot calculation
-    start_idx = 34
+    # Warmup: need EMA50 (50) and enough history for Donchian (20)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+        if np.isnan(ema_50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine trend: bullish if close > EMA50, bearish if close < EMA50
+        is_uptrend = close[i] > ema_50_aligned[i]
+        is_downtrend = close[i] < ema_50_aligned[i]
+        
         if position == 0:
-            # Long: above weekly EMA34 (uptrend) AND price breaks above R1 with volume
-            if close[i] > ema_34_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
+            # Long: uptrend AND price breaks above 20-period high WITH volume
+            if is_uptrend and high[i] > highest_high[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: below weekly EMA34 (downtrend) AND price breaks below S1 with volume
-            elif close[i] < ema_34_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
+            # Short: downtrend AND price breaks below 20-period low WITH volume
+            elif is_downtrend and low[i] < lowest_low[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 OR trend turns bearish
-            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Long exit: price breaks below 20-period low OR trend turns bearish
+            if low[i] < lowest_low[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 OR trend turns bullish
-            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Short exit: price breaks above 20-period high OR trend turns bullish
+            if high[i] > highest_high[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
