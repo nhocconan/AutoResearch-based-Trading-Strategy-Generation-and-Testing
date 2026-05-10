@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Price respects Camarilla pivot levels (R1/S1) on daily chart. 
-# Long when price breaks above R1 with volume > 1.5x average in uptrend (price > 1d EMA50).
-# Short when price breaks below S1 with volume > 1.5x average in downtrend (price < 1d EMA50).
-# Exit when price crosses back below/above EMA20 or ATR-based stoploss hit.
-# Designed for 12-37 trades/year to avoid fee drag. Works in bull/bear via trend filter.
+# 4h_Bollinger_Band_Squeeze_Breakout_Volume
+# Hypothesis: In low volatility (Bollinger Band width < 20th percentile), breakout of Bollinger Bands with volume > 1.5x average signals trend continuation.
+# Long when price breaks above upper band, short when breaks below lower band.
+# Uses 1d ADX > 25 to confirm trending regime on higher timeframe.
+# Designed for 20-50 trades/year to avoid fee drag. Works in bull/bear via volatility breakout logic.
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Bollinger_Band_Squeeze_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -24,82 +23,120 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(20) for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.full(n, np.nan)
-    for i in range(20, n):
-        atr[i] = np.nanmean(tr[i-19:i+1])
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = np.full(n, np.nan)
+    for i in range(bb_period, n):
+        sma[i] = np.mean(close[i-bb_period:i])
     
-    # EMA20 for exit condition
-    ema20 = np.full(n, np.nan)
-    k = 2 / (20 + 1)
-    for i in range(20, n):
-        if i == 20:
-            ema20[i] = np.mean(close[0:20])
-        else:
-            ema20[i] = close[i] * k + ema20[i-1] * (1 - k)
+    bb_std_dev = np.full(n, np.nan)
+    for i in range(bb_period, n):
+        bb_std_dev[i] = np.std(close[i-bb_period:i])
     
-    # Get daily OHLC for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    # Camarilla levels: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    bb_upper = sma + bb_std * bb_std_dev
+    bb_lower = sma - bb_std * bb_std_dev
+    bb_width = bb_upper - bb_lower
     
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Get 1d EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Bollinger Band width percentile (lookback 50 periods)
+    bb_width_percentile = np.full(n, np.nan)
+    for i in range(50, n):
+        window = bb_width[i-50:i]
+        valid = window[~np.isnan(window)]
+        if len(valid) > 0:
+            bb_width_percentile[i] = (np.sum(valid < bb_width[i]) / len(valid)) * 100
     
     # Volume average (20 periods)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.nanmean(volume[i-20:i])
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # Get 1d ADX for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate ADX components
+    plus_dm = np.zeros(len(df_1d))
+    minus_dm = np.zeros(len(df_1d))
+    tr = np.zeros(len(df_1d))
+    
+    for i in range(1, len(df_1d)):
+        high_diff = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
+        low_diff = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+        tr[i] = max(
+            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+        )
+    
+    # Smooth with Wilder's smoothing (alpha = 1/14)
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period_adx = 14
+    tr_smooth = wilder_smooth(tr, period_adx)
+    plus_dm_smooth = wilder_smooth(plus_dm, period_adx)
+    minus_dm_smooth = wilder_smooth(minus_dm, period_adx)
+    
+    plus_di = np.full(len(df_1d), np.nan)
+    minus_di = np.full(len(df_1d), np.nan)
+    dx = np.full(len(df_1d), np.nan)
+    
+    for i in range(len(df_1d)):
+        if tr_smooth[i] > 0:
+            plus_di[i] = (plus_dm_smooth[i] / tr_smooth[i]) * 100
+            minus_di[i] = (minus_dm_smooth[i] / tr_smooth[i]) * 100
+            dx[i] = (abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+    
+    adx = wilder_smooth(dx, period_adx)
+    adx_1d = adx
+    
+    # Align 1d ADX to 4h
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Ensure sufficient warmup
+    start_idx = 50  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width_percentile[i]) or np.isnan(vol_ma[i]) or np.isnan(adx_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Squeeze condition: Bollinger Band width in low volatility (< 20th percentile)
+        is_squeeze = bb_width_percentile[i] < 20
+        
         if position == 0:
-            # Trade only in direction of 1d EMA50 trend
-            if close[i] > ema_50_1d_aligned[i]:  # Uptrend
-                # Long: Breakout above Camarilla R1 with volume confirmation
-                if close[i] > camarilla_r1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Only enter in trending regime (ADX > 25)
+            if adx_1d_aligned[i] > 25:
+                # Long: Breakout above upper band with volume confirmation
+                if close[i] > bb_upper[i] and volume[i] > 1.5 * vol_ma[i] and is_squeeze:
                     signals[i] = 0.25
                     position = 1
-            else:  # Downtrend
-                # Short: Breakout below Camarilla S1 with volume confirmation
-                if close[i] < camarilla_s1_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+                # Short: Breakout below lower band with volume confirmation
+                elif close[i] < bb_lower[i] and volume[i] > 1.5 * vol_ma[i] and is_squeeze:
                     signals[i] = -0.25
                     position = -1
         
         elif position == 1:
-            # Exit: Price closes below EMA20 or stoploss hit
-            if close[i] < ema20[i] or (i > 0 and low[i] < camarilla_s1_aligned[i] - 2.0 * atr[i-1]):
+            # Exit: Price closes below middle band (SMA) or volatility expands
+            if close[i] < sma[i] or bb_width_percentile[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: Price closes above EMA20 or stoploss hit
-            if close[i] > ema20[i] or (i > 0 and high[i] > camarilla_r1_aligned[i] + 2.0 * atr[i-1]):
+            # Exit: Price closes above middle band (SMA) or volatility expands
+            if close[i] > sma[i] or bb_width_percentile[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
