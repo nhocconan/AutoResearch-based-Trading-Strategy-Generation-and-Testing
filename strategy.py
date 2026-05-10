@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Daily trend filter (EMA34) reduces false breakouts, while daily Camarilla R3/S3 levels
-# provide precise entries on 12h timeframe. Volume confirmation ensures breakout strength.
-# Designed for low trade frequency (12-37/year) to minimize fee drift. Works in bull via trend-following
-# breakouts and in bear via mean-reversion at extremes when trend aligns.
+# 4h_VolumeSpike_KAMA_Reversal
+# Hypothesis: KAMA trend direction combined with volume spikes captures reversal moves
+# in both bull and bear markets. Uses 1d trend filter to avoid counter-trend trades.
+# Low-frequency design (target 20-30 trades/year) to minimize fee drag.
 
-name = "12h_1D_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_VolumeSpike_KAMA_Reversal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -23,71 +22,74 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter and Camarilla levels
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # KAMA parameters
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
+    # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close_1d, k=er_period))
+    volatility = np.sum(np.abs(np.diff(close_1d)), axis=0) if len(close_1d) > er_period else np.zeros_like(close_1d)
+    # Vectorized volatility calculation
+    volatility = np.full_like(close_1d, np.nan)
+    for i in range(er_period, len(close_1d)):
+        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-er_period+1:i+1])))
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    # KAMA calculation
+    kama = np.full_like(close_1d, np.nan)
+    kama[er_period-1] = close_1d[er_period-1]
+    for i in range(er_period, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    kama_1d = kama
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # Daily EMA34 for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate typical price and range from previous day
-    typical_price = (high_1d + low_1d + close_1d) / 3
-    range_hl = high_1d - low_1d
-    # Camarilla R3 and S3 levels
-    R3 = typical_price + (range_hl * 1.2500)
-    S3 = typical_price - (range_hl * 1.2500)
-    # Align daily levels to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume confirmation (12-period average on 12h = ~6 days)
-    vol_ma_period = 12
+    # Volume confirmation (20-period average on 4h)
     def mean_arr(arr, p):
         res = np.full_like(arr, np.nan)
         if len(arr) >= p:
             for i in range(p-1, len(arr)):
                 res[i] = np.mean(arr[i-p+1:i+1])
         return res
-    vol_ma = mean_arr(volume, vol_ma_period)
+    vol_ma = mean_arr(volume, 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 12) + 5  # need enough history for calculations
+    start_idx = max(20, 30) + 5
     
     for i in range(start_idx, n):
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or \
-           np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 2.0x average (stricter for fewer trades)
-        volume_confirm = volume[i] > 2.0 * vol_ma[i] if vol_ma[i] > 0 else False
+        # Volume spike: current volume > 2.5x average (strict for low frequency)
+        volume_spike = volume[i] > 2.5 * vol_ma[i] if vol_ma[i] > 0 else False
         
         if position == 0:
-            # Long: price breaks above R3 with volume, above daily EMA34 (uptrend)
-            if close[i] > R3_aligned[i] and volume_confirm and close[i] > ema_1d_aligned[i]:
+            # Long: price crosses above KAMA with volume spike
+            if close[i] > kama_1d_aligned[i] and close[i-1] <= kama_1d_aligned[i-1] and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume, below daily EMA34 (downtrend)
-            elif close[i] < S3_aligned[i] and volume_confirm and close[i] < ema_1d_aligned[i]:
+            # Short: price crosses below KAMA with volume spike
+            elif close[i] < kama_1d_aligned[i] and close[i-1] >= kama_1d_aligned[i-1] and volume_spike:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 or breaks below daily EMA34
-            if close[i] < S3_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price crosses below KAMA
+            if close[i] < kama_1d_aligned[i] and close[i-1] >= kama_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R3 or breaks above daily EMA34
-            if close[i] > R3_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price crosses above KAMA
+            if close[i] > kama_1d_aligned[i] and close[i-1] <= kama_1d_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
