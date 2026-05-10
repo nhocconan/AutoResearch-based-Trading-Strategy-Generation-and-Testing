@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dEMA134_Trend_VolumeS
-# Hypothesis: Breakouts at Camarilla R3/S3 levels with 1d EMA134 trend filter and volume confirmation (1.5x 24-period average).
+# 4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeS
+# Hypothesis: Breakouts at Camarilla R3/S3 levels with 1d EMA34 trend filter and volume confirmation (1.5x 24-period average).
 # Uses 4h timeframe for institutional entries, works in bull/bear markets via trend alignment.
 # Target: 20-50 trades/year to minimize fee drag on 4h timeframe.
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA134_Trend_VolumeS"
+name = "4h_Camarilla_R3S3_Breakout_1dEMA34_Trend_VolumeS"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 140:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,15 +22,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d trend filter (EMA134)
+    # 1d trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 134:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema134_1d = pd.Series(close_1d).ewm(span=134, adjust=False, min_periods=134).mean().values
-    trend_1d_up = close_1d > ema134_1d
-    trend_1d_down = close_1d < ema134_1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_1d_up = close_1d > ema34_1d
+    trend_1d_down = close_1d < ema34_1d
     
     # Align 1d trend to 4h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
@@ -75,7 +75,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 140  # Need enough data for all indicators
+    start_idx = 50  # Need enough data for all indicators
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
