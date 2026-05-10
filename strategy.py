@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-Hypothesis: Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume spike confirmation.
-Works in bull/bear by following 12h trend; volatility-based entries reduce false breakouts.
-Target: 20-30 trades/year per symbol with strict entry conditions to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: 12h chart strategy using daily Camarilla R1/S1 breakouts with 1d EMA trend filter and volume confirmation.
+Works in bull/bear by following daily trend; volatility-based entries reduce false breakouts.
+Target: 12-30 trades/year per symbol with strict entry conditions to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,16 +24,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema_50_12h[i-1]
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Calculate daily EMA34 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        alpha = 2 / (34 + 1)
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     # Calculate volume SMA(20)
     vol_sma = np.full(n, np.nan)
@@ -43,10 +43,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,23 +75,23 @@ def generate_signals(prices):
                 
                 if position == 0:
                     # Long: Break above R1 with uptrend and volume confirmation
-                    if close[i] > r1 and close[i] > ema_50_12h_aligned[i] and volume_confirm:
+                    if close[i] > r1 and close[i] > ema_34_1d_aligned[i] and volume_confirm:
                         signals[i] = 0.25
                         position = 1
                     # Short: Break below S1 with downtrend and volume confirmation
-                    elif close[i] < s1 and close[i] < ema_50_12h_aligned[i] and volume_confirm:
+                    elif close[i] < s1 and close[i] < ema_34_1d_aligned[i] and volume_confirm:
                         signals[i] = -0.25
                         position = -1
                 elif position == 1:
-                    # Exit: Close crosses back below EMA50_12h
-                    if close[i] < ema_50_12h_aligned[i]:
+                    # Exit: Close crosses back below EMA34_1d
+                    if close[i] < ema_34_1d_aligned[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
                         signals[i] = 0.25
                 elif position == -1:
-                    # Exit: Close crosses back above EMA50_12h
-                    if close[i] > ema_50_12h_aligned[i]:
+                    # Exit: Close crosses back above EMA34_1d
+                    if close[i] > ema_34_1d_aligned[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
