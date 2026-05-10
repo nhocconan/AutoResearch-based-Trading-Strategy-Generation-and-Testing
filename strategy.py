@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-# 1D_4H_Trend_Filtered_Camarilla_S1_R1_Breakout
-# Hypothesis: Daily breakouts from daily Camarilla R1/S1 levels filtered by 4-hour trend (EMA34) and volume confirmation. Designed for 1d timeframe to achieve 7-25 trades/year with strong trend alignment to work in both bull and bear markets.
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2
+# Hypothesis: 12-hour breakouts from daily Camarilla R1/S1 levels with daily trend filter (EMA34) and volume confirmation.
+# Uses dynamic volume threshold (median-based) to avoid look-ahead and improve robustness. Targets 12-37 trades/year on 12h.
 
-name = "1D_4H_Trend_Filtered_Camarilla_S1_R1_Breakout"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,20 +21,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla levels
+    # Daily data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # 4H data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # Daily EMA34 for trend filter (using 4H EMA aligned to daily)
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
     # Camarilla levels (based on previous day)
     def calculate_camarilla(h, l, c):
@@ -48,19 +44,20 @@ def generate_signals(prices):
     for i in range(1, len(close_1d)):
         R1[i], S1[i] = calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
     
-    # Daily volume confirmation: 20-period average
-    def mean_arr(arr, p):
+    # Dynamic volume threshold: median of past 20 days (avoid look-ahead)
+    def rolling_median(arr, window):
         res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p - 1, len(arr)):
-                res[i] = np.mean(arr[i - p + 1:i + 1])
+        if len(arr) >= window:
+            for i in range(window - 1, len(arr)):
+                res[i] = np.median(arr[i - window + 1:i + 1])
         return res
-    vol_ma_20 = mean_arr(volume_1d, 20)
+    vol_median_20 = rolling_median(volume_1d, 20)
     
-    # Align daily indicators to daily timeframe (wait for 1d bar to close)
+    # Align daily indicators to 12h timeframe (wait for 1d bar to close)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    vol_median_20_aligned = align_htf_to_ltf(prices, df_1d, vol_median_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,31 +66,31 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
-           np.isnan(ema_34_4h_aligned[i]) or np.isnan(vol_ma_20_aligned[i]):
+           np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_median_20_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
         if position == 0:
-            # Long: price breaks above R1, above 4H EMA34, strong volume
-            if close[i] > R1_aligned[i] and close[i] > ema_34_4h_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Long: price breaks above R1, above daily EMA34, volume above median
+            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume[i] > vol_median_20_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, below 4H EMA34, strong volume
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_4h_aligned[i] and volume[i] > 2.0 * vol_ma_20_aligned[i]:
+            # Short: price breaks below S1, below daily EMA34, volume above median
+            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume[i] > vol_median_20_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price drops below S1 or below 4H EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema_34_4h_aligned[i]:
+            # Long exit: price drops below S1 or below daily EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 or above 4H EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema_34_4h_aligned[i]:
+            # Short exit: price rises above R1 or above daily EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
