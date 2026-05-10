@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v4
-# Hypothesis: 4h breakout of daily Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation.
-# Uses 1d trend for bias to avoid whipsaws in sideways markets, 4h for entry timing.
-# Targets 25-40 trades/year to minimize fee drag. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
+# 12h_Donchian20_1dTrend_VolumeSpike_v1
+# Hypothesis: 12h breakout of daily Donchian(20) channels with 1d EMA50 trend filter and volume spike confirmation.
+# Uses 1d trend for bias to avoid whipsaws in sideways markets, 12h for entry timing.
+# Targets 20-40 trades/year to minimize fee drag. Works in bull/bear by trading breakouts aligned with higher timeframe trend.
 # Added volume confirmation to reduce false breakouts.
-# This version adds stricter volume threshold (2.0x) and uses median-based volatility filter to reduce churn.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v4"
-timeframe = "4h"
+name = "12h_Donchian20_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,34 +28,31 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1d EMA34 trend
+    # 1d EMA50 trend
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_1d_up = close_1d > ema34_1d
-    trend_1d_down = close_1d < ema34_1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1d_up = close_1d > ema50_1d
+    trend_1d_down = close_1d < ema50_1d
     
-    # Align 1d trend to 4h
+    # Align 1d trend to 12h
     trend_1d_up_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_up.astype(float))
     trend_1d_down_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_down.astype(float))
     
-    # 1d data for Camarilla pivot levels (using previous day's OHLC)
-    close_1d_arr = df_1d['close'].values
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
+    # Daily high/low for Donchian channel (20-day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Shift to get previous day's values (avoid look-ahead)
-    prev_close = np.concatenate([[close_1d_arr[0]], close_1d_arr[:-1]])
-    prev_high = np.concatenate([[high_1d_arr[0]], high_1d_arr[:-1]])
-    prev_low = np.concatenate([[low_1d_arr[0]], low_1d_arr[:-1]])
+    # 20-period rolling max/min for Donchian bands
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_up = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Align Donchian levels to 12h
+    donchian_up_aligned = align_htf_to_ltf(prices, df_1d, donchian_up)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
-    # Align Camarilla levels to 4h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume filter: current volume > 2.0 * 20-period average (stricter to reduce trades)
+    # Volume filter: current volume > 1.5 * 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -67,7 +63,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         if (np.isnan(trend_1d_up_aligned[i]) or np.isnan(trend_1d_down_aligned[i]) or
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(donchian_up_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,28 +71,27 @@ def generate_signals(prices):
             continue
         
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
-        volume_filter = vol_ratio > 2.0  # Increased threshold for fewer, higher-quality signals
+        volume_filter = vol_ratio > 1.5
         
         if position == 0:
-            # Long: price breaks above Camarilla R1 with uptrend and volume spike
-            if (close[i] > camarilla_r1_aligned[i] and
+            # Long: price breaks above Donchian upper band with uptrend and volume spike
+            if (close[i] > donchian_up_aligned[i] and
                 trend_1d_up_aligned[i] > 0.5 and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S1 with downtrend and volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and
+            # Short: price breaks below Donchian lower band with downtrend and volume spike
+            elif (close[i] < donchian_low_aligned[i] and
                   trend_1d_down_aligned[i] > 0.5 and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
         
         elif position == 1:
-            # Exit: price returns to Camarilla pivot (central level) or trend fails
-            camarilla_pivot = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
-            camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(prev_close, camarilla_pivot))[i] if not np.isnan(prev_high[i]) else camarilla_pivot
+            # Exit: price returns to Donchian midpoint or trend fails
+            donchian_mid = (donchian_up_aligned[i] + donchian_low_aligned[i]) / 2
             
-            if (close[i] < camarilla_pivot_aligned or
+            if (close[i] < donchian_mid or
                 trend_1d_up_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
@@ -104,11 +99,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit: price returns to Camarilla pivot or trend fails
-            camarilla_pivot = (prev_high[i] + prev_low[i] + prev_close[i]) / 3
-            camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, np.full_like(prev_close, camarilla_pivot))[i] if not np.isnan(prev_high[i]) else camarilla_pivot
+            # Exit: price returns to Donchian midpoint or trend fails
+            donchian_mid = (donchian_up_aligned[i] + donchian_low_aligned[i]) / 2
             
-            if (close[i] > camarilla_pivot_aligned or
+            if (close[i] > donchian_mid or
                 trend_1d_down_aligned[i] < 0.5):
                 signals[i] = 0.0
                 position = 0
