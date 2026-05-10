@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_Improved
 # Hypothesis: 4h Camarilla R1/S1 breakout filtered by 12h EMA50 trend and volume surge.
-# Camarilla levels provide high-probability reversal/breakout points.
-# Breakout above R1 or below S1 with volume and trend continuation captures strong moves.
-# Works in bull/bear markets by using 12h trend filter and requiring volume confirmation.
-# Targets 20-50 trades/year to minimize fee drag on 4h timeframe.
+# Improvements: reduced trading frequency via stricter volume threshold (3x vs 2x),
+# added minimum holding period (3 bars), and refined exit conditions to reduce whipsaw.
+# Targets 20-40 trades/year to minimize fee drag on 4h timeframe.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume_Improved"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,11 +34,6 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous 1d OHLC
-    # Camarilla: Close +- (High - Low) * multipliers
-    # R1 = Close + (High - Low) * 1.0833
-    # S1 = Close - (High - Low) * 1.0833
-    # R2 = Close + (High - Low) * 1.1666
-    # S2 = Close - (High - Low) * 1.1666
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d_vals = df_1d['close'].values
@@ -69,6 +63,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0  # track holding period
     
     # Warmup: need EMA50 (50) + volume MA (30)
     start_idx = 80
@@ -84,6 +79,7 @@ def generate_signals(prices):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
             continue
         
         # Determine trend from 12h EMA50
@@ -91,16 +87,15 @@ def generate_signals(prices):
         uptrend = close_12h_aligned[i] > ema_50_12h_aligned[i]
         downtrend = close_12h_aligned[i] < ema_50_12h_aligned[i]
         
-        # Volume confirmation
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (stricter: 3x average)
+        volume_surge = volume[i] > 3.0 * vol_ma[i]
         
         # Camarilla breakout signals
         breakout_r1 = close[i] > r1_aligned[i-1]
         breakdown_s1 = close[i] < s1_aligned[i-1]
-        breakout_r2 = close[i] > r2_aligned[i-1]
-        breakdown_s2 = close[i] < s2_aligned[i-1]
         
         if position == 0:
+            bars_since_entry = 0
             # Long: Camarilla R1 breakout with volume surge and 12h uptrend
             if breakout_r1 and volume_surge and uptrend:
                 signals[i] = 0.25
@@ -109,19 +104,28 @@ def generate_signals(prices):
             elif breakdown_s1 and volume_surge and downtrend:
                 signals[i] = -0.25
                 position = -1
-        elif position == 1:
-            # Long exit: price breaks below S1 or trend changes
-            if close[i] < s1_aligned[i-1] or not uptrend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short exit: price breaks above R1 or trend changes
-            if close[i] > r1_aligned[i-1] or not downtrend:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        else:
+            bars_since_entry += 1
+            # Enforce minimum holding period of 3 bars
+            if bars_since_entry < 3:
+                signals[i] = signals[i-1]  # maintain position
+                continue
+            
+            if position == 1:
+                # Long exit: price breaks below S1 or trend changes
+                if close[i] < s1_aligned[i-1] or not uptrend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short exit: price breaks above R1 or trend changes
+                if close[i] > r1_aligned[i-1] or not downtrend:
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
