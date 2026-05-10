@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# 4h_EquiVolume_RSI_Trend
-# Hypothesis: On 4h timeframe, combine EquiVolume-weighted RSI with 1d EMA trend filter and volume confirmation.
-# EquiVolume weights price by volume to identify institutional interest. RSI(14) > 55 with rising EquiVolume indicates bullish momentum.
-# RSI(14) < 45 with falling EquiVolume indicates bearish momentum. 1d EMA50 filter ensures trades align with higher timeframe trend.
-# Volume confirmation (current volume > 1.5x 20-period average) reduces false signals.
-# Designed for low trade frequency (20-40/year) to minimize fee flood in choppy markets.
+# 1D_WeeklyDonchian_Breakout_Volume
+# Hypothesis: Weekly Donchian channel breakouts with volume confirmation capture strong trends across bull and bear markets.
+# The weekly timeframe provides robust trend context, reducing false signals in noisy daily data.
+# Volume confirmation ensures breakouts are supported by participation, increasing reliability.
+# Designed for low trade frequency (7-25/year) to minimize fee drag and improve generalization.
 
-name = "4h_EquiVolume_RSI_Trend"
-timeframe = "4h"
+name = "1D_WeeklyDonchian_Breakout_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,71 +23,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # EquiVolume calculation: typical price * volume
-    typical_price = (high + low + close) / 3.0
-    equivolume = typical_price * volume
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # RSI(14) on EquiVolume
-    rsi_period = 14
-    delta = np.diff(equivolume, prepend=equivolume[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Weekly Donchian channel (20-period)
+    donchian_len = 20
+    high_roll = pd.Series(high_1w).rolling(window=donchian_len, min_periods=donchian_len).max()
+    low_roll = pd.Series(low_1w).rolling(window=donchian_len, min_periods=donchian_len).min()
+    upper_1w = high_roll.values
+    lower_1w = low_roll.values
     
-    # Use Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align weekly Donchian levels to daily timeframe
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
-    # Volume confirmation (20-period average)
-    def mean_arr(arr, p):
-        res = np.full_like(arr, np.nan)
-        if len(arr) >= p:
-            for i in range(p-1, len(arr)):
-                res[i] = np.mean(arr[i-p+1:i+1])
-        return res
-    vol_ma = mean_arr(volume, 20)
-    
-    # HTF: 1d EMA50 for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean()
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Weekly average volume for confirmation
+    vol_avg_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_avg_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)  # Ensure sufficient history
+    start_idx = 50  # Ensure sufficient history for indicators
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(ema_50_1d_aligned[i]):
+        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or \
+           np.isnan(vol_avg_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        vol_confirm = volume[i] > 1.5 * vol_ma[i] if vol_ma[i] > 0 else False
-        rsi_val = rsi[i]
+        vol_confirm = volume[i] > 1.5 * vol_avg_1w_aligned[i] if vol_avg_1w_aligned[i] > 0 else False
         
         if position == 0:
-            # Long: RSI > 55, rising EquiVolume (proxy: RSI rising), above 1d EMA50, volume confirmation
-            if rsi_val > 55 and rsi[i] > rsi[i-1] and close[i] > ema_50_1d_aligned[i] and vol_confirm:
+            # Long entry: price breaks above weekly Donchian upper with volume
+            if close[i] > upper_1w_aligned[i] and vol_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45, falling EquiVolume (proxy: RSI falling), below 1d EMA50, volume confirmation
-            elif rsi_val < 45 and rsi[i] < rsi[i-1] and close[i] < ema_50_1d_aligned[i] and vol_confirm:
+            # Short entry: price breaks below weekly Donchian lower with volume
+            elif close[i] < lower_1w_aligned[i] and vol_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI < 50 or breaks below 1d EMA50
-            if rsi_val < 50 or close[i] < ema_50_1d_aligned[i]:
+            # Long exit: price breaks below weekly Donchian lower
+            if close[i] < lower_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI > 50 or breaks above 1d EMA50
-            if rsi_val > 50 or close[i] > ema_50_1d_aligned[i]:
+            # Short exit: price breaks above weekly Donchian upper
+            if close[i] > upper_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
