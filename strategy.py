@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Trend_1dRSI_Volume
-Hypothesis: KAMA trend direction on 12h with 1d RSI filter and volume confirmation.
-KAMA adapts to market noise, providing reliable trend signals.
-In trending markets, KAMA follows price closely; in ranging markets, it stays flat.
-RSI filter avoids overbought/oversold extremes. Volume confirmation ensures strong breakouts.
-Works in both bull (KAMA up + RSI<70) and bear (KAMA down + RSI>30).
+6h_Pocock_Binary_Wave_1wTrend_Volume
+Hypothesis: Uses Pocock Binary Wave (PBW) - a proprietary oscillator combining
+RSI, Stochastic, and Williams %R concepts to identify momentum exhaustion and
+reversals. Combined with 1-week trend filter to ensure we trade with the
+higher timeframe momentum, and volume confirmation to filter weak signals.
+PBW oscillates between 0-100 with overbought >70 and oversold <30.
+In trending markets, PBW stays in extreme zones; pullbacks to 50 offer re-entry.
+In ranging markets, reversals at 70/30 provide mean reversion.
+Volume confirmation ensures only significant moves are traded.
 Target: 50-150 total trades over 4 years (12-37/year).
+Works in both bull (buy PBW pullbacks in uptrend) and bear (sell PBW bounces in downtrend).
 """
 
-name = "12h_KAMA_Trend_1dRSI_Volume"
-timeframe = "12h"
+name = "6h_Pocock_Binary_Wave_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,91 +26,107 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d RSI(14) for overbought/oversold filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    rsi_14_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 14:
-        delta = np.diff(close_1d)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(len(close_1d), np.nan)
-        avg_loss = np.full(len(close_1d), np.nan)
-        avg_gain[13] = np.mean(gain[:14])
-        avg_loss[13] = np.mean(loss[:14])
-        for i in range(14, len(close_1d)):
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-        rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.inf)
-        rsi_14_1d = 100 - (100 / (1 + rs))
-        rsi_14_1d[np.isinf(rs)] = 100
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
+    # 1-week EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema50_1w[49] = np.mean(close_1w[:50])
+        alpha = 2 / (50 + 1)
+        for i in range(50, len(close_1w)):
+            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # 1d volume SMA20 for volume confirmation
-    volume_1d = df_1d['volume'].values
-    vol_sma20_1d = np.full(len(volume_1d), np.nan)
-    if len(volume_1d) >= 20:
-        vol_sma20_1d[19] = np.mean(volume_1d[:20])
-        for i in range(20, len(volume_1d)):
-            vol_sma20_1d[i] = (vol_sma20_1d[i-1] * 19 + volume_1d[i]) / 20
-    vol_sma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_sma20_1d)
+    # 1-week volume SMA20 for volume confirmation
+    volume_1w = df_1w['volume'].values
+    vol_sma20_1w = np.full(len(volume_1w), np.nan)
+    if len(volume_1w) >= 20:
+        vol_sma20_1w[19] = np.mean(volume_1w[:20])
+        for i in range(20, len(volume_1w)):
+            vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + volume_1w[i]) / 20
+    vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
     
-    # KAMA(10) on 12h for trend direction
-    er_period = 10
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    kama = np.full(n, np.nan)
-    if n >= er_period:
-        change = np.abs(close[er_period:] - close[:-er_period])
-        volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute properly
-        # Correct volatility calculation
-        volatility = np.array([np.sum(np.abs(np.diff(close[i:i+er_period]))) for i in range(n-er_period+1)])
-        volatility = np.concatenate([np.full(er_period-1, np.nan), volatility])
-        er = np.where(volatility != 0, change / volatility, 0)
-        sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-        kama[er_period-1] = np.mean(close[:er_period])
-        for i in range(er_period, n):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Pocock Binary Wave (PBW) - 14 period
+    # PBW = (RSI + Stoch + Williams %R) / 3, scaled 0-100
+    rsi_period = 14
+    stoch_period = 14
+    williams_period = 14
+    
+    # RSI calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.full(n, np.nan)
+    avg_loss = np.full(n, np.nan)
+    if n >= rsi_period:
+        avg_gain[rsi_period-1] = np.mean(gain[1:rsi_period+1])
+        avg_loss[rsi_period-1] = np.mean(loss[1:rsi_period+1])
+        for i in range(rsi_period, n):
+            avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+            avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Stochastic %K
+    lowest_low = np.full(n, np.nan)
+    highest_high = np.full(n, np.nan)
+    for i in range(stoch_period-1, n):
+        lowest_low[i] = np.min(low[i-stoch_period+1:i+1])
+        highest_high[i] = np.max(high[i-stoch_period+1:i+1])
+    
+    stoch_k = np.where((highest_high - lowest_low) != 0, 
+                       (close - lowest_low) / (highest_high - lowest_low) * 100, 50)
+    
+    # Williams %R
+    williams_r = np.where((highest_high - lowest_low) != 0,
+                          (highest_high - close) / (highest_high - lowest_low) * -100, -50)
+    
+    # PBW = average of RSI, Stoch, and Williams %R (all 0-100 scale)
+    pbw = (rsi + stoch_k + (100 + williams_r)) / 3  # Williams %R is -100 to 0, so +100 to make 0-100
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(14, er_period)  # warmup for RSI and KAMA
+    start_idx = max(rsi_period, stoch_period, williams_period, 50)  # warmup
     
     for i in range(start_idx, n):
-        if np.isnan(rsi_14_1d_aligned[i]) or np.isnan(vol_sma20_1d_aligned[i]) or np.isnan(kama[i]):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_1w_aligned[i]) or np.isnan(pbw[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1d volume (scaled to 12h)
-        # Approximate 12h volume from 1d: 1d volume / 2 (since 24h/12h = 2)
-        vol_12h_approx = vol_sma20_1d_aligned[i] / 2.0
-        volume_confirm = volume[i] > 1.5 * vol_12h_approx
+        # Volume confirmation: current 6h volume > 1.3x average 1w volume (scaled)
+        # Approximate 6h volume from 1w: 1w volume / 28 (7days*24h/6h = 28)
+        vol_6h_approx = vol_sma20_1w_aligned[i] / 28.0
+        volume_confirm = volume[i] > 1.3 * vol_6h_approx
         
         if position == 0:
-            # Long: KAMA rising (bullish trend) with RSI not overbought and volume confirmation
-            if kama[i] > kama[i-1] and rsi_14_1d_aligned[i] < 70 and volume_confirm:
+            # Long: PBW pulls back from oversold (<30) to above 40 in uptrend with volume
+            if pbw[i] > 40 and pbw[i-1] <= 40 and close[i] > ema50_1w_aligned[i] and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA falling (bearish trend) with RSI not oversold and volume confirmation
-            elif kama[i] < kama[i-1] and rsi_14_1d_aligned[i] > 30 and volume_confirm:
+            # Short: PBW bounces from overbought (>70) to below 60 in downtrend with volume
+            elif pbw[i] < 60 and pbw[i-1] >= 60 and close[i] < ema50_1w_aligned[i] and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: KAMA reverses or RSI overbought
-            if kama[i] < kama[i-1] or rsi_14_1d_aligned[i] >= 70:
+            # Exit: PBW reaches overbought (>70) or trend reversal
+            if pbw[i] >= 70 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: KAMA reverses or RSI oversold
-            if kama[i] > kama[i-1] or rsi_14_1d_aligned[i] <= 30:
+            # Exit: PBW reaches oversold (<30) or trend reversal
+            if pbw[i] <= 30 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
