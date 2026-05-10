@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum_v3
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h momentum filter (price > 12h EMA20) and volume confirmation.
-# Uses tighter volume filter (4x average) and longer EMA (40) to reduce trade frequency.
-# Targets 15-25 trades/year to avoid fee drag. Works in bull/bear via momentum filter.
+# 4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum_v4
+# Hypothesis: 4h Camarilla R1/S1 breakout with 12h momentum filter (price > 12h EMA40) and volume confirmation (5x average).
+# Targets 15-25 trades/year to avoid fee drag. Works in bull/bear via momentum filter. Uses 12h EMA40 for stronger trend filter.
 
-name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum_v3"
+name = "4h_12h_Camarilla_R1_S1_Breakout_Volume_Momentum_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,7 +27,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 12h EMA40 for momentum filter (slower = fewer signals)
+    # Calculate 12h EMA40 for momentum filter (stronger trend filter)
     close_12h = df_12h['close'].values
     ema_40 = pd.Series(close_12h).ewm(span=40, adjust=False, min_periods=40).mean().values
     ema_40_aligned = align_htf_to_ltf(prices, df_12h, ema_40)
@@ -51,10 +50,10 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # 4h 10-period EMA for exit (slower exit = fewer reversals)
+    # 4h 10-period EMA for exit
     ema_10 = pd.Series(close).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Volume confirmation (4.0x 30-period average - much tighter)
+    # Volume confirmation (5.0x 30-period average - tighter)
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
@@ -80,8 +79,8 @@ def generate_signals(prices):
         bullish_momentum = close_12h_aligned[i] > ema_40_aligned[i]
         bearish_momentum = close_12h_aligned[i] < ema_40_aligned[i]
         
-        # Volume confirmation (4.0x average - much tighter)
-        volume_surge = volume[i] > 4.0 * vol_ma[i]
+        # Volume confirmation (5.0x average - tighter)
+        volume_surge = volume[i] > 5.0 * vol_ma[i]
         
         if position == 0:
             # Long: breakout above R1 in bullish momentum with volume surge
