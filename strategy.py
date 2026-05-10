@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Adaptive_Keltner_MeanReversion_TrendFilter
-Hypothesis: Mean reversion at Keltner Channel (ATR-based) extremes with trend filter on 12h EMA200.
-Buys near lower band in uptrend, sells near upper band in downtrend. Uses volume confirmation to avoid false signals.
-Designed to work in both bull and bear markets by following 12h trend and fading extremes only when aligned with higher timeframe.
-Target: 20-30 trades/year per symbol with strict entry conditions to minimize fee drag.
+1d_KAMA_Trend_Filter_With_RSI_And_Chop_Filter
+Hypothesis: KAMA trend direction filters RSI extremes with chop filter to avoid whipsaw.
+Uses weekly timeframe for regime detection to work in both bull and bear markets.
+Target: 10-20 trades/year per symbol with strict entry conditions to minimize fee drag.
 """
 
-name = "4h_Adaptive_Keltner_MeanReversion_TrendFilter"
-timeframe = "4h"
+name = "1d_KAMA_Trend_Filter_With_RSI_And_Chop_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -25,87 +24,128 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ATR(20) for Keltner Channels
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
+    # Calculate KAMA(10) for trend
+    def kama(close, period=10):
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=1)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+        kama = np.full_like(close, np.nan)
+        kama[period] = close[period]
+        for i in range(period+1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
+    
+    kama_val = kama(close, 10)
+    
+    # Calculate RSI(14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.full_like(close, np.nan)
+    avg_loss = np.full_like(close, np.nan)
+    for i in range(14, len(close)):
+        if i == 14:
+            avg_gain[i] = np.mean(gain[1:15])
+            avg_loss[i] = np.mean(loss[1:15])
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Chop filter using weekly data
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # True Range for chop calculation
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(np.roll(high_1w, 1) - close_1w)
+    tr3 = np.abs(np.roll(low_1w, 1) - close_1w)
     tr2[0] = np.inf
     tr3[0] = np.inf
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = np.full(n, np.nan)
-    for i in range(20, n):
-        if i == 20:
-            atr[i] = np.mean(tr[1:21])
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Chop calculation: (sum of TR / (max(high) - min(low))) * 100
+    chop = np.full(len(close_1w), np.nan)
+    for i in range(14, len(close_1w)):
+        atr_sum = np.sum(tr_1w[i-14:i+1])
+        max_high = np.max(high_1w[i-14:i+1])
+        min_low = np.min(low_1w[i-14:i+1])
+        range_val = max_high - min_low
+        if range_val != 0:
+            chop[i] = (atr_sum / range_val) * 100
         else:
-            atr[i] = (atr[i-1] * 19 + tr[i]) / 20
+            chop[i] = 50
     
-    # Calculate EMA(20) for middle band
-    ema20 = np.full(n, np.nan)
-    if n >= 20:
-        ema20[19] = np.mean(close[:20])
-        alpha = 2 / (20 + 1)
-        for i in range(20, n):
-            ema20[i] = alpha * close[i] + (1 - alpha) * ema20[i-1]
-    
-    # Keltner Channels: EMA20 ± 1.5 * ATR(20)
-    kc_upper = ema20 + 1.5 * atr
-    kc_lower = ema20 - 1.5 * atr
-    
-    # Calculate 12h EMA200 for trend filter (using HTF data)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema200_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 200:
-        ema200_12h[199] = np.mean(close_12h[:200])
-        alpha = 2 / (200 + 1)
-        for i in range(200, len(close_12h)):
-            ema200_12h[i] = alpha * close_12h[i] + (1 - alpha) * ema200_12h[i-1]
-    ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h)
-    
-    # Calculate volume SMA(20) for volume filter
-    vol_sma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_sma[i] = np.mean(volume[i-20:i])
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 200)  # Ensure EMA20, ATR, and 12h EMA200 are ready
+    start_idx = max(15, 15)  # Ensure RSI and KAMA are ready
     
     for i in range(start_idx, n):
-        if np.isnan(atr[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema200_12h_aligned[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(kama_val[i]) or np.isnan(rsi[i]) or np.isnan(chop_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirm = volume[i] > 1.5 * vol_sma[i]
-        
-        if position == 0:
-            # Long: Price near lower Keltner band in uptrend (12h EMA200 up)
-            if close[i] <= kc_lower[i] and close[i] > ema200_12h_aligned[i] and volume_confirm:
-                signals[i] = 0.25
-                position = 1
-            # Short: Price near upper Keltner band in downtrend (12h EMA200 down)
-            elif close[i] >= kc_upper[i] and close[i] < ema200_12h_aligned[i] and volume_confirm:
-                signals[i] = -0.25
-                position = -1
-        
-        elif position == 1:
-            # Exit: Price crosses back above EMA20 (mean reversion complete) or trend breaks
-            if close[i] >= ema20[i] or close[i] < ema200_12h_aligned[i]:
+        # Chop filter: only trade when market is trending (CHOP < 38.2) or ranging (CHOP > 61.8)
+        # In trending markets: follow KAMA direction
+        # In ranging markets: fade extreme RSI
+        if chop_aligned[i] < 38.2:  # Trending market
+            if position == 0:
+                # Go with KAMA trend
+                if close[i] > kama_val[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < kama_val[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif position == 1:
+                # Exit long when price crosses below KAMA
+                if close[i] < kama_val[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short when price crosses above KAMA
+                if close[i] > kama_val[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        elif chop_aligned[i] > 61.8:  # Ranging market
+            if position == 0:
+                # Fade RSI extremes
+                if rsi[i] < 30:  # Oversold - go long
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi[i] > 70:  # Overbought - go short
+                    signals[i] = -0.25
+                    position = -1
+            elif position == 1:
+                # Exit long when RSI returns to neutral
+                if rsi[i] > 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short when RSI returns to neutral
+                if rsi[i] < 50:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
+        else:  # Neutral chop - stay flat
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
-            else:
-                signals[i] = 0.25
-        
-        elif position == -1:
-            # Exit: Price crosses back below EMA20 (mean reversion complete) or trend breaks
-            if close[i] <= ema20[i] or close[i] > ema200_12h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
     
     return signals
