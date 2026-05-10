@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4H_Camarilla_R3_S3_Breakout_12hTrend_Volume
-# Hypothesis: Breakout from Camarilla R3/S3 levels with 12h trend and volume confirmation.
-# Works in bull/bear by following 12h trend direction, entering only on strong volume breakouts.
-# Camarilla levels provide institutional support/resistance; volume confirms institutional participation.
-# Target: 20-35 trades/year per symbol.
+# 12H_Camarilla_R1_S1_Breakout_1dTrend_Volume
+# Hypothesis: Buy breaks above Camarilla R1 or sell breaks below S1 on 12h chart,
+# filtered by daily trend (EMA50) and volume confirmation (1.5x average).
+# Works in bull/bear by following daily trend and using volume to confirm institutional interest.
+# Target: 15-30 trades/year per symbol.
 
-name = "4H_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "12H_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,47 +23,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate Camarilla levels for each bar using previous day's OHLC
-    # We need daily OHLC to compute Camarilla levels
-    # Get daily data first
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Calculate daily OHLC arrays
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each day
-    # R3 = close + (high - low) * 1.1/2
-    # S3 = close - (high - low) * 1.1/2
-    daily_range = daily_high - daily_low
-    camarilla_r3 = daily_close + daily_range * 1.1 / 2
-    camarilla_s3 = daily_close - daily_range * 1.1 / 2
-    
-    # Align daily Camarilla levels to 4h timeframe
-    camarilla_r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # 12h trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema20_12h = pd.Series(close_12h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_12h_up = close_12h > ema20_12h
-    trend_12h_down = close_12h < ema20_12h
-    
-    # Align 12h trend to 4h
-    trend_12h_up_4h = align_htf_to_ltf(prices, df_12h, trend_12h_up.astype(float))
-    trend_12h_down_4h = align_htf_to_ltf(prices, df_12h, trend_12h_down.astype(float))
-    
-    # Volume confirmation (20-period average)
+    # 12h indicators
+    close_s = pd.Series(close)
     volume_s = pd.Series(volume)
+    
+    # Calculate Camarilla levels for 12h (using previous bar's OHLC)
+    # Camarilla: R1 = close + (high - low) * 1.1/12, S1 = close - (high - low) * 1.1/12
+    # We use previous bar's data to avoid look-ahead
+    prev_high = np.concatenate([[np.nan], high[:-1]])
+    prev_low = np.concatenate([[np.nan], low[:-1]])
+    prev_close = np.concatenate([[np.nan], close[:-1]])
+    
+    rang = prev_high - prev_low
+    R1 = prev_close + rang * 1.1 / 12
+    S1 = prev_close - rang * 1.1 / 12
+    
+    # Volume average (20-period)
     vol_ma = volume_s.rolling(window=20, min_periods=20).mean().values
+    
+    # Daily trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    daily_uptrend = close_1d > ema50_1d
+    daily_downtrend = close_1d < ema50_1d
+    
+    # Align daily trend to 12h
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_1d, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_1d, daily_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,9 +63,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if data not ready
-        if (np.isnan(camarilla_r3_4h[i]) or np.isnan(camarilla_s3_4h[i]) or
-            np.isnan(trend_12h_up_4h[i]) or np.isnan(trend_12h_down_4h[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(R1[i]) or np.isnan(S1[i]) or np.isnan(vol_ma[i]) or
+            np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,29 +73,30 @@ def generate_signals(prices):
         vol_ratio = volume[i] / vol_ma[i] if vol_ma[i] > 0 else 0
         volume_confirm = vol_ratio > 1.5
         
+        daily_up = daily_uptrend_aligned[i] > 0.5
+        daily_down = daily_downtrend_aligned[i] > 0.5
+        
         if position == 0:
-            # Enter long: price breaks above R3 with 12h uptrend and volume
-            if trend_12h_up_4h[i] > 0.5 and volume_confirm:
-                if close[i] > camarilla_r3_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-            # Enter short: price breaks below S3 with 12h downtrend and volume
-            elif trend_12h_down_4h[i] > 0.5 and volume_confirm:
-                if close[i] < camarilla_s3_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Enter long: daily uptrend + price breaks above R1 + volume
+            if daily_up and volume_confirm and close[i] > R1[i]:
+                signals[i] = 0.25
+                position = 1
+            # Enter short: daily downtrend + price breaks below S1 + volume
+            elif daily_down and volume_confirm and close[i] < S1[i]:
+                signals[i] = -0.25
+                position = -1
         
         elif position == 1:
-            # Exit long: price moves back below R3 or trend changes
-            if close[i] < camarilla_r3_4h[i] or trend_12h_up_4h[i] < 0.5:
+            # Exit long: price breaks below S1 or trend changes
+            if close[i] < S1[i] or not daily_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         
         elif position == -1:
-            # Exit short: price moves back above S3 or trend changes
-            if close[i] > camarilla_s3_4h[i] or trend_12h_down_4h[i] < 0.5:
+            # Exit short: price breaks above R1 or trend changes
+            if close[i] > R1[i] or not daily_down:
                 signals[i] = 0.0
                 position = 0
             else:
