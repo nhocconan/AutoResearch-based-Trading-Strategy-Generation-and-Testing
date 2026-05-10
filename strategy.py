@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1D_RSI_Extreme_1wTrend_Volume
-Hypothesis: Uses weekly trend direction with daily RSI extremes for mean reversion entries, filtered by volume spikes. Works in both bull and bear markets by following weekly trend direction for entries but using daily RSI extremes for counter-trend entries within the trend. Targets 15-30 trades/year with discrete sizing to minimize fee drag.
+6H_ElderRay_BullBearPower_1dTrend_Filter
+Hypothesis: Uses Elder Ray index (Bull Power = High - EMA13, Bear Power = Low - EMA13) from 1d timeframe 
+to identify bull/bear regime, then enters long when Bull Power > 0 and price > 6h EMA20, short when 
+Bear Power < 0 and price < 6h EMA20. Avoids counter-trend trades by aligning with 1d trend. 
+Designed for 6h timeframe with low trade frequency (target: 15-30 trades/year) to minimize fee drag.
+Works in both bull and bear markets by following 1d trend direction.
 """
 
-name = "1D_RSI_Extreme_1wTrend_Volume"
-timeframe = "1d"
+name = "6H_ElderRay_BullBearPower_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,75 +21,70 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Elder Ray calculation (EMA13 and Bull/Bear Power)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate weekly EMA(20) for trend direction
-    ema_20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Calculate EMA13 on 1d close
+    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate daily RSI(14)
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
+    # Calculate Bull Power (High - EMA13) and Bear Power (Low - EMA13)
+    bull_power_1d = df_1d['high'].values - ema13_1d
+    bear_power_1d = df_1d['low'].values - ema13_1d
     
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_threshold = vol_ma * 1.5
+    # Align 1d indicators to 6h timeframe
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Calculate 6h EMA20 for trend filter
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Warmup for EMA and RSI
+    start_idx = max(20, 13)  # Warmup for EMA20 and EMA13
     
     for i in range(start_idx, n):
-        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(rsi_values[i]) or np.isnan(vol_threshold[i]):
+        if np.isnan(ema13_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema20_6h[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter: price above/below weekly EMA20
-        price_above_weekly_ema = close[i] > ema_20_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema_20_1w_aligned[i]
+        # Trend filters from 1d Elder Ray
+        bull_regime = bull_power_aligned[i] > 0  # Bullish when Bull Power > 0
+        bear_regime = bear_power_aligned[i] < 0  # Bearish when Bear Power < 0
+        
+        # 6h price relative to EMA20
+        price_above_ema = close[i] > ema20_6h[i]
+        price_below_ema = close[i] < ema20_6h[i]
         
         if position == 0:
-            # Long entry: RSI oversold (<30) + above weekly EMA + volume spike
-            if (rsi_values[i] < 30 and 
-                price_above_weekly_ema and 
-                volume[i] > vol_threshold[i]):
+            # Long entry: bull regime + price above 6h EMA20
+            if bull_regime and price_above_ema:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: RSI overbought (>70) + below weekly EMA + volume spike
-            elif (rsi_values[i] > 70 and 
-                  price_below_weekly_ema and 
-                  volume[i] > vol_threshold[i]):
+            # Short entry: bear regime + price below 6h EMA20
+            elif bear_regime and price_below_ema:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI overbought (>70) or price below weekly EMA
-            if (rsi_values[i] > 70 or 
-                close[i] < ema_20_1w_aligned[i]):
+            # Long exit: bear regime or price below 6h EMA20
+            if bear_regime or price_below_ema:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI oversold (<30) or price above weekly EMA
-            if (rsi_values[i] < 30 or 
-                close[i] > ema_20_1w_aligned[i]):
+            # Short exit: bull regime or price above 6h EMA20
+            if bull_regime or price_above_ema:
                 signals[i] = 0.0
                 position = 0
             else:
