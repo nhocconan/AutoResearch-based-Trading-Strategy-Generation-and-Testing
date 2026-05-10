@@ -1,14 +1,14 @@
-#!/usr/bin/env python3
-# 6h_Aroon_AroonOsc_TrendStrength_With_1dTrend
-# Hypothesis: Aroon oscillator identifies strong trends with low lag, and when combined with
-# 1-day trend filter and volume confirmation, it captures continuation moves in both bull and bear markets.
-# Aroon > 70 indicates strong uptrend, Aroon < -70 indicates strong downtrend.
-# We enter on Aroon cross above/below zero with 1d trend alignment and volume spike.
-# Exit when Aroon crosses back below/above zero or trend breaks.
-# This avoids whipsaws in ranging markets while catching strong trends.
+# 4h_Keltner_Channel_Pullback_With_Trend
+# Hypothesis: In trending markets, price tends to pull back to the 20-period EMA before resuming the trend.
+# We use 1-day EMA50 as the primary trend filter and enter on 4-hour pullbacks to EMA20 using Keltner channels.
+# Long when: 1d trend up (close > EMA50_1d) AND price pulls back to touch lower Keltner band from below.
+# Short when: 1d trend down (close < EMA50_1d) AND price pulls back to touch upper Keltner band from above.
+# Keltner channels (EMA20 ± 2*ATR) provide dynamic support/resistance that adapts to volatility.
+# Works in both bull (follows strong uptrends) and bear (follows strong downtrends).
+# Uses volume confirmation to avoid low-conviction breakouts.
 
-name = "6h_Aroon_AroonOsc_TrendStrength_With_1dTrend"
-timeframe = "6h"
+name = "4h_Keltner_Channel_Pullback_With_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,81 +27,42 @@ def generate_signals(prices):
     
     # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Aroon oscillator (25-period) on 6h chart
-    # Aroon Up = ((25 - periods since 25-period high) / 25) * 100
-    # Aroon Down = ((25 - periods since 25-period low) / 25) * 100
-    # Aroon Oscillator = Aroon Up - Aroon Down
-    lookback = 25
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    
-    # Calculate rolling index of max/min
-    def rolling_argmax(arr, window):
-        return pd.Series(arr).rolling(window, min_periods=1).apply(lambda x: np.argmax(x), raw=True)
-    def rolling_argmin(arr, window):
-        return pd.Series(arr).rolling(window, min_periods=1).apply(lambda x: np.argmin(x), raw=True)
-    
-    # Since we can't use apply easily in vectorized way, we'll calculate manually in loop later
-    # Instead, we'll compute Aroon using standard formulas with min_periods
-    high_rolling_max = high_series.rolling(window=lookback, min_periods=lookback).max()
-    low_rolling_min = low_series.rolling(window=lookback, min_periods=lookback).min()
-    
-    # Calculate periods since high/low
-    # We'll use expanding window approach for efficiency
-    periods_since_high = np.zeros_like(high)
-    periods_since_low = np.zeros_like(low)
-    
-    # Initialize
-    max_idx = 0
-    min_idx = 0
-    for i in range(n):
-        if i < lookback:
-            periods_since_high[i] = i
-            periods_since_low[i] = i
-        else:
-            # Update max/min index
-            if high[i] >= high[max_idx]:
-                max_idx = i
-            if low[i] <= low[min_idx]:
-                min_idx = i
-            
-            # Reset if outside lookback window
-            if max_idx < i - lookback + 1:
-                # Find new max in window
-                window_start = i - lookback + 1
-                max_idx = window_start + np.argmax(high[window_start:i+1])
-            if min_idx < i - lookback + 1:
-                # Find new min in window
-                window_start = i - lookback + 1
-                min_idx = window_start + np.argmin(low[window_start:i+1])
-            
-            periods_since_high[i] = i - max_idx
-            periods_since_low[i] = i - min_idx
-    
-    aroon_up = ((lookback - periods_since_high) / lookback) * 100
-    aroon_down = ((lookback - periods_since_low) / lookback) * 100
-    aroon_osc = aroon_up - aroon_down  # -100 to +100
+    # Calculate EMA20 on 4h chart
+    close_s = pd.Series(close)
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # Calculate daily EMA50 for trend filter
     ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation (20-period MA on 6h chart)
+    # Calculate ATR(14) for Keltner channels
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Keltner channels: EMA20 ± 2*ATR
+    keltner_upper = ema_20 + 2 * atr
+    keltner_lower = ema_20 - 2 * atr
+    
+    # Volume confirmation (20-period MA on 4h chart = ~3.3 days)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need Aroon (25), EMA50_1d (50), volume MA (20)
-    start_idx = max(25, 50, 20)
+    # Warmup: need EMA20 (20), EMA50_1d (50), ATR (14), volume MA (20)
+    start_idx = max(20, 50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(aroon_osc[i]) or np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema_20[i]) or np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(atr[i]) or np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -114,33 +75,33 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirm = volume[i] > volume_ma[i] * 1.5
         
-        # Aroon signals: zero cross
+        # Price relative to Keltner channels for pullback detection
         if i > 0:
-            cross_above_zero = (aroon_osc[i] > 0) and (aroon_osc[i-1] <= 0)
-            cross_below_zero = (aroon_osc[i] < 0) and (aroon_osc[i-1] >= 0)
+            touch_lower_from_below = (low[i] <= keltner_lower[i]) and (low[i-1] > keltner_lower[i-1])
+            touch_upper_from_above = (high[i] >= keltner_upper[i]) and (high[i-1] < keltner_upper[i-1])
         else:
-            cross_above_zero = False
-            cross_below_zero = False
+            touch_lower_from_below = False
+            touch_upper_from_above = False
         
         if position == 0:
-            # Long entry: strong uptrend (Aroon > 0) + 1d uptrend + volume
-            if aroon_osc[i] > 0 and uptrend and volume_confirm:
+            # Long entry: uptrend + touch lower Keltner from below + volume
+            if uptrend and touch_lower_from_below and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: strong downtrend (Aroon < 0) + 1d downtrend + volume
-            elif aroon_osc[i] < 0 and downtrend and volume_confirm:
+            # Short entry: downtrend + touch upper Keltner from above + volume
+            elif downtrend and touch_upper_from_above and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend weakness or reversal
-            if aroon_osc[i] <= 0 or not uptrend:
+            # Long exit: trend breaks or reversal signal (touch upper band)
+            if not uptrend or touch_upper_from_above:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: trend weakness or reversal
-            if aroon_osc[i] >= 0 or not downtrend:
+            # Short exit: trend breaks or reversal signal (touch lower band)
+            if not downtrend or touch_lower_from_below:
                 signals[i] = 0.0
                 position = 0
             else:
