@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_Breakout_1wTrend
-Hypothesis: Price breaks weekly Camarilla pivot levels (R1/S1) calculated from prior week's range, with 1w EMA50 trend filter and volume confirmation. Uses 12h timeframe to reduce trade frequency and avoid fee drag. Works in both bull and bear markets by filtering trades in direction of weekly trend. Target: 20-40 trades/year (80-160 total over 4 years) to minimize fee drag.
+4h_SMA50_Breakout_Volume_Confirm
+Hypothesis: Price breaks above SMA50 for longs or below SMA50 for shorts on 4h timeframe, confirmed by volume spike (>1.5x 10-period SMA) and filtered by 1d EMA200 trend. This captures momentum in trending markets while avoiding counter-trend trades. The SMA50 acts as dynamic support/resistance, and volume confirms institutional participation. Works in bull/bear by aligning with higher timeframe trend.
+Target: 30-50 trades/year (120-200 total) to minimize fee drag.
 """
 
-name = "12h_Camarilla_Pivot_Breakout_1wTrend"
-timeframe = "12h"
+name = "4h_SMA50_Breakout_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,78 +23,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w data
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 4h SMA50 for dynamic support/resistance
+    sma50 = np.full(n, np.nan)
+    if n >= 50:
+        sma50[49] = np.mean(close[:50])
+        for i in range(50, n):
+            sma50[i] = (sma50[i-1] * 49 + close[i]) / 50
     
-    # Camarilla levels from prior week: R1 = close + 1.1*(high-low)/12, S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = close_1w + 1.1 * (high_1w - low_1w) / 12
-    camarilla_s1 = close_1w - 1.1 * (high_1w - low_1w) / 12
+    # 4h volume SMA10 for volume confirmation
+    vol_sma10 = np.full(n, np.nan)
+    if n >= 10:
+        vol_sma10[9] = np.mean(volume[:10])
+        for i in range(10, n):
+            vol_sma10[i] = (vol_sma10[i-1] * 9 + volume[i]) / 10
     
-    # 1w EMA50 for trend filter
-    ema50_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema50_1w[49] = np.mean(close_1w[:50])
-        alpha = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema50_1w[i] = alpha * close_1w[i] + (1 - alpha) * ema50_1w[i-1]
+    # 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1w volume SMA20 for volume confirmation
-    vol_sma20_1w = np.full(len(df_1w), np.nan)
-    if len(df_1w) >= 20:
-        vol_sma20_1w[19] = np.mean(df_1w['volume'].values[:20])
-        for i in range(20, len(df_1w)):
-            vol_sma20_1w[i] = (vol_sma20_1w[i-1] * 19 + df_1w['volume'].values[i]) / 20
+    # 1d EMA200 for trend filter
+    ema200_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        ema200_1d[199] = np.mean(close_1d[:200])
+        alpha = 2 / (200 + 1)
+        for i in range(200, len(close_1d)):
+            ema200_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema200_1d[i-1]
     
-    # Align 1w indicators to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    vol_sma20_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_sma20_1w)
+    # Align 1d EMA200 to 4h
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Wait for EMA50
+    start_idx = max(50, 200)  # Wait for SMA50 and EMA200
     
     for i in range(start_idx, n):
-        if np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_sma20_1w_aligned[i]):
+        if np.isnan(sma50[i]) or np.isnan(vol_sma10[i]) or np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x average 1w volume (scaled)
-        vol_1w_scaled = vol_sma20_1w_aligned[i] / 14.0  # 14x 12h bars in 1w (7 days * 2 per day)
-        volume_confirm = volume[i] > 1.5 * vol_1w_scaled
+        # Volume confirmation: current 4h volume > 1.5x 10-period SMA
+        volume_confirm = volume[i] > 1.5 * vol_sma10[i]
         
-        # Trend and price relative to Camarilla levels
-        is_uptrend = close[i] > ema50_1w_aligned[i]
-        is_downtrend = close[i] < ema50_1w_aligned[i]
-        price_above_r1 = close[i] > r1_aligned[i]
-        price_below_s1 = close[i] < s1_aligned[i]
+        # Trend and price relative to SMA50
+        is_uptrend = close[i] > ema200_1d_aligned[i]
+        is_downtrend = close[i] < ema200_1d_aligned[i]
+        price_above_sma50 = close[i] > sma50[i]
+        price_below_sma50 = close[i] < sma50[i]
         
         if position == 0:
-            # Long: price breaks above R1, in uptrend, with volume
-            if price_above_r1 and is_uptrend and volume_confirm:
+            # Long: price breaks above SMA50, in uptrend, with volume
+            if price_above_sma50 and is_uptrend and volume_confirm:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1, in downtrend, with volume
-            elif price_below_s1 and is_downtrend and volume_confirm:
+            # Short: price breaks below SMA50, in downtrend, with volume
+            elif price_below_sma50 and is_downtrend and volume_confirm:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: price falls back below R1 or trend turns down
-            if not price_above_r1 or not is_uptrend:
+            # Exit: price falls back below SMA50 or trend turns down
+            if not price_above_sma50 or not is_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit: price rises back above S1 or trend turns up
-            if not price_below_s1 or not is_downtrend:
+            # Exit: price rises back above SMA50 or trend turns up
+            if not price_below_sma50 or not is_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
