@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: Camarilla pivot levels (R3/S3) on 4h combined with 1d trend and volume confirmation
-# provides high-probability breakout trades in both bull and bear markets.
-# Uses discrete position sizing (0.25) to limit turnover and focuses on high-conviction setups.
-# Target: 20-40 trades/year to minimize fee drag while maintaining edge.
+# 6h_ADX_Alligator_Trend_Filter
+# Hypothesis: Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) combined with ADX(14) filters whipsaw in sideways markets.
+# Long when Lips > Teeth > Jaw (bullish alignment) + ADX > 25; Short when Lips < Teeth < Jaw (bearish alignment) + ADX > 25.
+# Uses 1d trend (EMA50) for multi-timeframe alignment to avoid counter-trend trades.
+# Designed for low-moderate trade frequency (target: 15-30 trades/year) with strong trend confirmation.
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ADX_Alligator_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,77 +21,95 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Get daily data for pivot calculation and trend filter
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # We use R3 and S3 for breakout entries
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # === Williams Alligator (SMAs) ===
+    # Jaw: 13-period SMMA (smoothed SMA)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values
+    # Teeth: 8-period SMMA
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values
+    # Lips: 5-period SMMA
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values
     
-    # Calculate pivot levels for each day
-    range_ = prev_high - prev_low
-    r3 = prev_close + (range_ * 1.1 / 4)
-    s3 = prev_close - (range_ * 1.1 / 4)
+    # === ADX Calculation (14-period) ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.concatenate([[close[0]], close[:-1]]))
+    tr3 = np.abs(low - np.concatenate([[close[0]], close[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily pivot levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    up_move = high - np.concatenate([[high[0]], high[:-1]])
+    down_move = np.concatenate([[low[0]], low[:-1]]) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Calculate daily EMA for trend filter (34-period)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
+    minus_dm_smooth = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
     
-    # Volume confirmation (20-period MA on 4h chart)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
+    
+    # ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # === Daily Trend Filter (EMA50) ===
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need enough data for calculations
-    start_idx = max(20, 34)  # volume MA and EMA
+    # Warmup: need Alligator (13), ADX (14*2=28), daily EMA (50)
+    start_idx = max(13, 28, 50)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(adx[i]) or np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Daily trend filter
-        uptrend = close[i] > ema_34_1d_aligned[i]
-        downtrend = close[i] < ema_34_1d_aligned[i]
+        # Alligator alignment
+        bullish_align = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_align = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Volume confirmation
-        volume_confirm = volume[i] > volume_ma[i] * 1.5
+        # ADX trend strength
+        strong_trend = adx[i] > 25
+        
+        # Daily trend filter
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            # Long entry: price breaks above R3 + daily uptrend + volume spike
-            if close[i] > r3_aligned[i] and uptrend and volume_confirm:
+            # Long entry: bullish Alligator + strong ADX + daily uptrend
+            if bullish_align and strong_trend and uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3 + daily downtrend + volume spike
-            elif close[i] < s3_aligned[i] and downtrend and volume_confirm:
+            # Short entry: bearish Alligator + strong ADX + daily downtrend
+            elif bearish_align and strong_trend and downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 or daily trend turns down
-            if close[i] < s3_aligned[i] or not uptrend:
+            # Long exit: Alligator alignment breaks or ADX weakens
+            if not bullish_align or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above R3 or daily trend turns up
-            if close[i] > r3_aligned[i] or not downtrend:
+            # Short exit: Alligator alignment breaks or ADX weakens
+            if not bearish_align or not strong_trend:
                 signals[i] = 0.0
                 position = 0
             else:
