@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: 12h Camarilla R1/S1 breakout in direction of 1d EMA34 trend with volume confirmation.
-Uses daily institutional levels and trend filter. Works in bull/bear by following higher timeframe trend.
-Target: 12-37 trades/year on 12h to avoid fee drag.
+12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+Hypothesis: 12h Camarilla R1/S1 breakout in direction of 1w EMA50 trend, with volume confirmation.
+Uses weekly EMA trend filter to avoid counter-trend trades in bear markets and weekly institutional
+levels for high-probability breakouts. Target: 12-37 trades/year on 12h to stay within optimal range.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -16,20 +16,25 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get weekly data for EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 1:
+        return np.zeros(n)
+    
+    # Weekly EMA50 for trend filter
+    ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    
+    # Get daily data for Camarilla levels (using previous day's OHLC)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 1:
         return np.zeros(n)
     
-    # Daily EMA34 for trend filter
-    ema_34 = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
-    
-    # Calculate daily Camarilla levels (using previous day's OHLC)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -54,12 +59,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need EMA34 (34) and enough history for Camarilla calculation
-    start_idx = 34
+    # Warmup: need EMA50 (50) and enough history for Camarilla calculation
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_aligned[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or 
             np.isnan(r1_aligned[i]) or
             np.isnan(s1_aligned[i])):
             if position != 0:
@@ -68,24 +73,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: above EMA34 (uptrend) AND price breaks above R1 with volume
-            if close[i] > ema_34_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
+            # Long: above EMA50 (uptrend) AND price breaks above R1 with volume
+            if close[i] > ema_50_aligned[i] and high[i] > r1_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: below EMA34 (downtrend) AND price breaks below S1 with volume
-            elif close[i] < ema_34_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
+            # Short: below EMA50 (downtrend) AND price breaks below S1 with volume
+            elif close[i] < ema_50_aligned[i] and low[i] < s1_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S1 OR trend turns bearish
-            if low[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            if low[i] < s1_aligned[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above R1 OR trend turns bullish
-            if high[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            if high[i] > r1_aligned[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
