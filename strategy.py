@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike
-Hypothesis: Trade breakouts at Camarilla R1/S1 levels with 1d EMA34 trend filter and volume spike confirmation. Works in bull markets (breakouts above R1 in uptrend) and bear markets (breakdowns below S1 in downtrend). Uses 1d trend for direction and volume to confirm institutional interest. Targets 20-30 trades/year to minimize fee drag.
+4h_VolumeWeighted_Camilla_R3_S3_Breakout_1dTrend
+Hypothesis: Camarilla R3/S3 breakout with volume spike and 1-day trend filter.
+Targets high-probability reversals in range-bound markets and breakouts in trending markets.
+Works in bull/bear by adapting to regime: uses 1d trend to filter direction, volume for confirmation.
+Designed for low trade frequency (<30/year) to minimize fee drag on 4h timeframe.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+name = "4h_VolumeWeighted_Camilla_R3_S3_Breakout_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,32 +25,33 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d EMA34 Trend Filter ===
+    # === Calculate Camarilla levels from prior 1d bar ===
+    # Get daily OHLC
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # === Camarilla Levels from Previous 1d Bar ===
-    # Calculate from previous day's OHLC (to avoid look-ahead)
-    close_1d_shifted = np.roll(close_1d, 1)
-    high_1d_shifted = np.roll(df_1d['high'].values, 1)
-    low_1d_shifted = np.roll(df_1d['low'].values, 1)
-    close_1d_shifted[0] = close_1d[0]  # first day uses same day
-    high_1d_shifted[0] = df_1d['high'].values[0]
-    low_1d_shifted[0] = df_1d['low'].values[0]
-    
-    # Camarilla calculation: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    camarilla_r1 = close_1d_shifted + (high_1d_shifted - low_1d_shifted) * 1.1 / 12
-    camarilla_s1 = close_1d_shifted - (high_1d_shifted - low_1d_shifted) * 1.1 / 12
+    # Prior day's OHLC (shifted by 1 to avoid look-ahead)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
     
     # Align to 4h timeframe
-    camarilla_r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    prior_high_4h = align_htf_to_ltf(prices, df_1d, prior_high)
+    prior_low_4h = align_htf_to_ltf(prices, df_1d, prior_low)
+    prior_close_4h = align_htf_to_ltf(prices, df_1d, prior_close)
     
-    # === Volume Spike Filter ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # 2x average volume for institutional confirmation
+    # Camarilla R3 and S3 levels
+    R3 = prior_close_4h + (prior_high_4h - prior_low_4h) * 1.1 / 4
+    S3 = prior_close_4h - (prior_high_4h - prior_low_4h) * 1.1 / 4
+    
+    # === 1-day EMA34 Trend Filter ===
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Filter (2x 20-period EMA) ===
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_ok = volume > vol_ema20 * 2.0
     
     # === Signal Parameters ===
     position_size = 0.25
@@ -55,13 +59,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers EMA calculation)
-    start_idx = 35
+    # Start after warmup (covers EMA and Camarilla calculation)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_1d_4h[i]) or np.isnan(camarilla_r1_4h[i]) or 
-            np.isnan(camarilla_s1_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,28 +74,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 in uptrend (price > EMA34) with volume spike
-            if (close[i] > camarilla_r1_4h[i] and 
+            # Long: Close crosses above R3 with uptrend (close > EMA34) and volume spike
+            if (close[i] > R3[i] and 
                 close[i] > ema34_1d_4h[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Break below S1 in downtrend (price < EMA34) with volume spike
-            elif (close[i] < camarilla_s1_4h[i] and 
+            # Short: Close crosses below S3 with downtrend (close < EMA34) and volume spike
+            elif (close[i] < S3[i] and 
                   close[i] < ema34_1d_4h[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: Price returns to opposite Camarilla level or trend reverses
+            # Exit: Close crosses back through the Camarilla level in opposite direction
             if position == 1:
-                if (close[i] < camarilla_s1_4h[i] or  # broke below S1
-                    close[i] < ema34_1d_4h[i]):        # trend turned down
+                if close[i] < S3[i]:  # Exit long if price breaks below S3
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if (close[i] > camarilla_r1_4h[i] or  # broke above R1
-                    close[i] > ema34_1d_4h[i]):       # trend turned up
+                if close[i] > R3[i]:  # Exit short if price breaks above R3
                     signals[i] = 0.0
                     position = 0
                 else:
