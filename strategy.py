@@ -1,12 +1,11 @@
-# 12h_Camarilla_R2S2_Breakout_1dTrend_Volume_Confirm
-# Hypothesis: Breakout of 1-day Camarilla R2/S2 levels with 1-day EMA34 trend filter and volume confirmation on 12h timeframe.
-# This strategy targets 12-37 trades/year by requiring both price close and open to confirm breakout,
-# adding a minimum holding period to avoid whipsaws, and using volume confirmation.
-# Designed for BTC/ETH resilience in bull/bear markets via trend alignment and volume filters.
-# Uses 12h primary timeframe with 1d HTF for multi-timeframe analysis.
+#!/usr/bin/env python3
+# 4h_KAMA_Direction_RSI_1dTrend_PriceAction
+# Hypothesis: KAMA trend direction on 4h with RSI filter and 1d trend filter for low-frequency, high-conviction trades.
+# Uses price action (higher highs/lows) to confirm trend and avoid whipsaws. Targets 20-30 trades/year.
+# Designed to work in bull markets via trend following and bear markets via defensive positioning.
 
-name = "12h_Camarilla_R2S2_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_KAMA_Direction_RSI_1dTrend_PriceAction"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,94 +14,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    open_price = prices['open'].values
-    volume = prices['volume'].values
     
-    # === 1d Data (loaded ONCE) ===
+    # === 4h KAMA (ER=10) for trend direction ===
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # === 1d Trend Filter (EMA34) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # === 1d Camarilla Pivot Levels (R2, S2) ===
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r2 = pivot + (range_1d * 1.1 / 4)
-    s2 = pivot - (range_1d * 1.1 / 4)
-    
-    # Align 1d levels to 12h
-    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # === 1d EMA34 Trend Filter ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Volume Spike Filter (20-period EMA) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
+    # === RSI(14) on 4h ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Price Action: Higher Highs/Lows (3-bar lookback) ===
+    hh = (high > np.maximum(high[1:], high[:-1])).astype(float)  # Simplified: current high > max of adjacent
+    ll = (low < np.minimum(low[1:], low[:-1])).astype(float)
+    # Pad arrays
+    hh = np.concatenate([[hh[0]], hh])
+    ll = np.concatenate([[ll[0]], ll])
+    hh = hh[:n]
+    ll = ll[:n]
     
     # === Signal Parameters ===
-    position_size = 0.25  # 25% of capital per trade
+    position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    holding_bars = 0
     
-    # Start after warmup (covers EMA34)
-    start_idx = 60
+    # Start after warmup (covers KAMA, RSI, EMA)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or 
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema34_1d_4h[i]) or 
+            np.isnan(rsi[i]) or np.isnan(hh[i]) or np.isnan(ll[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Break above R2 (both open and close) + above 1d EMA34 + volume spike
-            if (open_price[i] > r2_12h[i] and close[i] > r2_12h[i] and 
-                close[i] > ema34_1d_12h[i] and volume_ok[i]):
+            # Long: Price > KAMA (uptrend) + RSI > 50 + HH confirmation + above 1d EMA34
+            if (close[i] > kama[i] and rsi[i] > 50 and hh[i] > 0 and 
+                close[i] > ema34_1d_4h[i]):
                 signals[i] = position_size
                 position = 1
-                holding_bars = 0
-            # Short: Break below S2 (both open and close) + below 1d EMA34 + volume spike
-            elif (open_price[i] < s2_12h[i] and close[i] < s2_12h[i] and 
-                  close[i] < ema34_1d_12h[i] and volume_ok[i]):
+            # Short: Price < KAMA (downtrend) + RSI < 50 + LL confirmation + below 1d EMA34
+            elif (close[i] < kama[i] and rsi[i] < 50 and ll[i] > 0 and 
+                  close[i] < ema34_1d_4h[i]):
                 signals[i] = -position_size
                 position = -1
-                holding_bars = 0
         else:
-            # Enforce minimum holding period (12 bars)
-            holding_bars += 1
-            if holding_bars < 12:
-                signals[i] = position_size if position == 1 else -position_size
-                continue
-            
-            # Exit: Price closes below/above opposite level
+            # Exit: Price crosses KAMA in opposite direction
             if position == 1:
-                if close[i] < s2_12h[i]:
+                if close[i] < kama[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > r2_12h[i]:
+                if close[i] > kama[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
