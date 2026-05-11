@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Angle_of_Descent_v1
-Hypothesis: Measures the angle of price descent from the 1d high using a 12h window.
-In bull markets, steep declines often reverse sharply; in bear markets, shallow declines
-continue the trend. Uses 1d high as reference and 12h EMA for trend filter.
-Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
+12h_Monthly_Pivot_Breakout_Trend_v1
+Hypothesis: Monthly pivot levels act as strong support/resistance on 12h timeframe.
+Breakout above R1 with monthly trend up = long; breakdown below S1 with monthly trend down = short.
+Uses monthly pivot points (calculated from prior month OHLC) and 12h EMA25 for trend filter.
+Volume confirmation reduces false breakouts. Designed for 12-37 trades/year.
+Works in bull (breakouts continue) and bear (breakdowns continue) markets.
 """
 
-name = "6h_Angle_of_Descent_v1"
-timeframe = "6h"
+name = "12h_Monthly_Pivot_Breakout_Trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +18,62 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D Data for Reference High ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Monthly Data for Pivot Points ===
+    df_monthly = get_htf_data(prices, '1M')
+    if len(df_monthly) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    # Previous day's high (reference point)
-    ref_high_1d = high_1d  # this is the prior day's high
+    # Previous month OHLC
+    monthly_high = df_monthly['high'].values
+    monthly_low = df_monthly['low'].values
+    monthly_close = df_monthly['close'].values
     
-    # Align reference high to 6h
-    ref_high_aligned = align_htf_to_ltf(prices, df_1d, ref_high_1d)
+    # Calculate monthly pivot points: P = (H + L + C)/3
+    pivot = (monthly_high + monthly_low + monthly_close) / 3.0
+    # Resistance 1: R1 = 2*P - L
+    r1 = 2 * pivot - monthly_low
+    # Support 1: S1 = 2*P - H
+    s1 = 2 * pivot - monthly_high
     
-    # === 12H Data for Trend Filter ===
+    # Align monthly levels to 12h (wait for month-end close)
+    pivot_aligned = align_htf_to_ltf(prices, df_monthly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_monthly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_monthly, s1)
+    
+    # === 12h Data for Trend and Volume ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
+    if len(df_12h) < 25:
         return np.zeros(n)
     
     close_12h = df_12h['close'].values
-    # 12h EMA21 for trend
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    volume_12h = df_12h['volume'].values
     
-    # === Calculate Angle of Descent ===
-    # Angle = arctan((current price - reference high) / time_in_bars)
-    # We use 12 bars (3 days) lookback for the angle calculation
-    lookback = 12  # 12 * 6h = 3 days
-    angle_of_descent = np.full(n, np.nan)
+    # 12h EMA25 for trend filter
+    ema25_12h = pd.Series(close_12h).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema25_12h_aligned = align_htf_to_ltf(prices, df_12h, ema25_12h)
     
-    for i in range(lookback, n):
-        if np.isnan(ref_high_aligned[i]):
-            continue
-        price_change = close[i] - ref_high_aligned[i]
-        # Normalize by reference price to get percentage change
-        price_change_pct = price_change / ref_high_aligned[i]
-        # Angle in degrees: arctan(price_change_pct * 100) * (180/pi) 
-        # Multiply by 100 to get reasonable angle values
-        angle = np.arctan(price_change_pct * 100) * (180 / np.pi)
-        angle_of_descent[i] = angle
+    # Volume average (20-period) for confirmation
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(100, lookback)
+    start_idx = max(50, 25)  # need enough data for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ref_high_aligned[i]) or 
-            np.isnan(ema21_12h_aligned[i]) or 
-            np.isnan(angle_of_descent[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema25_12h_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,26 +82,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: shallow angle of descent (> -10 degrees) in downtrend (mean reversion bounce)
-            # OR steep angle of descent (< -30 degrees) in uptrend (panic sell exhaustion)
-            if (angle_of_descent[i] > -10 and ema21_12h_aligned[i] < close[i]) or \
-               (angle_of_descent[i] < -30 and ema21_12h_aligned[i] > close[i]):
+            # Long: breakout above R1 with volume confirmation and uptrend
+            if (close[i] > r1_aligned[i] and 
+                volume[i] > vol_ma_20_aligned[i] * 1.5 and  # 1.5x average volume
+                ema25_12h_aligned[i] < close[i]):  # uptrend: price above EMA
                 signals[i] = 0.25
                 position = 1
-            # Short: steep angle of descent (< -30 degrees) in downtrend (continuation)
-            elif angle_of_descent[i] < -30 and ema21_12h_aligned[i] > close[i]:
+            # Short: breakdown below S1 with volume confirmation and downtrend
+            elif (close[i] < s1_aligned[i] and 
+                  volume[i] > vol_ma_20_aligned[i] * 1.5 and  # 1.5x average volume
+                  ema25_12h_aligned[i] > close[i]):  # downtrend: price below EMA
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: angle becomes too steep (> -30) indicating continued weakness
-            if angle_of_descent[i] < -30:
+            # Long exit: breakdown below pivot or trend reversal
+            if close[i] < pivot_aligned[i] or ema25_12h_aligned[i] > close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: angle flattens (> -10) indicating loss of momentum
-            if angle_of_descent[i] > -10:
+            # Short exit: breakout above pivot or trend reversal
+            if close[i] > pivot_aligned[i] or ema25_12h_aligned[i] < close[i]:
                 signals[i] = 0.0
                 position = 0
             else:
