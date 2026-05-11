@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Multi_Regime_Breakout_12h_Trend"
-timeframe = "4h"
+name = "6h_ElderRay_BullBear_1dTrend_WeakFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    
-    # 1d data for volatility and range
+    # 1d data for EMA13 trend filter and Elder Ray calculations
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 12h for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 1w data for trend filter (optional confirmation)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Calculate ATR(14) on 1d for volatility filter
-    tr1 = high_1d[1:] - low_1d[:-1]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr14_aligned = align_htf_to_ltf(prices, df_1d, atr14)
+    close_1w = df_1w['close'].values
     
-    # Calculate 20-period high/low for breakout levels
-    high20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate EMA13 on 1d close
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate 14-period RSI for momentum filter
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate EMA13 on 1w close
+    ema13_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Calculate Bull Power and Bear Power on 1d
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
+    
+    # Align 1d indicators to 6h
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    
+    # Align 1w EMA13 to 6h
+    ema13_1w_aligned = align_htf_to_ltf(prices, df_1w, ema13_1w)
+    
+    # Volume spike (24-period average on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 50  # Ensure EMA13 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(atr14_aligned[i]) or np.isnan(high20[i]) or np.isnan(low20[i]) or np.isnan(rsi[i]):
+        if np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema13_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +70,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above 20-period high, above 12h EMA50, RSI > 50, volatility not extreme
-            if (close[i] > high20[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                rsi[i] > 50 and
-                atr14_aligned[i] < np.nanmedian(atr14_aligned[max(0, i-100):i+1]) * 2.0):
+            # Long: Bull Power > 0, Bear Power < 0, price above 1d EMA13, price above 1w EMA13, volume spike
+            if (bull_power_aligned[i] > 0 and 
+                bear_power_aligned[i] < 0 and 
+                close[i] > ema13_1d_aligned[i] and 
+                close[i] > ema13_1w_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 20-period low, below 12h EMA50, RSI < 50, volatility not extreme
-            elif (close[i] < low20[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  rsi[i] < 50 and
-                  atr14_aligned[i] < np.nanmedian(atr14_aligned[max(0, i-100):i+1]) * 2.0):
+            # Short: Bull Power < 0, Bear Power > 0, price below 1d EMA13, price below 1w EMA13, volume spike
+            elif (bull_power_aligned[i] < 0 and 
+                  bear_power_aligned[i] > 0 and 
+                  close[i] < ema13_1d_aligned[i] and 
+                  close[i] < ema13_1w_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below 20-period low or below 12h EMA50
-            if close[i] < low20[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit long: Bull Power <= 0 or price below 1d EMA13
+            if bull_power_aligned[i] <= 0 or close[i] < ema13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above 20-period high or above 12h EMA50
-            if close[i] > high20[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit short: Bear Power >= 0 or price above 1d EMA13
+            if bear_power_aligned[i] >= 0 or close[i] > ema13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
