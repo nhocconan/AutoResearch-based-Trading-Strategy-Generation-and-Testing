@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_Williams_Alligator_ElderRay_Trend
-Hypothesis: Williams Alligator (Jaw/Teeth/Lips) for trend direction + Elder Ray (Bear/Bull Power) for momentum confirmation.
-- Long when: Lips > Teeth > Jaw (bullish alignment) AND Bull Power > 0 AND price > Jaw
-- Short when: Lips < Teeth < Jaw (bearish alignment) AND Bear Power < 0 AND price < Jaw
-- Exit when: Alligator alignment breaks (Lips crosses Teeth) OR price crosses Jaw in opposite direction
-Uses 1d timeframe with 1h Alligator/Elder Ray for timely signals while maintaining low trade frequency.
-Targets 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
-Works in both bull (trend following) and bear (counter-trend reversals at extremes) markets.
+12h_1d_Camarilla_Pivot_Breakout_Volume_Simple
+Hypothesis: Camarilla pivot levels from 1d combined with volume confirmation and 1d trend filter on 12h timeframe.
+- Long when: price breaks above R3 with volume > 20-period average and 1d EMA50 uptrend
+- Short when: price breaks below S3 with volume > 20-period average and 1d EMA50 downtrend
+- Exit when price returns to opposite pivot level (S1 for longs, R1 for shorts)
+Targets 12-37 trades/year (50-150 over 4 years) to minimize fee drift.
+Uses 1d trend filter to avoid counter-trend trades in ranging markets.
 """
 
-name = "1d_Williams_Alligator_ElderRay_Trend"
-timeframe = "1d"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Simple"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,112 +22,103 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1h data for Alligator and Elder Ray calculations
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 13:
+    # Get 1d data for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1d OHLCV
-    close_1d = prices['close'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- Williams Alligator: SMoothed Medians ---
-    # Jaw: 13-period SMMA, shifted 8 bars
-    # Teeth: 8-period SMMA, shifted 5 bars  
-    # Lips: 5-period SMMA, shifted 3 bars
-    def smma(values, period):
-        """Smoothed Moving Average"""
-        sma = np.full_like(values, np.nan, dtype=float)
-        if len(values) < period:
-            return sma
-        # First value is simple average
-        sma[period-1] = np.mean(values[:period])
-        # Subsequent values: (prev*(period-1) + current) / period
-        for i in range(period, len(values)):
-            sma[i] = (sma[i-1] * (period-1) + values[i]) / period
-        return sma
+    # --- 1d Trend Filter: EMA50 ---
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate SMMA for each component
-    jaw_raw = smma(median_1h := (df_1h['high'].values + df_1h['low'].values) / 2, 13)
-    teeth_raw = smma(median_1h, 8)
-    lips_raw = smma(median_1h, 5)
+    # --- Camarilla Pivots from 1d (previous day) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Apply shifts (Jaw +8, Teeth +5, Lips +3)
-    jaw = np.full_like(jaw_raw, np.nan)
-    teeth = np.full_like(teeth_raw, np.nan)
-    lips = np.full_like(lips_raw, np.nan)
+    # Calculate pivots from previous day's data
+    camarilla_high = np.full_like(close_1d, np.nan)
+    camarilla_low = np.full_like(close_1d, np.nan)
+    camarilla_close = np.full_like(close_1d, np.nan)
     
-    if len(jaw) > 8:
-        jaw[8:] = jaw_raw[:-8]
-    if len(teeth) > 5:
-        teeth[5:] = teeth_raw[:-5]
-    if len(lips) > 3:
-        lips[3:] = lips_raw[:-3]
+    for i in range(1, len(close_1d)):
+        # Use previous day's OHLC to calculate today's pivots
+        camarilla_high[i] = high_1d[i-1]
+        camarilla_low[i] = low_1d[i-1]
+        camarilla_close[i] = close_1d[i-1]
     
-    # Align to 1d timeframe
-    jaw_1d = align_htf_to_ltf(prices, df_1h, jaw)
-    teeth_1d = align_htf_to_ltf(prices, df_1h, teeth)
-    lips_1d = align_htf_to_ltf(prices, df_1h, lips)
+    # Calculate Camarilla levels
+    R4 = camarilla_close + ((camarilla_high - camarilla_low) * 1.5000)
+    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
+    R2 = camarilla_close + ((camarilla_high - camarilla_low) * 1.1666)
+    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
+    PP = camarilla_close
+    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
+    S2 = camarilla_close - ((camarilla_high - camarilla_low) * 1.1666)
+    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
+    S4 = camarilla_close - ((camarilla_high - camarilla_low) * 1.5000)
     
-    # --- Elder Ray: Bull Power and Bear Power ---
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    ema13_1h = pd.Series(df_1h['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
-    ema13_1h_aligned = align_htf_to_ltf(prices, df_1h, ema13_1h)
+    # Align pivots to 12h timeframe
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
     
-    bull_power = high_1d - ema13_1h_aligned
-    bear_power = low_1d - ema13_1h_aligned
+    # --- Volume Confirmation: 12h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 20  # for Alligator shifts and EMA
+    start_idx = 50  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(jaw_1d[i]) or np.isnan(teeth_1d[i]) or np.isnan(lips_1d[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i])):
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+            np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine Alligator alignment
-        bullish_alignment = lips_1d[i] > teeth_1d[i] > jaw_1d[i]
-        bearish_alignment = lips_1d[i] < teeth_1d[i] < jaw_1d[i]
+        # Determine 1d trend
+        trend_up = close_12h[i] > ema50_1d_aligned[i]
+        trend_down = close_12h[i] < ema50_1d_aligned[i]
         
-        # Elder Ray conditions
-        bull_power_pos = bull_power[i] > 0
-        bear_power_neg = bear_power[i] < 0
-        
-        # Price relative to Jaw
-        price_above_jaw = close_1d[i] > jaw_1d[i]
-        price_below_jaw = close_1d[i] < jaw_1d[i]
+        # Volume confirmation
+        vol_ok = volume_12h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for entries
-            if bullish_alignment and bull_power_pos and price_above_jaw:
-                # Long: bullish alignment + positive bull power + price above jaw
+            # Look for entries only in direction of 1d trend with volume
+            if close_12h[i] > R3_12h[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
-            elif bearish_alignment and bear_power_neg and price_below_jaw:
-                # Short: bearish alignment + negative bear power + price below jaw
+            elif close_12h[i] < S3_12h[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: alignment breaks OR price crosses below jaw
-                if not bullish_alignment or price_below_jaw:
+                # Exit long: price returns to S1 (opposite side)
+                if close_12h[i] <= S1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: alignment breaks OR price crosses above jaw
-                if not bearish_alignment or price_above_jaw:
+                # Exit short: price returns to R1 (opposite side)
+                if close_12h[i] >= R1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
