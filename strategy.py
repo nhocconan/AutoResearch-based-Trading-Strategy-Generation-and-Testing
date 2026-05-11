@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WilliamsAlligator_JawTeeth_1wTrend"
-timeframe = "1d"
+name = "6h_Keltner_Breakout_Trend_Pullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,40 +17,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Williams Alligator
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    # Calculate ATR (20) for Keltner Bands
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[high[0] - low[0]], tr])
+    atr = np.zeros_like(close)
+    for i in range(len(close)):
+        if i < 20:
+            atr[i] = np.mean(tr[:i+1])
+        else:
+            atr[i] = np.mean(tr[i-19:i+1])
+    
+    # Calculate EMA (20) for middle line
+    ema20 = np.zeros_like(close)
+    ema20[0] = close[0]
+    alpha = 2 / (20 + 1)
+    for i in range(1, len(close)):
+        ema20[i] = alpha * close[i] + (1 - alpha) * ema20[i-1]
+    
+    # Keltner Bands
+    keltner_upper = ema20 + 2 * atr
+    keltner_lower = ema20 - 2 * atr
+    
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Williams Alligator components on 1w
-    close_1w = df_1w['close'].values
-    jaw = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
-    teeth = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    lips = pd.Series(close_1w).ewm(span=5, adjust=False, min_periods=5).mean().values
+    # 1d EMA 50 for trend
+    ema50_1d = np.zeros_like(df_1d['close'])
+    ema50_1d[0] = df_1d['close'][0]
+    alpha_50 = 2 / (50 + 1)
+    for i in range(1, len(df_1d)):
+        ema50_1d[i] = alpha_50 * df_1d['close'][i] + (1 - alpha_50) * ema50_1d[i-1]
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align to 1d
-    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
-    
-    # 1w trend: EMA 34
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # Volume filter: 20-period SMA > 0
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = np.zeros_like(volume)
+    for i in range(len(volume)):
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1])
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
-            np.isnan(lips_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or
-            np.isnan(vol_sma[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,34 +75,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Lips > Teeth > Jaw AND price > EMA34 AND volume > SMA
-            if (lips_aligned[i] > teeth_aligned[i] and 
-                teeth_aligned[i] > jaw_aligned[i] and 
-                close[i] > ema34_1w_aligned[i] and
-                volume[i] > vol_sma[i]):
+            # Long: Close > Keltner Upper AND Volume > 1.5x MA AND Price > 1d EMA50
+            if (close[i] > keltner_upper[i] and 
+                volume[i] > 1.5 * vol_ma20[i] and 
+                close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Lips < Teeth < Jaw AND price < EMA34 AND volume > SMA
-            elif (lips_aligned[i] < teeth_aligned[i] and 
-                  teeth_aligned[i] < jaw_aligned[i] and 
-                  close[i] < ema34_1w_aligned[i] and
-                  volume[i] > vol_sma[i]):
+            # Short: Close < Keltner Lower AND Volume > 1.5x MA AND Price < 1d EMA50
+            elif (close[i] < keltner_lower[i] and 
+                  volume[i] > 1.5 * vol_ma20[i] and 
+                  close[i] < ema50_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Lips <= Teeth OR Teeth <= Jaw OR price < EMA34
-            if (lips_aligned[i] <= teeth_aligned[i] or 
-                teeth_aligned[i] <= jaw_aligned[i] or 
-                close[i] < ema34_1w_aligned[i]):
+            # Long exit: Close < EMA20 OR Volume drops below average
+            if (close[i] < ema20[i] or volume[i] < 0.5 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: Lips >= Teeth OR Teeth >= Jaw OR price > EMA34
-            if (lips_aligned[i] >= teeth_aligned[i] or 
-                teeth_aligned[i] >= jaw_aligned[i] or 
-                close[i] > ema34_1w_aligned[i]):
+            # Short exit: Close > EMA20 OR Volume drops below average
+            if (close[i] > ema20[i] or volume[i] < 0.5 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
