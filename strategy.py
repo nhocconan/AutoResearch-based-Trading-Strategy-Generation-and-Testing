@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "12h_Donchian_20_Trend_200_EMA_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA34
+    # 200-day EMA trend filter (daily timeframe)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    trend_up = close > ema_1d_aligned
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    trend_up = close > ema_200_1d_aligned
     
-    # 1d volume filter: volume > 1.5x 20-day average
+    # Volume filter: volume > 1.5x 20-day average (daily)
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Daily Camarilla levels (based on previous day's high-low-close)
-    # We need previous day's data, so we shift the daily data by 1
-    close_1d_shift = np.roll(close_1d, 1)
-    high_1d_shift = np.roll(high, 1)  # Note: this is a simplification, ideally we'd use daily high/low
-    low_1d_shift = np.roll(low, 1)
+    # Donchian channel (20 periods on 12h)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # For simplicity, we'll use the current day's high-low-close for Camarilla calculation
-    # In practice, we should use previous day's, but for now we'll approximate
-    # To get proper previous day's data, we need to access the actual daily dataframe
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    
-    # Align the previous day's data to the 4h timeframe
-    prev_close_aligned = align_htf_to_ltf(prices, df_1d, prev_close)
-    prev_high_aligned = align_htf_to_ltf(prices, df_1d, prev_high)
-    prev_low_aligned = align_htf_to_ltf(prices, df_1d, prev_low)
-    
-    # Calculate Camarilla levels for R1 and S1
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_range = prev_high_aligned - prev_low_aligned
-    r1 = prev_close_aligned + 1.1 * camarilla_range / 12
-    s1 = prev_close_aligned - 1.1 * camarilla_range / 12
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA and shifted values
+    start_idx = 40  # Need enough data for EMA, Donchian, and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(prev_close_aligned[i]) or np.isnan(prev_high_aligned[i]) or
-            np.isnan(prev_low_aligned[i]) or np.isnan(r1[i]) or np.isnan(s1[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,24 +65,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + daily uptrend + volume filter
-            if close[i] > r1[i] and trend_up[i] and volume_filter[i]:
+            # Long: Break above upper Donchian + daily uptrend + volume filter
+            if close[i] > highest_20[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + daily downtrend + volume filter
-            elif close[i] < s1[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Break below lower Donchian + daily downtrend + volume filter
+            elif close[i] < lowest_20[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below S1 or daily trend down
-            if close[i] < s1[i] or not trend_up[i]:
+            # Long exit: Break below lower Donchian or trend down
+            if close[i] < lowest_20[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above R1 or daily trend up
-            if close[i] > r1[i] or trend_up[i]:
+            # Short exit: Break above upper Donchian or trend up
+            if close[i] > highest_20[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
