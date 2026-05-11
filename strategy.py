@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
-name = "6h_SMI_Trend_1wTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_1dTrend_With_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def _smi(high, low, close, k=10, d=3, smooth=3):
-    """Calculate Stochastic Momentum Index (SMI)"""
-    n = len(close)
-    if n < k:
-        return np.full(n, np.nan)
-    
-    # Calculate hlc3 (midpoint of high-low)
-    hlc3 = (high + low + close) / 3.0
-    
-    # Calculate min and max of hlc3 over k periods
-    min_hlc3 = pd.Series(hlc3).rolling(window=k, min_periods=k).min().values
-    max_hlc3 = pd.Series(hlc3).rolling(window=k, min_periods=k).max().values
-    
-    # Avoid division by zero
-    range_hlc3 = max_hlc3 - min_hlc3
-    range_hlc3 = np.where(range_hlc3 == 0, 1e-10, range_hlc3)
-    
-    # Calculate SMI raw value
-    smi_raw = (hlc3 - (min_hlc3 + max_hlc3) / 2.0) / (range_hlc3 / 2.0) * 100.0
-    
-    # Smooth with EMA (double smoothed)
-    smi_once = pd.Series(smi_raw).ewm(span=smooth, adjust=False).mean().values
-    smi_twice = pd.Series(smi_once).ewm(span=smooth, adjust=False).mean().values
-    
-    # Signal line
-    smi_signal = pd.Series(smi_twice).ewm(span=d, adjust=False).mean().values
-    
-    return smi_twice, smi_signal
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,34 +17,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter (using 1w EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Calculate 1w EMA20 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Get 1d data for SMI calculation
+    # Get 1d data for trend filter and Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate SMI on 1d data
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Get 1d data for Camarilla pivots (from previous 1d bar)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    smi, smi_signal = _smi(high_1d, low_1d, close_1d, k=10, d=3, smooth=3)
-    smi_aligned = align_htf_to_ltf(prices, df_1d, smi)
-    smi_signal_aligned = align_htf_to_ltf(prices, df_1d, smi_signal)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Previous 1d bar's range
+    range_1d = high_1d - low_1d
+    
+    # Calculate Camarilla R1 and S1 levels
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
+    
+    # Align Camarilla levels to 12h timeframe (using previous 1d bar's values)
+    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(smi_aligned[i]) or np.isnan(smi_signal_aligned[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -93,24 +66,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: SMI crosses above signal line AND above 1w EMA20 (uptrend) AND volume surge
-            if smi_aligned[i] > smi_signal_aligned[i] and smi_aligned[i-1] <= smi_signal_aligned[i-1] and close[i] > ema_1w_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R1 AND above 1d EMA50 (uptrend) AND volume surge
+            if close[i] > r1_12h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: SMI crosses below signal line AND below 1w EMA20 (downtrend) AND volume surge
-            elif smi_aligned[i] < smi_signal_aligned[i] and smi_aligned[i-1] >= smi_signal_aligned[i-1] and close[i] < ema_1w_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S1 AND below 1d EMA50 (downtrend) AND volume surge
+            elif close[i] < s1_12h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: SMI crosses below signal line OR below 1w EMA20 (trend change)
-            if smi_aligned[i] < smi_signal_aligned[i] and smi_aligned[i-1] >= smi_signal_aligned[i-1] or close[i] < ema_1w_aligned[i]:
+            # Long exit: price falls below S1 OR below 1d EMA50 (trend change)
+            if close[i] < s1_12h[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: SMI crosses above signal line OR above 1w EMA20 (trend change)
-            if smi_aligned[i] > smi_signal_aligned[i] and smi_aligned[i-1] <= smi_signal_aligned[i-1] or close[i] > ema_1w_aligned[i]:
+            # Short exit: price rises above R1 OR above 1d EMA50 (trend change)
+            if close[i] > r1_12h[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
