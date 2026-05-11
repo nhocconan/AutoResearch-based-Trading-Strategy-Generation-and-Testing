@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_Points_With_WeeklyTrend
-Hypothesis: Camarilla pivot levels on 1d provide strong intraday support/resistance. 
-Combined with 1w EMA trend filter to align with higher timeframe momentum. 
-Only trade when price touches S3 or R3 levels with volume confirmation and in-trend conditions.
-Designed for low turnover (~15-25 trades/year) to minimize fee dust and survive 2025 bear market.
+6H_Ichimoku_Cloud_Breakout_With_1dTrend_Filter
+Hypothesis: Ichimoku cloud provides dynamic support/resistance and trend direction.
+In strong trends (price above/below cloud), breakouts in direction of 1d trend have high probability.
+Combines TK cross for entry timing with cloud filter to avoid false breakouts.
+Designed for ~20-40 trades/year on 6f timeframe to minimize fee drag.
+Works in both bull/bear markets by aligning with higher timeframe trend.
 """
 
-name = "1d_Camarilla_Pivot_Points_With_WeeklyTrend"
-timeframe = "1d"
+name = "6H_Ichimoku_Cloud_Breakout_With_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,33 +26,55 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Camarilla Pivot Levels (using previous day's OHLC) ===
-    # Calculate pivots with 1-day lag to avoid look-ahead
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]  # first day uses current close
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # === Ichimoku Components (9, 26, 52) ===
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+    tenkan = (period9_high + period9_low) / 2
     
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_hl = prev_high - prev_low
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+    kijun = (period26_high + period26_low) / 2
     
-    # Camarilla levels
-    S1 = pivot - (range_hl * 1.1 / 12)
-    S2 = pivot - (range_hl * 1.1 / 6)
-    S3 = pivot - (range_hl * 1.1 / 4)
-    R1 = pivot + (range_hl * 1.1 / 12)
-    R2 = pivot + (range_hl * 1.1 / 6)
-    R3 = pivot + (range_hl * 1.1 / 4)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
     
-    # === Weekly Trend Filter (EMA 20 on 1w) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
+    senkou_b = (period52_high + period52_low) / 2
     
-    # === Volume Confirmation (20-period EMA) ===
+    # Chikou Span (Lagging Span): current close plotted 26 periods back
+    # Not used in signals to avoid look-ahead
+    
+    # === Cloud Top and Bottom ===
+    # Cloud top is the higher of Senkou A and B
+    # Cloud bottom is the lower of Senkou A and B
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # === Price Position Relative to Cloud ===
+    price_above_cloud = close > cloud_top
+    price_below_cloud = close < cloud_bottom
+    price_in_cloud = (close >= cloud_bottom) & (close <= cloud_top)
+    
+    # === TK Cross (Tenkan/Kijun Cross) ===
+    # Bullish cross: Tenkan crosses above Kijun
+    # Bearish cross: Tenkan crosses below Kijun
+    tk_bullish = (tenkan > kijun) & (np.roll(tenkan, 1) <= np.roll(kijun, 1))
+    tk_bearish = (tenkan < kijun) & (np.roll(tenkan, 1) >= np.roll(kijun, 1))
+    # Handle first element
+    tk_bullish[0] = False
+    tk_bearish[0] = False
+    
+    # === Load Daily Trend Filter (EMA 34) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
@@ -61,13 +84,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for calculations)
-    start_idx = 20  # covers EMA20 and pivot calculation
+    # Start after warmup (need enough data for Ichimoku calculations)
+    start_idx = 52  # covers the longest period (52) in Ichimoku
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot[i]) or np.isnan(S3[i]) or np.isnan(R3[i]) or 
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(cloud_top[i]) or 
+            np.isnan(cloud_bottom[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -76,38 +99,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Price touch conditions with small buffer
-        buffer = 0.001 * close[i]  # 0.1% buffer
-        touch_S3 = low[i] <= (S3[i] + buffer) and low[i] >= (S3[i] - buffer)
-        touch_R3 = high[i] >= (R3[i] - buffer) and high[i] <= (R3[i] + buffer)
-        
-        # Trend conditions
-        uptrend = close[i] > ema20_1w_aligned[i]
-        downtrend = close[i] < ema20_1w_aligned[i]
+        # Determine 1d trend direction
+        trend_up = close[i] > ema34_1d_aligned[i]
+        trend_down = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
-            # Long: Price touches S3 level + in uptrend + volume confirmation
-            if touch_S3 and uptrend and volume_ok[i]:
+            # Long: Price above cloud + TK bullish cross + 1d uptrend + volume
+            if price_above_cloud[i] and tk_bullish[i] and trend_up and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price touches R3 level + in downtrend + volume confirmation
-            elif touch_R3 and downtrend and volume_ok[i]:
+            # Short: Price below cloud + TK bearish cross + 1d downtrend + volume
+            elif price_below_cloud[i] and tk_bearish[i] and trend_down and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions: price moves to opposite S1/R1 level or reverses
+            # Exit conditions
             if position == 1:
-                # Exit long: price touches S1 or crosses below pivot
-                touch_S1 = low[i] <= (S1[i] + buffer) and low[i] >= (S1[i] - buffer)
-                if touch_S1 or close[i] < pivot[i]:
+                # Exit: Price crosses below cloud OR TK bearish cross
+                if close[i] < cloud_top[i] or tk_bearish[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit short: price touches R1 or crosses above pivot
-                touch_R1 = high[i] >= (R1[i] - buffer) and high[i] <= (R1[i] + buffer)
-                if touch_R1 or close[i] > pivot[i]:
+                # Exit: Price crosses above cloud OR TK bullish cross
+                if close[i] > cloud_bottom[i] or tk_bullish[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
