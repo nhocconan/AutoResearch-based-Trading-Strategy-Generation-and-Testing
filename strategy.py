@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_Relative_Volume_Imbalance_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,52 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter and volume spike
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
-    
-    # Calculate EMA20 on 4h for trend filter
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align 4h EMA20 to 1h
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
-    
-    # Calculate volume spike (20-period average) on 4h
-    vol_ma_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
-    vol_spike_4h = volume_4h > (vol_ma_4h * 2.0)
-    
-    # Align 4h volume spike to 1h
-    vol_spike_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_spike_4h.astype(float))
-    
-    # 1d data for Camarilla pivot levels
+    # 1d data for volume profile and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Calculate daily EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align Camarilla levels to 1h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Calculate 1-day average volume
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    
+    # Align 1d indicators to 6h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    
+    # Calculate 6h volume ratio (current volume / 20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma  # Current volume relative to recent average
+    
+    # Calculate price position within 6h range (0 = low, 1 = high)
+    range_width = high - low
+    range_width = np.where(range_width == 0, 1, range_width)  # Avoid division by zero
+    price_position = (close - low) / range_width
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Ensure EMA20 is ready
+    start_idx = 50  # Ensure EMA50 and volume MA are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(vol_spike_4h_aligned[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(price_position[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +62,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1, above 4h EMA20, volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema20_4h_aligned[i] and 
-                vol_spike_4h_aligned[i] > 0.5):
-                signals[i] = 0.20
+            # Long: strong buying pressure (high close in range) + high volume + above daily EMA50
+            if (price_position[i] > 0.7 and 
+                vol_ratio[i] > 2.0 and 
+                close[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: break below S1, below 4h EMA20, volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema20_4h_aligned[i] and 
-                  vol_spike_4h_aligned[i] > 0.5):
-                signals[i] = -0.20
+            # Short: strong selling pressure (low close in range) + high volume + below daily EMA50
+            elif (price_position[i] < 0.3 and 
+                  vol_ratio[i] > 2.0 and 
+                  close[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below 4h EMA20
-            if close[i] < s1_aligned[i] or close[i] < ema20_4h_aligned[i]:
+            # Exit long: loss of buying pressure or volume drops
+            if (price_position[i] < 0.4 or 
+                vol_ratio[i] < 1.2):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R1 or above 4h EMA20
-            if close[i] > r1_aligned[i] or close[i] > ema20_4h_aligned[i]:
+            # Exit short: loss of selling pressure or volume drops
+            if (price_position[i] > 0.6 or 
+                vol_ratio[i] < 1.2):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
