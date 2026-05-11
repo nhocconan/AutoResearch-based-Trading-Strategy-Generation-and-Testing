@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Trend_Momentum"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +17,67 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    # Get weekly data for pivot points and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # 4h EMA20 for trend
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
     
-    # 1d RSI14 for momentum
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate pivots for each week
+    pivot_1w = np.full_like(high_1w, np.nan)
+    r1_1w = np.full_like(high_1w, np.nan)
+    s1_1w = np.full_like(high_1w, np.nan)
+    r2_1w = np.full_like(high_1w, np.nan)
+    s2_1w = np.full_like(high_1w, np.nan)
+    r3_1w = np.full_like(high_1w, np.nan)
+    s3_1w = np.full_like(high_1w, np.nan)
+    
+    for i in range(1, len(high_1w)):
+        # Use previous week's data for current week's pivot
+        ph = high_1w[i-1]
+        pl = low_1w[i-1]
+        pc = close_1w[i-1]
+        
+        pivot = (ph + pl + pc) / 3.0
+        pivot_1w[i] = pivot
+        
+        r1_1w[i] = 2 * pivot - pl
+        s1_1w[i] = 2 * pivot - ph
+        
+        r2_1w[i] = pivot + (ph - pl)
+        s2_1w[i] = pivot - (ph - pl)
+        
+        r3_1w[i] = ph + 2 * (pivot - pl)
+        s3_1w[i] = pl - 2 * (ph - pivot)
+    
+    # Align weekly pivots to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # Get daily data for trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_14_1d = 100 - (100 / (1 + rs))
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 1d ATR14 for volatility filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = high_1d[0] - low_1d[0]
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Align indicators to 1h
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    rsi_14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
-    
-    # Volume filter: 20-period average on 1h
+    # Volume filter: 20-period average on 6h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -64,51 +86,52 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(rsi_14_1d_aligned[i]) or 
-            np.isnan(atr_14_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(r2_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or 
+            np.isnan(s3_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume threshold - avoid low-volume false signals
-        volume_surge = vol_ratio[i] > 1.3
+        # Volume threshold - avoid low-volume false breakouts
+        volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price above 4h EMA20, RSI > 50, volume surge
-            if (close[i] > ema_20_4h_aligned[i] and 
-                rsi_14_1d_aligned[i] > 50 and 
-                volume_surge):
-                signals[i] = 0.20
+            # Long: Price breaks above R3 with volume and above daily EMA34 trend
+            if (close[i] > r3_1w_aligned[i] and 
+                volume_surge and 
+                close[i] > ema_34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: Price below 4h EMA20, RSI < 50, volume surge
-            elif (close[i] < ema_20_4h_aligned[i] and 
-                  rsi_14_1d_aligned[i] < 50 and 
-                  volume_surge):
-                signals[i] = -0.20
+            # Short: Price breaks below S3 with volume and below daily EMA34 trend
+            elif (close[i] < s3_1w_aligned[i] and 
+                  volume_surge and 
+                  close[i] < ema_34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to 4h EMA20 or RSI reverses
+            # Exit: price returns to opposite pivot level
             if position == 1:
-                # Exit long: price below EMA20 or RSI < 40
-                if close[i] < ema_20_4h_aligned[i] or rsi_14_1d_aligned[i] < 40:
+                # Exit long: price touches or goes below S3
+                if close[i] <= s3_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: price above EMA20 or RSI > 60
-                if close[i] > ema_20_4h_aligned[i] or rsi_14_1d_aligned[i] > 60:
+                # Exit short: price touches or goes above R3
+                if close[i] >= r3_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
