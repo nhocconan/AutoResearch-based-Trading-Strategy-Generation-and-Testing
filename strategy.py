@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Reversal_v1
-Hypothesis: Weekly pivot reversals with volume confirmation on 6h timeframe.
-- Calculates weekly pivot points (P), resistance (R1,R2), support (S1,S2) from prior week's OHLC.
-- Enters long when price breaks above R1 with volume spike and price above weekly P (bullish bias).
-- Enters short when price breaks below S1 with volume spike and price below weekly P (bearish bias).
-- Exits when price crosses the weekly pivot point P (mean reversion).
-- Works in bull/bear markets by using weekly pivot as dynamic support/resistance and volume to filter false breakouts.
+12h_Keltner_Channel_Breakout_1dTrend_Volume
+Hypothesis: Price breaks above/below Keltner Channel (ATR-based bands) on 12h with 1d trend filter (price > 1d EMA50) and volume confirmation. Exits on opposite band touch. Designed for low trade frequency (~20-40/year) to work in both bull and bear markets by following 1d trend and avoiding whipsaws.
 """
 
-name = "6h_Weekly_Pivot_Reversal_v1"
-timeframe = "6h"
+name = "12h_Keltner_Channel_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,49 +22,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === WEEKLY Data for Pivot Points ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 1D Data for Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's OHLC for pivot calculation
-    ph_1w = high_1w  # previous week high
-    pl_1w = low_1w   # previous week low
-    pc_1w = close_1w # previous week close
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly pivot points: P = (H+L+C)/3
-    pivot = (ph_1w + pl_1w + pc_1w) / 3.0
-    # Resistance and support levels
-    r1 = 2 * pivot - pl_1w
-    s1 = 2 * pivot - ph_1w
-    r2 = pivot + (ph_1w - pl_1w)
-    s2 = pivot - (ph_1w - pl_1w)
+    # === 12h Keltner Channel (20, ATRx2) ===
+    # EMA20 of close
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # ATR(20)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = 0
+    atr20 = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Keltner Bands
+    kelner_upper = ema20 + 2 * atr20
+    kelner_lower = ema20 - 2 * atr20
     
-    # Align weekly pivot levels to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # === Volume Filter: 2.0x 20-period EMA on 6h ===
+    # === Volume Filter: 1.5x 20-period EMA on 12h ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 2.0
+    volume_spike = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 30
+    # Start after warmup (covers 1d EMA50 and 12h EMA20/ATR20)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(kelner_upper[i]) or np.isnan(kelner_lower[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,28 +69,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and bullish bias (price > pivot)
-            if (close[i] > r1_aligned[i] and 
-                volume_spike[i] and 
-                close[i] > pivot_aligned[i]):
+            # Long: price breaks above Keltner Upper with uptrend and volume spike
+            if (close[i] > kelner_upper[i] and 
+                close[i] > ema50_1d_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and bearish bias (price < pivot)
-            elif (close[i] < s1_aligned[i] and 
-                  volume_spike[i] and 
-                  close[i] < pivot_aligned[i]):
+            # Short: price breaks below Keltner Lower with downtrend and volume spike
+            elif (close[i] < kelner_lower[i] and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below weekly pivot (mean reversion)
-            if close[i] < pivot_aligned[i]:
+            # Long exit: price touches or crosses below Keltner Lower (mean reversion)
+            if close[i] < kelner_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above weekly pivot (mean reversion)
-            if close[i] > pivot_aligned[i]:
+            # Short exit: price touches or crosses above Keltner Upper (mean reversion)
+            if close[i] > kelner_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
