@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_DonchianBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,9 +27,21 @@ def generate_signals(prices):
     trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Donchian channel on 12h (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels from previous day (using 1d high/low/close)
+    # Camarilla formulas: H = high, L = low, C = close
+    # Resistance levels: R3 = C + (H-L)*1.1/2, R4 = C + (H-L)*1.1
+    # Support levels: S3 = C - (H-L)*1.1/2, S4 = C - (H-L)*1.1
+    # We use R3 and S3 for breakout signals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_arr = df_1d['close'].values
+    
+    camarilla_R3 = close_1d_arr + (high_1d - low_1d) * 1.1 / 2
+    camarilla_S3 = close_1d_arr - (high_1d - low_1d) * 1.1 / 2
+    
+    # Align Camarilla levels to 4h timeframe
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
     
     # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -38,11 +50,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for EMA and Donchian
+    start_idx = 34  # Need enough data for EMA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or
             np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -52,24 +64,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Donchian breakout + 1d uptrend + volume confirmation
-            if close[i] > donchian_high[i-1] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Price breaks above Camarilla R3 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_R3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakdown + 1d downtrend + volume confirmation
-            elif close[i] < donchian_low[i-1] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Price breaks below Camarilla S3 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_S3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Donchian breakdown OR 1d trend turns down
-            if close[i] < donchian_low[i-1] or not trend_up_1d_aligned[i]:
+            # Long exit: Price breaks below Camarilla S3 OR 1d trend turns down
+            if close[i] < camarilla_S3_aligned[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Donchian breakout OR 1d trend turns up
-            if close[i] > donchian_high[i-1] or trend_up_1d_aligned[i]:
+            # Short exit: Price breaks above Camarilla R3 OR 1d trend turns up
+            if close[i] > camarilla_R3_aligned[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
