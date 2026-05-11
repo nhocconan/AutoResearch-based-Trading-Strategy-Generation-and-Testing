@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_EMA_RSI_Reversal"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
+    # Get daily data for Camarilla and trend
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 60 or len(df_1w) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels from previous day
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Daily RSI(14) for momentum/divergence
-    delta = pd.Series(close_1d).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
+    r1 = pivot + (range_ * 1.0 / 12)
+    s1 = pivot - (range_ * 1.0 / 12)
+    r2 = pivot + (range_ * 2.0 / 12)
+    s2 = pivot - (range_ * 2.0 / 12)
     
-    # Weekly high/low for range context
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Daily trend filter: EMA34 > EMA89 for uptrend
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = pd.Series(df_1d['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
+    trend_up_1d = ema34_1d > ema89_1d
+    trend_down_1d = ema34_1d < ema89_1d
     
-    # Align all to 6h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
-    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
-    
-    # 60-period RSI on 6c for overbought/oversold
-    delta_6h = pd.Series(close).diff()
-    gain_6h = delta_6h.clip(lower=0)
-    loss_6h = -delta_6h.clip(upper=0)
-    avg_gain_6h = gain_6h.ewm(alpha=1/60, adjust=False, min_periods=60).mean()
-    avg_loss_6h = loss_6h.ewm(alpha=1/60, adjust=False, min_periods=60).mean()
-    rs_6h = avg_gain_6h / avg_loss_6h
-    rsi_6h = 100 - (100 / (1 + rs_6h))
-    rsi_6h = rsi_6h.values
+    # Align all to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = np.zeros(n)
@@ -69,13 +60,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(150, 60)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]) or
-            np.isnan(rsi_6h[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,30 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: oversold RSI on 6h + price above daily EMA50 + weekly support
-            if (rsi_6h[i] < 30 and 
-                close[i] > ema50_1d_aligned[i] and
-                close[i] > low_1w_aligned[i] and  # above weekly low
+            # Long: price breaks above R2 in daily uptrend with volume surge
+            if (close[i] > r2_aligned[i] and 
+                trend_up_aligned[i] and 
                 volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought RSI on 6h + price below daily EMA50 + weekly resistance
-            elif (rsi_6h[i] > 70 and 
-                  close[i] < ema50_1d_aligned[i] and
-                  close[i] < high_1w_aligned[i] and  # below weekly high
+            # Short: price breaks below S2 in daily downtrend with volume surge
+            elif (close[i] < s2_aligned[i] and 
+                  trend_down_aligned[i] and 
                   volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI overbought or price breaks below daily EMA50
-            if (rsi_6h[i] > 70 or close[i] < ema50_1d_aligned[i]):
+            # Long exit: price falls below R1 or daily trend changes
+            if (close[i] < r1_aligned[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI oversold or price breaks above daily EMA50
-            if (rsi_6h[i] < 30 or close[i] > ema50_1d_aligned[i]):
+            # Short exit: price rises above S1 or daily trend changes
+            if (close[i] > s1_aligned[i] or not trend_down_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
