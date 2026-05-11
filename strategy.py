@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_TRIX_ZeroCross_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,58 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily trend (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 1w data for weekly trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # Daily EMA34 for trend
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1w = close_1w > ema50_1w
     
-    # Get 4h data for Camarilla levels (R3, S3)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
-        return np.zeros(n)
+    # Calculate TRIX on daily close
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
+    trix_raw = (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1) * 100
+    trix_raw[0] = 0  # First value has no previous
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # TRIX smoothed (signal line)
+    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Calculate Camarilla levels (R3, S3) from previous 4h period
-    R3 = np.full(len(high_4h), np.nan)
-    S3 = np.full(len(high_4h), np.nan)
-    
-    for i in range(1, len(high_4h)):
-        prev_high = high_4h[i-1]
-        prev_low = low_4h[i-1]
-        prev_close = close_4h[i-1]
-        range_val = prev_high - prev_low
-        if range_val > 0:
-            R3[i] = prev_close + range_val * 1.1 / 4
-            S3[i] = prev_close - range_val * 1.1 / 4
+    # TRIX histogram (main signal)
+    trix_hist = trix_raw - trix_signal
     
     # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
     volume_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 4h timeframe
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
+    # Align indicators to 1d timeframe
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    trix_hist_aligned = align_htf_to_ltf(prices, df_1d, trix_hist)
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(60, 34)  # Need enough data for indicators
+    start_idx = max(30, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or
+        if (np.isnan(trix_hist_aligned[i]) or 
+            np.isnan(trend_up_1w_aligned[i]) or
             np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -78,30 +71,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + daily uptrend + volume confirmation
-            if (close[i] > R3_aligned[i] and 
-                trend_up_1d_aligned[i] and 
-                volume[i] > 1.2 * vol_ma20_1d_aligned[i]):
+            # Long: TRIX crosses above zero + weekly uptrend + volume confirmation
+            if (trix_hist_aligned[i] > 0 and trix_hist_aligned[i-1] <= 0 and 
+                trend_up_1w_aligned[i] and 
+                volume[i] > 1.3 * vol_ma20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + daily downtrend + volume confirmation
-            elif (close[i] < S3_aligned[i] and 
-                  not trend_up_1d_aligned[i] and 
-                  volume[i] > 1.2 * vol_ma20_1d_aligned[i]):
+            # Short: TRIX crosses below zero + weekly downtrend + volume confirmation
+            elif (trix_hist_aligned[i] < 0 and trix_hist_aligned[i-1] >= 0 and 
+                  not trend_up_1w_aligned[i] and 
+                  volume[i] > 1.3 * vol_ma20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes
-            if (close[i] < S3_aligned[i] or 
-                not trend_up_1d_aligned[i]):
+            # Long exit: TRIX crosses below zero or trend changes
+            if (trix_hist_aligned[i] < 0 or 
+                not trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes
-            if (close[i] > R3_aligned[i] or 
-                trend_up_1d_aligned[i]):
+            # Short exit: TRIX crosses above zero or trend changes
+            if (trix_hist_aligned[i] > 0 or 
+                trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
