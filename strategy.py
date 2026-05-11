@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Volume_Session"
-timeframe = "1h"
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: Price breaking above/below R3/S3 Camarilla levels on 12h, filtered by 1d EMA34 trend and volume above 1.5x median. Exit on opposite Camarilla touch or ATR stop.
+# Designed for 12h timeframe with 1d trend filter to reduce whipsaw in both bull and bear markets.
+# Target: 50-150 total trades over 4 years (12-37/year).
+
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,49 +17,46 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter (updated only after 1d bar closes)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 1h OHLCV
-    close_1h = prices['close'].values
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    volume_1h = prices['volume'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
     # --- 1d Trend Filter: EMA34 ---
     close_1d = df_1d['close'].values
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- 1h Camarilla Levels (based on previous 1d) ---
-    # Calculate from previous 1d bar (shifted by 1 to avoid lookahead)
-    prev_close = np.roll(close_1h, 1)
-    prev_high = np.roll(high_1h, 1)
-    prev_low = np.roll(low_1h, 1)
-    prev_close[0] = close_1h[0]
-    prev_high[0] = high_1h[0]
-    prev_low[0] = low_1h[0]
+    # --- 12h Camarilla Levels (based on previous day) ---
+    # Calculate from previous 12h bar (shifted by 1 to avoid lookahead)
+    prev_close = np.roll(close_12h, 1)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close[0] = close_12h[0]
+    prev_high[0] = high_12h[0]
+    prev_low[0] = low_12h[0]
     
     # Camarilla R3 and S3 levels
     camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
     camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # --- Volume Filter: above 1.5x median of last 24 periods ---
-    vol_median = pd.Series(volume_1h).rolling(window=24, min_periods=12).median().values
+    # --- Volume Filter: above 1.5x median of last 20 periods ---
+    vol_median = pd.Series(volume_12h).rolling(window=20, min_periods=10).median().values
     vol_threshold = vol_median * 1.5
     
     # --- ATR for stoploss (14-period) ---
-    tr1 = np.abs(high_1h - low_1h)
-    tr2 = np.abs(high_1h - np.roll(close_1h, 1))
-    tr3 = np.abs(low_1h - np.roll(close_1h, 1))
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first bar
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # --- Session filter: 08-20 UTC ---
-    hours = prices.index.hour  # already datetime64[ms], .hour works
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,61 +71,58 @@ def generate_signals(prices):
             np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
                 # Check stoploss
-                if position == 1 and close_1h[i] <= entry_price - 2.0 * atr[i]:
+                if position == 1 and close_12h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_1h[i] >= entry_price + 2.0 * atr[i]:
+                elif position == -1 and close_12h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20 if position == 1 else -0.20
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Determine 1d trend
-        trend_up = close_1h[i] > ema34_1d_aligned[i]
-        trend_down = close_1h[i] < ema34_1d_aligned[i]
+        trend_up = close_12h[i] > ema34_1d_aligned[i]
+        trend_down = close_12h[i] < ema34_1d_aligned[i]
         
         # Volume filter: above 1.5x median
-        vol_ok = volume_1h[i] > vol_threshold[i]
+        vol_ok = volume_12h[i] > vol_threshold[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume and session
-            if in_session and close_1h[i] > camarilla_r3[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + 1d uptrend + volume + session
-                signals[i] = 0.20
+            # Look for entries only in direction of 1d trend with volume
+            if close_12h[i] > camarilla_r3[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + 1d uptrend + volume
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_1h[i]
-            elif in_session and close_1h[i] < camarilla_s3[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + 1d downtrend + volume + session
-                signals[i] = -0.20
+                entry_price = close_12h[i]
+            elif close_12h[i] < camarilla_s3[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + 1d downtrend + volume
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_1h[i]
+                entry_price = close_12h[i]
         else:
             # Update stoploss and check exits
             if position == 1:
                 # Stoploss
-                if close_1h[i] <= entry_price - 2.0 * atr[i]:
+                if close_12h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 # Exit: price touches or crosses below S3
-                elif close_1h[i] <= camarilla_s3[i]:
+                elif close_12h[i] <= camarilla_s3[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
                 # Stoploss
-                if close_1h[i] >= entry_price + 2.0 * atr[i]:
+                if close_12h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 # Exit: price touches or crosses above R3
-                elif close_1h[i] >= camarilla_r3[i]:
+                elif close_12h[i] >= camarilla_r3[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
