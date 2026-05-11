@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_Pivot_1dTrend_Volume
-Hypothesis: Camarilla pivot levels (R3, S3) from 1d act as strong support/resistance. 
-Price breaking above R3 or below S3 with 1d trend alignment (close > EMA34) and volume surge signals momentum continuation.
-In ranging markets (ADX < 20), fade at R3/S3 for mean reversion. Uses 12h timeframe with 1d HTF for pivot, trend, volume, and ADX.
-Target: 20-50 total trades over 4 years (5-12/year) to minimize fee drag.
-Works in bull/bear via trend filter and mean-reversion mode in ranging conditions.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Camarilla pivot levels (R1, S1) calculated from daily OHLC act as key support/resistance on 12h chart.
+When price breaks above R1 or below S1 with 1d trend alignment (price > EMA50) and volume confirmation (>1.5x 20-period average),
+it signals momentum continuation. In ranging markets (ADX < 20), fade at R1/S1 for mean reversion.
+Uses 12h timeframe with 1d Camarilla levels, 1d EMA50 for trend, and ADX for regime filtering.
+Targets 50-150 total trades over 4 years (12-37/year).
 """
 
-name = "12h_Camarilla_Pivot_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -21,22 +21,46 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for HTF indicators
+    # Get 1d data for Camarilla levels, EMA50, and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
     # 12h OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # --- 1d Camarilla Levels (using previous day's OHLC) ---
+    # Calculate from previous day's OHLC
+    prev_day_high = np.roll(df_1d['high'].values, 1)
+    prev_day_low = np.roll(df_1d['low'].values, 1)
+    prev_day_close = np.roll(df_1d['close'].values, 1)
+    # Set first values to avoid NaN
+    prev_day_high[0] = df_1d['high'].values[0]
+    prev_day_low[0] = df_1d['low'].values[0]
+    prev_day_close[0] = df_1d['close'].values[0]
     
-    # --- 1d ADX(14) for regime detection ---
+    # Camarilla calculation
+    range_prev = prev_day_high - prev_day_low
+    camarilla_mult = 1.1 / 12  # 1.1/12 for R1/S1
+    r1 = prev_day_close + range_prev * camarilla_mult
+    s1 = prev_day_close - range_prev * camarilla_mult
+    r2 = prev_day_close + range_prev * 1.1 / 6   # 1.1/6 for R2/S2
+    s2 = prev_day_close - range_prev * 1.1 / 6
+    
+    # Align daily levels to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1)
+    r2_12h = align_htf_to_ltf(prices, df_1d, r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # --- 1d EMA50 for trend filter ---
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # --- 1d ADX for regime filtering (14 period) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -47,113 +71,123 @@ def generate_signals(prices):
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Smoothed values
-    tr14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    plus_dm14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    minus_dm14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * plus_dm14 / (tr14 + 1e-10)
-    minus_di = 100 * minus_dm14 / (tr14 + 1e-10)
-    
-    # DX and ADX
+    # Smoothed DM and TR
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / atr_1d
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # --- 1d Camarilla Pivot Levels (R3, S3) ---
-    # Calculate from previous day's OHLC
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
-    
-    # Camarilla calculations
-    range_prev = prev_high - prev_low
-    camarilla_mult = 1.1 / 12  # ~0.09167
-    r3 = prev_close + range_prev * camarilla_mult * 4
-    s3 = prev_close - range_prev * camarilla_mult * 4
-    
-    # Align to 12h
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # --- 1d Volume Average for confirmation ---
-    vol_avg_1d = pd.Series(df_1d['volume']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
+    # --- 12h Volume Average for confirmation ---
+    vol_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 40
+    start_idx = 50  # for EMA50 and ADX
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or np.isnan(vol_avg_1d_aligned[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema50_12h[i]) or np.isnan(adx_12h[i]) or 
+            np.isnan(vol_avg_12h[i])):
             if position != 0:
-                # Exit on close beyond opposite level
-                if position == 1 and close[i] <= s3_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close[i] >= r3_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                # Hold position until clear exit signal
+                signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Regime detection: trending vs ranging
-        trending = adx_1d_aligned[i] > 25
-        ranging = adx_1d_aligned[i] < 20
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = volume_12h[i] > 1.5 * vol_avg_12h[i]
         
-        # Volume confirmation: current volume > 1.5x 1d EMA average
-        vol_confirm = volume[i] > 1.5 * vol_avg_1d_aligned[i]
+        # Trend filter: price above/below EMA50
+        uptrend = close_12h[i] > ema50_12h[i]
+        downtrend = close_12h[i] < ema50_12h[i]
+        
+        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
+        trending = adx_12h[i] > 25
+        ranging = adx_12h[i] < 20
         
         if position == 0:
+            # Look for entries
             if trending and vol_confirm:
                 # Trending market: breakout continuation
-                if close[i] > r3_12h[i] and close[i] > ema34_1d_aligned[i]:
-                    signals[i] = 0.25  # long breakout above R3
+                if uptrend and close_12h[i] > r1_12h[i]:
+                    signals[i] = 0.25  # long breakout above R1
                     position = 1
-                elif close[i] < s3_12h[i] and close[i] < ema34_1d_aligned[i]:
-                    signals[i] = -0.25  # short breakdown below S3
+                    entry_price = close_12h[i]
+                elif downtrend and close_12h[i] < s1_12h[i]:
+                    signals[i] = -0.25  # short breakdown below S1
                     position = -1
-            elif ranging:
-                # Ranging market: mean reversion at extremes
-                if close[i] < s3_12h[i]:
-                    signals[i] = 0.25  # long at S3 support
+                    entry_price = close_12h[i]
+            elif ranging and vol_confirm:
+                # Ranging market: mean reversion at S1/R1
+                if close_12h[i] < s1_12h[i] and i > 0 and close_12h[i-1] >= s1_12h[i-1]:
+                    signals[i] = 0.25  # long mean reversion from S1
                     position = 1
-                elif close[i] > r3_12h[i]:
-                    signals[i] = -0.25  # short at R3 resistance
+                    entry_price = close_12h[i]
+                elif close_12h[i] > r1_12h[i] and i > 0 and close_12h[i-1] <= r1_12h[i-1]:
+                    signals[i] = -0.25  # short mean reversion from R1
                     position = -1
+                    entry_price = close_12h[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long: exit on close below S3 or trend reversal
-                if close[i] < s3_12h[i] or (trending and close[i] < ema34_1d_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                # Long position management
+                if trending:
+                    # In trending market, trail with EMA50 or stop at S1
+                    if close_12h[i] < ema50_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below S1
+                    elif close_12h[i] < s1_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
+                else:  # ranging or weak trend
+                    # In ranging market, take profit at R2 or stop at S1
+                    if close_12h[i] >= r2_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below S1
+                    elif close_12h[i] < s1_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
             elif position == -1:
-                # Short: exit on close above R3 or trend reversal
-                if close[i] > r3_12h[i] or (trending and close[i] > ema34_1d_aligned[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                # Short position management
+                if trending:
+                    # In trending market, trail with EMA50 or stop at R1
+                    if close_12h[i] > ema50_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above R1
+                    elif close_12h[i] > r1_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
+                else:  # ranging or weak trend
+                    # In ranging market, take profit at S2 or stop at R1
+                    if close_12h[i] <= s2_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above R1
+                    elif close_12h[i] > r1_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
     
     return signals
