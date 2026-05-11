@@ -1,14 +1,17 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-1d_Weekly_Camarilla_Pivot_Breakout_Trend
-Hypothesis: Breakouts at weekly Camarilla pivot levels (H4/L4) with 1-week EMA trend filter and volume confirmation.
-This strategy trades daily breakouts in the direction of the weekly trend, using weekly pivot levels for precise entry.
-Works in both bull and bear markets by aligning with higher timeframe trend. Volume filters out false breakouts.
-Low trade frequency (~10-25 trades/year) reduces fee drag significantly.
+6h_Pivot_Reversal_Backtest
+Hypothesis: Fade intraday reversals from previous day's open with 1d EMA trend filter.
+In ranging markets (common in 2025), price tends to revert to the day's open after strong moves.
+We use the 1d EMA to determine trend direction: only fade when price deviates significantly
+from the open in the opposite trend direction. Volume spike confirms exhaustion.
+Works in both bull and bear markets by fading extremes within the prevailing trend.
+Target: 15-30 trades/year per symbol.
 """
 
-name = "1d_Weekly_Camarilla_Pivot_Breakout_Trend"
-timeframe = "1d"
+name = "6h_Pivot_Reversal_Backtest"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,44 +28,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Data for Trend and Pivot Levels ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # === 1d Data for Trend Filter and Open Reference ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w_series = pd.Series(close_1w)
+    # Daily EMA for trend filter (20-period)
+    close_1d = df_1d['close'].values
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Weekly EMA50 for trend filter
-    ema50_1w = close_1w_series.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Previous day's open as mean reversion target
+    open_1d = df_1d['open'].values
+    open_1d_aligned = align_htf_to_ltf(prices, df_1d, open_1d)
     
-    # Weekly Camarilla pivot levels: H4, L4
-    # H4 = close + 1.1 * (high - low) / 2
-    # L4 = close - 1.1 * (high - low) / 2
-    camarilla_h4 = close_1w + 1.1 * (high_1w - low_1w) / 2
-    camarilla_l4 = close_1w - 1.1 * (high_1w - low_1w) / 2
+    # === 60-period ATR for deviation threshold (on 6h data) ===
+    # Calculate True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr60 = pd.Series(tr).rolling(window=60, min_periods=60).mean().values
     
-    # Align pivot levels to daily timeframe
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
-    
-    # === Volume Filter (1.5x 20-period EMA on daily) ===
+    # === Volume Spike Filter (2x 20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    volume_spike = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers weekly EMA and pivot calculation)
+    # Start after warmup (covers 1d EMA and ATR)
     start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema20_1d_aligned[i]) or np.isnan(open_1d_aligned[i]) or 
+            np.isnan(atr60[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,29 +71,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Calculate deviation from day's open in ATR units
+        deviation = (close[i] - open_1d_aligned[i]) / atr60[i]
+        
         if position == 0:
-            # Long breakout: price closes above weekly H4 with uptrend and volume
-            if (close[i] > camarilla_h4_aligned[i] and 
-                close[i] > ema50_1w_aligned[i] and 
-                volume_ok[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short breakdown: price closes below weekly L4 with downtrend and volume
-            elif (close[i] < camarilla_l4_aligned[i] and 
-                  close[i] < ema50_1w_aligned[i] and 
-                  volume_ok[i]):
+            # Fade down: price is significantly above open AND trend is down (price < EMA)
+            if deviation > 1.5 and close[i] < ema20_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
+            # Fade up: price is significantly below open AND trend is up (price > EMA)
+            elif deviation < -1.5 and close[i] > ema20_1d_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
         elif position == 1:
-            # Long exit: price closes below weekly L4 (mean reversion to pivot)
-            if close[i] < camarilla_l4_aligned[i]:
+            # Long exit: price returns to near open or trend breaks down
+            if deviation > -0.5 or close[i] < ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above weekly H4 (mean reversion to pivot)
-            if close[i] > camarilla_h4_aligned[i]:
+            # Short exit: price returns to near open or trend breaks up
+            if deviation < 0.5 or close[i] > ema20_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
