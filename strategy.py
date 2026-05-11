@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Williams_R_Reversal_v1
-Hypothesis: Williams %R identifies overbought/oversold conditions. In ranging markets,
-extreme readings often precede mean-reverting moves. We combine with 1d ADX trend filter
-to avoid counter-trend trades in strong trends, and use volume spike for confirmation.
-Target: 100-180 trades over 4 years (25-45/year) on 4h timeframe.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Uses daily Camarilla pivot levels (R1, S1) for breakout entries on 12h timeframe.
+Trades only when 1d EMA34 confirms trend direction and volume exceeds 1.5x 20-period average.
+Designed to work in both bull and bear markets by trading with the higher timeframe trend.
+Targets 50-150 trades over 4 years (12-37/year) on 12h timeframe.
 """
 
-name = "4h_Williams_R_Reversal_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,115 +17,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1D Data for ADX Trend Filter ===
+    # === 1D Data for Camarilla Pivots and Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate Camarilla levels from previous day's OHLC
+    # We need the previous day's data to calculate today's levels
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # Calculate ADX(14) on daily data
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First TR is just high-low
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smooth TR, DM+, DM- using Wilder's smoothing (EMA with alpha=1/period)
-        atr = np.zeros_like(tr)
-        dm_plus_smooth = np.zeros_like(dm_plus)
-        dm_minus_smooth = np.zeros_like(dm_minus)
-        
-        atr[period-1] = np.mean(tr[:period])
-        dm_plus_smooth[period-1] = np.mean(dm_plus[:period])
-        dm_minus_smooth[period-1] = np.mean(dm_minus[:period])
-        
-        for i in range(period, len(tr)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-            dm_plus_smooth[i] = (dm_plus_smooth[i-1] * (period-1) + dm_plus[i]) / period
-            dm_minus_smooth[i] = (dm_minus_smooth[i-1] * (period-1) + dm_minus[i]) / period
-        
-        # Avoid division by zero
-        dm_plus_smooth = np.where(atr == 0, 0, dm_plus_smooth)
-        dm_minus_smooth = np.where(atr == 0, 0, dm_minus_smooth)
-        
-        di_plus = 100 * dm_plus_smooth / atr
-        di_minus = 100 * dm_minus_smooth / atr
-        
-        dx = np.zeros_like(di_plus)
-        dx = np.where((di_plus + di_minus) != 0, 
-                      100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-        
-        adx = np.zeros_like(dx)
-        adx[2*period-2] = np.mean(dx[period-1:2*period-1]) if len(dx) >= 2*period-1 else 0
-        for i in range(2*period-1, len(dx)):
-            adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Camarilla formulas
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align Camarilla levels to 12h timeframe (already delayed by shift(1))
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # === Williams %R Calculation (4h) ===
-    def williams_r(high, low, close, period=14):
-        highest_high = np.zeros_like(high)
-        lowest_low = np.zeros_like(low)
-        
-        for i in range(len(high)):
-            if i < period - 1:
-                highest_high[i] = np.max(high[:i+1])
-                lowest_low[i] = np.min(low[:i+1])
-            else:
-                highest_high[i] = np.max(high[i-period+1:i+1])
-                lowest_low[i] = np.min(low[i-period+1:i+1])
-        
-        wr = np.where((highest_high - lowest_low) != 0,
-                      -100 * (highest_high - close) / (highest_high - lowest_low), -50)
-        return wr
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    wr = williams_r(high, low, close, 14)
-    
-    # === Volume Spike Detection ===
-    # Volume SMA(20) and check for 1.5x spike
-    vol_sma = np.zeros_like(volume)
-    for i in range(len(volume)):
-        if i < 20:
-            vol_sma[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
-        else:
-            vol_sma[i] = np.mean(volume[i-19:i+1])
-    
-    volume_spike = volume > (vol_sma * 1.5)
+    # === Volume Spike Filter (20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(50, 30)  # Ensure enough data for indicators
+    # Start after warmup period
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(adx_1d_aligned[i]) or 
-            np.isnan(wr[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -134,24 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Oversold (WR < -80) + volume spike + not strong uptrend (ADX < 25)
-            if wr[i] < -80 and volume_spike[i] and adx_1d_aligned[i] < 25:
+            # Long breakout: price breaks above R1 with volume spike and uptrend
+            if (close[i] > R1_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i] and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Overbought (WR > -20) + volume spike + not strong downtrend (ADX < 25)
-            elif wr[i] > -20 and volume_spike[i] and adx_1d_aligned[i] < 25:
+            # Short breakdown: price breaks below S1 with volume spike and downtrend
+            elif (close[i] < S1_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i] and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: WR returns above -50 (mean reversion complete) or strong trend emerges
-            if wr[i] > -50 or adx_1d_aligned[i] >= 30:
+            # Long exit: price breaks below S1 or volume dries up
+            if close[i] < S1_aligned[i] or volume[i] < vol_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: WR returns below -50 or strong trend emerges
-            if wr[i] < -50 or adx_1d_aligned[i] >= 30:
+            # Short exit: price breaks above R1 or volume dries up
+            if close[i] > R1_aligned[i] or volume[i] < vol_ma20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
