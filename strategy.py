@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Trend"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,23 +17,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla R1 and S1 levels
+    # 1d data for Camarilla R3 and S3 levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla R1 = Close + (High - Low) * 1.1 / 12
-    # Camarilla S1 = Close - (High - Low) * 1.1 / 12
-    R1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    S1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Camarilla R3 = Close + (High - Low) * 1.1 / 4
+    # Camarilla S3 = Close - (High - Low) * 1.1 / 4
+    R3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
+    S3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
     
     # Align to 4h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
     
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -49,7 +49,7 @@ def generate_signals(prices):
     start_idx = 100  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
             np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,28 +59,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, uptrend (price > EMA34), volume spike
-            if (close[i] > R1_aligned[i] and 
+            # Long: Price breaks above R3, uptrend (price > EMA34), volume spike
+            if (close[i] > R3_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1, downtrend (price < EMA34), volume spike
-            elif (close[i] < S1_aligned[i] and 
+            # Short: Price breaks below S3, downtrend (price < EMA34), volume spike
+            elif (close[i] < S3_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S1 (opposite level)
-            if close[i] < S1_aligned[i]:
+            # Exit long: price crosses below S3 (opposite level)
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1 (opposite level)
-            if close[i] > R1_aligned[i]:
+            # Exit short: price crosses above R3 (opposite level)
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
