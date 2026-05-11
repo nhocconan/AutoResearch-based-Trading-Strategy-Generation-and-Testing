@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Wick_Reversal_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,41 +9,64 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    open_ = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # 1d data for Ichimoku components
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:  # Need enough data for Ichimoku
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    # Weekly EMA21 for trend filter
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_b_period = 52
+    
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
+    tenkan_sen = tenkan_sen.values
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    kijun_sen = kijun_sen.values
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_b_period, min_periods=senkou_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_b_period, min_periods=senkou_b_period).min()) / 2
+    senkou_span_b = senkou_span_b.values
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # 6h EMA20 for entry timing
+    ema20_6h = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 21  # Ensure indicators are ready
+    start_idx = 52  # Ensure Ichimoku is ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ema21_1w_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or 
+            np.isnan(ema20_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -51,40 +74,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Calculate daily body and wicks
-        body = np.abs(close[i] - open_[i])
-        lower_wick = np.minimum(open_[i], close[i]) - low[i]
-        upper_wick = high[i] - np.maximum(open_[i], close[i])
-        
-        # Volume spike: current volume > 1.5 * 20-day average volume
-        vol_ma20 = np.mean(np.maximum(1, volume[max(0, i-19):i+1])) if i >= 19 else volume[i]
-        volume_spike = volume[i] > 1.5 * vol_ma20
+        # Determine cloud top and bottom
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
         if position == 0:
-            # Long reversal: long lower wick, small body, volume spike, above weekly EMA
-            if (lower_wick > 2 * body and  # Long lower wick at least 2x body
-                body < (high[i] - low[i]) * 0.3 and  # Small body (<30% of range)
-                volume_spike and
-                close[i] > ema21_1w_aligned[i]):
+            # Long: TK cross bullish, price above cloud, price above EMA20
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1] and
+                close[i] > cloud_top and
+                close[i] > ema20_6h[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short reversal: long upper wick, small body, volume spike, below weekly EMA
-            elif (upper_wick > 2 * body and  # Long upper wick at least 2x body
-                  body < (high[i] - low[i]) * 0.3 and  # Small body (<30% of range)
-                  volume_spike and
-                  close[i] < ema21_1w_aligned[i]):
+            # Short: TK cross bearish, price below cloud, price below EMA20
+            elif (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                  tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1] and
+                  close[i] < cloud_bottom and
+                  close[i] < ema20_6h[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below weekly EMA or opposite signal
-            if close[i] < ema21_1w_aligned[i] or (upper_wick > 2 * body and volume_spike):
+            # Exit long: TK cross bearish or price drops below cloud
+            if (tenkan_sen_aligned[i] < kijun_sen_aligned[i] or 
+                close[i] < cloud_top):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above weekly EMA or opposite signal
-            if close[i] > ema21_1w_aligned[i] or (lower_wick > 2 * body and volume_spike):
+            # Exit short: TK cross bullish or price rises above cloud
+            if (tenkan_sen_aligned[i] > kijun_sen_aligned[i] or 
+                close[i] > cloud_bottom):
                 signals[i] = 0.0
                 position = 0
             else:
