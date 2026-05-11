@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-# Hypothesis: Breaks above Camarilla R1 level or below S1 level on 4h with 1d trend direction and volume surge.
-# Works in bull markets by buying breakouts above R1 in uptrends.
-# Works in bear markets by selling breakouts below S1 in downtrends.
-# Uses 1d EMA34 for trend and volume confirmation to avoid false breakouts.
-# Target: 20-50 trades per year per symbol.
+# 4h_Touchstone_Reversal
+# Hypothesis: Reversals at key psychological levels (round numbers) with volume confirmation in ranging markets.
+# Long when price touches recent low + volume spike + bullish engulfing; short when price touches recent high + volume spike + bearish engulfing.
+# Works in ranging markets (2025) by capturing mean reversion at support/resistance.
+# Uses 1-day ATR for volatility filter to avoid low-volatility chop.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+name = "4h_Touchstone_Reversal"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,9 +18,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend calculation
+    # Get 1-day data for ATR and recent high/low
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # 4h OHLCV
@@ -29,83 +28,78 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # --- 1d EMA34 for trend direction ---
+    # --- 1-day ATR(14) for volatility filter ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_slope = ema_34_1d - np.roll(ema_34_1d, 1)
-    ema_34_1d_slope[0] = 0
-    ema_34_1d_slope = pd.Series(ema_34_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    ema_34_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_slope)
     
-    # --- 4h Camarilla levels (based on previous day's OHLC) ---
-    # Note: Camarilla levels are calculated from previous day's range
-    # We'll use the 1d data to compute levels for the current 4h period
-    # Camarilla: H = high, L = low, C = close
-    # R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = 0
+    tr2[0] = high_1d[0] - close_1d[0]
+    tr3[0] = high_1d[0] - low_1d[0]
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # Calculate daily range from 1d data
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # --- Recent 4h high/low for support/resistance (20-period) ---
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels for each day
-    camarilla_R1 = daily_close + (daily_high - daily_low) * 1.1 / 12
-    camarilla_S1 = daily_close - (daily_high - daily_low) * 1.1 / 12
+    # --- Candlestick patterns ---
+    # Bullish engulfing: current green candle fully engulfs previous red candle
+    bullish_engulf = (close > open_price) & (open_price < np.roll(close, 1)) & (close > np.roll(open_price, 1))
+    # Bearish engulfing: current red candle fully engulfs previous green candle
+    bearish_engulf = (close < open_price) & (open_price > np.roll(close, 1)) & (close < np.roll(open_price, 1))
     
-    # Align Camarilla levels to 4h timeframe
-    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
-    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
-    
-    # --- Volume confirmation (volume > 20-period average) ---
+    # --- Volume confirmation (volume > 1.5x 20-period average) ---
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > vol_ma
+    vol_spike = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA34 (34) and smoothing (3)
-    start_idx = 34
+    # Warmup: enough for 20-period high/low and ATR
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_slope_aligned[i]) or
-            np.isnan(camarilla_R1_aligned[i]) or
-            np.isnan(camarilla_S1_aligned[i]) or
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(highest_high_20[i]) or
+            np.isnan(lowest_low_20[i]) or
+            np.isnan(atr_14_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 1d EMA34 slope
-        uptrend = ema_34_1d_slope_aligned[i] > 0
-        downtrend = ema_34_1d_slope_aligned[i] < 0
+        # Volatility filter: avoid low volatility environments
+        vol_filter = atr_14_1d_aligned[i] > np.nanmedian(atr_14_1d_aligned[max(0, i-50):i+1])
         
-        if position == 0:
-            if uptrend and vol_surge[i]:
-                # Long: 1d uptrend + volume surge + price breaks above R1
-                if close[i] > camarilla_R1_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend and vol_surge[i]:
-                # Short: 1d downtrend + volume surge + price breaks below S1
-                if close[i] < camarilla_S1_aligned[i]:
+        if position == 0 and vol_filter:
+            # Long setup: price near recent low + volume spike + bullish engulfing
+            near_support = low[i] <= lowest_low_20[i] * 1.002  # within 0.2% of recent low
+            if near_support and vol_spike[i] and bullish_engulf[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short setup: price near recent high + volume spike + bearish engulfing
+            elif high[i] >= highest_high_20[i] * 0.998:  # within 0.2% of recent high
+                if vol_spike[i] and bearish_engulf[i]:
                     signals[i] = -0.25
                     position = -1
         else:
             if position == 1:
-                # Exit long: 1d trend turns down OR price crosses below S1 (reversal)
-                if downtrend or close[i] < camarilla_S1_aligned[i]:
+                # Exit long: price reaches recent high or engulfing pattern fails
+                if high[i] >= highest_high_20[i] * 0.998 or bearish_engulf[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: 1d trend turns up OR price crosses above R1 (reversal)
-                if uptrend or close[i] > camarilla_R1_aligned[i]:
+                # Exit short: price reaches recent low or engulfing pattern fails
+                if low[i] <= lowest_low_20[i] * 1.002 or bullish_engulf[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
