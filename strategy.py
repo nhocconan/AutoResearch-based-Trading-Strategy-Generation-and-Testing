@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_KAMA_Trend_RSI_MeanReversion"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,56 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for KAMA trend and RSI
+    # Get 1d data for Camarilla pivot levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d close
+    # Calculate Camarilla pivot levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Efficiency Ratio (ER)
-    change = np.abs(np.diff(close_1d, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close_1d)), axis=1)  # needs correction
-    # Recalculate volatility properly
-    volatility = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        volatility[i] = np.sum(np.abs(np.diff(close_1d[i-10:i+1])))
-    # Avoid division by zero
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        if volatility[i] > 0:
-            er[i] = change[i-10] / volatility[i]
-        else:
-            er[i] = 0
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # for EMA(2)
-    slow_sc = 2 / (30 + 1)  # for EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # Calculate RSI(14) on 1d close
-    delta = np.diff(close_1d)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros_like(close_1d)
-    avg_loss = np.zeros_like(close_1d)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    # Pivot = (H + L + C) / 3
+    pivot = (high_1d + low_1d + close_1d) / 3
+    # R1 = C + (H - L) * 1.1 / 2
+    r1 = close_1d + (high_1d - low_1d) * 1.1 / 2
+    # S1 = C - (H - L) * 1.1 / 2
+    s1 = close_1d - (high_1d - low_1d) * 1.1 / 2
     
-    # Align KAMA and RSI to 12h
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Align Camarilla levels to 4h (previous day's levels available at 00:00 UTC)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Volume filter: 20-period average on 12h
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -79,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -89,34 +65,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume threshold - avoid low-volume false signals
-        volume_surge = vol_ratio[i] > 1.3
+        # Volume threshold - avoid low-volume false breakouts
+        volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price > KAMA and RSI < 40 (mean reversion from oversold) with volume
-            if (close[i] > kama_aligned[i] and 
-                rsi_aligned[i] < 40 and 
-                volume_surge):
+            # Long: Price breaks above R1 with volume and above EMA34 trend
+            if (close[i] > r1_aligned[i] and 
+                volume_surge and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA and RSI > 60 (mean reversion from overbought) with volume
-            elif (close[i] < kama_aligned[i] and 
-                  rsi_aligned[i] > 60 and 
-                  volume_surge):
+            # Short: Price breaks below S1 with volume and below EMA34 trend
+            elif (close[i] < s1_aligned[i] and 
+                  volume_surge and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to KAMA or RSI reaches extreme
+            # Exit: price returns to opposite Camarilla level
             if position == 1:
-                # Exit long: price crosses below KAMA or RSI > 60
-                if close[i] <= kama_aligned[i] or rsi_aligned[i] > 60:
+                # Exit long: price touches or goes below S1
+                if close[i] <= s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses above KAMA or RSI < 40
-                if close[i] >= kama_aligned[i] or rsi_aligned[i] < 40:
+                # Exit short: price touches or goes above R1
+                if close[i] >= r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
