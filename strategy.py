@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_1dTrend_Volume_v2
+4h_Camarilla_R1_S1_1dTrend_Volume_v3
 Hypothesis: Trade breakouts at daily Camarilla R1/S1 levels on 4h timeframe with 1d trend filter and volume confirmation.
 Uses tighter volume filter (2.0x EMA) and stricter breakout conditions (must close outside level) to reduce trade frequency.
 Targets 20-50 trades per year per symbol (80-200 total over 4 years) by using tight entry conditions.
 Works in bull/bear markets by aligning with the daily trend direction.
 """
 
-name = "4h_Camarilla_R1_S1_1dTrend_Volume_v2"
+name = "4h_Camarilla_R1_S1_1dTrend_Volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
