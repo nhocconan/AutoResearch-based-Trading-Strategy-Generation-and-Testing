@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_Camarilla_R1S1_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,14 +19,14 @@ def generate_signals(prices):
     
     # Get daily data for trend filter (1d EMA34) and Camarilla levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate EMA34 for trend filter
+    # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     trend_up_1d = close_1d > ema34_1d
     
@@ -43,10 +43,28 @@ def generate_signals(prices):
             R1[i] = prev_close + range_val * 1.1 / 6
             S1[i] = prev_close - range_val * 1.1 / 6
     
-    # Align indicators to 12h timeframe
+    # Get weekly data for volatility filter (weekly ATR14)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly ATR14
+    tr1 = high_1w[1:] - low_1w[1:]
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Align indicators to 4h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
     
     # Volume moving average (20-period) for confirmation
     vol_ma20 = np.full(n, np.nan)
@@ -60,13 +78,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need enough data for indicators
+    start_idx = max(20, 34, 14)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(R1_aligned[i]) or 
             np.isnan(S1_aligned[i]) or
             np.isnan(trend_up_1d_aligned[i]) or
+            np.isnan(atr14_1w_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,16 +95,18 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + volume confirmation
+            # Long: price breaks above R1 + uptrend + volume confirmation + volatility filter
             if (close[i] > R1_aligned[i] and 
                 trend_up_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+                volume[i] > 1.5 * vol_ma20[i] and
+                atr14_1w_aligned[i] > 0):  # Ensure volatility is present
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend + volume confirmation
+            # Short: price breaks below S1 + downtrend + volume confirmation + volatility filter
             elif (close[i] < S1_aligned[i] and 
                   not trend_up_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+                  volume[i] > 1.5 * vol_ma20[i] and
+                  atr14_1w_aligned[i] > 0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
