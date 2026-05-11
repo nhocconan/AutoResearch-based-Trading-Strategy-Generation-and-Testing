@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filtered"
-timeframe = "4h"
+name = "6h_WeeklyPivot_BullBear_Switch_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +18,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data
+    # 1d data for weekly pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:  # need 34 for EMA + 1 for prev day
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's close for Camarilla calculation
-    prev_close_1d = np.roll(close_1d, 1)
-    prev_close_1d[0] = np.nan
+    # Weekly pivot points (using previous week)
+    weekly_high = np.zeros_like(high_1d)
+    weekly_low = np.zeros_like(low_1d)
+    weekly_close = np.zeros_like(close_1d)
     
-    # Calculate Camarilla levels from previous day
-    hl_range = high_1d - low_1d
-    camarilla_r1 = prev_close_1d + hl_range * 1.083
-    camarilla_s1 = prev_close_1d - hl_range * 1.083
+    # Calculate weekly aggregates (simplified: use last 5 days)
+    for i in range(len(high_1d)):
+        start_idx = max(0, i - 4)
+        weekly_high[i] = np.max(high_1d[start_idx:i+1])
+        weekly_low[i] = np.min(low_1d[start_idx:i+1])
+        weekly_close[i] = close_1d[i]
     
-    # Align Camarilla levels (previous day's levels available at 4h bar open)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Weekly pivot levels
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
     
-    # 1d trend filter: EMA 34
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align weekly pivot to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
     
-    # Volume filter: 20-period average (conservative)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Weekly EMA 20 for trend
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Volume filter (24-period average for 6h = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_filter = volume > vol_ma
-    
-    # Choppiness filter: avoid choppy markets (CHOP > 61.8)
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(np.roll(high, 1) - low)
-    tr3 = np.abs(np.roll(low, 1) - high)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = np.nan
-    atr = pd.Series(tr).rolling(window=atr_period, min_periods=atr_period).mean().values
-    
-    max_high = pd.Series(high).rolling(window=atr_period, min_periods=atr_period).max().values
-    min_low = pd.Series(low).rolling(window=atr_period, min_periods=atr_period).min().values
-    
-    # Avoid division by zero
-    range_sum = pd.Series(max_high - min_low).rolling(window=atr_period, min_periods=atr_period).sum().values
-    chop = 100 * np.log10(atr * atr_period / range_sum) / np.log10(atr_period)
-    chop_filter = chop < 61.8  # trending market
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(35, 20, atr_period)
+    start_idx = max(24, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(chop[i])):
+        if np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,34 +82,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + above 1d EMA + volume + trending
-            if (close[i] > camarilla_r1_aligned[i] and 
-                close[i] > ema_1d_aligned[i] and 
-                vol_filter[i] and 
-                chop_filter[i]):
+            # Long: price above weekly R1 + above weekly EMA + volume
+            if close[i] > weekly_r1_aligned[i] and close[i] > ema_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below 1d EMA + volume + trending
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  close[i] < ema_1d_aligned[i] and 
-                  vol_filter[i] and 
-                  chop_filter[i]):
+            # Short: price below weekly S1 + below weekly EMA + volume
+            elif close[i] < weekly_s1_aligned[i] and close[i] < ema_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below 1d EMA or choppy market
-            if (close[i] < camarilla_s1_aligned[i] or 
-                close[i] < ema_1d_aligned[i] or 
-                not chop_filter[i]):
+            # Exit long: price below weekly pivot or below weekly EMA
+            if close[i] < weekly_pivot_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R1 or above 1d EMA or choppy market
-            if (close[i] > camarilla_r1_aligned[i] or 
-                close[i] > ema_1d_aligned[i] or 
-                not chop_filter[i]):
+            # Exit short: price above weekly pivot or above weekly EMA
+            if close[i] > weekly_pivot_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
