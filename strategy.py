@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_200day_MA_With_RSI_And_Price_Position"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,54 +17,56 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for 200-day MA (trend filter)
+    # Get 1d data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    # Calculate Camarilla pivot levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate 200-day EMA (more responsive than SMA for trend)
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    # Get weekly data for trend confirmation (stronger filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Previous day's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    close_1w = df_1w['close'].values
-    # 50-week EMA for weekly trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Camarilla levels
+    range_1d = prev_high - prev_low
+    camarilla_r1 = prev_close + range_1d * 1.0 / 12
+    camarilla_s1 = prev_close - range_1d * 1.0 / 12
+    camarilla_r3 = prev_close + range_1d * 1.1 / 12
+    camarilla_s3 = prev_close - range_1d * 1.1 / 12
     
-    # RSI on daily (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # Align indicators to lower timeframe (daily)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # 1d trend filter: EMA34
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Price position relative to 200-day EMA (how far above/below as percentage)
-    # Normalize to [-1, 1] range where 0 = at EMA, positive = above, negative = below
-    price_to_ema_ratio = (close_1d - ema200_1d) / (ema200_1d + 1e-10)
-    # Clip extreme values to avoid instability
-    price_to_ema_ratio = np.clip(price_to_ema_ratio, -0.5, 0.5)
-    price_pos_aligned = align_htf_to_ltf(prices, df_1d, price_to_ema_ratio)
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.8 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # Need enough data for 200-day EMA
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or np.isnan(price_pos_aligned[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,40 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions:
-            # 1. Price above 200-day EMA (uptrend)
-            # 2. Weekly trend also up (50-week EMA)
-            # 3. RSI not overbought (< 70) 
-            # 4. Price not too far above EMA (avoid chasing)
-            if (close_1d[i] > ema200_1d_aligned[i] and 
-                ema50_1w_aligned[i] > 0 and  # Weekly EMA has meaningful value
-                rsi_aligned[i] < 70 and 
-                price_pos_aligned[i] > -0.1 and  # Not significantly below EMA
-                price_pos_aligned[i] < 0.2):     # Not significantly above EMA
+            # Long: Price breaks above R1 with uptrend and volume confirmation
+            if close[i] > camarilla_r1_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short conditions:
-            # 1. Price below 200-day EMA (downtrend)
-            # 2. Weekly trend also down
-            # 3. RSI not oversold (> 30)
-            # 4. Price not too far below EMA (avoid catching falling knife)
-            elif (close_1d[i] < ema200_1d_aligned[i] and 
-                  ema50_1w_aligned[i] < 0 and  # Weekly EMA has meaningful negative value
-                  rsi_aligned[i] > 30 and 
-                  price_pos_aligned[i] < 0.1 and   # Not significantly above EMA
-                  price_pos_aligned[i] > -0.2):    # Not significantly below EMA
+            # Short: Price breaks below S1 with downtrend and volume confirmation
+            elif close[i] < camarilla_s1_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 200-day EMA OR RSI overbought
-            if close_1d[i] < ema200_1d_aligned[i] or rsi_aligned[i] > 75:
+            # Long exit: Price breaks below S3 or trend turns down
+            if close[i] < camarilla_s3_aligned[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above 200-day EMA OR RSI oversold
-            if close_1d[i] > ema200_1d_aligned[i] or rsi_aligned[i] < 25:
+            # Short exit: Price breaks above R3 or trend turns up
+            if close[i] > camarilla_r3_aligned[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
