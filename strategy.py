@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Direction_With_RSI_Filter
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction. 
-Combined with RSI for momentum confirmation and volume filter to avoid false breaks.
-Long when: KAMA upward, RSI > 50, volume above average
-Short when: KAMA downward, RSI < 50, volume above average
-Exit when: RSI crosses back to 50 or KAMA flips direction
-Designed for 4-8 trades per month per symbol (48-96 over 4 years) to minimize fee drag.
-Works in both bull (trend following) and bear (mean reversion via RSI extremes) markets.
+12h_1w_Camarilla_Pivot_Breakout_Trend_Volume
+Hypothesis: On 12h timeframe, breakouts of weekly Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
+Uses 1d EMA50 for trend and weekly Camarilla pivots for structure. Targets 15-30 trades/year (60-120 over 4 years).
+Designed to work in both bull and bear markets by only trading in direction of higher timeframe trend.
 """
 
-name = "4h_1d_KAMA_Direction_With_RSI_Filter"
-timeframe = "4h"
+name = "12h_1w_Camarilla_Pivot_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,109 +16,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for KAMA trend filter and RSI
+    # Get 1d and 1w data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h data
-    close_4h = prices['close'].values
-    volume_4h = prices['volume'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 1d KAMA (Adaptive Trend) ---
+    # --- 1d Trend Filter: EMA50 ---
     close_1d = df_1d['close'].values
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_1d, n=10))  # |close(t) - close(t-10)|
-    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum of |diff| over 10 periods
-    # Handle array shapes properly
-    change_padded = np.concatenate([np.full(10, np.nan), change])
-    volatility_padded = np.concatenate([np.full(10, np.nan), volatility])
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Avoid division by zero
-    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Calculate KAMA
-    kama = np.full_like(close_1d, np.nan)
-    kama[29] = close_1d[29]  # seed
-    for i in range(30, len(close_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # --- Weekly Camarilla Pivots (from previous week) ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
+    # Use previous week's OHLC to calculate current week's pivots
+    camarilla_high = np.full_like(close_1w, np.nan)
+    camarilla_low = np.full_like(close_1w, np.nan)
+    camarilla_close = np.full_like(close_1w, np.nan)
     
-    # --- 1d RSI (14) ---
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    for i in range(1, len(close_1w)):
+        camarilla_high[i] = high_1w[i-1]
+        camarilla_low[i] = low_1w[i-1]
+        camarilla_close[i] = close_1w[i-1]
     
-    # Wilder's smoothing
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
-    avg_gain[13] = np.mean(gain[1:14])  # first average
-    avg_loss[13] = np.mean(loss[1:14])
+    # Calculate weekly Camarilla levels
+    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
+    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
+    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
+    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
     
-    for i in range(14, len(close_1d)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Align weekly pivots to 12h timeframe
+    R3_12h = align_htf_to_ltf(prices, df_1w, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1w, S3)
+    R1_12h = align_htf_to_ltf(prices, df_1w, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1w, S1)
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    
-    # --- Volume Confirmation (4h) ---
-    vol_ma_20 = np.full_like(volume_4h, np.nan)
-    for i in range(20, len(volume_4h)):
-        vol_ma_20[i] = np.mean(volume_4h[i-20:i])
+    # --- Volume Confirmation: 12h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 60  # for KAMA and RSI stability
+    # Start after warmup period
+    start_idx = 50  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any values are NaN
-        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        # Skip if any critical values are NaN
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+            np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine KAMA direction (slope)
-        kama_rising = kama_1d_aligned[i] > kama_1d_aligned[i-1]
-        kama_falling = kama_1d_aligned[i] < kama_1d_aligned[i-1]
+        # Determine 1d trend
+        trend_up = close_12h[i] > ema50_1d_aligned[i]
+        trend_down = close_12h[i] < ema50_1d_aligned[i]
         
-        # Volume filter
-        vol_ok = volume_4h[i] > vol_ma_20[i]
+        # Volume confirmation
+        vol_ok = volume_12h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Enter long: KAMA up, RSI > 50 (bullish momentum), volume confirmation
-            if kama_rising and rsi_1d_aligned[i] > 50 and vol_ok:
+            # Look for entries only in direction of 1d trend with volume
+            if close_12h[i] > R3_12h[i] and trend_up and vol_ok:
+                # Long: price breaks above weekly R3 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
-            # Enter short: KAMA down, RSI < 50 (bearish momentum), volume confirmation
-            elif kama_falling and rsi_1d_aligned[i] < 50 and vol_ok:
+            elif close_12h[i] < S3_12h[i] and trend_down and vol_ok:
+                # Short: price breaks below weekly S3 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: RSI drops below 50 OR KAMA turns down
-                if rsi_1d_aligned[i] < 50 or not kama_rising:
+                # Exit long: price returns to S1 (opposite side)
+                if close_12h[i] <= S1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI rises above 50 OR KAMA turns up
-                if rsi_1d_aligned[i] > 50 or not kama_falling:
+                # Exit short: price returns to R1 (opposite side)
+                if close_12h[i] >= R1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
