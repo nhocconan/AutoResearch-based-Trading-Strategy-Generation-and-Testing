@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Volume_Spike_Reversion_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wEMA50_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,24 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 1d data ONCE for trend filter (close > EMA50 = uptrend)
+    # 1. Load 1w data ONCE for EMA trend filter (primary trend)
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # 2. Load 1d data ONCE for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 2. Volume spike filter: current volume > 2.0 * 24-period EMA (on 6h data)
-    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
-    volume_spike = volume > vol_ema24 * 2.0
+    # 3. Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + hl_range * 1.5000
+    s3 = close_1d - hl_range * 1.5000
     
-    # 3. Mean reversion trigger: price deviates >1.5*ATR from 20-period SMA
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    atr14 = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    deviation = close - sma20
-    zscore = deviation / (atr14 + 1e-10)  # avoid division by zero
-    reversion_long = zscore < -1.5  # price significantly below mean
-    reversion_short = zscore > 1.5   # price significantly above mean
+    # 4. Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Fixed position size to minimize churn
+    # 5. Volume filter: 20-period EMA for spike detection
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
+    
+    # 6. Fixed position size to avoid churn
     position_size = 0.25
     
     signals = np.zeros(n)
@@ -45,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_spike[i]) or 
-            np.isnan(reversion_long[i]) or np.isnan(reversion_short[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -55,29 +62,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter from 1d: only trade in direction of higher timeframe trend
-        uptrend = close[i] > ema50_1d_aligned[i]
-        downtrend = close[i] < ema50_1d_aligned[i]
+        # Conditions
+        price_above_ema1w = close[i] > ema50_1w_aligned[i]
+        price_below_ema1w = close[i] < ema50_1w_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: price significantly below mean + volume spike + 1d uptrend
-            if reversion_long[i] and volume_spike[i] and uptrend:
+            # Long: Price breaks above R3 + above 1w EMA50 + volume spike
+            if breakout_long and price_above_ema1w and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: price significantly above mean + volume spike + 1d downtrend
-            elif reversion_short[i] and volume_spike[i] and downtrend:
+            # Short: Price breaks below S3 + below 1w EMA50 + volume spike
+            elif breakout_short and price_below_ema1w and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit when price returns to mean (z-score crosses zero) OR volume condition fails
+            # Exit conditions - simplified to reduce churn
             if position == 1:
-                if zscore[i] >= 0.0 or not volume_spike[i]:
+                # Exit: Price crosses below S3 OR trend reverses
+                if close[i] < s3_aligned[i] or close[i] < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if zscore[i] <= 0.0 or not volume_spike[i]:
+                # Exit: Price crosses above R3 OR trend reverses
+                if close[i] > r3_aligned[i] or close[i] > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
