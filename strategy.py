@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_R1S1_Breakout_TrendFilter
-Hypothesis: Price breaking above daily R1 or below daily S1 with daily trend confirmation (EMA50) and volume spike. Uses daily Camarilla levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 12h timeframe with daily trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
+4h_Camarilla_R1S1_Breakout_TrendFilter
+Hypothesis: Price breaking above daily R1 or below daily S1 with daily trend confirmation (EMA50) and volume spike. Uses daily Camarilla levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with daily trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "12h_1d_Camarilla_R1S1_Breakout_TrendFilter"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -48,7 +48,7 @@ def generate_signals(prices):
     r1 = d_close_prev + (1.1/12) * (d_high_prev - d_low_prev)
     s1 = d_close_prev - (1.1/12) * (d_high_prev - d_low_prev)
     
-    # Align daily R1/S1 to 12h timeframe
+    # Align daily R1/S1 to 4h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
@@ -60,7 +60,7 @@ def generate_signals(prices):
     ).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Volume confirmation (20-period average on 12h)
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
