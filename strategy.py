@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Improved"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Reduced"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,15 +36,15 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: 20-period EMA
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # Increased threshold to reduce trades
+    # Volume filter: 50-period EMA for higher threshold
+    vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
+    volume_ok = volume > vol_ema50 * 2.5  # Further increased threshold to reduce trades
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 80
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
