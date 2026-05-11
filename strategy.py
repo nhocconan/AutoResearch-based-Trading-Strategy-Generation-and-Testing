@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Pivot_Breakout_TrendVolume
+4h_12h_Camarilla_Pivot_Breakout_TrendVolume_v2
 Hypothesis: Price breaking above monthly R1 or below monthly S1 with 12h trend confirmation (EMA50) and volume spike. Uses monthly pivot levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with 12h trend filter and monthly pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "4h_12h_Camarilla_Pivot_Breakout_TrendVolume"
+name = "4h_12h_Camarilla_Pivot_Breakout_TrendVolume_v2"
 timeframe = "4h"
 leverage = 1.0
 
