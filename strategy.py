@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1S1_1dTrend_VolumeFilter
-Hypothesis: On 12h timeframe, trade breakouts at daily Camarilla R1/S1 levels with 1d trend filter (EMA34) and volume confirmation. Uses 12h to reduce trade frequency (<25/year) and avoid fee drag. Works in bull/bear by aligning with daily trend. Target: 15-25 trades/year on 12h.
+1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeS
+Hypothesis: Use 4h trend and daily volatility to filter 1h Camarilla breakouts.
+Trades only during 08-20 UTC to avoid low-liquidity periods. Targets 15-37 trades/year.
+Works in bull/bear by aligning with 4h trend and requiring volume confirmation.
 """
 
-name = "12h_Camarilla_R1S1_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeS"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -36,27 +38,43 @@ def generate_signals(prices):
     camarilla_r1 = pc + (ph - pl) * 1.1 / 2
     camarilla_s1 = pc - (ph - pl) * 1.1 / 2
     
-    # Align to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_1h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # === Daily Trend Filter (EMA34) ===
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === 4h Trend Filter (EMA34) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
+        return np.zeros(n)
+    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1h = align_htf_to_ltf(prices, df_4h, ema34_4h)
     
-    # === Volume Filter (1.5x 20-period EMA on 12h) ===
+    # === Volume Filter (1.5x 20-period EMA on 1h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 1.5
+    
+    # === Session Filter: 08-20 UTC ===
+    hours = prices.index.hour
+    session_ok = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers daily calculations)
+    # Start after warmup
     start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or np.isnan(ema34_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema34_1h[i]) or 
+            np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_ok[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,30 +84,30 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price breaks above R1 with uptrend and volume
-            if (close[i] > r1_12h[i] and 
-                close[i] > ema34_12h[i] and 
+            if (close[i] > r1_1h[i] and 
+                close[i] > ema34_1h[i] and 
                 volume_ok[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short breakdown: price breaks below S1 with downtrend and volume
-            elif (close[i] < s1_12h[i] and 
-                  close[i] < ema34_12h[i] and 
+            elif (close[i] < s1_1h[i] and 
+                  close[i] < ema34_1h[i] and 
                   volume_ok[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 (reversal) or hits R1 (take profit)
-            if close[i] < s1_12h[i]:
+            # Long exit: price breaks below S1 (reversal)
+            if close[i] < s1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
-            # Short exit: price breaks above R1 (reversal) or hits S1 (take profit)
-            if close[i] > r1_12h[i]:
+            # Short exit: price breaks above R1 (reversal)
+            if close[i] > r1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
