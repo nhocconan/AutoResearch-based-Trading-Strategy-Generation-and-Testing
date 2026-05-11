@@ -1,15 +1,13 @@
-# WARNING: DO NOT MODIFY THIS SECTION
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-Hypothesis: Trade breakouts at Camarilla R1/S1 levels on 4h timeframe with 12h EMA trend filter and volume confirmation.
-Camarilla levels provide precise support/resistance. Breakouts in direction of 12h trend with volume surge
-capture strong moves while minimizing whipsaw. Works in bull/bear by aligning with higher timeframe trend.
+1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+Hypothesis: Trade breakouts at Camarilla R1/S1 levels on 1h timeframe with 4h EMA trend filter and volume confirmation.
+4h trend provides directional bias, 1h provides entry timing precision. Volume confirms breakout strength.
+Works in bull/bear by aligning with 4h trend. Target: 15-37 trades/year.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -26,14 +24,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Data for Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # === 4h Data for Trend Filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema12 = pd.Series(close_12h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema12_aligned = align_htf_to_ltf(prices, df_12h, ema12)
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
     
     # === Daily Data for Camarilla Pivots (using previous day) ===
     df_1d = get_htf_data(prices, '1d')
@@ -46,28 +44,40 @@ def generate_signals(prices):
     pc_1d = df_1d['close'].values
     
     # Camarilla levels (R1, S1 are most significant for breakouts)
-    # R1 = C + (H-L) * 1.1/12
-    # S1 = C - (H-L) * 1.1/12
     r1_1d = pc_1d + (ph_1d - pl_1d) * 1.1 / 12
     s1_1d = pc_1d - (ph_1d - pl_1d) * 1.1 / 12
     
-    # Align to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Align to 1h timeframe
+    r1_1h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # === Volume Filter (2.0x 20-period EMA on 4h) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 2.0
+    # === Volume Filter (2.0x 24-period EMA on 1h) ===
+    vol_ema24 = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
+    volume_ok = volume > vol_ema24 * 2.0
+    
+    # === Session Filter: 08-20 UTC ===
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_ok = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers 12h EMA and daily pivots)
+    # Start after warmup (covers 4h EMA and daily pivots)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema12_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
+            np.isnan(ema21_4h_aligned[i]) or np.isnan(volume_ok[i]) or 
+            np.isnan(session_ok[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_ok[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,30 +87,30 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price closes above R1 with uptrend and volume
-            if (close[i] > r1_4h[i] and 
-                close[i] > ema12_aligned[i] and 
+            if (close[i] > r1_1h[i] and 
+                close[i] > ema21_4h_aligned[i] and 
                 volume_ok[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             # Short breakdown: price closes below S1 with downtrend and volume
-            elif (close[i] < s1_4h[i] and 
-                  close[i] < ema12_aligned[i] and 
+            elif (close[i] < s1_1h[i] and 
+                  close[i] < ema21_4h_aligned[i] and 
                   volume_ok[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
             # Long exit: price closes below S1 (reversion to mean)
-            if close[i] < s1_4h[i]:
+            if close[i] < s1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
             # Short exit: price closes above R1 (reversion to mean)
-            if close[i] > r1_4h[i]:
+            if close[i] > r1_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
