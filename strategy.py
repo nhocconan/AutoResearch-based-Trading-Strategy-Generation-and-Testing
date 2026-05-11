@@ -1,13 +1,14 @@
-#!/usr/bin/env python3
-"""
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Uses Camarilla R1/S1 breakouts with 1-day trend filter (ADX > 25) and volume spike confirmation.
-Works in bull markets via breakouts and bear markets via mean reversion at Camarilla levels during low volatility.
-Target: 25-40 trades/year to minimize fee drag while capturing strong moves.
-"""
+# 6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
+# Hypothesis: Use 6h bars with Camarilla pivot levels from daily timeframe.
+# Long when price breaks above R3 with volume spike and daily trend up.
+# Short when price breaks below S3 with volume spike and daily trend down.
+# Uses volume confirmation to avoid false breakouts.
+# Daily trend filter avoids counter-trend trades.
+# Targets 15-30 trades/year to minimize fee drag.
+# Works in bull markets via breakouts and bear markets via trend-following shorts.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,64 +17,41 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and ADX trend filter
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Camarilla Levels (based on previous day's range) ---
-    # Calculate using previous day's OHLC (Camarilla uses previous day)
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # --- Calculate Camarilla pivot levels from previous day ---
+    # Typical price = (H + L + C) / 3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    range_val = df_1d['high'] - df_1d['low']
     
     # Camarilla levels
-    R1 = prev_close + (prev_range * 1.1 / 12)
-    S1 = prev_close - (prev_range * 1.1 / 12)
+    R3 = typical_price + (range_val * 1.1 / 2)
+    S3 = typical_price - (range_val * 1.1 / 2)
+    R4 = typical_price + (range_val * 1.1)
+    S4 = typical_price - (range_val * 1.1)
     
-    # Align Camarilla levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Align Camarilla levels to 6h timeframe
+    R3_6h = align_htf_to_ltf(prices, df_1d, R3.values)
+    S3_6h = align_htf_to_ltf(prices, df_1d, S3.values)
+    R4_6h = align_htf_to_ltf(prices, df_1d, R4.values)
+    S4_6h = align_htf_to_ltf(prices, df_1d, S4.values)
     
-    # --- 1d ADX for trend filter ---
-    # Calculate True Range
-    tr1 = pd.Series(df_1d['high']).subtract(df_1d['low']).abs()
-    tr2 = pd.Series(df_1d['high']).subtract(df_1d['close'].shift(1)).abs()
-    tr3 = pd.Series(df_1d['low']).subtract(df_1d['close'].shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Calculate Directional Movement
-    dm_plus = pd.Series(df_1d['high']).diff()
-    dm_minus = pd.Series(df_1d['low']).diff().abs()
-    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
-    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
-    
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    atr_1d = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_plus_smooth = dm_plus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    dm_minus_smooth = dm_minus.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    
-    # Calculate DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / atr_1d
-    di_minus = 100 * dm_minus_smooth / atr_1d
-    
-    # Calculate DX and ADX
-    dx = (abs(di_plus - di_minus) / (di_plus + di_minus)) * 100
-    adx_1d = dx.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    adx_1d_values = adx_1d.values
-    
-    # Align ADX to 4h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d_values)
+    # --- 1d EMA trend filter ---
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean()
+    ema_34_1d_values = ema_34_1d.values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_values)
     
     # --- Volume Spike Detection ---
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
@@ -83,13 +61,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or
+        if (np.isnan(R3_6h[i]) or 
+            np.isnan(S3_6h[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
             np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
@@ -100,49 +78,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine market regime based on ADX
-        adx = adx_1d_aligned[i]
-        is_trending = adx > 25
-        is_ranging = adx < 20
+        # Determine trend based on price vs EMA
+        price_vs_ema = close[i] > ema_34_1d_aligned[i]
         
-        # Breakout signals at Camarilla levels
-        long_breakout = (high[i] > R1_aligned[i]) and vol_spike[i]
-        short_breakout = (low[i] < S1_aligned[i]) and vol_spike[i]
-        
-        # Mean reversion signals (only in ranging markets)
-        long_reversion = (close[i] < S1_aligned[i]) and is_ranging
-        short_reversion = (close[i] > R1_aligned[i]) and is_ranging
+        # Breakout signals with volume confirmation
+        long_breakout = (high[i] > R3_6h[i]) and vol_spike[i] and price_vs_ema
+        short_breakout = (low[i] < S3_6h[i]) and vol_spike[i] and (not price_vs_ema)
         
         if position == 0:
-            if is_trending:
-                # In trending markets, only take breakout signals
-                if long_breakout:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_breakout:
-                    signals[i] = -0.25
-                    position = -1
-            else:
-                # In ranging markets, take both breakout and mean reversion
-                if long_breakout or long_reversion:
-                    signals[i] = 0.25
-                    position = 1
-                elif short_breakout or short_reversion:
-                    signals[i] = -0.25
-                    position = -1
+            if long_breakout:
+                signals[i] = 0.25
+                position = 1
+            elif short_breakout:
+                signals[i] = -0.25
+                position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price touches opposite Camarilla level or ADX drops (trend weakening)
-                exit_signal = (low[i] < S1_aligned[i]) or (adx < 20)
+                # Exit long: price touches S3 or reversal signals
+                exit_signal = (low[i] < S3_6h[i]) or (not price_vs_ema)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price touches opposite Camarilla level or ADX drops
-                exit_signal = (high[i] > R1_aligned[i]) or (adx < 20)
+                # Exit short: price touches R3 or reversal signals
+                exit_signal = (high[i] > R3_6h[i]) or (price_vs_ema)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
