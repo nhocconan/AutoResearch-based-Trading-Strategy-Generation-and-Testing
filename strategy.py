@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-# 12h_1D_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Use daily Camarilla R3/S3 levels as support/resistance on 12h chart.
-# Long when: price breaks above R3 with volume spike AND 1d EMA34 rising
-# Short when: price breaks below S3 with volume spike AND 1d EMA34 falling
-# Exit when price crosses back through R3/S3 OR 1d EMA34 trend reverses.
-# Camarilla levels provide institutional reversal points; EMA34 filters counter-trend moves.
-# Works in bull by buying breakouts in uptrend; works in bear by selling breakdowns in downtrend.
-# Target: 15-30 trades/year (60-120 total over 4 years) to avoid fee drag.
+"""
+1d_1w_Stochastic_BullBear
+Hypothesis: In bull markets, buy when weekly stochastic is oversold (<20) and price pulls back to daily EMA20.
+In bear markets, sell when weekly stochastic is overbought (>80) and price rallies to daily EMA20.
+Use daily ATR for stop/reverse. Stochastic filters avoid counter-trend trades in strong trends.
+Designed for low trade frequency (<20/year) to avoid fee drag. Works in both bull (buy dips) and bear (sell rallies).
+"""
 
-name = "12h_1D_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_1w_Stochastic_BullBear"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,101 +20,110 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla and EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for stochastic
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 14:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d Camarilla levels (R3, S3) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- Weekly Stochastic (14,3,3) ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate pivot point
-    pp_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # %K = (Current Close - Lowest Low) / (Highest High - Lowest Low) * 100
+    lowest_low = np.full(len(close_1w), np.nan)
+    highest_high = np.full(len(close_1w), np.nan)
+    for i in range(13, len(close_1w)):
+        lowest_low[i] = np.min(low_1w[i-13:i+1])
+        highest_high[i] = np.max(high_1w[i-13:i+1])
     
-    # Camarilla levels: R3 = PP + (H-L)*1.1/2, S3 = PP - (H-L)*1.1/2
-    r3_1d = pp_1d + range_1d * 1.1 / 2
-    s3_1d = pp_1d - range_1d * 1.1 / 2
-    
-    # --- 1d EMA34 trend ---
-    ema_1d = np.full(len(close_1d), np.nan)
-    for i in range(len(close_1d)):
-        if i < 34:
-            ema_1d[i] = np.nan
-        elif i == 34:
-            ema_1d[i] = np.mean(close_1d[0:34])
+    stoch_k = np.full(len(close_1w), np.nan)
+    for i in range(13, len(close_1w)):
+        if highest_high[i] - lowest_low[i] != 0:
+            stoch_k[i] = (close_1w[i] - lowest_low[i]) / (highest_high[i] - lowest_low[i]) * 100
         else:
-            ema_1d[i] = (close_1d[i] * 2 / (34 + 1)) + (ema_1d[i-1] * (33 / (34 + 1)))
+            stoch_k[i] = 50.0
     
-    # EMA slope
-    ema_slope_1d = np.full(len(close_1d), np.nan)
-    for i in range(35, len(close_1d)):
-        ema_slope_1d[i] = ema_1d[i] - ema_1d[i-1]
+    # %D = SMA of %K, period 3
+    stoch_d = np.full(len(close_1w), np.nan)
+    for i in range(15, len(close_1w)):  # 13 + 2 for 3-period SMA
+        stoch_d[i] = np.mean(stoch_k[i-2:i+1])
     
-    # --- 12h volume MA(20) ---
-    vol_ma = np.full(n, np.nan)
+    # --- Daily EMA20 for trend/pullback ---
+    ema20 = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        if i == 20:
+            ema20[i] = np.mean(close[0:20])
+        else:
+            ema20[i] = (close[i] * 2 / (20 + 1)) + (ema20[i-1] * (19 / (20 + 1)))
     
-    # Align 1d indicators to 12h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_1d)
+    # --- Daily ATR(14) for volatility ---
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[0:14])
+        else:
+            atr[i] = (tr[i] * 1 / 14) + (atr[i-1] * 13 / 14)
+    
+    # Align weekly indicators to daily
+    stoch_d_aligned = align_htf_to_ltf(prices, df_1w, stoch_d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max(1d data needs 34 bars, volume MA20)
-    start_idx = max(34, 20)
+    # Warmup: max(weekly stoch needs 15 bar, EMA20, ATR14)
+    start_idx = max(15, 20, 14)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or
-            np.isnan(ema_slope_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(stoch_d_aligned[i]) or
+            np.isnan(ema20[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_long = close[i] > r3_1d_aligned[i]
-        breakout_short = close[i] < s3_1d_aligned[i]
+        # Bull/Bear regime from weekly stochastic
+        bull_regime = stoch_d_aligned[i] < 50  # Below 50 = bearish bias? Actually, <50 is bearish, >50 bullish
+        # Let's reverse: >50 = bullish bias, <50 = bearish bias
+        bull_regime = stoch_d_aligned[i] > 50
+        bear_regime = stoch_d_aligned[i] < 50
         
-        # Volume confirmation
-        vol_spike = volume[i] > vol_ma[i] * 1.5
+        # Price relative to daily EMA20
+        price_near_ema = np.abs(close[i] - ema20[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA20
         
         if position == 0:
-            if breakout_long and ema_slope_1d_aligned[i] > 0 and vol_spike:
-                # Long: breakout above R3 in uptrend
+            # In bull regime, buy when price pulls back to EMA20 (dip buying)
+            if bull_regime and price_near_ema and close[i] <= ema20[i]:
                 signals[i] = 0.25
                 position = 1
-            elif breakout_short and ema_slope_1d_aligned[i] < 0 and vol_spike:
-                # Short: breakdown below S3 in downtrend
+            # In bear regime, sell when price rallies to EMA20 (sell the rally)
+            elif bear_regime and price_near_ema and close[i] >= ema20[i]:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price breaks below R3 OR EMA34 trend turns down
-                if close[i] < r3_1d_aligned[i] or ema_slope_1d_aligned[i] < 0:
+                # Exit long: price moves above EMA20 or weekly turns bearish
+                if close[i] > ema20[i] or stoch_d_aligned[i] < 50:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price breaks above S3 OR EMA34 trend turns up
-                if close[i] > s3_1d_aligned[i] or ema_slope_1d_aligned[i] > 0:
+                # Exit short: price moves below EMA20 or weekly turns bullish
+                if close[i] < ema20[i] or stoch_d_aligned[i] > 50:
                     signals[i] = 0.0
                     position = 0
                 else:
