@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -32,37 +32,38 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Calculate Camarilla levels from previous day's range
-    # Camarilla: Close + (High-Low) * multiplier / 11
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
+    # Camarilla pivot levels from previous day (H, L, C)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    range_1d = prev_high - prev_low
-    r3 = prev_close + range_1d * 1.1 / 11  # R3 level
-    s3 = prev_close - range_1d * 1.1 / 11  # S3 level
-    r4 = prev_close + range_1d * 1.3 / 11  # R4 level
-    s4 = prev_close - range_1d * 1.3 / 11  # S4 level
+    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA, volume, and Camarilla
+    start_idx = 35  # Need enough data for EMA, volume, and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(R3[i]) or np.isnan(S3[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,24 +72,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R3 with uptrend and volume
-            if close[i] > r3_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: Close above R3 + daily uptrend + volume filter
+            if close[i] > R3[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with downtrend and volume
-            elif close[i] < s3_aligned[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Close below S3 + daily downtrend + volume filter
+            elif close[i] < S3[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Break below S3 or trend reversal
-            if close[i] < s3_aligned[i] or not trend_up[i]:
+            # Long exit: Close below S3 or daily trend down
+            if close[i] < S3[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Break above R3 or trend reversal
-            if close[i] > r3_aligned[i] or trend_up[i]:
+            # Short exit: Close above R3 or daily trend up
+            if close[i] > R3[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
