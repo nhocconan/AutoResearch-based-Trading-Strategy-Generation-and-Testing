@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Solid
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Stable
 Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA34 trend and volume above 1.5x median.
 Focus on tight entries (R1/S1 tighter than R3/S3) to reduce trade count and improve win rate. Works in bull via uptrend breaks,
 in bear via downtrend breaks. Volume confirms conviction. Target: 20-50 trades/year.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Solid"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Stable"
 timeframe = "4h"
 leverage = 1.0
 
