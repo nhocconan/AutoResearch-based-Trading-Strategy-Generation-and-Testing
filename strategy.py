@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_DailyTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Pivot from daily data
+    # Calculate Pivot from daily data (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -27,7 +27,7 @@ def generate_signals(prices):
     r1_daily = pivot_daily * 2 - df_1d['low']
     s1_daily = pivot_daily * 2 - df_1d['high']
     
-    # Align Pivot levels to 12h timeframe
+    # Align Pivot levels to 4h timeframe
     pivot_daily_aligned = align_htf_to_ltf(prices, df_1d, pivot_daily.values)
     r1_daily_aligned = align_htf_to_ltf(prices, df_1d, r1_daily.values)
     s1_daily_aligned = align_htf_to_ltf(prices, df_1d, s1_daily.values)
