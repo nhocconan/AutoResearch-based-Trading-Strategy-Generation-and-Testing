@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_1dVolume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,14 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: close above/below 1d EMA34
+    # 1d trend: EMA34 (bullish/bearish filter)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    trend_up = close > ema_1d_aligned
+    trend_up = close > ema_1d_aligned  # 1d EMA trend filter
     
     # 1d volume filter: volume > 1.5x 20-day average
     vol_1d = df_1d['volume'].values
@@ -32,7 +32,7 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Camarilla levels from previous day
+    # Camarilla levels from previous day (1d)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -43,14 +43,14 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Session filter: 08-20 UTC
+    # Session filter: 08-20 UTC (avoid low-volume Asian session)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA and Camarilla
+    start_idx = 34  # Need enough data for EMA34 and volume MA20
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
