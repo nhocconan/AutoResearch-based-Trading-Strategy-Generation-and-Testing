@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_v1
-Hypothesis: Combines 4h Donchian breakouts with volume confirmation and 1d trend filter.
-Breakouts above 20-period high with volume > 1.5x average and bullish 1d trend = long.
-Breakouts below 20-period low with volume > 1.5x average and bearish 1d trend = short.
-Designed to capture trending moves while avoiding false breakouts in ranging markets.
-Targets 30-60 trades per year (120-240 over 4 years) on 4h timeframe.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike
+Hypothesis: Combines Camarilla pivot breakout with 1-day trend filter and volume spike to capture high-probability moves.
+Works in bull/bear by requiring trend alignment and volume confirmation, reducing false breakouts.
+Target: 20-50 trades per year on 4h timeframe.
 """
 
-name = "4h_Donchian_Breakout_Volume_Trend_v1"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,44 +24,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 4h Donchian Channel (20-period) ===
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
-    
-    # === Volume Confirmation (1.5x average volume) ===
-    vol_ma = np.full(n, np.nan)
-    vol_period = 20
-    for i in range(vol_period, n):
-        vol_ma[i] = np.mean(volume[i-vol_period:i])
-    
-    volume_ratio = np.divide(volume, vol_ma, out=np.full(n, np.nan), where=vol_ma!=0)
-    
-    # === 1d Trend Filter (EMA34) ===
+    # === 1D Data for Trend and Camarilla Calculation ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Calculate previous day's Camarilla levels
+    # Using previous day's OHLC to avoid look-ahead
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Camarilla levels: R1, R2, S1, S2
+    # R1 = Close + (High - Low) * 1.1/12
+    # S1 = Close - (High - Low) * 1.1/12
+    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align Camarilla levels to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # 1-day EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Detection (20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma20 * 2.0)  # Volume at least 2x average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = max(lookback, vol_period, 34)
+    # Start after warmup
+    start_idx = max(30, 20)  # For EMA34 and vol MA20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or 
-            np.isnan(volume_ratio[i]) or 
-            np.isnan(ema34_1d_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,28 +80,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above Donchian high + volume confirmation + bullish 1d trend
-            if (close[i] > highest_high[i] and 
-                volume_ratio[i] > 1.5 and 
-                close[i] > ema34_1d_aligned[i]):
+            # Long: price breaks above R1 with volume spike and price > EMA34 (uptrend)
+            if close[i] > R1_aligned[i] and vol_spike[i] and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakout below Donchian low + volume confirmation + bearish 1d trend
-            elif (close[i] < lowest_low[i] and 
-                  volume_ratio[i] > 1.5 and 
-                  close[i] < ema34_1d_aligned[i]):
+            # Short: price breaks below S1 with volume spike and price < EMA34 (downtrend)
+            elif close[i] < S1_aligned[i] and vol_spike[i] and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below Donchian low or loss of 1d trend
-            if close[i] < lowest_low[i] or close[i] < ema34_1d_aligned[i]:
+            # Long exit: price breaks below S1 (reversal signal)
+            if close[i] < S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: close above Donchian high or loss of 1d trend
-            if close[i] > highest_high[i] or close[i] > ema34_1d_aligned[i]:
+            # Short exit: price breaks above R1 (reversal signal)
+            if close[i] > R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
