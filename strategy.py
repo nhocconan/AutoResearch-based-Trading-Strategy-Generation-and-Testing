@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1d_Camarilla_Pivot_Breakout_Volume_Simple
-Hypothesis: Camarilla pivot levels from 1d combined with volume confirmation and 1d trend filter on 12h timeframe.
-- Long when: price breaks above R3 with volume > 20-period average and 1d EMA50 uptrend
-- Short when: price breaks below S3 with volume > 20-period average and 1d EMA50 downtrend
-- Exit when price returns to opposite pivot level (S1 for longs, R1 for shorts)
-Targets 12-37 trades/year (50-150 over 4 years) to minimize fee drift.
-Uses 1d trend filter to avoid counter-trend trades in ranging markets.
+1d_KAMA_Trend_Volume_Momentum
+Hypothesis: KAMA direction + RSI + volume momentum filter on daily chart. KAMA adapts to volatility, RSI identifies momentum, volume confirms strength. Works in both bull and bear markets by filtering with trend and momentum.
 """
 
-name = "12h_1d_Camarilla_Pivot_Breakout_Volume_Simple"
-timeframe = "12h"
+name = "1d_KAMA_Trend_Volume_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,103 +17,102 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # Daily close
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # --- KAMA (Kaufman Adaptive Moving Average) ---
+    # Parameters: ER period=10, Fast EMA=2, Slow EMA=30
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder, will compute properly
     
-    # --- Camarilla Pivots from 1d (previous day) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Proper ER calculation
+    close_series = pd.Series(close)
+    change = close_series.diff().abs()
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    direction = np.abs(close_series - close_series.shift(10))
+    er = direction / volatility.replace(0, np.nan)
+    er = er.fillna(0).values
     
-    # Calculate pivots from previous day's data
-    camarilla_high = np.full_like(close_1d, np.nan)
-    camarilla_low = np.full_like(close_1d, np.nan)
-    camarilla_close = np.full_like(close_1d, np.nan)
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)
+    slow_sc = 2 / (30 + 1)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's OHLC to calculate today's pivots
-        camarilla_high[i] = high_1d[i-1]
-        camarilla_low[i] = low_1d[i-1]
-        camarilla_close[i] = close_1d[i-1]
+    # Calculate KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Calculate Camarilla levels
-    R4 = camarilla_close + ((camarilla_high - camarilla_low) * 1.5000)
-    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
-    R2 = camarilla_close + ((camarilla_high - camarilla_low) * 1.1666)
-    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
-    PP = camarilla_close
-    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
-    S2 = camarilla_close - ((camarilla_high - camarilla_low) * 1.1666)
-    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
-    S4 = camarilla_close - ((camarilla_high - camarilla_low) * 1.5000)
+    # --- RSI (14) ---
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = (100 - (100 / (1 + rs))).fillna(50).values
     
-    # Align pivots to 12h timeframe
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
-    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    # --- Volume momentum: volume > 20-day average ---
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # --- Volume Confirmation: 12h volume > 20-period average ---
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # --- Weekly trend filter: EMA50 ---
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50  # for EMA50 and volume MA
+    start_idx = 50  # for KAMA, RSI, EMA, volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
-            np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close_12h[i] > ema50_1d_aligned[i]
-        trend_down = close_12h[i] < ema50_1d_aligned[i]
+        # Determine weekly trend
+        trend_up = close[i] > ema50_1w_aligned[i]
+        trend_down = close[i] < ema50_1w_aligned[i]
         
         # Volume confirmation
-        vol_ok = volume_12h[i] > vol_ma_20[i]
+        vol_ok = volume[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume
-            if close_12h[i] > R3_12h[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + 1d uptrend + volume
+            # Look for entries only in direction of weekly trend with volume and RSI momentum
+            if close[i] > kama[i] and rsi[i] > 55 and trend_up and vol_ok:
+                # Long: price above KAMA, RSI > 55, weekly uptrend, volume momentum
                 signals[i] = 0.25
                 position = 1
-            elif close_12h[i] < S3_12h[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + 1d downtrend + volume
+            elif close[i] < kama[i] and rsi[i] < 45 and trend_down and vol_ok:
+                # Short: price below KAMA, RSI < 45, weekly downtrend, volume momentum
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price returns to S1 (opposite side)
-                if close_12h[i] <= S1_12h[i]:
+                # Exit long: price crosses below KAMA or RSI < 40
+                if close[i] < kama[i] or rsi[i] < 40:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to R1 (opposite side)
-                if close_12h[i] >= R1_12h[i]:
+                # Exit short: price crosses above KAMA or RSI > 60
+                if close[i] > kama[i] or rsi[i] > 60:
                     signals[i] = 0.0
                     position = 0
                 else:
