@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_v2"
-timeframe = "4h"
+name = "12h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -44,14 +44,19 @@ def generate_signals(prices):
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Get daily trend filter using EMA(34)
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_1d > ema34_1d
+    # Get weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
     
-    # Align indicators to 4h timeframe
+    close_1w = df_1w['close'].values
+    ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_up = close_1w > ema20
+    
+    # Align indicators to 12h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
     
     # Volume moving average (10-period) for confirmation
     vol_ma10 = np.zeros(n)
@@ -64,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 10)  # Wait for EMA34 and volume MA
+    start_idx = max(20, 10)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
