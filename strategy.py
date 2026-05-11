@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R3_S3_Breakout_12hTrend_Volume
-Hypothesis: Breakouts from daily Camarilla R3/S3 levels with 12h trend filter and volume confirmation.
-In strong trends, price breaking above R3 or below S3 with volume confirms institutional participation.
-Trades only in direction of higher timeframe trend to avoid counter-trend whipsaws.
-Designed for low frequency (15-35 trades/year) to minimize fee drag in both bull and bear markets.
+1H_Trend_Follow_4H1D_Confirm
+Hypothesis: 1h trend following with 4h/1d confirmation to avoid false breakouts.
+Uses 4h EMA21 for trend direction and 1d ATR for volatility filter.
+Trades only during London/NY session (08-20 UTC) to reduce noise.
+Designed for 15-35 trades/year with 0.20 position size to minimize fee drag.
+Works in bull/bear via trend filter and volatility-adjusted entries.
 """
 
-name = "4H_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1H_Trend_Follow_4H1D_Confirm"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -20,45 +21,45 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivot
+    # Get 1d data for volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Precompute session filter
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # 1h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1d Camarilla pivot levels (R3, S3) ---
+    # --- 4h EMA21 for trend filter ---
+    close_4h = df_4h['close'].values
+    ema_21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_21_4h)
+    
+    # --- 1d ATR14 for volatility filter ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate Camarilla levels: R3/S3
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
+    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d, additional_delay_bars=0)
     
-    # Align R3/S3 to 4h timeframe (using previous day's levels for breakout)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # --- 12h EMA50 for trend filter ---
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # --- Volume Spike (4h) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
+    # --- 1h EMA21 for entry timing ---
+    ema_21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,49 +68,53 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i])):
-            # Maintain position if valid, otherwise flat
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(ema_21_4h_aligned[i]) or 
+            np.isnan(atr_14_1d_aligned[i]) or 
+            np.isnan(ema_21_1h[i]) or
+            not in_session[i]):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Entry conditions: Breakout of R3/S3 with volume and trend alignment
-        long_entry = (close[i] > r3_aligned[i]) and vol_spike[i] and (close[i] > ema_50_12h_aligned[i])
-        short_entry = (close[i] < s3_aligned[i]) and vol_spike[i] and (close[i] < ema_50_12h_aligned[i])
+        # Entry conditions: 
+        # Long: price > 4h EMA21 AND price > 1h EMA21 AND volatility normal
+        # Short: price < 4h EMA21 AND price < 1h EMA21 AND volatility normal
+        vol_normal = atr_14_1d_aligned[i] < np.percentile(atr_14_1d_aligned[:i+1], 80)
+        
+        long_entry = (close[i] > ema_21_4h_aligned[i]) and (close[i] > ema_21_1h[i]) and vol_normal
+        short_entry = (close[i] < ema_21_4h_aligned[i]) and (close[i] < ema_21_1h[i]) and vol_normal
         
         if position == 0:
             if long_entry:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
             elif short_entry:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: Price returns to pivot level or trend reversal
+            # Exit conditions: 
+            # Long: price < 1h EMA21 OR volatility spike
+            # Short: price > 1h EMA21 OR volatility spike
+            vol_spike = atr_14_1d_aligned[i] > np.percentile(atr_14_1d_aligned[:i+1], 90)
+            
             if position == 1:
-                # Exit if price crosses below pivot or trend turns down
-                pp_aligned = align_htf_to_ltf(prices, df_1d, (high_1d + low_1d + close_1d) / 3.0)
-                if (close[i] < pp_aligned[i]) or (close[i] < ema_50_12h_aligned[i]):
+                if (close[i] < ema_21_1h[i]) or vol_spike:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit if price crosses above pivot or trend turns up
-                pp_aligned = align_htf_to_ltf(prices, df_1d, (high_1d + low_1d + close_1d) / 3.0)
-                if (close[i] > pp_aligned[i]) or (close[i] > ema_50_12h_aligned[i]):
+                if (close[i] > ema_21_1h[i]) or vol_spike:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
