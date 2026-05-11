@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_Bounce_1dTrend_Volume
-# Hypothesis: Price reversals at Camarilla pivot levels (S3/S4 for long, R3/R4 for short)
-# with 1-day trend confirmation and volume spike. Works in bull by buying S3/S4 dips in uptrend,
-# and in bear by selling R3/R4 rallies in downtrend. Target: 20-40 trades/year.
+"""
+1d_1w_Keltner_Breakout_Trend
+Hypothesis: On 1d timeframe, break above/below Keltner Channel (20, 2.0) signals trend.
+Use 1-week EMA50 as trend filter: only take longs when price > 1w EMA50, shorts when price < 1w EMA50.
+This avoids counter-trend trades in strong monthly trends. Weekly EMA50 adapts slowly,
+providing a robust bull/bear filter. Keltner breakout catches momentum; weekly filter
+ensures alignment with major trend. Target: 15-25 trades/year (60-100 total).
+Works in bull by buying breakouts in uptrend; works in bear by selling breakdowns in downtrend.
+"""
 
-name = "4h_Camarilla_Pivot_Bounce_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_1w_Keltner_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,91 +19,93 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1d OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # --- Calculate Camarilla levels from previous 1d bar ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- 1d Keltner Channel (20, 2.0) ---
+    # EMA20 of close
+    ema_20 = np.full(n, np.nan)
+    if n >= 20:
+        ema_20[19] = np.mean(close[:20])
+        for i in range(20, n):
+            ema_20[i] = 0.1 * close[i] + 0.9 * ema_20[i-1]
     
-    # Camarilla formulas: H = high, L = low, C = close of previous day
-    # Resistance levels: R1 = C + (H-L)*1.1/12, R2 = C + (H-L)*1.1/6, R3 = C + (H-L)*1.1/4, R4 = C + (H-L)*1.1/2
-    # Support levels: S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    R2 = close_1d + (high_1d - low_1d) * 1.1 / 6
-    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    R4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    S2 = close_1d - (high_1d - low_1d) * 1.1 / 6
-    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    S4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # ATR(20)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # first TR
+    atr = np.full(n, np.nan)
+    if n >= 20:
+        atr[19] = np.mean(tr[1:21])  # average of TR[1] to TR[20]
+        for i in range(21, n):
+            atr[i] = 0.05 * tr[i] + 0.95 * atr[i-1]
     
-    # Align Camarilla levels to 4h (previous day's levels available at 00:00 UTC)
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    R2_4h = align_htf_to_ltf(prices, df_1d, R2)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
-    S2_4h = align_htf_to_ltf(prices, df_1d, S2)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
+    # Keltner bounds
+    kc_upper = ema_20 + 2.0 * atr
+    kc_lower = ema_20 - 2.0 * atr
     
-    # --- 1d trend: EMA34 ---
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # --- 1w EMA50 (trend filter) ---
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_1w[i] = 2/(50+1) * close_1w[i] + (1 - 2/(50+1)) * ema_1w[i-1]
     
-    # --- Volume spike: volume > 1.5 * 20-period average ---
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    vol_spike = volume > 1.5 * vol_ma
+    # Align 1w EMA50 to 1d
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after we have enough data for calculations
-    start_idx = max(20, 34)  # volume MA and EMA warmup
+    # Warmup: max(1d EMA20, ATR20, 1w EMA50)
+    start_idx = max(20, 20, 50)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Breakout conditions
+        breakout_up = close[i] > kc_upper[i]
+        breakout_down = close[i] < kc_lower[i]
+        
+        # 1w trend: price above/below EMA50
+        trend_up = close[i] > ema_1w_aligned[i]  # Compare 1d close to 1w EMA50 aligned
+        trend_down = close[i] < ema_1w_aligned[i]
+        
         if position == 0:
-            # Long: price at or below S3 with volume spike in uptrend
-            if low[i] <= S3_4h[i] and vol_spike[i] and close[i] > ema_1d_aligned[i]:
+            if breakout_up and trend_up:
+                # Long: breakout above KC upper in 1w uptrend
                 signals[i] = 0.25
                 position = 1
-            # Short: price at or above R3 with volume spike in downtrend
-            elif high[i] >= R3_4h[i] and vol_spike[i] and close[i] < ema_1d_aligned[i]:
+            elif breakout_down and trend_down:
+                # Short: breakdown below KC lower in 1w downtrend
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price crosses above S2 or trend changes
-                if high[i] >= S2_4h[i] or close[i] < ema_1d_aligned[i]:
+                # Exit long: break below KC lower OR trend turns down
+                if breakout_down or not trend_up:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses below R2 or trend changes
-                if low[i] <= R2_4h[i] or close[i] > ema_1d_aligned[i]:
+                # Exit short: break above KC upper OR trend turns up
+                if breakout_up or not trend_down:
                     signals[i] = 0.0
                     position = 0
                 else:
