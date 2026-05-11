@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pullback_Trend
-Hypothesis: 4h pullback to Camarilla R3/S3 levels in direction of 1d trend (EMA34) with volume confirmation.
-Enters on retest of key levels rather than breakouts, reducing false signals. Uses 1d timeframe for trend and levels.
-Designed for low trade frequency (~30-50/year) to minimize fee drag. Works in bull/bear by following higher timeframe trend.
+12h_Pivot_Breakout_Trend_Volume
+Hypothesis: 12h chart breakouts at 1d Camarilla R3/S3 levels, filtered by 1d EMA trend and volume spikes.
+Trades in direction of 1d trend using previous 1d bar's Camarilla levels. Volume confirmation filters false breakouts.
+Designed for moderate trade frequency (~15-35/year) to balance opportunity and fee drag. Works in bull/bear by following higher timeframe trend.
 """
 
-name = "4h_Camarilla_Pullback_Trend"
-timeframe = "4h"
+name = "12h_Pivot_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -43,16 +43,18 @@ def generate_signals(prices):
     pc_1d = df_1d['close'].values  # previous 1d close
     
     # Camarilla levels: R3, S3
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
     camarilla_r3 = pc_1d + 1.1 * (ph_1d - pl_1d) / 2
     camarilla_s3 = pc_1d - 1.1 * (ph_1d - pl_1d) / 2
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
-    # === Volume Filter: 1.5x 20-period EMA on 4h ===
+    # === Volume Filter: 2.0x 20-period EMA on 12h ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 1.5
+    volume_spike = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,27 +74,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price pulls back to S3 in uptrend with volume confirmation
-            if (close[i] >= s3_aligned[i] * 0.999 and close[i] <= s3_aligned[i] * 1.001 and 
+            # Long: price breaks above R3 with uptrend and volume spike
+            if (close[i] > r3_aligned[i] and 
                 close[i] > ema34_1d_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price pulls back to R3 in downtrend with volume confirmation
-            elif (close[i] >= r3_aligned[i] * 0.999 and close[i] <= r3_aligned[i] * 1.001 and 
+            # Short: price breaks below S3 with downtrend and volume spike
+            elif (close[i] < s3_aligned[i] and 
                   close[i] < ema34_1d_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 (break of pullback level)
+            # Long exit: price closes below S3 (mean reversion to midpoint)
             if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above R3 (break of pullback level)
+            # Short exit: price closes above R3 (mean reversion to midpoint)
             if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
