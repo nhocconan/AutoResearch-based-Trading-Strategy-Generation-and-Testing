@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_OrderFlow_Imbalance_VWAP_Divergence_v2
-Hypothesis: Detect institutional order flow imbalances via VWAP divergence on 6h timeframe, filtered by 1D trend and volume confirmation. 
-Works in bull/bear by following 1D trend direction. VWAP divergence signals exhaustion of moves, allowing mean reversion entries.
-Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing high-probability reversals.
+12h_Trix_Volume_Trend
+Hypothesis: 12h TRIX momentum filtered by 1w trend and volume spikes captures momentum bursts in both bull and bear markets. TRIX crossing zero indicates acceleration, volume confirms institutional participation, and 1w EMA ensures we trade with the dominant trend. Designed for low trade frequency (~15-30/year) to minimize fee drag while capturing strong moves.
 """
 
-name = "6h_OrderFlow_Imbalance_VWAP_Divergence_v2"
-timeframe = "6h"
+name = "12h_Trix_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,60 +22,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Data for Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === 12h TRIX for momentum ===
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = ema3.diff() / ema3.shift(1) * 100  # percentage change
+    trix_values = trix.fillna(0).values
+    
+    # === 1w EMA34 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    # 1D EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # === VWAP Calculation on 6h ===
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, typical_price)
-    
-    # === VWAP Divergence Detection ===
-    # Bullish divergence: price makes lower low, VWAP makes higher low
-    # Bearish divergence: price makes higher high, VWAP makes lower high
-    # We'll use a 5-period lookback for simplicity
-    lookback = 5
-    
-    # Price swings
-    price_lower_low = np.zeros(n, dtype=bool)
-    price_higher_high = np.zeros(n, dtype=bool)
-    vwap_higher_low = np.zeros(n, dtype=bool)
-    vwap_lower_high = np.zeros(n, dtype=bool)
-    
-    for i in range(lookback, n):
-        # Price lower low: current low < lowest low in lookback period
-        price_lower_low[i] = low[i] == np.min(low[i-lookback:i+1])
-        # Price higher high: current high == highest high in lookback period
-        price_higher_high[i] = high[i] == np.max(high[i-lookback:i+1])
-        # VWAP higher low: current VWAP > lowest VWAP in lookback period
-        vwap_higher_low[i] = vwap[i] > np.min(vwap[i-lookback:i+1])
-        # VWAP lower high: current VWAP < highest VWAP in lookback period
-        vwap_lower_high[i] = vwap[i] < np.max(vwap[i-lookback:i+1])
-    
-    # Volume filter: 1.5x 20-period EMA volume
+    # === Volume filter: 2.0x 20 EMA ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 1.5
+    volume_spike = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(50, lookback)
+    # Start after warmup (covers TRIX calculation)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vwap[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(trix_values[i-1]) or 
+            np.isnan(ema34_1w_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,26 +61,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: bullish VWAP divergence + uptrend on 1D + volume spike
-            if (price_lower_low[i] and vwap_higher_low[i] and 
-                close[i] > ema50_1d_aligned[i] and volume_spike[i]):
+            # Long: TRIX crosses above zero with uptrend and volume spike
+            if (trix_values[i] > 0 and trix_values[i-1] <= 0 and 
+                close[i] > ema34_1w_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish VWAP divergence + downtrend on 1D + volume spike
-            elif (price_higher_high[i] and vwap_lower_high[i] and 
-                  close[i] < ema50_1d_aligned[i] and volume_spike[i]):
+            # Short: TRIX crosses below zero with downtrend and volume spike
+            elif (trix_values[i] < 0 and trix_values[i-1] >= 0 and 
+                  close[i] < ema34_1w_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses above VWAP (momentum resumption) or trend fails
-            if close[i] > vwap[i] or close[i] < ema50_1d_aligned[i]:
+            # Long exit: TRIX crosses below zero
+            if trix_values[i] < 0 and trix_values[i-1] >= 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses below VWAP (momentum resumption) or trend fails
-            if close[i] < vwap[i] or close[i] > ema50_1d_aligned[i]:
+            # Short exit: TRIX crosses above zero
+            if trix_values[i] > 0 and trix_values[i-1] <= 0:
                 signals[i] = 0.0
                 position = 0
             else:
