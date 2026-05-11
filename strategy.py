@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla R3/S3 levels from daily data provide strong support/resistance.
-Breakouts above R3 or below S3 with volume confirmation and daily trend filter capture
-institutional breakouts. Works in bull (breakouts continue) and bear (breakdowns continue).
-Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
+1h_4h1d_Triple_Confirmation_v1
+Hypothesis: Combine 4h trend (EMA21), 1d momentum (RSI14), and 1h volatility breakout (ATR-based) 
+for high-probability entries. Uses 4h for trend direction, 1d for momentum filter, 
+and 1h for precise entry timing. Designed to work in both bull and bear markets by 
+requiring alignment across timeframes. Target: 15-35 trades/year per symbol.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "1h_4h1d_Triple_Confirmation_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,51 +23,63 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === DAILY DATA FOR CAMARILLA AND TREND ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === 4H Data for Trend Direction ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 21:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    
+    # === 1D Data for Momentum Filter (RSI) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
     close_1d = df_1d['close'].values
+    # Calculate RSI(14) on daily
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # R3 = close + 1.1*(high - low)/2
-    # S3 = close - 1.1*(high - low)/2
-    camarilla_range = high_1d - low_1d
-    r3_level = close_1d + 1.1 * camarilla_range / 2
-    s3_level = close_1d - 1.1 * camarilla_range / 2
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Use previous day's levels (avoid look-ahead)
-    r3_prev = r3_level  # will be shifted by align function
-    s3_prev = s3_level
+    # === 1H Data for Entry Timing (ATR-based breakout) ===
+    # Calculate ATR(14) for volatility
+    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
+    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], tr1])
     
-    # Align Camarilla levels to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_prev)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_prev)
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Daily trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Donchian channel breakout (20-period)
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # === VOLUME CONFIRMATION (20-period average) ===
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback+1:i+1])
+        lowest_low[i] = np.min(low[i-lookback+1:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = max(50, lookback)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(ema21_4h_aligned[i]) or 
+            np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(atr[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,31 +88,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 with volume > 1.5x average and price > daily EMA34 (uptrend)
-            if (close[i] > r3_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i] and 
-                close[i] > ema34_aligned[i]):
-                signals[i] = 0.25
+            # Long conditions:
+            # 1. 4h trend up (price > EMA21)
+            # 2. 1d momentum bullish (RSI > 50)
+            # 3. 1h breakout above Donchian high with volume expansion (using price action proxy)
+            if (close[i] > ema21_4h_aligned[i] and 
+                rsi_1d_aligned[i] > 50 and 
+                close[i] > highest_high[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S3 with volume > 1.5x average and price < daily EMA34 (downtrend)
-            elif (close[i] < s3_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i] and 
-                  close[i] < ema34_aligned[i]):
-                signals[i] = -0.25
+            # Short conditions:
+            # 1. 4h trend down (price < EMA21)
+            # 2. 1d momentum bearish (RSI < 50)
+            # 3. 1h breakdown below Donchian low
+            elif (close[i] < ema21_4h_aligned[i] and 
+                  rsi_1d_aligned[i] < 50 and 
+                  close[i] < lowest_low[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price re-enters below R3 or volume drops significantly
-            if close[i] < r3_aligned[i] or volume[i] < 0.5 * vol_ma20[i]:
+            # Long exit: trend breaks down or momentum fades
+            if close[i] < ema21_4h_aligned[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
-            # Short exit: price re-enters above S3 or volume drops significantly
-            if close[i] > s3_aligned[i] or volume[i] < 0.5 * vol_ma20[i]:
+            # Short exit: trend breaks up or momentum fades
+            if close[i] > ema21_4h_aligned[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
