@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Twist_1dTrend
-Hypothesis: Uses Ichimoku cloud twist (Tenkan/Kijun cross) with cloud thickness filter and 1-day trend filter.
-Trades in direction of daily trend only when cloud twist occurs and cloud is thin (low volatility).
-Designed for low trade frequency (<25/year) to avoid fee drift while capturing high-probability trend continuations.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v1
+Hypothesis: Uses daily Camarilla pivot levels (R1/S1) with volume spike confirmation and 1-day EMA trend filter.
+Trades breakouts in trending markets (EMA34) and mean-reversion at pivot levels in ranging markets.
+Designed for low trade frequency (<30/year) to avoid fee drag while capturing high-probability moves.
+Target timeframe: 12h for lower turnover and higher win rate in both bull and bear markets.
 """
 
-name = "6h_Ichimoku_Cloud_Twist_1dTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,69 +20,54 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for Camarilla pivots and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # --- 1d EMA50 for trend filter ---
+    # --- 1d EMA34 for trend filter ---
     close_1d = df_1d['close']
-    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # --- Ichimoku Components (9, 26, 52) ---
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = (high_9 + low_9) / 2
+    # --- Daily Camarilla Pivot Levels (R1, S1) ---
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = (high_26 + low_26) / 2
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)  # R1
+    s1 = pivot - (range_1d * 1.1 / 12)  # S1
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
-    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    # Align to 12h (Camarilla levels are valid for the entire day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 52 periods
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((high_52 + low_52) / 2).shift(52)
-    
-    # Chikou Span (Lagging Span): close shifted -22 periods (not used for signals)
-    
-    # Cloud thickness: absolute difference between Senkou spans
-    cloud_thickness = np.abs(senkou_a - senkou_b)
-    
-    # Cloud twist signals: Tenkan/Kijun cross
-    # Bullish twist: Tenkan crosses above Kijun
-    # Bearish twist: Tenkan crosses below Kijun
-    bullish_twist = (tenkan.shift(1) <= kijun.shift(1)) & (tenkan > kijun)
-    bearish_twist = (tenkan.shift(1) >= kijun.shift(1)) & (tenkan < kijun)
-    
-    # Cloud is thin (low volatility) - using 20-period average of thickness
-    cloud_thick_ma = pd.Series(cloud_thickness).rolling(window=20, min_periods=20).mean()
-    thin_cloud = cloud_thickness < cloud_thick_ma
+    # --- Volume Spike Detection (2x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ema.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (max lookback is 52 for Senkou B)
-    start_idx = 60
+    # Start after warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(tenkan.iloc[i]) or
-            np.isnan(kijun.iloc[i]) or
-            np.isnan(senkou_a.iloc[i]) or
-            np.isnan(senkou_b.iloc[i]) or
-            np.isnan(thin_cloud.iloc[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -91,34 +77,52 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs EMA50
-        price_above_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_ema = close[i] < ema_50_1d_aligned[i]
+        # Determine trend based on price vs EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        
+        # Breakout signals (price crosses R1/S1 with volume spike)
+        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
+        
+        # Mean reversion at pivot levels (price touches S1/R1 without breakout)
+        # Only in non-trending conditions (price near EMA)
+        near_ema = abs(close[i] - ema_34_1d_aligned[i]) < (0.01 * ema_34_1d_aligned[i])  # Within 1% of EMA
+        long_reversion = (low[i] <= s1_aligned[i]) and near_ema and not vol_spike[i]
+        short_reversion = (high[i] >= r1_aligned[i]) and near_ema and not vol_spike[i]
         
         if position == 0:
             if price_above_ema:
-                # Uptrend: look for bullish twist with thin cloud
-                if bullish_twist.iloc[i] and thin_cloud.iloc[i]:
+                # Uptrend: favor long breakouts, avoid shorts
+                if long_breakout:
                     signals[i] = 0.25
                     position = 1
             elif price_below_ema:
-                # Downtrend: look for bearish twist with thin cloud
-                if bearish_twist.iloc[i] and thin_cloud.iloc[i]:
+                # Downtrend: favor short breakouts, avoid longs
+                if short_breakout:
+                    signals[i] = -0.25
+                    position = -1
+            else:
+                # Near EMA: allow mean reversion at pivot levels
+                if long_reversion:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_reversion:
                     signals[i] = -0.25
                     position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: bearish twist or price closes below Kijun
-                exit_signal = bearish_twist.iloc[i] or (close[i] < kijun.iloc[i])
+                # Exit long: price touches S1 (support) or breaks below EMA
+                exit_signal = (low[i] <= s1_aligned[i]) or (close[i] < ema_34_1d_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: bullish twist or price closes above Kijun
-                exit_signal = bullish_twist.iloc[i] or (close[i] > kijun.iloc[i])
+                # Exit short: price touches R1 (resistance) or breaks above EMA
+                exit_signal = (high[i] >= r1_aligned[i]) or (close[i] > ema_34_1d_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
