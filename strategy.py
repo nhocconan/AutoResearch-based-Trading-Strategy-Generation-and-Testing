@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Donchian_Breakout_VolumeTrend_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,53 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: close above/below 1d EMA34
+    # 1d trend: 20-period EMA
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    trend_up = close > ema_34_1d_aligned
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
+    trend_up = close > ema_20_1d_aligned
     
-    # 1d volume filter: volume > 1.8x 20-day average
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_filter = volume > 1.8 * vol_ma20_1d_aligned
+    # Donchian channel (20-period) on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels (H4/L4) from previous 1d
-    h4_prev = df_1d['high'].values
-    l4_prev = df_1d['low'].values
-    close_prev = df_1d['close'].values
-    # Camarilla H4 = Close + 1.1 * (High - Low) / 2
-    # Camarilla L4 = Close - 1.1 * (High - Low) / 2
-    camarilla_h4 = close_prev + 1.1 * (h4_prev - l4_prev) / 2
-    camarilla_l4 = close_prev - 1.1 * (h4_prev - l4_prev) / 2
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA and volume
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if not session_filter[i]:
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_20_1d_aligned[i]) or np.isnan(vol_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,27 +48,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above Camarilla H4 + daily uptrend + volume filter
-            if close[i] > camarilla_h4_aligned[i] and trend_up[i] and volume_filter[i]:
-                signals[i] = 0.30
+            # Long: Breakout above Donchian upper + daily uptrend + volume surge
+            if close[i] > highest_high[i] and trend_up[i] and volume[i] > 1.5 * vol_ma20[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: Close below Camarilla L4 + daily downtrend + volume filter
-            elif close[i] < camarilla_l4_aligned[i] and not trend_up[i] and volume_filter[i]:
-                signals[i] = -0.30
+            # Short: Breakdown below Donchian lower + daily downtrend + volume surge
+            elif close[i] < lowest_low[i] and not trend_up[i] and volume[i] > 1.5 * vol_ma20[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below Camarilla L4 or daily trend down
-            if close[i] < camarilla_l4_aligned[i] or not trend_up[i]:
+            # Long exit: Breakdown below Donchian lower or daily trend down
+            if close[i] < lowest_low[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above Camarilla H4 or daily trend up
-            if close[i] > camarilla_h4_aligned[i] or trend_up[i]:
+            # Short exit: Breakout above Donchian upper or daily trend up
+            if close[i] > highest_high[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
