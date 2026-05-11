@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_PriceChannelBreakout_1wTrend
-# Hypothesis: Uses 1d Donchian breakout for entries, filtered by 1w trend direction and volume confirmation.
-# Long when: price breaks above 1d Donchian upper channel (20), weekly trend is up (price > weekly EMA20), and volume > 1.5x 20-day average.
-# Short when: price breaks below 1d Donchian lower channel (20), weekly trend is down (price < weekly EMA20), and volume > 1.5x 20-day average.
-# Exit when price returns to the 10-day Donchian midpoint (mean reversion exit).
-# Designed to capture medium-term trends with clear entry/exit rules, avoiding false breakouts in low-volume conditions.
-# Works in bull markets by catching upward breakouts and in bear markets by catching downward breakouts.
+# 6h_HTF_LiquidityZone_Reversal
+# Hypothesis: Uses 12h liquidity zones (prior swing highs/lows) as support/resistance on 6h timeframe.
+# Long when price approaches 12h swing low, shows bullish rejection (close > open), and volume confirms.
+# Short when price approaches 12h swing high, shows bearish rejection (close < open), and volume confirms.
+# Exit when price reaches opposite liquidity zone or shows rejection at current zone.
+# Works in bull markets by buying dips to 12h support and in bear markets by selling rallies to 12h resistance.
+# Liquidity zones act as institutional order flow areas where price often reacts.
 
-name = "1d_PriceChannelBreakout_1wTrend"
-timeframe = "1d"
+name = "6h_HTF_LiquidityZone_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,90 +20,109 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for trend filter (weekly EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for swing points (liquidity zones)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 3:
         return np.zeros(n)
     
-    # 1d OHLCV
+    # 6h OHLCV
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d Donchian channels (20-period) ---
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    midpoint = np.full(n, np.nan)
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
-        midpoint[i] = (upper[i] + lower[i]) / 2.0
+    # --- 12h swing highs and lows (liquidity zones) ---
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # --- 1w EMA20 for trend filter ---
-    close_1w = df_1w['close'].values
-    ema_20 = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        if i == 20:
-            ema_20[i] = np.mean(close_1w[:20])
-        else:
-            ema_20[i] = (close_1w[i] * 2/21) + (ema_20[i-1] * (1 - 2/21))
+    # Swing high: higher high followed by lower high
+    swing_high = (high_12h[2:] > high_12h[1:-1]) & (high_12h[2:] > high_12h[3:]) & \
+                 (high_12h[1:-1] > high_12h[0:-2])
+    # Swing low: lower low followed by higher low
+    swing_low = (low_12h[2:] < low_12h[1:-1]) & (low_12h[2:] < low_12h[3:]) & \
+                (low_12h[1:-1] < low_12h[0:-2])
     
-    # --- Volume confirmation (volume > 20-period average) ---
+    # Create arrays of swing levels (NaN where no swing)
+    swing_high_levels = np.full_like(high_12h, np.nan)
+    swing_low_levels = np.full_like(low_12h, np.nan)
+    swing_high_levels[2:-1] = high_12h[2:-1][swing_high]
+    swing_low_levels[2:-1] = low_12h[2:-1][swing_low]
+    
+    # Forward fill to maintain levels until next swing
+    # Convert to pandas Series for ffill, then back to numpy
+    swing_high_series = pd.Series(swing_high_levels)
+    swing_low_series = pd.Series(swing_low_levels)
+    swing_high_ffill = swing_high_series.ffill().values
+    swing_low_ffill = swing_low_series.ffill().values
+    
+    # --- 6h rejection candles ---
+    # Bullish rejection: close > open (bullish body)
+    bullish_rej = close > open_
+    # Bearish rejection: close < open (bearish body)
+    bearish_rej = close < open_
+    
+    # --- Volume confirmation ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1w EMA20 to 1d timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Align 12h liquidity zones to 6h timeframe
+    resistance_zones = align_htf_to_ltf(prices, df_12h, swing_high_ffill)
+    support_zones = align_htf_to_ltf(prices, df_12h, swing_low_ffill)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for Donchian(20), EMA20, and volume MA(20)
-    start_idx = 20
+    # Warmup: enough for swing detection (need 3 periods) and volume MA(20)
+    start_idx = max(20, 30)  # volume MA needs 20, extra buffer for safety
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(upper[i]) or
-            np.isnan(lower[i]) or
-            np.isnan(midpoint[i]) or
-            np.isnan(ema_20_aligned[i]) or
+        if (np.isnan(resistance_zones[i]) or
+            np.isnan(support_zones[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend from 1w: price above/below weekly EMA20
-        is_uptrend = close[i] > ema_20_aligned[i]
-        is_downtrend = close[i] < ema_20_aligned[i]
+        # Current price levels
+        resistance = resistance_zones[i]
+        support = support_zones[i]
         
         # Volume spike condition
         vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
         
+        # Distance to zones (as percentage of price)
+        dist_to_resistance = abs(close[i] - resistance) / close[i] if resistance > 0 else 1.0
+        dist_to_support = abs(close[i] - support) / close[i] if support > 0 else 1.0
+        
+        # Consider price near zone if within 0.5%
+        near_resistance = dist_to_resistance < 0.005
+        near_support = dist_to_support < 0.005
+        
         if position == 0:
-            if is_uptrend and vol_spike:
-                # Long: weekly uptrend + volume spike + break above 1d Donchian upper
-                if close[i] > upper[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif is_downtrend and vol_spike:
-                # Short: weekly downtrend + volume spike + break below 1d Donchian lower
-                if close[i] < lower[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Look for rejection near liquidity zones
+            if near_support and bullish_rej and vol_spike:
+                # Long: price near 12h support, bullish rejection, volume confirmation
+                signals[i] = 0.25
+                position = 1
+            elif near_resistance and bearish_rej and vol_spike:
+                # Short: price near 12h resistance, bearish rejection, volume confirmation
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Exit long: price returns to 10-day Donchian midpoint (mean reversion)
-                if close[i] <= midpoint[i]:
+                # Exit long: price reaches resistance or shows bearish rejection at support
+                if near_resistance or bearish_rej:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to 10-day Donchian midpoint (mean reversion)
-                if close[i] >= midpoint[i]:
+                # Exit short: price reaches support or shows bullish rejection at resistance
+                if near_support or bullish_rej:
                     signals[i] = 0.0
                     position = 0
                 else:
