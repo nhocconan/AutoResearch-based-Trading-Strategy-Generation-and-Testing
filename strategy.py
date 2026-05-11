@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSurge"
-timeframe = "12h"
+name = "4h_12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume calculation
+    # Get 1d data for trend filter (EMA34) and volume calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -40,13 +40,13 @@ def generate_signals(prices):
     vol_ratio = df_1d_vol / vol_ma_1d
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # Align all 1d data to 12h timeframe
+    # Align all 1d data to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
-    # Session filter: 8-20 UTC
+    # Session filter: 8-20 UTC (aligned to 4h)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -54,7 +54,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
@@ -79,7 +79,7 @@ def generate_signals(prices):
             continue
         
         # Volume threshold - avoid low-volume false breakouts
-        volume_surge = vol_ratio_aligned[i] > 2.0
+        volume_surge = vol_ratio_aligned[i] > 1.5
         
         if position == 0:
             # Long: Price breaks above R3 with volume and above 1d EMA34 trend
