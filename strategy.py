@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_1d_Pivot_Reversion_Bias
-Hypothesis: In crypto, price tends to revert to daily pivot points (support/resistance) 
-with a trend bias from higher timeframe. Long when price touches daily S1 in uptrend 
-(1w EMA50 up), short when touches R1 in downtrend (1w EMA50 down). Uses volume 
-confirmation to avoid false touches. Works in bull (buy dips to S1) and bear (sell 
-rallies to R1). Target: 20-40 trades/year (80-160 total) to minimize fee drag.
+4h_12h_Camarilla_R3_S3_Breakout_TrendFilter
+Hypothesis: Camarilla R3/S3 breakout from 12h timeframe acts as strong support/resistance.
+Combine with 12h EMA50 trend filter and volume spike for confirmation.
+Only trade in direction of 12h trend to avoid counter-trend whipsaws.
+Target: 20-40 trades/year (80-160 total over 4 years) to avoid fee drag.
+Works in bull by buying breakouts above R3 in uptrend; works in bear by selling breakdowns below S3 in downtrend.
 """
-name = "4h_1d_Pivot_Reversion_Bias"
+
+name = "4h_12h_Camarilla_R3_S3_Breakout_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,14 +21,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 12h data for Camarilla levels and EMA50
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
     # 4h OHLCV
@@ -36,35 +32,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d Classic Pivot Points ---
-    # P = (H + L + C)/3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- 12h Camarilla levels (R3, S3) ---
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
+    # Calculate pivot and ranges
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
     
-    # --- 1w EMA50 trend filter ---
-    close_1w = df_1w['close'].values
-    ema_1w = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
+    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
+    r3_12h = close_12h + range_12h * 1.1 / 4
+    s3_12h = close_12h - range_12h * 1.1 / 4
+    
+    # --- 12h EMA50 trend ---
+    ema_50_12h = np.full(len(close_12h), np.nan)
+    for i in range(len(close_12h)):
         if i < 50:
-            ema_1w[i] = np.nan
+            ema_50_12h[i] = np.nan
         elif i == 50:
-            ema_1w[i] = np.mean(close_1w[0:50])
+            ema_50_12h[i] = np.mean(close_12h[0:50])
         else:
-            ema_1w[i] = (close_1w[i] * 2 / (50 + 1)) + (ema_1w[i-1] * (49 / (50 + 1)))
+            ema_50_12h[i] = (close_12h[i] * 2 / (50 + 1)) + (ema_50_12h[i-1] * (49 / (50 + 1)))
     
-    # EMA slope (trend direction)
-    ema_slope_1w = np.full(len(close_1w), np.nan)
-    for i in range(51, len(close_1w)):
-        ema_slope_1w[i] = ema_1w[i] - ema_1w[i-1]
+    # EMA slope for trend direction
+    ema_slope_50_12h = np.full(len(close_12h), np.nan)
+    for i in range(51, len(close_12h)):
+        ema_slope_50_12h[i] = ema_50_12h[i] - ema_50_12h[i-1]
     
-    # --- 4h ATR(14) for stop/re-entry logic ---
+    # --- 4h ATR(14) for stoploss ---
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -77,33 +73,29 @@ def generate_signals(prices):
         else:
             atr[i] = (tr[i] * 1 / 14) + (atr[i-1] * 13 / 14)
     
-    # --- 4h volume MA(20) for confirmation ---
+    # --- 4h volume MA(20) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1d pivot levels to 4h
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    
-    # Align 1w indicators to 4h
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    ema_slope_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_1w)
+    # Align 12h indicators to 4h
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_slope_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_50_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: need 1d pivot (1 bar), 1w EMA50, ATR14, vol MA20
-    start_idx = max(1, 50, 14, 20)
+    # Warmup: max(12h data needs 50 bars for EMA, 14 for ATR, 20 for vol MA)
+    start_idx = max(50, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(pivot_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_1w_aligned[i]) or
-            np.isnan(ema_slope_1w_aligned[i]) or
+        if (np.isnan(r3_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or
+            np.isnan(ema_50_12h_aligned[i]) or
+            np.isnan(ema_slope_50_12h_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -115,31 +107,25 @@ def generate_signals(prices):
         vol_spike = volume[i] > vol_ma[i] * 1.5
         
         if position == 0:
-            # Long: price touches S1 support in uptrend
-            if (low[i] <= s1_1d_aligned[i] and 
-                ema_slope_1w_aligned[i] > 0 and 
-                vol_spike):
+            # Long: break above R3 in uptrend
+            if close[i] > r3_12h_aligned[i] and ema_slope_50_12h_aligned[i] > 0 and vol_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price touches R1 resistance in downtrend
-            elif (high[i] >= r1_1d_aligned[i] and 
-                  ema_slope_1w_aligned[i] < 0 and 
-                  vol_spike):
+            # Short: break below S3 in downtrend
+            elif close[i] < s3_12h_aligned[i] and ema_slope_50_12h_aligned[i] < 0 and vol_spike:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price crosses pivot OR trend turns down
-                if (high[i] >= pivot_1d_aligned[i] or 
-                    ema_slope_1w_aligned[i] < 0):
+                # Exit long: price closes below EMA50 OR breaks below S3 (reversal)
+                if close[i] < ema_50_12h_aligned[i] or close[i] < s3_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses pivot OR trend turns up
-                if (low[i] <= pivot_1d_aligned[i] or 
-                    ema_slope_1w_aligned[i] > 0):
+                # Exit short: price closes above EMA50 OR breaks above R3 (reversal)
+                if close[i] > ema_50_12h_aligned[i] or close[i] > r3_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
