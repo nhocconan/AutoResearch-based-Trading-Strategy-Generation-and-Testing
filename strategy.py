@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_Pivot_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,16 +26,10 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for each 1d bar
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.500
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.250
-    camarilla_r2 = close_1d + (high_1d - low_1d) * 1.166
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.083
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.083
-    camarilla_s2 = close_1d - (high_1d - low_1d) * 1.166
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.250
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.500
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
