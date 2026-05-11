@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R4_S4_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Use weekly trend from 1w EMA50 for directional bias, combined with Camarilla R4/S4 breakout on 6h and volume confirmation.
-The Camarilla R4/S4 levels represent strong support/resistance; breakouts with volume indicate institutional interest.
-Weekly trend filter ensures we only take trades in the direction of the higher timeframe trend, reducing false signals.
-This combination has shown promise in prior research and should work in both bull and bear markets by adapting to weekly trend.
-Target: 50-150 total trades over 4 years on 6h timeframe.
+1d_Aroon_Trend_Strength_v1
+Hypothesis: Aroon oscillator from 1d measures trend strength and direction.
+When Aroon Up > 70 (strong uptrend) go long, Aroon Down > 70 (strong downtrend) go short.
+Weak trend (both < 30) triggers exit. Combined with 1w trend filter to avoid counter-trend trades.
+Target: 20-60 total trades over 4 years on 1d timeframe.
 """
 
-name = "6h_Camarilla_R4_S4_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "1d_Aroon_Trend_Strength_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,59 +17,59 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 1W Data for Weekly Trend (EMA50) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # === 1D Data for Camarilla Pivot Calculation ===
+    # === 1D Data for Aroon ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 25:  # Need at least 25 days for Aroon(25)
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R4 = C + ((H-L) * 1.1/2)
-    # S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
+    # Aroon Up: ((25 - periods since 25-period high) / 25) * 100
+    # Aroon Down: ((25 - periods since 25-period low) / 25) * 100
+    period = 25
+    high_idx = pd.Series(high_1d).rolling(window=period, min_periods=1).apply(lambda x: np.argmax(x), raw=True)
+    low_idx = pd.Series(low_1d).rolling(window=period, min_periods=1).apply(lambda x: np.argmin(x), raw=True)
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Convert index to periods ago
+    periods_since_high = (period - 1) - high_idx
+    periods_since_low = (period - 1) - low_idx
     
-    # Volume spike detection: volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    aroon_up = ((period - periods_since_high) / period) * 100
+    aroon_down = ((period - periods_since_low) / period) * 100
+    
+    # === 1W Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Simple trend: price above/below 20-period EMA
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Align Aroon to 1d timeframe
+    aroon_up_aligned = align_htf_to_ltf(prices, df_1d, aroon_up)
+    aroon_down_aligned = align_htf_to_ltf(prices, df_1d, aroon_down)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for EMA50
-    start_idx = 50
+    # Start after warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(aroon_up_aligned[i]) or 
+            np.isnan(aroon_down_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,29 +77,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Weekly trend: price above EMA50 = uptrend, below = downtrend
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        # Aroon signals
+        strong_uptrend = aroon_up_aligned[i] > 70
+        strong_downtrend = aroon_down_aligned[i] > 70
+        weak_trend = (aroon_up_aligned[i] < 30) and (aroon_down_aligned[i] < 30)
+        
+        # 1W trend filter
+        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
         
         if position == 0:
-            # Long: weekly uptrend AND price breaks above R4 AND volume spike
-            if weekly_uptrend and close[i] > r4_aligned[i] and volume_spike[i]:
+            # Long: strong uptrend + weekly uptrend
+            if strong_uptrend and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend AND price breaks below S4 AND volume spike
-            elif weekly_downtrend and close[i] < s4_aligned[i] and volume_spike[i]:
+            # Short: strong downtrend + weekly downtrend
+            elif strong_downtrend and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below S4 (reversal signal) OR weekly trend turns down
-            if close[i] < s4_aligned[i] or not weekly_uptrend:
+            # Long exit: weak trend OR weekly trend turns down
+            if weak_trend or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above R4 (reversal signal) OR weekly trend turns up
-            if close[i] > r4_aligned[i] or not weekly_downtrend:
+            # Short exit: weak trend OR weekly trend turns up
+            if weak_trend or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
