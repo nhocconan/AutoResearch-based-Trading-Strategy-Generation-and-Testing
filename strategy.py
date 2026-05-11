@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_with_Volume_and_Chop
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) for trend direction,
-combined with volume confirmation and Choppiness Index regime filter to avoid whipsaws.
-KAMA adapts to market noise, reducing false signals in sideways markets. Volume confirms
-strength of breakouts. Choppiness Index > 61.8 indicates ranging (avoid trend trades),
-< 38.2 indicates trending (favor trend trades). Designed for low trade frequency
-(<25/year) to minimize fee drag on 1d timeframe. Works in bull/bear by adapting to
-regime: uses KAMA for trend, volume for confirmation, chop for regime filter.
+12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Camarilla R3/S3 breakout on 12h timeframe with 1-day trend filter and volume confirmation.
+Targets high-probability reversals in range-bound markets and breakouts in trending markets.
+Works in bull/bear by adapting to regime: uses 1d trend to filter direction, volume for confirmation.
+Designed for low trade frequency (<30/year) to minimize fee drag on 12h timeframe.
 """
 
-name = "1d_KAMA_Trend_Filter_with_Volume_and_Chop"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,77 +17,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) Calculation ===
-    # Parameters: ER period=10, Fast SC=2, Slow SC=30
-    er_period = 10
-    fast_sc = 2
-    slow_sc = 30
+    # === Calculate Camarilla levels from prior 1d bar ===
+    # Get daily OHLC
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=er_period))  # |close - close[er_period]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # sum of |diff| over er_period
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing Constant
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    # KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Prior day's OHLC (shifted by 1 to avoid look-ahead)
+    prior_high = df_1d['high'].shift(1).values
+    prior_low = df_1d['low'].shift(1).values
+    prior_close = df_1d['close'].shift(1).values
     
-    # === Choppiness Index Calculation ===
-    # Parameters: period=14
-    chop_period = 14
-    atr = np.zeros_like(close)
-    tr = np.zeros_like(close)
-    for i in range(1, len(close)):
-        tr[i] = max(high[i] - low[i], np.abs(high[i] - close[i-1]), np.abs(low[i] - close[i-1]))
-    # True Range average
-    atr_sum = np.zeros_like(close)
-    for i in range(chop_period, len(close)):
-        atr_sum[i] = np.sum(tr[i-chop_period+1:i+1])
-    atr = atr_sum / chop_period
-    # Max/min high-low over period
-    max_high = np.zeros_like(close)
-    min_low = np.zeros_like(close)
-    for i in range(chop_period-1, len(close)):
-        max_high[i] = np.max(high[i-chop_period+1:i+1])
-        min_low[i] = np.min(low[i-chop_period+1:i+1])
-    # Chop = 100 * log10(sum(atr) / (max_high - min_low)) / log10(period)
-    range_val = max_high - min_low
-    chop = np.zeros_like(close)
-    for i in range(chop_period-1, len(close)):
-        if range_val[i] > 0 and atr[i] > 0:
-            chop[i] = 100 * np.log10(atr[i] * chop_period / range_val[i]) / np.log10(chop_period)
-        else:
-            chop[i] = 50  # neutral
+    # Align to 12h timeframe
+    prior_high_12h = align_htf_to_ltf(prices, df_1d, prior_high)
+    prior_low_12h = align_htf_to_ltf(prices, df_1d, prior_low)
+    prior_close_12h = align_htf_to_ltf(prices, df_1d, prior_close)
     
-    # === Volume Spike Filter ===
+    # Camarilla R3 and S3 levels
+    R3 = prior_close_12h + (prior_high_12h - prior_low_12h) * 1.1 / 4
+    S3 = prior_close_12h - (prior_high_12h - prior_low_12h) * 1.1 / 4
+    
+    # === 1-day EMA34 Trend Filter ===
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Filter (2x 20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # 1.5x volume average
+    volume_ok = volume > vol_ema20 * 2.0
     
-    # === Parameters ===
+    # === Signal Parameters ===
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers KAMA, chop, volume calculations)
-    start_idx = max(er_period, chop_period, 20) + 10
+    # Start after warmup (covers EMA and Camarilla calculation)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(chop[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,26 +74,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA AND trending regime (Chop < 38.2) AND volume spike
-            if (close[i] > kama[i] and 
-                chop[i] < 38.2 and volume_ok[i]):
+            # Long: Close crosses above R3 with uptrend (close > EMA34) and volume spike
+            if (close[i] > R3[i] and 
+                close[i] > ema34_1d_12h[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Price below KAMA AND trending regime (Chop < 38.2) AND volume spike
-            elif (close[i] < kama[i] and 
-                  chop[i] < 38.2 and volume_ok[i]):
+            # Short: Close crosses below S3 with downtrend (close < EMA34) and volume spike
+            elif (close[i] < S3[i] and 
+                  close[i] < ema34_1d_12h[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: Price crosses back through KAMA OR chop indicates ranging (Chop > 61.8)
+            # Exit: Close crosses back through the Camarilla level in opposite direction
             if position == 1:
-                if close[i] < kama[i] or chop[i] > 61.8:
+                if close[i] < S3[i]:  # Exit long if price breaks below S3
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > kama[i] or chop[i] > 61.8:
+                if close[i] > R3[i]:  # Exit short if price breaks above R3
                     signals[i] = 0.0
                     position = 0
                 else:
