@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,12 +28,6 @@ def generate_signals(prices):
     prev_close = df_1d['close'].shift(1).values
     
     # Calculate Camarilla levels R1, R2, R3, S1, S2, S3
-    # R1 = close + (high - low) * 1.1/12
-    # R2 = close + (high - low) * 1.1/6
-    # R3 = close + (high - low) * 1.1/4
-    # S1 = close - (high - low) * 1.1/12
-    # S2 = close - (high - low) * 1.1/6
-    # S3 = close - (high - low) * 1.1/4
     r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
     r2 = prev_close + (prev_high - prev_low) * 1.1 / 6
     r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
@@ -41,7 +35,7 @@ def generate_signals(prices):
     s2 = prev_close - (prev_high - prev_low) * 1.1 / 6
     s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 12h timeframe
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
@@ -53,7 +47,7 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume filter: 20-period average on 4h
+    # Volume filter: 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -62,7 +56,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
