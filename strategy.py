@@ -1,63 +1,98 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-4h_Range_Trend_Filter_v1
-Hypothesis: Uses 1-day range (high-low) and ATR to identify volatility regime.
-In low volatility (ATR < 20-period ATR mean), trade mean reversion at Bollinger Bands.
-In high volatility (ATR > 20-period ATR mean), trade breakouts of Donchian channels.
-Uses 1-day trend (EMA50) to filter trades: only long when price > EMA50, short when price < EMA50.
-Designed for low frequency (20-40 trades/year) to work in both bull (breakouts) and bear (mean reversion) markets.
+12h_1W_Camarilla_Pivot_Breakout_1DTrend_Volume_v1
+Hypothesis: Uses weekly pivot points as structural support/resistance levels, with breakout
+confirmation from 12h price action, 1d trend filter, and volume confirmation. Designed for
+low frequency (15-25 trades/year) to work in both bull (breakouts above weekly pivots) and
+bear (breakdowns below weekly pivots) markets. Weekly pivots provide stronger levels than
+daily pivots, reducing false breakouts. Volume confirmation ensures breakouts have
+institutional participation. 1d trend filter avoids counter-trend trades.
 """
 
-name = "4h_Range_Trend_Filter_v1"
-timeframe = "4h"
+name = "12h_1W_Camarilla_Pivot_Breakout_1DTrend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla_pivots(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    r4 = close + range_val * 1.1 / 2
+    r3 = close + range_val * 1.1 / 4
+    r2 = close + range_val * 1.1 / 6
+    r1 = close + range_val * 1.1 / 12
+    s1 = close - range_val * 1.1 / 12
+    s2 = close - range_val * 1.1 / 6
+    s3 = close - range_val * 1.1 / 4
+    s4 = close - range_val * 1.1 / 2
+    return r4, r3, r2, r1, s1, s2, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1-day data for trend filter
+    # Get 1w data for weekly Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 1-day EMA50 for trend filter ---
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # --- 1w Camarilla pivots (updated weekly) ---
+    # Calculate pivots for each weekly bar
+    r4_1w = np.full(len(df_1w), np.nan)
+    r3_1w = np.full(len(df_1w), np.nan)
+    r2_1w = np.full(len(df_1w), np.nan)
+    r1_1w = np.full(len(df_1w), np.nan)
+    s1_1w = np.full(len(df_1w), np.nan)
+    s2_1w = np.full(len(df_1w), np.nan)
+    s3_1w = np.full(len(df_1w), np.nan)
+    s4_1w = np.full(len(df_1w), np.nan)
     
-    # --- Volatility Regime: ATR(14) vs its 20-period mean ---
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
-    low_vol = atr < atr_ma  # Low volatility regime
+    for i in range(len(df_1w)):
+        r4, r3, r2, r1, s1, s2, s3, s4 = calculate_camarilla_pivots(
+            df_1w['high'].iloc[i], df_1w['low'].iloc[i], df_1w['close'].iloc[i]
+        )
+        r4_1w[i] = r4
+        r3_1w[i] = r3
+        r2_1w[i] = r2
+        r1_1w[i] = r1
+        s1_1w[i] = s1
+        s2_1w[i] = s2
+        s3_1w[i] = s3
+        s4_1w[i] = s4
     
-    # --- Bollinger Bands (20,2) for mean reversion ---
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
+    # Align weekly pivots to 12h timeframe (wait for weekly bar to close)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # --- Donchian Channel (20) for breakouts ---
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # --- 1d EMA34 for trend filter ---
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # --- Volume confirmation ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,13 +102,11 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1d_aligned[i]) or 
-            np.isnan(sma_20[i]) or
-            np.isnan(std_20[i]) or
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(atr_ma[i])):
+        if (np.isnan(r4_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or 
+            np.isnan(r2_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
+            np.isnan(s1_1w_aligned[i]) or np.isnan(s2_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma.iloc[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -83,21 +116,11 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine market regime based on volatility
-        is_low_vol = low_vol[i]
+        # Long signal: price breaks above R3 with volume, in uptrend
+        long_signal = (high[i] > r3_1w_aligned[i]) and vol_spike[i] and (close[i] > ema_34_1d_aligned[i])
         
-        # Entry signals
-        long_signal = False
-        short_signal = False
-        
-        if is_low_vol:
-            # Low volatility: mean reversion at Bollinger Bands
-            long_signal = (close[i] < lower_bb[i]) and (close[i] > ema_50_1d_aligned[i])
-            short_signal = (close[i] > upper_bb[i]) and (close[i] < ema_50_1d_aligned[i])
-        else:
-            # High volatility: breakout of Donchian channels
-            long_signal = (high[i] > highest_high[i-1]) and (close[i] > ema_50_1d_aligned[i])
-            short_signal = (low[i] < lowest_low[i-1]) and (close[i] < ema_50_1d_aligned[i])
+        # Short signal: price breaks below S3 with volume, in downtrend
+        short_signal = (low[i] < s3_1w_aligned[i]) and vol_spike[i] and (close[i] < ema_34_1d_aligned[i])
         
         if position == 0:
             if long_signal:
@@ -109,16 +132,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: opposite signal or volatility regime change
+            # Exit conditions: opposite signal or reversion to pivot
             if position == 1:
-                exit_signal = short_signal or (not is_low_vol and low_vol[i])  # Exit on opposite signal or shift to low vol
+                # Exit long if price breaks below R1 or reverses to S1
+                exit_signal = (low[i] < r1_1w_aligned[i]) or (close[i] < s1_1w_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                exit_signal = long_signal or (not is_low_vol and low_vol[i])  # Exit on opposite signal or shift to low vol
+                # Exit short if price breaks above S1 or reverses to R1
+                exit_signal = (high[i] > s1_1w_aligned[i]) or (close[i] > r1_1w_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
