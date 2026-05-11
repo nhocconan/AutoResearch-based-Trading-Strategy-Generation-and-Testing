@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_RSI_Overbought_Oversold_1wTrend
-Hypothesis: Uses weekly trend filter with daily RSI extremes for mean reversion.
-In long-term uptrend (price > weekly EMA200), enter long on RSI < 30 (oversold).
-In long-term downtrend (price < weekly EMA200), enter short on RSI > 70 (overbought).
-Exits when RSI crosses back to neutral (40-60 range). Designed for low trade frequency
-(5-15 trades/year) to minimize fee drag while capturing mean reversion in trending markets.
-Works in both bull and bear markets by aligning with weekly trend direction.
+6h_Angle_of_Descent_v1
+Hypothesis: Measures the angle of price descent from the 1d high using a 12h window.
+In bull markets, steep declines often reverse sharply; in bear markets, shallow declines
+continue the trend. Uses 1d high as reference and 12h EMA for trend filter.
+Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
 """
 
-name = "1d_RSI_Overbought_Oversold_1wTrend"
-timeframe = "1d"
+name = "6h_Angle_of_Descent_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,49 +17,63 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
+    # === 1D Data for Reference High ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    # Previous day's high (reference point)
+    ref_high_1d = high_1d  # this is the prior day's high
     
-    # Weekly EMA200 for trend
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Align reference high to 6h
+    ref_high_aligned = align_htf_to_ltf(prices, df_1d, ref_high_1d)
     
-    # === DAILY RSI CALCULATION ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # === 12H Data for Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 21:
+        return np.zeros(n)
     
-    # Wilder's smoothing (equivalent to RMA)
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[0] = gain[0]
-    avg_loss[0] = loss[0]
+    close_12h = df_12h['close'].values
+    # 12h EMA21 for trend
+    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
     
-    for i in range(1, len(gain)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # === Calculate Angle of Descent ===
+    # Angle = arctan((current price - reference high) / time_in_bars)
+    # We use 12 bars (3 days) lookback for the angle calculation
+    lookback = 12  # 12 * 6h = 3 days
+    angle_of_descent = np.full(n, np.nan)
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    for i in range(lookback, n):
+        if np.isnan(ref_high_aligned[i]):
+            continue
+        price_change = close[i] - ref_high_aligned[i]
+        # Normalize by reference price to get percentage change
+        price_change_pct = price_change / ref_high_aligned[i]
+        # Angle in degrees: arctan(price_change_pct * 100) * (180/pi) 
+        # Multiply by 100 to get reasonable angle values
+        angle = np.arctan(price_change_pct * 100) * (180 / np.pi)
+        angle_of_descent[i] = angle
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers weekly EMA200 and RSI calculation)
-    start_idx = 200
+    # Start after warmup
+    start_idx = max(100, lookback)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if np.isnan(ema200_1w_aligned[i]) or np.isnan(rsi[i]):
+        if (np.isnan(ref_high_aligned[i]) or 
+            np.isnan(ema21_12h_aligned[i]) or 
+            np.isnan(angle_of_descent[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +82,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: oversold in uptrend
-            if rsi[i] < 30 and close[i] > ema200_1w_aligned[i]:
+            # Long: shallow angle of descent (> -10 degrees) in downtrend (mean reversion bounce)
+            # OR steep angle of descent (< -30 degrees) in uptrend (panic sell exhaustion)
+            if (angle_of_descent[i] > -10 and ema21_12h_aligned[i] < close[i]) or \
+               (angle_of_descent[i] < -30 and ema21_12h_aligned[i] > close[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: overbought in downtrend
-            elif rsi[i] > 70 and close[i] < ema200_1w_aligned[i]:
+            # Short: steep angle of descent (< -30 degrees) in downtrend (continuation)
+            elif angle_of_descent[i] < -30 and ema21_12h_aligned[i] > close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI returns to neutral or trend breaks
-            if rsi[i] > 40 or close[i] < ema200_1w_aligned[i]:
+            # Long exit: angle becomes too steep (> -30) indicating continued weakness
+            if angle_of_descent[i] < -30:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: RSI returns to neutral or trend breaks
-            if rsi[i] < 60 or close[i] > ema200_1w_aligned[i]:
+            # Short exit: angle flattens (> -10) indicating loss of momentum
+            if angle_of_descent[i] > -10:
                 signals[i] = 0.0
                 position = 0
             else:
