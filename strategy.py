@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_KAMA_12hTrend_Volume
-# Hypothesis: Uses KAMA (Kaufman Adaptive Moving Average) on 4h to capture trend, filtered by 12h trend and volume spikes.
-# Long when: 12h trend is up (KAMA rising), volume > 1.5x 20-period average, and price > KAMA (bullish).
-# Short when: 12h trend is down (KAMA falling), volume > 1.5x 20-period average, and price < KAMA (bearish).
-# Exit when 12h trend reverses or price crosses KAMA in opposite direction.
-# Designed to work in both bull and bear markets by following the higher timeframe trend with adaptive smoothing.
+# 1h_Camarilla_R1_S1_Breakout_4hTrend_Volume
+# Hypothesis: Uses Camarilla pivot points (R1/S1) on 1h for breakout entries, filtered by 4h trend direction and volume spikes.
+# Long when: 4h uptrend (close > EMA50), volume > 1.5x 20-period average, and price breaks above R1 level.
+# Short when: 4h downtrend (close < EMA50), volume > 1.5x 20-period average, and price breaks below S1 level.
+# Exit when price returns to the Camarilla pivot point (PP) or trend reverses.
+# Designed to capture intraday breakouts with trend alignment and volume confirmation, effective in both trending and ranging markets.
+# Camarilla levels provide precise support/resistance, reducing false breakouts.
 
-name = "4h_KAMA_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -16,112 +17,90 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend (EMA50) and Camarilla calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 12h KAMA calculation ---
-    close_12h = df_12h['close'].values
-    # Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close_12h, n=10))
-    volatility = np.sum(np.abs(np.diff(close_12h, n=1)), axis=1)
-    er = np.zeros_like(close_12h)
-    er[10:] = change[10:] / volatility[10:]
-    er[volatility == 0] = 0
-    # Smoothing constants
-    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
-    # KAMA
-    kama = np.full_like(close_12h, np.nan)
-    kama[9] = close_12h[9]  # seed
-    for i in range(10, len(close_12h)):
-        kama[i] = kama[i-1] + sc[i] * (close_12h[i] - kama[i-1])
+    # --- 4h trend: EMA50 ---
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # 12h trend: rising/falling KAMA
-    kama_rising = kama > np.roll(kama, 1)
-    kama_falling = kama < np.roll(kama, 1)
-    kama_rising[0] = False
-    kama_falling[0] = False
-    
-    # --- 4h KAMA for entry trigger ---
-    change_4h = np.abs(np.diff(close, n=10))
-    volatility_4h = np.sum(np.abs(np.diff(close, n=1)), axis=1)
-    er_4h = np.zeros_like(close)
-    er_4h[10:] = change_4h[10:] / volatility_4h[10:]
-    er_4h[volatility_4h == 0] = 0
-    sc_4h = (er_4h * (0.6667 - 0.0645) + 0.0645) ** 2
-    kama_4h = np.full_like(close, np.nan)
-    kama_4h[9] = close[9]
-    for i in range(10, len(close)):
-        kama_4h[i] = kama_4h[i-1] + sc_4h[i] * (close[i] - kama_4h[i-1])
+    # --- Camarilla pivot points on 1h (using previous bar) ---
+    # Calculate PP, R1, S1 from previous bar's OHLC
+    pp = (np.roll(high, 1) + np.roll(low, 1) + np.roll(close, 1)) / 3.0
+    r1 = pp + (np.roll(high, 1) - np.roll(low, 1)) * 1.1 / 12.0
+    s1 = pp - (np.roll(high, 1) - np.roll(low, 1)) * 1.1 / 12.0
+    # First bar: no previous bar, set to NaN
+    pp[0] = np.nan
+    r1[0] = np.nan
+    s1[0] = np.nan
     
     # --- Volume confirmation (volume > 20-period average) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 12h trend indicators to 4h timeframe
-    kama_rising_aligned = align_htf_to_ltf(prices, df_12h, kama_rising)
-    kama_falling_aligned = align_htf_to_ltf(prices, df_12h, kama_falling)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for KAMA (need 10) and volume MA(20)
-    start_idx = max(10, 20)
+    # Warmup: enough for EMA50 (50) and volume MA (20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_4h[i]) or
+        if (np.isnan(ema_50_4h_aligned[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(kama_rising_aligned[i]) or
-            np.isnan(kama_falling_aligned[i])):
+            np.isnan(pp[i]) or
+            np.isnan(r1[i]) or
+            np.isnan(s1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend from 12h
-        is_kama_rising = kama_rising_aligned[i]
-        is_kama_falling = kama_falling_aligned[i]
+        # Trend from 4h EMA50
+        is_uptrend = close[i] > ema_50_4h_aligned[i]
+        is_downtrend = close[i] < ema_50_4h_aligned[i]
         
         # Volume spike condition
-        vol_spike = volume[i] > vol_ma[i] * 1.5
+        vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
         
         if position == 0:
-            if is_kama_rising and vol_spike:
-                # Long: 12h uptrend + volume spike + price > KAMA
-                if close[i] > kama_4h[i]:
-                    signals[i] = 0.25
+            if is_uptrend and vol_spike:
+                # Long: 4h uptrend + volume spike + price breaks above R1
+                if close[i] > r1[i]:
+                    signals[i] = 0.20
                     position = 1
-            elif is_kama_falling and vol_spike:
-                # Short: 12h downtrend + volume spike + price < KAMA
-                if close[i] < kama_4h[i]:
-                    signals[i] = -0.25
+            elif is_downtrend and vol_spike:
+                # Short: 4h downtrend + volume spike + price breaks below S1
+                if close[i] < s1[i]:
+                    signals[i] = -0.20
                     position = -1
         else:
             if position == 1:
-                # Exit long: 12h trend turns down OR price < KAMA
-                if is_kama_falling or close[i] < kama_4h[i]:
+                # Exit long: price returns to PP or trend reverses
+                if close[i] <= pp[i] or not is_uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: 12h trend turns up OR price > KAMA
-                if is_kama_rising or close[i] > kama_4h[i]:
+                # Exit short: price returns to PP or trend reverses
+                if close[i] >= pp[i] or not is_downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
