@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_1D_Camarilla_R1S1_Breakout_Trend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -12,7 +12,6 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -41,11 +40,16 @@ def generate_signals(prices):
     range_val = prev_high - prev_low
     
     # Camarilla levels
+    R3 = pivot + (range_val * 1.1 / 2.0)
+    S3 = pivot - (range_val * 1.1 / 2.0)
     R1 = pivot + (range_val * 1.1 / 6.0)
     S1 = pivot - (range_val * 1.1 / 6.0)
     
     # Align to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # 1D EMA34 for trend filter
@@ -61,16 +65,17 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
             np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
             continue
@@ -79,33 +84,33 @@ def generate_signals(prices):
         volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above R1 with volume surge and above EMA34 (bullish trend)
-            if (close[i] > R1_aligned[i] and 
+            # Long: Price breaks above R3 with volume surge and above EMA34 (bullish trend)
+            if (close[i] > R3_aligned[i] and 
                 volume_surge and 
                 close[i] > ema_34_aligned[i]):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
-            # Short: Price breaks below S1 with volume surge and below EMA34 (bearish trend)
-            elif (close[i] < S1_aligned[i] and 
+            # Short: Price breaks below S3 with volume surge and below EMA34 (bearish trend)
+            elif (close[i] < S3_aligned[i] and 
                   volume_surge and 
                   close[i] < ema_34_aligned[i]):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: Price returns below S1 or trend turns bearish
-                if (close[i] < S1_aligned[i]) or (close[i] < ema_34_aligned[i]):
+                # Exit long: Price returns below R1 or trend turns bearish
+                if (close[i] < R1_aligned[i]) or (close[i] < ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             elif position == -1:
-                # Exit short: Price returns above R1 or trend turns bullish
-                if (close[i] > R1_aligned[i]) or (close[i] > ema_34_aligned[i]):
+                # Exit short: Price returns above S1 or trend turns bullish
+                if (close[i] > S1_aligned[i]) or (close[i] > ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
