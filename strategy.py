@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_1w_Pivot_MeanReversion_With_Volume
-Hypothesis: Weekly pivot levels act as strong support/resistance on 12h chart. 
-Price tends to revert from weekly R1/S1 levels back toward weekly pivot point.
-Only take mean-reversion trades when price touches weekly R1/S1 with volume confirmation.
-Works in both bull and bear markets as pivot levels are recalculated weekly and 
-mean reversion occurs in ranging and trending markets. 
-Target: Low frequency (12-30 trades/year) with high win rate via confluence.
+4H_Vortex_Volume_Trend_v2
+Hypothesis: Vortex Indicator (VI+) and (VI-) crossovers filtered by 1d EMA trend and volume spikes.
+In strong trends, VI+ > VI- indicates bullish momentum; VI- > VI+ indicates bearish momentum.
+Trades only in direction of higher timeframe trend with volume confirmation to avoid false signals.
+Designed for low frequency (20-50 trades/year) to minimize fee drag in both bull and bear markets.
 """
 
-name = "12h_1w_Pivot_MeanReversion_With_Volume"
-timeframe = "12h"
+name = "4H_Vortex_Volume_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,56 +20,62 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for weekly pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close = prices['close'].values
+    # 4h OHLCV
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- Calculate weekly pivot points (using prior week's OHLC) ---
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Previous week values (shifted by 1)
-    phigh = np.roll(high_1w, 1)
-    plow = np.roll(low_1w, 1)
-    pclose = np.roll(close_1w, 1)
-    # First week has no previous, set to same week values
-    phigh[0] = high_1w[0]
-    plow[0] = low_1w[0]
-    pclose[0] = close_1w[0]
+    # --- Vortex Indicator (14 periods) on 4h ---
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]  # First period
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Weekly pivot calculations
-    pivot = (phigh + plow + pclose) / 3.0
-    r1 = 2 * pivot - plow
-    s1 = 2 * pivot - phigh
+    # VM+ and VM-
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus[0] = np.abs(high[0] - low[0])
+    vm_minus[0] = np.abs(low[0] - high[0])
     
-    # Align weekly levels to 12h
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    # Sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # --- Volume Spike (12h) ---
+    # VI+ and VI-
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # --- Volume Spike (4h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.8 * vol_ma.values)  # Volume confirmation
+    vol_spike = volume > (2.0 * vol_ma.values)  # Strong volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vi_plus[i]) or 
+            np.isnan(vi_minus[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -81,33 +85,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions: Touch weekly R1/S1 with volume and mean reversion expectation
-        # Long when price touches S1 and reverses up (but we enter on touch with volume)
-        # Short when price touches R1 and reverses down
-        long_touch = (low[i] <= s1_aligned[i]) and vol_spike[i]
-        short_touch = (high[i] >= r1_aligned[i]) and vol_spike[i]
+        # Entry conditions: VI crossover with volume and trend alignment
+        long_entry = (vi_plus[i] > vi_minus[i]) and vol_spike[i] and (close[i] > ema_34_1d_aligned[i])
+        short_entry = (vi_minus[i] > vi_plus[i]) and vol_spike[i] and (close[i] < ema_34_1d_aligned[i])
         
         if position == 0:
-            if long_touch:
+            if long_entry:
                 signals[i] = 0.25
                 position = 1
-            elif short_touch:
+            elif short_entry:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: Return to weekly pivot or opposite touch
+            # Exit conditions: Opposite VI crossover or trend reversal
             if position == 1:
-                # Exit long when price returns to pivot or touches R1
-                if (close[i] >= pivot_aligned[i]) or (high[i] >= r1_aligned[i]):
+                # Exit if VI- > VI+ or trend turns down
+                if (vi_minus[i] > vi_plus[i]) or (close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short when price returns to pivot or touches S1
-                if (close[i] <= pivot_aligned[i]) or (low[i] <= s1_aligned[i]):
+                # Exit if VI+ > VI- or trend turns up
+                if (vi_plus[i] > vi_minus[i]) or (close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
