@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-# 1h_4d_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Uses daily and 4-day (96h) high/low for breakout levels, with trend filter from 4h EMA34.
-# Breakouts above 4-day high or below 4-day low are taken with volume confirmation and trend alignment.
-# In bull markets: breakouts above 4-day high in uptrend capture momentum.
-# In bear markets: breakdowns below 4-day low in downtrend capture short moves.
+# 12h_1d_Camarilla_R1_S1_Breakout_Volume
+# Hypothesis: Uses daily Camarilla pivot levels (R1/S1) as support/resistance.
+# On 12h timeframe, breakouts above R1 or below S1 are taken with volume confirmation.
+# Targets breakouts with institutional volume in both bull and bear markets.
 # Volume filter ensures breakouts have conviction, reducing false signals.
-# Uses 4h/1d for signal direction, 1h only for entry timing to reduce noise.
-# Target: 15-37 trades/year to minimize fee drag while capturing meaningful moves.
+# Target: 12-37 trades/year to minimize fee drag while capturing meaningful moves.
 
-name = "1h_4d_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,69 +19,54 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 4h and 1d data for multi-timeframe analysis
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 34 or len(df_1d) < 2:
+    if len(df_1d) < 1:
         return np.zeros(n)
     
-    # 1h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 4-day (96h) high/low from 4h data ---
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # --- Daily Camarilla pivot levels (R1, S1) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4-period (4*4h=16h) rolling high/low for 4-day equivalent
-    # Using 6 periods of 4h = 24h, so 4 days = 6*4 = 24 periods
-    period_4d = 6  # 6 * 4h = 24h, but we want 4 days = 96h = 24 * 4h
-    high_4d = pd.Series(high_4h).rolling(window=period_4d*4, min_periods=period_4d*4).max().values  # 24 periods for 4 days
-    low_4d = pd.Series(low_4h).rolling(window=period_4d*4, min_periods=period_4d*4).min().values
+    # Calculate pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Shift by 1 to use only completed 4-day period (avoid look-ahead)
-    high_4d_prev = np.roll(high_4d, 1)
-    low_4d_prev = np.roll(low_4d, 1)
-    high_4d_prev[0] = np.nan
-    low_4d_prev[0] = np.nan
+    # Calculate R1 and S1 levels
+    r1 = pivot + 1.1 * range_1d / 4
+    s1 = pivot - 1.1 * range_1d / 4
     
-    # Align 4-day high/low to 1h
-    high_4d_aligned = align_htf_to_ltf(prices, df_4h, high_4d_prev)
-    low_4d_aligned = align_htf_to_ltf(prices, df_4h, low_4d_prev)
+    # Shift by 1 to use only completed daily candle (avoid look-ahead)
+    r1_prev = np.roll(r1, 1)
+    s1_prev = np.roll(s1, 1)
+    r1_prev[0] = np.nan
+    s1_prev[0] = np.nan
     
-    # --- 4h EMA34 for trend filter ---
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # Align daily R1/S1 to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
     
-    # --- Volume confirmation (1.5x 20-period average on 1h) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # --- Volume confirmation (2x 30-period average on 12h) ---
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for 4-day calculation (96 periods of 1h) and 4h EMA34
-    start_idx = 96
+    # Warmup: enough for 30-period volume MA
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Session filter: only trade between 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-            
         # Skip if any critical values are NaN
-        if (np.isnan(high_4d_aligned[i]) or
-            np.isnan(low_4d_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -91,37 +74,31 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation
-        volume_surge = volume[i] > 1.5 * vol_ma[i]
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above 4-day high with volume surge and 4h uptrend
-            if (close[i] > high_4d_aligned[i] and 
-                volume_surge and 
-                ema_34_aligned[i] < close[i]):
-                signals[i] = 0.20
+            # Long: price breaks above R1 with volume surge
+            if (close[i] > r1_aligned[i] and volume_surge):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4-day low with volume surge and 4h downtrend
-            elif (close[i] < low_4d_aligned[i] and 
-                  volume_surge and 
-                  ema_34_aligned[i] > close[i]):
-                signals[i] = -0.20
+            # Short: price breaks below S1 with volume surge
+            elif (close[i] < s1_aligned[i] and volume_surge):
+                signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price drops below 4-day low OR 4h EMA34 turns down
-                if (close[i] < low_4d_aligned[i] or 
-                    close[i] < ema_34_aligned[i]):
+                # Exit long: price drops below S1
+                if close[i] < s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above 4-day high OR 4h EMA34 turns up
-                if (close[i] > high_4d_aligned[i] or 
-                    close[i] > ema_34_aligned[i]):
+                # Exit short: price rises above R1
+                if close[i] > r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
