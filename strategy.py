@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_Donchian_20_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_1d_Volume_Weighted_Price_Action"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mta_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,51 +17,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get daily data
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Weekly EMA50 trend filter
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_prev = np.roll(ema50_1w, 1)
-    ema50_1w_prev[0] = np.nan
-    trend_up_1w = ema50_1w > ema50_1w_prev
-    trend_down_1w = ema50_1w < ema50_1w_prev
+    # Daily VWAP calculation
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_values = vwap.values
     
-    # Align weekly trend to daily
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    trend_down_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_down_1w)
+    # Daily trend: price above/below VWAP
+    trend_up_1d = df_1d['close'].values > vwap_values
+    trend_down_1d = df_1d['close'].values < vwap_values
     
-    # Daily Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # Align to 6h
+    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_values)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
+    
+    # Volume filter: current volume > 2.0x 20-period average (tighter filter)
+    vol_ma20 = np.zeros(n)
+    vol_sum = 0
     for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.max(high[:i+1])
-            donchian_low[i] = np.min(low[:i+1])
+        vol_sum += volume[i]
+        if i >= 20:
+            vol_sum -= volume[i-20]
+        if i < 19:
+            vol_ma20[i] = vol_sum / (i + 1) if i > 0 else 0
         else:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
+            vol_ma20[i] = vol_sum / 20
     
-    # Volume filter: current volume > 1.5x 20-day average
-    vol_ma20 = np.full(n, np.nan)
-    for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    # Price position relative to VWAP bands (1% bands)
+    vwap_upper = vwap_aligned * 1.01
+    vwap_lower = vwap_aligned * 0.99
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Ensure sufficient warmup for weekly EMA50
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(trend_up_1w_aligned[i]) or np.isnan(trend_down_1w_aligned[i]) or
+        if (np.isnan(vwap_aligned[i]) or np.isnan(vwap_upper[i]) or np.isnan(vwap_lower[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,28 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high in weekly uptrend with volume surge
-            if (close[i] > donchian_high[i] and 
-                trend_up_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+            # Long: price crosses above VWAP upper band in daily uptrend with volume surge
+            if (close[i] > vwap_upper[i] and 
+                trend_up_aligned[i] and 
+                volume[i] > 2.0 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low in weekly downtrend with volume surge
-            elif (close[i] < donchian_low[i] and 
-                  trend_down_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+            # Short: price crosses below VWAP lower band in daily downtrend with volume surge
+            elif (close[i] < vwap_lower[i] and 
+                  trend_down_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below Donchian low or weekly trend changes
-            if (close[i] < donchian_low[i] or not trend_up_1w_aligned[i]):
+            # Long exit: price crosses below VWAP lower band or trend changes
+            if (close[i] < vwap_lower[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above Donchian high or weekly trend changes
-            if (close[i] > donchian_high[i] or not trend_down_1w_aligned[i]):
+            # Short exit: price crosses above VWAP upper band or trend changes
+            if (close[i] > vwap_upper[i] or not trend_down_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
