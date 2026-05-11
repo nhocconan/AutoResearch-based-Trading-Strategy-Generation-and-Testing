@@ -33,6 +33,12 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Camarilla levels: R3, S3 (fade zones) and R4, S4 (breakout zones)
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R3 = C + Range * 1.1 / 4
+    # S3 = C - Range * 1.1 / 4
+    # R4 = C + Range * 1.1 / 2
+    # S4 = C - Range * 1.1 / 2
     pivot_1d = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
     r3_1d = close_1d + range_1d * 1.1 / 4
@@ -46,7 +52,7 @@ def generate_signals(prices):
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Volume spike: current volume > 2x 24-period average (6 trading days in 4h)
+    # Volume spike: current volume > 2x 24-period average
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (vol_ma * 2)
     
