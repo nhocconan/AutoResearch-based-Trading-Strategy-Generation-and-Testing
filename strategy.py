@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Controlled_v2"
-timeframe = "4h"
+name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Filter_1hTiming"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -32,16 +32,20 @@ def generate_signals(prices):
     r3 = close_1d + hl_range * 1.25
     s3 = close_1d - hl_range * 1.25
     
-    # Align Camarilla levels to 4h timeframe
+    # Align Camarilla levels to 1h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: 50-period EMA for higher threshold
-    vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
-    volume_ok = volume > vol_ema50 * 2.5  # Further increased threshold to reduce trades
+    # Volume filter: 20-period EMA for higher threshold (1h)
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    session_ok = (hours >= 8) & (hours <= 20)
     
     # Fixed position size to avoid churn
-    position_size = 0.25
+    position_size = 0.20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,7 +56,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is invalid
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -68,12 +72,12 @@ def generate_signals(prices):
         breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
-            if breakout_long and price_above_ema1d and volume_ok[i]:
+            # Long: Price breaks above R3 + above 1d EMA34 + volume + session
+            if breakout_long and price_above_ema1d and volume_ok[i] and session_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below 1d EMA34 + volume spike
-            elif breakout_short and price_below_ema1d and volume_ok[i]:
+            # Short: Price breaks below S3 + below 1d EMA34 + volume + session
+            elif breakout_short and price_below_ema1d and volume_ok[i] and session_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
