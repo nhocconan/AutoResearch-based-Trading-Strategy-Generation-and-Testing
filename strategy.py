@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-# 6h_WeeklyPivot_Donchian_Breakout
-# Hypothesis: Combines weekly pivot levels (from 1w) with Donchian(20) breakout on 6h.
-# Long when: price breaks above Donchian high(20) AND price is above weekly pivot (support/resistance).
-# Short when: price breaks below Donchian low(20) AND price is below weekly pivot.
-# Exit when price crosses back to Donchian midpoint or crosses back across weekly pivot.
-# Weekly pivot provides structural bias from higher timeframe, reducing false breakouts.
-# Works in bull markets by buying breakouts above weekly pivot and in bear by selling breakdowns below weekly pivot.
-# Donchian gives clear entry/exit levels, weekly pivot filters counter-trend noise.
+# 12h_1dCamarilla_Squeeze_Breakout
+# Hypothesis: On 12h chart, trade Camarilla pivot breakouts (H3/L3) with 1d volume confirmation and squeeze filter.
+# Long: price breaks above H3 + 1d volume > 1.5x 20-period avg + Bollinger Bandwidth < 50th percentile (squeeze).
+# Short: price breaks below L3 + 1d volume > 1.5x 20-period avg + Bollinger Bandwidth < 50th percentile.
+# Exit: price returns to Camarilla midpoint (P) or squeeze releases (BW > 50th percentile).
+# Works in bull/bear: breakouts capture momentum; squeeze filters false breakouts in chop.
+# Uses 1d Camarilla levels (calculated from prior 1d candle) for structure, volume for conviction.
+# Target: 15-30 trades/year on 12h to avoid fee drag.
 
-name = "6h_WeeklyPivot_Donchian_Breakout"
-timeframe = "6h"
+name = "12h_1dCamarilla_Squeeze_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,92 +18,112 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    # Get 1d data for Camarilla levels and Bollinger Bands
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Donchian(20) channels ---
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    donchian_mid = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
-        donchian_mid[i] = (donchian_high[i] + donchian_low[i]) / 2
+    # --- 1d Camarilla levels (from prior day) ---
+    # Typical Price = (H + L + C)/3
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Camarilla calculations
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
     
-    # --- Weekly Pivot Levels (using prior week's OHLC) ---
-    # Calculate pivot points: P = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Camarilla levels: H3, L3, P (midpoint)
+    camarilla_h3 = np.full(len(close_1d), np.nan)
+    camarilla_l3 = np.full(len(close_1d), np.nan)
+    camarilla_p = np.full(len(close_1d), np.nan)
     
-    pivot = np.full(len(close_1w), np.nan)
-    r1 = np.full(len(close_1w), np.nan)
-    s1 = np.full(len(close_1w), np.nan)
+    for i in range(len(close_1d)):
+        camarilla_h3[i] = close_1d[i] + (range_1d[i] * 1.1 / 6)
+        camarilla_l3[i] = close_1d[i] - (range_1d[i] * 1.1 / 6)
+        camarilla_p[i] = (high_1d[i] + low_1d[i] + close_1d[i]) / 3
     
-    for i in range(1, len(close_1w)):
-        pivot[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3
-        r1[i] = 2 * pivot[i] - low_1w[i-1]
-        s1[i] = 2 * pivot[i] - high_1w[i-1]
+    # --- 1d Bollinger Bandwidth (20,2) for squeeze ---
+    close_1d_series = pd.Series(close_1d)
+    bb_mid = close_1d_series.rolling(window=20, min_periods=20).mean()
+    bb_std = close_1d_series.rolling(window=20, min_periods=20).std()
+    bb_up = bb_mid + 2 * bb_std
+    bb_dn = bb_mid - 2 * bb_std
+    bb_width = (bb_up - bb_dn) / bb_mid * 100  # Percent bandwidth
+    bb_width_50th = bb_width.rolling(window=50, min_periods=50).quantile(0.5)
+    squeeze = bb_width < bb_width_50th  # True when in squeeze (low volatility)
     
-    # Align weekly pivot levels to 6h
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    camarilla_h3 = camarilla_h3.values
+    camarilla_l3 = camarilla_l3.values
+    camarilla_p = camarilla_p.values
+    squeeze = squeeze.values
+    
+    # --- 1d volume confirmation ---
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = vol_1d > (vol_ma_1d * 1.5)  # 50% above average
+    
+    # Align 1d indicators to 12h
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze.astype(float))  # bool to float
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for Donchian(20) and weekly pivot
-    start_idx = max(20, 1)
+    # Warmup: need Camarilla (uses prev day), BBands(20), BBwidth percentile(50), vol MA(20)
+    start_idx = 20  # 12h bars; 1d data aligned via helper
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
-            np.isnan(donchian_mid[i]) or
-            np.isnan(pivot_aligned[i])):
+        if (np.isnan(camarilla_h3_aligned[i]) or
+            np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_p_aligned[i]) or
+            np.isnan(squeeze_aligned[i]) or
+            np.isnan(vol_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donchian_high[i]
-        breakout_down = close[i] < donchian_low[i]
+        # Breakout conditions
+        breakout_up = close[i] > camarilla_h3_aligned[i]
+        breakout_down = close[i] < camarilla_l3_aligned[i]
+        
+        # Squeeze and volume conditions (must both be true)
+        in_squeeze = squeeze_aligned[i] > 0.5  # True if in squeeze
+        vol_spike = vol_spike_1d_aligned[i] > 0.5  # True if volume spike
         
         if position == 0:
-            if breakout_up and close[i] > pivot_aligned[i]:
-                # Long: upward breakout above weekly pivot
+            if breakout_up and in_squeeze and vol_spike:
+                # Long: break above H3 + squeeze + volume spike
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and close[i] < pivot_aligned[i]:
-                # Short: downward breakout below weekly pivot
+            elif breakout_down and in_squeeze and vol_spike:
+                # Short: break below L3 + squeeze + volume spike
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price falls to midpoint OR crosses below weekly pivot
-                if close[i] < donchian_mid[i] or close[i] < pivot_aligned[i]:
+                # Exit long: return to midpoint OR squeeze releases
+                if close[i] < camarilla_p_aligned[i] or squeeze_aligned[i] < 0.5:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises to midpoint OR crosses above weekly pivot
-                if close[i] > donchian_mid[i] or close[i] > pivot_aligned[i]:
+                # Exit short: return to midpoint OR squeeze releases
+                if close[i] > camarilla_p_aligned[i] or squeeze_aligned[i] < 0.5:
                     signals[i] = 0.0
                     position = 0
                 else:
