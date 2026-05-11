@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_WeeklyPivot_VolatilityBreakout
-Hypothesis: Weekly pivot points (PP, R1, S1) act as key support/resistance levels. When price breaks above R1 or below S1 with volatility expansion (ATR ratio > 1.2), it signals momentum continuation in the direction of the breakout. In low volatility regimes (ATR ratio < 0.8), fade at R1/S1 for mean reversion. Uses 1d timeframe with 1w pivot calculation and 1d ATR for regime filtering. Targets 30-100 total trades over 4 years.
+1h_4h1d_Trend_Filtered_Pullback
+Hypothesis: In 4h uptrend (close > EMA50) and 1d uptrend (close > EMA200), 
+buy pullbacks to EMA20 on 1h with RSI < 40. In 4h downtrend (close < EMA50) 
+and 1d downtrend (close < EMA200), sell rallies to EMA20 on 1h with RSI > 60.
+Uses session filter (08-20 UTC) to avoid low-volume periods. 
+Targets 60-150 total trades over 4 years = 15-37/year for 1h.
 """
 
-name = "1d_WeeklyPivot_VolatilityBreakout"
-timeframe = "1d"
+name = "1h_4h1d_Trend_Filtered_Pullback"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -14,177 +18,102 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 200:
         return np.zeros(n)
     
-    # Get 1w data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get 1d data for ATR (volatility regime)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 1d OHLCV
-    close_1d = prices['close'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    volume_1d = prices['volume'].values
+    # Precompute hour for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # --- 1d ATR for volatility regime (14 period) ---
-    high_1d_arr = df_1d['high'].values
-    low_1d_arr = df_1d['low'].values
-    close_1d_arr = df_1d['close'].values
+    # 1h data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     
-    # True Range
-    tr1 = np.abs(high_1d_arr - low_1d_arr)
-    tr2 = np.abs(high_1d_arr - np.roll(close_1d_arr, 1))
-    tr3 = np.abs(low_1d_arr - np.roll(close_1d_arr, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR ratio: current ATR / 20-period average ATR
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / (atr_ma_1d + 1e-10)
-    atr_ratio_1d = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # 1h EMA20 for pullback entries
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # --- Weekly Pivot Points (using previous week's OHLC) ---
-    # Calculate from previous week's OHLC
-    prev_week_high = np.roll(df_1w['high'].values, 1)
-    prev_week_low = np.roll(df_1w['low'].values, 1)
-    prev_week_close = np.roll(df_1w['close'].values, 1)
-    prev_week_high[0] = df_1w['high'].values[0]
-    prev_week_low[0] = df_1w['low'].values[0]
-    prev_week_close[0] = df_1w['close'].values[0]
+    # 1h RSI(14) for overbought/oversold
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Pivot point calculation
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
+    # 4h EMA50 for trend
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align weekly levels to 1d
-    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_1d = align_htf_to_ltf(prices, df_1w, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
-    r2_1d = align_htf_to_ltf(prices, df_1w, r2)
-    s2_1d = align_htf_to_ltf(prices, df_1w, s2)
-    
-    # --- 1d Volume Average for confirmation ---
-    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # 1d EMA200 for trend
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Start after warmup period
-    start_idx = 40  # for ATR ratio and volume average
+    # Start after warmup
+    start_idx = 200
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(atr_ratio_1d[i]) or np.isnan(pivot_1d[i]) or 
-            np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(vol_avg_1d[i])):
+        # Session filter: only trade 08-20 UTC
+        if hours[i] < 8 or hours[i] > 20:
             if position != 0:
-                # Simple stoploss: 2.5x ATR from entry
-                atr_est = np.abs(high_1d[i] - low_1d[i])  # rough 1d ATR estimate
-                if position == 1 and close_1d[i] <= entry_price - 2.5 * atr_est:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close_1d[i] >= entry_price + 2.5 * atr_est:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                signals[i] = 0.0
+                position = 0
             continue
         
-        # Volatility regime: high vol = breakout mode, low vol = mean reversion
-        high_vol = atr_ratio_1d[i] > 1.2
-        low_vol = atr_ratio_1d[i] < 0.8
+        # Skip if any values are NaN
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or 
+            np.isnan(ema20[i]) or np.isnan(rsi[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
         
-        # Volume confirmation: current volume > 1.3x 1d average
-        vol_confirm = volume_1d[i] > 1.3 * vol_avg_1d[i]
+        # Determine trend alignment
+        uptrend_4h = close[i] > ema50_4h_aligned[i]
+        uptrend_1d = close[i] > ema200_1d_aligned[i]
+        downtrend_4h = close[i] < ema50_4h_aligned[i]
+        downtrend_1d = close[i] < ema200_1d_aligned[i]
         
         if position == 0:
-            # Look for entries based on volatility regime
-            if high_vol and vol_confirm:
-                # High volatility: breakout continuation
-                if close_1d[i] > r1_1d[i]:
-                    signals[i] = 0.25  # long breakout above R1
+            # Look for long setup: uptrend on both timeframes + pullback to EMA20 + RSI < 40
+            if uptrend_4h and uptrend_1d:
+                if close[i] <= ema20[i] and rsi[i] < 40:
+                    signals[i] = 0.20
                     position = 1
-                    entry_price = close_1d[i]
-                elif close_1d[i] < s1_1d[i]:
-                    signals[i] = -0.25  # short breakdown below S1
+            # Look for short setup: downtrend on both timeframes + rally to EMA20 + RSI > 60
+            elif downtrend_4h and downtrend_1d:
+                if close[i] >= ema20[i] and rsi[i] > 60:
+                    signals[i] = -0.20
                     position = -1
-                    entry_price = close_1d[i]
-            elif low_vol and vol_confirm:
-                # Low volatility: mean reversion at pivot levels
-                if i > 0:
-                    # Rejection at R1 (failed breakout above)
-                    if close_1d[i-1] > r1_1d[i-1] and close_1d[i] < r1_1d[i]:
-                        signals[i] = -0.25  # short rejection at R1
-                        position = -1
-                        entry_price = close_1d[i]
-                    # Rejection at S1 (failed breakdown below)
-                    elif close_1d[i-1] < s1_1d[i-1] and close_1d[i] > s1_1d[i]:
-                        signals[i] = 0.25   # long rejection at S1
-                        position = 1
-                        entry_price = close_1d[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long position management
-                if high_vol:
-                    # In high vol, trail with 1d EMA20 or stop at S1
-                    ema20_1d = pd.Series(close_1d_arr).ewm(span=20, adjust=False, min_periods=20).mean().values
-                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-                    if not np.isnan(ema20_1d_aligned[i]) and close_1d[i] < ema20_1d_aligned[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close below S1
-                    elif close_1d[i] < s1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = 0.25
-                else:  # low_vol or neutral
-                    # In low vol, take profit at R2 or stop at S1
-                    if close_1d[i] >= r2_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close below S1
-                    elif close_1d[i] < s1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = 0.25
+                # Exit long: trend breakdown or RSI > 70
+                if not (uptrend_4h and uptrend_1d) or rsi[i] > 70:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
             elif position == -1:
-                # Short position management
-                if high_vol:
-                    # In high vol, trail with 1d EMA20 or stop at R1
-                    ema20_1d = pd.Series(close_1d_arr).ewm(span=20, adjust=False, min_periods=20).mean().values
-                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
-                    if not np.isnan(ema20_1d_aligned[i]) and close_1d[i] > ema20_1d_aligned[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close above R1
-                    elif close_1d[i] > r1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = -0.25
-                else:  # low_vol or neutral
-                    # In low vol, take profit at S2 or stop at R1
-                    if close_1d[i] <= s2_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close above R1
-                    elif close_1d[i] > r1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = -0.25
+                # Exit short: trend reversal or RSI < 30
+                if not (downtrend_4h and downtrend_1d) or rsi[i] < 30:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
     
     return signals
