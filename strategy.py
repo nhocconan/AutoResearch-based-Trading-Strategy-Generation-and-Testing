@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_Weekly_Pivot_Condor"
-timeframe = "6h"
+name = "12h_WP_Slope_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,11 +17,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for pivot points
     df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20 or len(df_1w) < 5:
+    if len(df_1w) < 5:
         return np.zeros(n)
     
     # Weekly pivot points (using previous week)
@@ -34,20 +33,17 @@ def generate_signals(prices):
     r2 = pivot + (prev_week_high - prev_week_low)
     s2 = pivot - (prev_week_high - prev_week_low)
     
-    # Daily trend filter (EMA34 > EMA89)
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1d = pd.Series(df_1d['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
-    trend_up_1d = ema34_1d > ema89_1d
-    trend_down_1d = ema34_1d < ema89_1d
+    # Slope of weekly pivot line (trend filter)
+    pivot_slope = np.diff(pivot, prepend=np.nan)
+    # Weekly trend: slope > 0 = up, slope < 0 = down
     
-    # Align all to 6h
+    # Align to 12h
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
+    pivot_slope_aligned = align_htf_to_ltf(prices, df_1w, pivot_slope)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = np.zeros(n)
@@ -60,13 +56,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)
+    start_idx = max(200, 5)  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
             np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(pivot_slope_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -76,28 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R2 in weekly uptrend with volume surge
+            # Long: price breaks above R2 with upward pivot slope and volume surge
             if (close[i] > r2_aligned[i] and 
-                trend_up_aligned[i] and 
+                pivot_slope_aligned[i] > 0 and 
                 volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S2 in weekly downtrend with volume surge
+            # Short: price breaks below S2 with downward pivot slope and volume surge
             elif (close[i] < s2_aligned[i] and 
-                  trend_down_aligned[i] and 
+                  pivot_slope_aligned[i] < 0 and 
                   volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or weekly trend changes
-            if (close[i] < r1_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: price falls below S1 or pivot slope turns negative
+            if (close[i] < s1_aligned[i] or pivot_slope_aligned[i] <= 0):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or weekly trend changes
-            if (close[i] > s1_aligned[i] or not trend_down_aligned[i]):
+            # Short exit: price rises above R1 or pivot slope turns positive
+            if (close[i] > r1_aligned[i] or pivot_slope_aligned[i] >= 0):
                 signals[i] = 0.0
                 position = 0
             else:
