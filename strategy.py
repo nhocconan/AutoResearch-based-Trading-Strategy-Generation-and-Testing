@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,20 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels and trend
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate daily EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_1d > ema34_1d
-    
     # Calculate Camarilla levels (R3, S3) from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
+    # Previous day's Camarilla levels
     R3 = np.zeros(len(high_1d))
     S3 = np.zeros(len(high_1d))
     
@@ -39,6 +36,7 @@ def generate_signals(prices):
             R3[i] = np.nan
             S3[i] = np.nan
         else:
+            # Camarilla formulas using previous day's range
             prev_high = high_1d[i-1]
             prev_low = low_1d[i-1]
             prev_close = close_1d[i-1]
@@ -46,10 +44,19 @@ def generate_signals(prices):
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Align indicators to 4h timeframe
+    # Get weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_up = close_1w > ema20
+    
+    # Align indicators to 6h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
     
     # Volume moving average (10-period) for confirmation
     vol_ma10 = np.zeros(n)
@@ -62,7 +69,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 10)
+    start_idx = max(20, 10)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
