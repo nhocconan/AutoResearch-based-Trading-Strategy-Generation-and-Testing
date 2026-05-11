@@ -1,127 +1,125 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined
-Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA50 trend and volume spike (2x median).
-Focus on tighter entries with stronger trend and volume confirmation to reduce trades and improve win rate.
-Works in bull via uptrend breaks, in bear via downtrend breaks. Volume confirms conviction. Target: 20-40 trades/year.
+12h_Williams_Alligator_Rebound
+Hypothesis: Price rebounds off Alligator's teeth (middle line) on 12h with 1d volume spike and 1w trend filter. Works in bull/bear as mean-reversion within trend.
+Target: 15-30 trades/year to avoid fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined"
-timeframe = "4h"
+name = "12h_Williams_Alligator_Rebound"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def williams_alligator(high, low, close):
+    """Returns (jaw, teeth, lips) lines."""
+    # Jaw: Blue line (13-period SMMA, shifted 8 bars)
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.shift(8)
+    # Teeth: Red line (8-period SMMA, shifted 5 bars)
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.shift(5)
+    # Lips: Green line (5-period SMMA, shifted 3 bars)
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean()
+    lips = lips.shift(3)
+    return jaw.values, teeth.values, lips.values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 40:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    # --- 1d Trend Filter: EMA50 ---
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 4h Camarilla Levels (based on previous day) ---
-    # Calculate from previous 4h bar (shifted by 1 to avoid lookahead)
-    prev_close = np.roll(close_4h, 1)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close[0] = close_4h[0]
-    prev_high[0] = high_4h[0]
-    prev_low[0] = low_4h[0]
+    # Williams Alligator on 12h
+    jaw, teeth, lips = williams_alligator(high_12h, low_12h, close_12h)
+    jaw_aligned = align_htf_to_ltf(prices, prices, jaw)  # same timeframe
+    teeth_aligned = align_htf_to_ltf(prices, prices, teeth)
+    lips_aligned = align_htf_to_ltf(prices, prices, lips)
     
-    # Camarilla R1 and S1 levels (tighter than R3/S3)
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    # 1d volume spike filter (above 1.5x median of last 20 days)
+    vol_1d = df_1d['volume'].values
+    vol_median_1d = pd.Series(vol_1d).rolling(window=20, min_periods=10).median().values
+    vol_threshold_1d = vol_median_1d * 1.5
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_threshold_1d)
     
-    # --- Volume Filter: spike above 2x median of last 30 periods ---
-    vol_median = pd.Series(volume_4h).rolling(window=30, min_periods=15).median().values
-    vol_threshold = vol_median * 2.0
-    
-    # --- ATR for stoploss (14-period) ---
-    tr1 = np.abs(high_4h - low_4h)
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1w EMA50 trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after warmup period
-    start_idx = 60  # for EMA50 and volume median
+    # Start after warmup for Alligator and EMA
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
+        if (np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or 
+            np.isnan(vol_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i])):
             if position != 0:
-                # Check stoploss
-                if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
+                # Check stoploss via price crossing jaws
+                if position == 1 and close_12h[i] < jaw_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_4h[i] >= entry_price + 2.0 * atr[i]:
+                elif position == -1 and close_12h[i] > jaw_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1d trend
-        trend_up = close_4h[i] > ema50_1d_aligned[i]
-        trend_down = close_4h[i] < ema50_1d_aligned[i]
+        # Volume condition: current 12h volume above 1d threshold
+        vol_ok = volume_12h[i] > vol_1d_aligned[i]
         
-        # Volume filter: spike above 2x median
-        vol_ok = volume_4h[i] > vol_threshold[i]
+        # Trend condition: price above/below 1w EMA50
+        trend_up = close_12h[i] > ema50_1w_aligned[i]
+        trend_down = close_12h[i] < ema50_1w_aligned[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume spike
-            if close_4h[i] > camarilla_r1[i] and trend_up and vol_ok:
-                # Long: price breaks above R1 + 1d uptrend + volume spike
+            # Long: price touches teeth from below, lips above teeth, volume spike, uptrend
+            if (close_12h[i] >= teeth_aligned[i] and 
+                lips_aligned[i] > teeth_aligned[i] and 
+                vol_ok and trend_up):
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_4h[i]
-            elif close_4h[i] < camarilla_s1[i] and trend_down and vol_ok:
-                # Short: price breaks below S1 + 1d downtrend + volume spike
+                entry_price = close_12h[i]
+            # Short: price touches teeth from above, lips below teeth, volume spike, downtrend
+            elif (close_12h[i] <= teeth_aligned[i] and 
+                  lips_aligned[i] < teeth_aligned[i] and 
+                  vol_ok and trend_down):
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_4h[i]
+                entry_price = close_12h[i]
         else:
-            # Update stoploss and check exits
             if position == 1:
-                # Stoploss
-                if close_4h[i] <= entry_price - 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: price touches or crosses below S1
-                elif close_4h[i] <= camarilla_s1[i]:
+                # Exit: price crosses below jaw (stop) or lips cross below teeth (signal)
+                if close_12h[i] < jaw_aligned[i] or lips_aligned[i] < teeth_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Stoploss
-                if close_4h[i] >= entry_price + 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: price touches or crosses above R1
-                elif close_4h[i] >= camarilla_r1[i]:
+                # Exit: price crosses above jaw (stop) or lips cross above teeth (signal)
+                if close_12h[i] > jaw_aligned[i] or lips_aligned[i] > teeth_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
