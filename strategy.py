@@ -1,19 +1,30 @@
 #!/usr/bin/env python3
 """
-6h_OrderFlow_Imbalance_1dTrend_Filter
-Hypothesis: Use 1d price action (higher highs/lows) to determine trend direction, and 6h order flow imbalance (delta volume) for entry timing. 
-In bull markets: buy pullbacks in uptrend when buying pressure exceeds selling pressure.
-In bear markets: sell rallies in downtrend when selling pressure exceeds buying pressure.
-Volume confirmation reduces false signals. Designed to work in both trending and ranging markets by requiring trend alignment.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Use 1d Camarilla pivot R3/S3 levels for breakout signals with 1d EMA34 trend filter and volume confirmation. 
+Designed to capture strong momentum moves in both bull and bear markets while avoiding false breakouts.
+Limits trades by requiring alignment between 1d trend and volume spike confirmation.
 """
 
-name = "6h_OrderFlow_Imbalance_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    r3 = close + range_val * 1.1 / 2
+    s3 = close - range_val * 1.1 / 2
+    return r3, s3
+
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,52 +35,42 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # Calculate selling volume (market sells)
-    sell_volume = volume - taker_buy_volume
-    # Calculate volume delta (buying pressure - selling pressure)
-    volume_delta = taker_buy_volume - sell_volume
-    
-    # Smooth volume delta with 3-period EMA to reduce noise
-    delta_ema = pd.Series(volume_delta).ewm(span=3, adjust=False, min_periods=3).mean().values
-    
-    # Get 1d data for trend direction
+    # Get 1d data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Determine 1d trend: higher highs and higher lows = uptrend, lower highs and lower lows = downtrend
-    # Use 2-period lookback for swing points
-    hh = high_1d >= np.roll(high_1d, 1)  # Higher high
-    hl = low_1d >= np.roll(low_1d, 1)    # Higher low
-    lh = high_1d <= np.roll(high_1d, 1)  # Lower high
-    ll = low_1d <= np.roll(low_1d, 1)    # Lower low
+    # Calculate 1d Camarilla R3 and S3
+    r3_1d, s3_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Trend direction: 1 for uptrend (HH & HL), -1 for downtrend (LH & LL), 0 for mixed/unclear
-    trend_1d = np.where(hh & hl, 1, np.where(lh & ll, -1, 0))
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = calculate_ema(close_1d, 34)
     
-    # Align 1d trend to 6h timeframe
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d.astype(float))
+    # Align 1d indicators to 4h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volume filter: current volume > 1.3x 20-period average to ensure participation
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(trend_1d_aligned[i]) or 
-            np.isnan(delta_ema[i]) or 
+        if (np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
             np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -79,24 +80,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 1d uptrend AND buying pressure (delta > 0) AND volume filter
-            if trend_1d_aligned[i] == 1 and delta_ema[i] > 0 and volume_filter[i]:
+            # Long: price breaks above R3 AND 1d uptrend (close > EMA34) AND volume spike
+            if close[i] > r3_1d_aligned[i] and close_1d_aligned[i] > ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: 1d downtrend AND selling pressure (delta < 0) AND volume filter
-            elif trend_1d_aligned[i] == -1 and delta_ema[i] < 0 and volume_filter[i]:
+            # Short: price breaks below S3 AND 1d downtrend (close < EMA34) AND volume spike
+            elif close[i] < s3_1d_aligned[i] and close_1d_aligned[i] < ema34_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 1d trend turns down OR selling pressure emerges (delta < 0)
-            if trend_1d_aligned[i] == -1 or delta_ema[i] < 0:
+            # Long exit: price breaks below S3 OR 1d trend turns down
+            if close[i] < s3_1d_aligned[i] or close_1d_aligned[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: 1d trend turns up OR buying pressure emerges (delta > 0)
-            if trend_1d_aligned[i] == 1 or delta_ema[i] > 0:
+            # Short exit: price breaks above R3 OR 1d trend turns up
+            if close[i] > r3_1d_aligned[i] or close_1d_aligned[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
