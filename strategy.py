@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_Volume_Trend_12h"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 1d trend: close above/below 1d EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    trend_up = close > ema_1d_aligned
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Daily volume filter: volume > 2.0x 20-day average
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    volume_filter = volume > 2.0 * vol_ma20_1d_aligned
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma20
+    # Daily Camarilla pivot levels for R1 and S1
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_for_pivot = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d_for_pivot) / 3.0
+    r1 = pivot + (1.1/12) * (high_1d - low_1d)
+    s1 = pivot - (1.1/12) * (high_1d - low_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50
+    start_idx = 40  # Need enough data for EMA, volume, pivot
     
     for i in range(start_idx, n):
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma20[i]):
+        # Skip if any data is NaN
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,24 +71,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above Donchian high + 12h uptrend + volume filter
-            if close[i] > donch_high[i] and close[i] > ema_12h_aligned[i] and volume_filter[i]:
+            # Long: Close above R1 + daily uptrend + volume filter
+            if close[i] > r1_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: breakdown below Donchian low + 12h downtrend + volume filter
-            elif close[i] < donch_low[i] and close[i] < ema_12h_aligned[i] and volume_filter[i]:
+            # Short: Close below S1 + daily downtrend + volume filter
+            elif close[i] < s1_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: breakdown below Donchian low
-            if close[i] < donch_low[i]:
+            # Long exit: Close below S1 or daily trend down
+            if close[i] < s1_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: breakout above Donchian high
-            if close[i] > donch_high[i]:
+            # Short exit: Close above R1 or daily trend up
+            if close[i] > r1_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
