@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_TrixVolumeSpike_Regime"
-timeframe = "4h"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,58 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for TRIX, volume spike, and chop regime
+    # 1d data for Elder Ray calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate TRIX (15-period triple EMA) on 1d
-    ema1 = pd.Series(close_1d).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # First value undefined
+    # Calculate 13-period EMA for Elder Ray (standard period)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Align TRIX to 4h
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
+    # Calculate Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    # Volume spike (20-period average)
+    # Align 1d components to 6h
+    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    
+    # Volume spike (20-period average) - moderate threshold
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_spike = volume > (vol_ma * 2.0)
-    
-    # Choppiness Index on 1d (14-period)
-    atr_1d = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        tr = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        atr_1d[i] = tr if i < 14 else (atr_1d[i-1] * 13 + tr) / 14
-    atr_1d[0] = high_1d[0] - low_1d[0]
-    
-    max_high = np.maximum.accumulate(high_1d)
-    min_low = np.minimum.accumulate(low_1d)
-    range_max_h = max_high - min_low
-    chop = np.zeros(len(close_1d))
-    for i in range(14, len(close_1d)):
-        sum_atr = np.sum(atr_1d[i-13:i+1])
-        if range_max_h[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr / range_max_h[i]) / np.log10(14)
-        else:
-            chop[i] = 50
-    chop[:14] = 50
-    
-    # Align chop to 4h
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Ensure indicators are ready
+    start_idx = 13  # Ensure EMA13 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(trix_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(ema13_1d_aligned[i]) or np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,26 +57,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above 0, volume spike, chop < 61.8 (trending)
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
-                vol_spike[i] and chop_aligned[i] < 61.8):
+            # Long: Bull Power > 0 (strong buying pressure), above 1d EMA13, volume spike
+            if (bull_power_1d_aligned[i] > 0 and 
+                close[i] > ema13_1d_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below 0, volume spike, chop < 61.8 (trending)
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
-                  vol_spike[i] and chop_aligned[i] < 61.8):
+            # Short: Bear Power < 0 (strong selling pressure), below 1d EMA13, volume spike
+            elif (bear_power_1d_aligned[i] < 0 and 
+                  close[i] < ema13_1d_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below 0 or chop > 61.8 (range)
-            if trix_aligned[i] < 0 or chop_aligned[i] > 61.8:
+            # Exit long: Bear Power becomes negative or price below EMA13
+            if bear_power_1d_aligned[i] < 0 or close[i] < ema13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above 0 or chop > 61.8 (range)
-            if trix_aligned[i] > 0 or chop_aligned[i] > 61.8:
+            # Exit short: Bull Power becomes positive or price above EMA13
+            if bull_power_1d_aligned[i] > 0 or close[i] > ema13_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
