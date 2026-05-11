@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Donchian20_Breakout_WeeklyTrend_Volume"
-timeframe = "1d"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data (weekly trend)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 1d data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA 34 trend
-    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Previous day's Camarilla levels
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d[0] = np.nan
+    prev_high_1d[0] = np.nan
+    prev_low_1d[0] = np.nan
     
-    # Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    camarilla_r1 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.083
+    camarilla_s1 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.083
     
-    # Volume filter (20-period average)
+    # Align to 12h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # 1d trend filter (EMA 34)
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume spike filter (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 1.5)  # Require 50% above average
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(high_roll[i]) or np.isnan(low_roll[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,27 +63,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above Donchian high + weekly uptrend + volume spike
-            if close[i] > high_roll[i] and close[i] > ema_1w_aligned[i] and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: break above R1 + above 1d EMA + volume spike
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: break below Donchian low + weekly downtrend + volume spike
-            elif close[i] < low_roll[i] and close[i] < ema_1w_aligned[i] and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: break below S1 + below 1d EMA + volume spike
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_spike[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: break below Donchian low
-            if close[i] < low_roll[i]:
+            # Exit long: break below S1 or below 1d EMA
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: break above Donchian high
-            if close[i] > high_roll[i]:
+            # Exit short: break above R1 or above 1d EMA
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
