@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-Hypothesis: 4-hour chart breakouts at daily Camarilla R1/S1 levels, filtered by 12-hour EMA trend and volume spikes.
-Trades in direction of 12-hour trend using previous day's Camarilla levels. Volume confirmation filters false breakouts.
-Designed for moderate trade frequency (~40-60/year) to balance opportunity and fee drag. Works in bull/bear by following higher timeframe trend.
+1h_RSI_MeanReversion_4hTrend_Filter
+Hypothesis: On 1h timeframe, buy oversold conditions (RSI < 30) and sell overbought conditions (RSI > 70) only when aligned with 4h trend (EMA50). Uses RSI mean reversion in ranging markets and filters out counter-trend trades during strong trends. Designed for low trade frequency (<30/year) to minimize fee drag. Works in bull/bear by following 4h trend filter.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_RSI_MeanReversion_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -15,57 +13,53 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 12-Hour Data for Trend Filter and Camarilla Levels ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # === 4h Data for Trend Filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    close_4h = df_4h['close'].values
+    # 4h EMA50 for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 12h EMA50 for trend
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # === 1h RSI for Mean Reversion Signals ===
+    # RSI(14) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Previous 12h bar's OHLC for Camarilla calculation (yesterday's levels)
-    ph_12h = high_12h  # previous 12h bar's high
-    pl_12h = low_12h   # previous 12h bar's low
-    pc_12h = df_12h['close'].values  # previous 12h bar's close
+    # Wilder's smoothing (alpha = 1/14)
+    alpha = 1.0 / 14
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
     
-    # Camarilla levels: R1, S1
-    # R1 = close + 1.1 * (high - low) / 12
-    # S1 = close - 1.1 * (high - low) / 12
-    camarilla_r1 = pc_12h + 1.1 * (ph_12h - pl_12h) / 12
-    camarilla_s1 = pc_12h - 1.1 * (ph_12h - pl_12h) / 12
+    for i in range(1, len(gain)):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
     
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
-    
-    # === Volume Filter: 1.5x 20-period EMA on 4h ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 1.5
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers 12h EMA50)
-    start_idx = 60
+    # Start after warmup (covers RSI and EMA50)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,31 +68,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with uptrend and volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                volume_spike[i]):
-                signals[i] = 0.25
+            # Long: RSI oversold (<30) and price above 4h EMA50 (uptrend filter)
+            if rsi[i] < 30 and close[i] > ema50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with downtrend and volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  volume_spike[i]):
-                signals[i] = -0.25
+            # Short: RSI overbought (>70) and price below 4h EMA50 (downtrend filter)
+            elif rsi[i] > 70 and close[i] < ema50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S1 (mean reversion to midpoint)
-            if close[i] < s1_aligned[i]:
+            # Long exit: RSI returns to neutral (>50) or stops below 4h EMA50
+            if rsi[i] > 50 or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
-            # Short exit: price closes above R1 (mean reversion to midpoint)
-            if close[i] > r1_aligned[i]:
+            # Short exit: RSI returns to neutral (<50) or stops above 4h EMA50
+            if rsi[i] < 50 or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
