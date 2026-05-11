@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# 4h_TRIX_ZeroCross_1dTrend_Volume_Confirm
-# Hypothesis: TRIX (15) zero cross with 1-day EMA50 trend filter and volume confirmation.
-# TRIX filters noise and detects momentum shifts. Long when TRIX crosses above zero and price above 1d EMA50,
-# short when TRIX crosses below zero and price below 1d EMA50. Volume > 1.5x 20-period EMA confirms momentum.
-# Works in bull/bear by aligning with higher timeframe trend. Targets 20-30 trades/year.
+# 4h_ThreeBarReversal_1dTrend_Volume_Confirm
+# Hypothesis: Three-bar reversal pattern (three consecutive closes in opposite direction) 
+# combined with 1-day EMA50 trend filter and volume confirmation. The pattern captures
+# momentum exhaustion and potential reversals. Works in both bull and bear markets
+# by requiring trend alignment (only take reversals against the trend for mean reversion,
+# or with the trend for continuation - but here we use counter-trend reversals in trending markets).
+# Targets 20-30 trades/year to minimize fee drag.
 
-name = "4h_TRIX_ZeroCross_1dTrend_Volume_Confirm"
+name = "4h_ThreeBarReversal_1dTrend_Volume_Confirm"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,20 +20,17 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
+    open_price = prices['open'].values
     volume = prices['volume'].values
     
     # === 1d Data (loaded ONCE) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # === TRIX (15) on close ===
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1-period percent change
-    ema1 = pd.Series(close).ewm(span=15, min_periods=15, adjust=False).mean()
-    ema2 = ema1.ewm(span=15, min_periods=15, adjust=False).mean()
-    ema3 = ema2.ewm(span=15, min_periods=15, adjust=False).mean()
-    trix = ema3.pct_change() * 100  # percentage
-    trix = trix.fillna(0).values
     
     # === 1d EMA50 Trend Filter ===
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -41,49 +40,75 @@ def generate_signals(prices):
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
     
+    # === Three-bar reversal pattern ===
+    # Bearish reversal: three consecutive higher closes (uptrend exhaustion)
+    bullish_reversal = np.zeros(n, dtype=bool)
+    bearish_reversal = np.zeros(n, dtype=bool)
+    
+    for i in range(2, n):
+        # Three consecutive higher closes = potential bearish reversal setup
+        if (close[i-2] < close[i-1] < close[i]):
+            bearish_reversal[i] = True
+        # Three consecutive lower closes = potential bullish reversal setup
+        if (close[i-2] > close[i-1] > close[i]):
+            bullish_reversal[i] = True
+    
     # === Signal Parameters ===
     position_size = 0.25  # 25% of capital per trade
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    holding_bars = 0
     
-    # Start after warmup (covers TRIX and EMA50)
+    # Start after warmup (covers EMA50)
     start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix[i]) or np.isnan(trix[i-1]) or 
-            np.isnan(ema50_1d_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema50_1d_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero + price above 1d EMA50 + volume spike
-            if (trix[i-1] <= 0 and trix[i] > 0 and 
-                close[i] > ema50_1d_4h[i] and volume_ok[i]):
+            # Long: Three-bar bullish reversal + below 1d EMA50 (mean reversion in downtrend) + volume
+            if (bullish_reversal[i] and 
+                close[i] < ema50_1d_4h[i] and 
+                volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: TRIX crosses below zero + price below 1d EMA50 + volume spike
-            elif (trix[i-1] >= 0 and trix[i] < 0 and 
-                  close[i] < ema50_1d_4h[i] and volume_ok[i]):
+                holding_bars = 0
+            # Short: Three-bar bearish reversal + above 1d EMA50 (mean reversion in uptrend) + volume
+            elif (bearish_reversal[i] and 
+                  close[i] > ema50_1d_4h[i] and 
+                  volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
+                holding_bars = 0
         else:
-            # Exit: TRIX crosses zero in opposite direction
+            # Enforce minimum holding period (8 bars)
+            holding_bars += 1
+            if holding_bars < 8:
+                signals[i] = position_size if position == 1 else -position_size
+                continue
+            
+            # Exit: Three-bar reversal in opposite direction
             if position == 1:
-                if trix[i] < 0:
+                if bearish_reversal[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if trix[i] > 0:
+                if bullish_reversal[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
