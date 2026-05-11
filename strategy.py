@@ -1,14 +1,6 @@
-# 1h_RSI_Bollinger_Band_Reversal_with_4hTrend
-# Strategy: Mean reversion on 1h using RSI and Bollinger Bands, filtered by 4h trend
-# RSI < 30 + price below lower Bollinger Band + 4h uptrend = long
-# RSI > 70 + price above upper Bollinger Band + 4h downtrend = short
-# Uses 4h trend (EMA50) to avoid counter-trend trades in strong moves
-# Target: 15-30 trades/year per symbol to minimize fee drag
-# Works in bull/bear: mean reversion works in ranges, trend filter avoids whipsaws in trends
-
 #!/usr/bin/env python3
-name = "1h_RSI_Bollinger_Band_Reversal_with_4hTrend"
-timeframe = "1h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,41 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 4h EMA50 for trend filter
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 1h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Camarilla levels for each 1d bar: H4, L4 (resistance/support)
+    # Camarilla: H4 = close + 1.1/2 * (high - low), L4 = close - 1.1/2 * (high - low)
+    camarilla_H4 = close_1d + 1.1/2 * (high_1d - low_1d)
+    camarilla_L4 = close_1d - 1.1/2 * (high_1d - low_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate volume spike: volume > 1.5 * 20-period average
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_1d > (1.5 * vol_ma_20)
     
-    # 1h Bollinger Bands(20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    lower_band = sma20 - 2 * std20
-    upper_band = sma20 + 2 * std20
+    # Align to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
+    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
+    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike.astype(float))
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 30  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi[i]) or np.isnan(lower_band[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(ema50_4h_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(camarilla_H4_aligned[i]) or 
+            np.isnan(camarilla_L4_aligned[i]) or np.isnan(volume_spike_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,33 +61,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI oversold + price below lower band + 4h uptrend
-            if (rsi[i] < 30 and 
-                close[i] < lower_band[i] and
-                ema50_4h_aligned[i] > ema50_4h_aligned[i-1]):
-                signals[i] = 0.20
+            # Long: price breaks above H4 with volume spike and uptrend (price > EMA34)
+            if (close[i] > camarilla_H4_aligned[i] and 
+                volume_spike_aligned[i] > 0.5 and
+                close[i] > ema34_1d_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + price above upper band + 4h downtrend
-            elif (rsi[i] > 70 and 
-                  close[i] > upper_band[i] and
-                  ema50_4h_aligned[i] < ema50_4h_aligned[i-1]):
-                signals[i] = -0.20
+            # Short: price breaks below L4 with volume spike and downtrend (price < EMA34)
+            elif (close[i] < camarilla_L4_aligned[i] and 
+                  volume_spike_aligned[i] > 0.5 and
+                  close[i] < ema34_1d_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: RSI > 50 or price > middle band
-            if (rsi[i] > 50 or 
-                close[i] > sma20[i]):
+            # Exit long: price closes below L4 or trend changes
+            if (close[i] < camarilla_L4_aligned[i] or 
+                close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: RSI < 50 or price < middle band
-            if (rsi[i] < 50 or 
-                close[i] < sma20[i]):
+            # Exit short: price closes above H4 or trend changes
+            if (close[i] > camarilla_H4_aligned[i] or 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
