@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_Trend_Volume_Filtered"
-timeframe = "4h"
+name = "12h_Vortex_Trend_Plus_Volume_1dFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 1d data ONCE for EMA trend filter
+    # Load 1d data ONCE for trend filter
     df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema100_1d = pd.Series(df_1d['close']).ewm(span=100, min_periods=100, adjust=False).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # 2. Load 1d data ONCE for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1d data ONCE for volume filter (volume spike detection)
+    vol_1d = df_1d['volume'].values
+    vol_ma50_1d = pd.Series(vol_1d).rolling(window=50, min_periods=50).mean().values
+    vol_ma50_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma50_1d)
     
-    # 3. Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.5000
-    s3 = close_1d - hl_range * 1.5000
+    # Calculate Vortex Indicator on 12h data (requires high, low, close)
+    tr1 = np.abs(high[1:] - low[:-1])
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum.reduce([tr1, tr2, tr3])
+    tr = np.concatenate([[np.nan], tr])  # align length
     
-    # 4. Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    vm_plus = np.abs(high - np.roll(low, 1))
+    vm_minus = np.abs(low - np.roll(high, 1))
+    vm_plus = np.concatenate([[np.nan], vm_plus])
+    vm_minus = np.concatenate([[np.nan], vm_minus])
     
-    # 5. Volume filter: 20-period EMA for spike detection
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    # Sum over 14 periods
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
     
-    # 6. Fixed position size to avoid churn
+    vi_plus = vm_plus14 / tr14
+    vi_minus = vm_minus14 / tr14
+    
+    # Position size
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 100
+    # Start after warmup (need enough data for Vortex)
+    start_idx = 150
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(vi_plus[i]) or 
+            np.isnan(vi_minus[i]) or np.isnan(vol_ma50_1d_aligned[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -62,32 +69,31 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema1d = close[i] > ema34_1d_aligned[i]
-        price_below_ema1d = close[i] < ema34_1d_aligned[i]
-        breakout_long = close[i] > r3_aligned[i]
-        breakout_short = close[i] < s3_aligned[i]
+        price_above_1d_ema = close[i] > ema100_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema100_1d_aligned[i]
+        volume_spike = volume[i] > vol_ma50_1d_aligned[i] * 2.0
+        vi_bullish = vi_plus[i] > vi_minus[i]
+        vi_bearish = vi_plus[i] < vi_minus[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
-            if breakout_long and price_above_ema1d and volume_ok[i]:
+            # Long: VI bullish + price above 1d EMA + volume spike
+            if vi_bullish and price_above_1d_ema and volume_spike:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below 1d EMA34 + volume spike
-            elif breakout_short and price_below_ema1d and volume_ok[i]:
+            # Short: VI bearish + price below 1d EMA + volume spike
+            elif vi_bearish and price_below_1d_ema and volume_spike:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit: Vortex reversal OR price crosses 1d EMA
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses
-                if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                if vi_bearish or price_below_1d_ema:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses
-                if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                if vi_bullish or price_above_1d_ema:
                     signals[i] = 0.0
                     position = 0
                 else:
