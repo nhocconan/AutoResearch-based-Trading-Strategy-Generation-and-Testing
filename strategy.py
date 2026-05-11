@@ -1,14 +1,12 @@
-# Solution
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3
-Hypothesis: Tighten entry conditions to reduce trades: require volume above 2x median (not 1.5x) and
-use 1d EMA50 (slower trend) for filter. This should yield ~20-40 trades/year, avoiding overtrading.
-Works in bull via uptrend breaks above R1, in bear via downtrend breaks below S1.
-Volume confirms conviction. Uses proper risk control via ATR stoploss.
+4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 12h EMA50 trend and volume spike (2x median).
+Focus on tight entries (R1/S1) with strong trend and volume confirmation to reduce trades and improve win rate.
+Works in bull via uptrend breaks, in bear via downtrend breaks. Volume confirms conviction. Target: 20-50 trades/year.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v3"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,9 +19,9 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
     # 4h OHLCV
@@ -32,10 +30,10 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 (slower) ---
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # --- 12h Trend Filter: EMA50 ---
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
     # --- 4h Camarilla Levels (based on previous day) ---
     # Calculate from previous 4h bar (shifted by 1 to avoid lookahead)
@@ -50,9 +48,9 @@ def generate_signals(prices):
     camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
     camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
-    # --- Volume Filter: above 2x median of last 20 periods (stricter) ---
+    # --- Volume Filter: spike above 2x median of last 20 periods ---
     vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
-    vol_threshold = vol_median * 2.0  # Increased from 1.5 to 2.0
+    vol_threshold = vol_median * 2.0
     
     # --- ATR for stoploss (14-period) ---
     tr1 = np.abs(high_4h - low_4h)
@@ -72,7 +70,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
         if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
                 # Check stoploss
                 if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
@@ -85,22 +83,22 @@ def generate_signals(prices):
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1d trend
-        trend_up = close_4h[i] > ema50_1d_aligned[i]
-        trend_down = close_4h[i] < ema50_1d_aligned[i]
+        # Determine 12h trend
+        trend_up = close_4h[i] > ema50_12h_aligned[i]
+        trend_down = close_4h[i] < ema50_12h_aligned[i]
         
-        # Volume filter: above 2x median (stricter)
+        # Volume filter: spike above 2x median
         vol_ok = volume_4h[i] > vol_threshold[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume
+            # Look for entries only in direction of 12h trend with volume spike
             if close_4h[i] > camarilla_r1[i] and trend_up and vol_ok:
-                # Long: price breaks above R1 + 1d uptrend + volume
+                # Long: price breaks above R1 + 12h uptrend + volume spike
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_4h[i]
             elif close_4h[i] < camarilla_s1[i] and trend_down and vol_ok:
-                # Short: price breaks below S1 + 1d downtrend + volume
+                # Short: price breaks below S1 + 12h downtrend + volume spike
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_4h[i]
