@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "1d_Retracement_WeeklyTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_ElderRay_26EMA_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,32 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: price above/below weekly EMA21
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:
+    # EMA26 for trend (primary)
+    ema26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    
+    # Daily Elder Ray components (Bull/Bear Power)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    trend_up = close > ema_1w_aligned
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13_1d  # High - EMA13
+    bear_power = low_1d - ema13_1d   # Low - EMA13
+    
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Daily volume filter: volume > 1.5x 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
-    
-    # Daily RSI(14) for pullback entries
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -51,12 +48,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for EMA, RSI, and volume
+    start_idx = 40  # Need enough data for EMA, Elder Ray, and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(ema26[i]) or np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,24 +70,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Pullback in uptrend - RSI < 40, volume spike, weekly uptrend
-            if rsi[i] < 40 and trend_up[i] and volume_filter[i]:
+            # Long: Bull Power > 0 (bullish momentum) + price > EMA26 (uptrend) + volume filter
+            if bull_power_aligned[i] > 0 and close[i] > ema26[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Pullback in downtrend - RSI > 60, volume spike, weekly downtrend
-            elif rsi[i] > 60 and not trend_up[i] and volume_filter[i]:
+            # Short: Bear Power < 0 (bearish momentum) + price < EMA26 (downtrend) + volume filter
+            elif bear_power_aligned[i] < 0 and close[i] < ema26[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 60 (overbought) or weekly trend down
-            if rsi[i] > 60 or not trend_up[i]:
+            # Long exit: Bear Power < 0 or price < EMA26
+            if bear_power_aligned[i] < 0 or close[i] < ema26[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 40 (oversold) or weekly trend up
-            if rsi[i] < 40 or trend_up[i]:
+            # Short exit: Bull Power > 0 or price > EMA26
+            if bull_power_aligned[i] > 0 or close[i] > ema26[i]:
                 signals[i] = 0.0
                 position = 0
             else:
