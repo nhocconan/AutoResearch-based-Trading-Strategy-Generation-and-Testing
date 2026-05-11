@@ -1,12 +1,15 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-# 4H_CAMARILLA_VOLUME_SQUEEZE_V1
-# Hypothesis: Camarilla pivot levels (from 1d) combined with Bollinger Band squeeze (volatility contraction)
-# and volume confirmation provides high-probability breakout entries. Works in both bull and bear markets
-# by capturing volatility expansion after contraction. Uses 4h timeframe with 1d Camarilla levels.
-# Target: 20-40 trades/year to minimize fee drag while capturing strong moves.
 
-name = "4H_CAMARILLA_VOLUME_SQUEEZE_V1"
-timeframe = "4h"
+# 1D_KAMA_RIBBON_VOLUME_V1
+# Hypothesis: On daily timeframe, KAMA ribbon (fast/slow) crossover signals trend changes,
+# filtered by volume spike (2x average) and weekly ADX trend strength (>25).
+# Uses weekly trend filter to avoid counter-trend trades in choppy markets.
+# Designed for low frequency (target 15-25 trades/year) to minimize fee drag in 2025 bear market.
+# Works in both bull and bear: KAMA adapts to market noise, volume confirms institutional interest.
+
+name = "1D_KAMA_RIBBON_VOLUME_V1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,92 +18,110 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and BB squeeze
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Get weekly data for ADX trend filter (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Camarilla Pivot Levels (from 1d) ---
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- KAMA Ribbon (fast: 2, slow: 30) ---
+    # Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close, prepend=close[0]))[:10])  # placeholder for rolling sum
+    # Proper ER calculation
+    price_change = np.abs(np.diff(close, prepend=close[0]))
+    er_num = np.abs(close - np.roll(close, 10))
+    er_den = np.zeros(n)
+    for i in range(10, n):
+        er_den[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
+    er = np.where(er_den > 0, er_num / er_den, 0)
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
+    # Smoothing constants
+    fast_sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    slow_sc = (er * (2/(5+1) - 2/(30+1)) + 2/(30+1)) ** 2
     
-    # Camarilla levels
-    r1 = close_1d + (range_1d * 1.1 / 12)
-    r2 = close_1d + (range_1d * 1.1 / 6)
-    r3 = close_1d + (range_1d * 1.1 / 4)
-    r4 = close_1d + (range_1d * 1.1 / 2)
+    # KAMA calculation
+    kama_fast = np.zeros(n)
+    kama_slow = np.zeros(n)
+    kama_fast[0] = close[0]
+    kama_slow[0] = close[0]
+    for i in range(1, n):
+        kama_fast[i] = kama_fast[i-1] + fast_sc[i] * (close[i] - kama_fast[i-1])
+        kama_slow[i] = kama_slow[i-1] + slow_sc[i] * (close[i] - kama_slow[i-1])
     
-    s1 = close_1d - (range_1d * 1.1 / 12)
-    s2 = close_1d - (range_1d * 1.1 / 6)
-    s3 = close_1d - (range_1d * 1.1 / 4)
-    s4 = close_1d - (range_1d * 1.1 / 2)
+    # --- Weekly ADX (14-period) for trend strength ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align Camarilla levels to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - np.roll(close_1w, 1)[1:])
+    tr3 = np.abs(low_1w[1:] - np.roll(close_1w, 1)[1:])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index
     
-    # --- Bollinger Band Squeeze (20, 2) on 1d ---
-    # Measures volatility contraction - precursor to expansion
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + (2 * bb_std)
-    bb_lower = bb_middle - (2 * bb_std)
-    bb_width = (bb_upper - bb_lower) / bb_middle
+    # Directional Movement
+    up_move = np.diff(high_1w, prepend=high_1w[0])
+    down_move = -np.diff(low_1w, prepend=low_1w[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Squeeze condition: BB width below 20-period average
-    bb_width_ma = bb_width.rolling(window=20, min_periods=20).mean()
-    squeeze = bb_width < bb_width_ma.values
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_dm_14 = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    minus_dm_14 = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
-    # Align squeeze to 4h
-    squeeze_4h = align_htf_to_ltf(prices, df_1d, squeeze.values)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / (tr_14 + 1e-10)
+    minus_di = 100 * minus_dm_14 / (tr_14 + 1e-10)
     
-    # --- Volume Confirmation (4h) ---
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # --- Volume Spike (daily) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)
+    vol_spike = volume > (2.0 * vol_ma.values)
+    
+    # Align weekly ADX to daily
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if Camarilla levels or squeeze data is not ready
-        if np.isnan(r1_4h[i]) or np.isnan(squeeze_4h[i]):
+        # Skip if ADX is not ready
+        if np.isnan(adx_aligned[i]):
             if position != 0:
-                # Hold position until clear exit
-                signals[i] = 0.25 if position == 1 else -0.25
+                # Exit if KAMA ribbon crosses opposite direction
+                if position == 1 and kama_fast[i] < kama_slow[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and kama_fast[i] > kama_slow[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Entry conditions: price near S3/R3 AND volatility squeeze AND volume spike
-        # Long: price near S3 with bullish bias
-        near_s3 = abs(close[i] - s3_4h[i]) / s3_4h[i] < 0.005  # Within 0.5% of S3
-        # Short: price near R3 with bearish bias
-        near_r3 = abs(close[i] - r3_4h[i]) / r3_4h[i] < 0.005  # Within 0.5% of R3
+        # Entry conditions: KAMA ribbon cross + volume spike + strong trend (ADX > 25)
+        kama_cross_up = kama_fast[i] > kama_slow[i] and kama_fast[i-1] <= kama_slow[i-1]
+        kama_cross_down = kama_fast[i] < kama_slow[i] and kama_fast[i-1] >= kama_slow[i-1]
         
-        long_entry = near_s3 and squeeze_4h[i] and vol_spike[i] and (close[i] > close[i-1])
-        short_entry = near_r3 and squeeze_4h[i] and vol_spike[i] and (close[i] < close[i-1])
+        long_entry = kama_cross_up and vol_spike[i] and (adx_aligned[i] > 25)
+        short_entry = kama_cross_down and vol_spike[i] and (adx_aligned[i] > 25)
         
         if position == 0:
             if long_entry:
@@ -110,17 +131,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price reaches opposite level OR squeeze releases
+            # Exit on KAMA ribbon reverse or weak trend
             if position == 1:
-                # Exit if price reaches R3 or squeeze breaks down
-                if close[i] >= r3_4h[i] or not squeeze_4h[i]:
+                if (kama_fast[i] < kama_slow[i]) or (adx_aligned[i] < 20):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit if price reaches S3 or squeeze breaks down
-                if close[i] <= s3_4h[i] or not squeeze_4h[i]:
+                if (kama_fast[i] > kama_slow[i]) or (adx_aligned[i] < 20):
                     signals[i] = 0.0
                     position = 0
                 else:
