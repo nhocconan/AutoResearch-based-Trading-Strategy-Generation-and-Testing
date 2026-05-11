@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,22 +27,22 @@ def generate_signals(prices):
     trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Calculate Camarilla pivot levels from previous 1d candle
-    # Camarilla formulas: 
-    # H4 = close + 1.5 * (high - low)
-    # H3 = close + 1.0 * (high - low)
-    # L3 = close - 1.0 * (high - low)
-    # L4 = close - 1.5 * (high - low)
-    # We use H3/L3 for breakout/breakdown
-    prev_high_1d = df_1d['high'].values
-    prev_low_1d = df_1d['low'].values
-    prev_close_1d = df_1d['close'].values
+    # Camarilla pivot levels from previous 1d bar
+    # PP = (H + L + C) / 3
+    # Range = H - L
+    # R1 = C + (Range * 1.1 / 12)
+    # S1 = C - (Range * 1.1 / 12)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    camarilla_h3 = prev_close_1d + 1.0 * (prev_high_1d - prev_low_1d)
-    camarilla_l3 = prev_close_1d - 1.0 * (prev_high_1d - prev_low_1d)
-    
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    pivot_point = (prev_high + prev_low + prev_close) / 3.0
+    prev_range = prev_high - prev_low
+    r1 = pivot_point + (prev_range * 1.1 / 12)
+    s1 = pivot_point - (prev_range * 1.1 / 12)
     
     # Volume confirmation: current volume > 1.8x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,11 +51,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA34 and Camarilla
+    start_idx = 34  # Need enough data for EMA and pivots
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+        if (np.isnan(r1[i]) or np.isnan(s1[i]) or
             np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,24 +65,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Camarilla H3 breakout + 1d uptrend + volume confirmation
-            if close[i] > camarilla_h3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Break above R1 + 1d uptrend + volume confirmation
+            if close[i] > r1[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Camarilla L3 breakdown + 1d downtrend + volume confirmation
-            elif close[i] < camarilla_l3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Break below S1 + 1d downtrend + volume confirmation
+            elif close[i] < s1[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Camarilla L3 breakdown OR 1d trend turns down
-            if close[i] < camarilla_l3_aligned[i] or not trend_up_1d_aligned[i]:
+            # Long exit: Break below S1 OR 1d trend turns down
+            if close[i] < s1[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Camarilla H3 breakout OR 1d trend turns up
-            if close[i] > camarilla_h3_aligned[i] or trend_up_1d_aligned[i]:
+            # Short exit: Break above R1 OR 1d trend turns up
+            if close[i] > r1[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
