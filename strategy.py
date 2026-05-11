@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_TrendFilter
+4h_1d_Camarilla_R1S1_Breakout_TrendFilter
 Hypothesis: Price breaking above daily R1 or below daily S1 with daily trend confirmation (EMA50) and volume spike. Uses daily Camarilla levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with daily trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_TrendFilter"
+name = "4h_1d_Camarilla_R1S1_Breakout_TrendFilter"
 timeframe = "4h"
 leverage = 1.0
 
