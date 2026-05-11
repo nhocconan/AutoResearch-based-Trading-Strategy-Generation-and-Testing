@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 4h_1d_TRIX_ZeroCross_Volume_Confirm
-# Hypothesis: TRIX (triple-smoothed EMA) zero cross signals momentum shifts.
-# Combined with 1d trend filter (EMA50) and volume confirmation (2x 20-period avg).
-# Trades only when TRIX crosses zero AND price is on correct side of 1d EMA50.
-# Volume surge filters breakouts with conviction. Target: ~25 trades/year.
+# 6h_1d_Williams_VIX_Fix_Signal
+# Hypothesis: Uses Williams VIX Fix (volatility spike detector) on daily timeframe to identify high-volatility regimes.
+# Combines with 6-hour price action: long when price > VWAP and volatility spike, short when price < VWAP and volatility spike.
+# VIX Fix helps identify panic selling or euphoria buying, providing edge in both trending and ranging markets.
+# Target: 20-40 trades/year to minimize fee drag while capturing volatility-driven moves.
 
-name = "4h_1d_TRIX_ZeroCross_Volume_Confirm"
-timeframe = "4h"
+name = "6h_1d_Williams_VIX_Fix_Signal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,83 +15,87 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1-day data for trend filter
+    # Get 1-day data for VIX Fix calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 2:
+    if len(df_1d) < 22:  # Need at least 22 days for lookback
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d EMA50 for trend filter ---
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # --- Daily Williams VIX Fix ---
+    # VIX Fix = (Highest Close in lookback - Low) / Highest Close in lookback * 100
+    # We invert it to get a volatility spike signal: higher = more fear
+    lookback = 22
+    highest_close = pd.Series(df_1d['close'].values).rolling(window=lookback, min_periods=lookback).max().values
+    vix_fix = (highest_close - df_1d['low'].values) / highest_close * 100
+    vix_fix_ma = pd.Series(vix_fix).rolling(window=10, min_periods=10).mean().values  # Smooth the signal
     
-    # --- TRIX on 4h (triple EMA 12-period) ---
-    # EMA1
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2 of EMA1
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3 of EMA2 (TRIX)
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = (EMA3[t] - EMA3[t-1]) / EMA3[t-1] * 100
-    trix = np.zeros_like(close)
-    trix[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Align daily VIX Fix to 6h
+    vix_fix_aligned = align_htf_to_ltf(prices, df_1d, vix_fix_ma)
     
-    # --- Volume confirmation (2x 20-period average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # --- 6-hour VWAP for intraday trend ---
+    typical_price = (high + low + close) / 3.0
+    vwap_num = pd.Series(typical_price * volume).cumsum().values
+    vwap_den = pd.Series(volume).cumsum().values
+    vwap = vwap_num / vwap_den
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for TRIX calculation (36 periods for 3x EMA12) and volume MA
-    start_idx = 40
+    # Warmup: enough for VIX Fix calculation (22 + 10 for smoothing)
+    start_idx = 35
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(trix[i]) or
-            np.isnan(trix[i-1]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(vix_fix_aligned[i]) or
+            np.isnan(vwap[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        # Volatility spike detection: VIX Fix above its 50-period upper band
+        # Using rolling mean + 2*std as dynamic threshold
+        if i >= 50:  # Need enough data for volatility regime detection
+            vix_slice = vix_fix_aligned[start_idx:i+1]
+            if len(vix_slice) >= 20:
+                vix_mean = np.nanmean(vix_slice[-20:])
+                vix_std = np.nanstd(vix_slice[-20:])
+                volatility_threshold = vix_mean + 2.0 * vix_std
+                volatility_spike = vix_fix_aligned[i] > volatility_threshold
+            else:
+                volatility_spike = False
+        else:
+            volatility_spike = False
         
         if position == 0:
-            # Long: TRIX crosses above zero with volume surge and 1d uptrend
-            if (trix[i] > 0 and trix[i-1] <= 0 and 
-                volume_surge and 
-                ema_50_1d_aligned[i] < close[i]):
+            # Long: volatility spike + price above VWAP (buying panic/dip)
+            if volatility_spike and close[i] > vwap[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero with volume surge and 1d downtrend
-            elif (trix[i] < 0 and trix[i-1] >= 0 and 
-                  volume_surge and 
-                  ema_50_1d_aligned[i] > close[i]):
+            # Short: volatility spike + price below VWAP (selling euphoria/rally)
+            elif volatility_spike and close[i] < vwap[i]:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: TRIX crosses below zero OR price below 1d EMA50
-                if (trix[i] < 0 and trix[i-1] >= 0) or (close[i] < ema_50_1d_aligned[i]):
+                # Exit long: volatility subsides OR price crosses below VWAP
+                if (not volatility_spike) or (close[i] < vwap[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: TRIX crosses above zero OR price above 1d EMA50
-                if (trix[i] > 0 and trix[i-1] <= 0) or (close[i] > ema_50_1d_aligned[i]):
+                # Exit short: volatility subsides OR price crosses above VWAP
+                if (not volatility_spike) or (close[i] > vwap[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
