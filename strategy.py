@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Price breaking above/below daily Camarilla R1/S1 levels with volume confirmation and daily trend filter (price > EMA50). 
-Camarilla levels from daily timeframe provide institutional support/resistance. Volume confirms participation. 
-Trend filter avoids counter-trwhipsaws. Designed for 4h timeframe with low frequency (20-50 trades/year) 
-to work in bull (breakouts) and bear (mean reversion at extremes) markets.
+12h_1D_Camarilla_R1S1_Breakout_1D_EMA34_Trend
+Hypothesis: Price breaking above/below daily Camarilla R1/S1 levels with volume confirmation, 
+filtered by daily trend (price > EMA34). Daily pivots capture institutional levels; 
+breakouts signal momentum; volume confirms participation. Daily trend filter avoids 
+counter-trend whipsaws. Designed for low frequency (12-37 trades/year) to work in 
+both bull (breakouts) and bear (mean reversion at extremes) markets.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_1D_Camarilla_R1S1_Breakout_1D_EMA34_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,46 +21,39 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla levels and trend filter
+    # Get daily data for Camarilla pivot and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- Daily Camarilla Levels (R1, S1) ---
+    # --- Daily Camarilla Pivot Levels (R1, S1) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's close for Camarilla calculation
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    # First day: use same day's values (will be NaN until second day due to min_periods)
-    prev_close[0] = close_1d[0]
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
+    # Daily pivot point
+    pp_d = (high_1d + low_1d + close_1d) / 3.0
+    # Daily R1 and S1 (Camarilla)
+    r1_d = close_1d + ((high_1d - low_1d) * 1.1 / 12)
+    s1_d = close_1d - ((high_1d - low_1d) * 1.1 / 12)
     
-    # Camarilla R1 and S1 using previous day's data
-    r1_1d = prev_close + 1.1 * (prev_high - prev_low) / 12
-    s1_1d = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Align daily levels to 12h timeframe (using previous day's levels)
+    r1_d_aligned = align_htf_to_ltf(prices, df_1d, r1_d)
+    s1_d_aligned = align_htf_to_ltf(prices, df_1d, s1_d)
     
-    # Align daily levels to 4h timeframe (using previous day's levels)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # --- Daily EMA34 for trend filter ---
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # --- Daily EMA50 for trend filter ---
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # --- Volume Spike (4h) ---
+    # --- Volume Spike (12h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ma.values)  # Strong volume confirmation
+    vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,10 +63,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_1d_aligned[i]) or 
-            np.isnan(s1_1d_aligned[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma.values[i])):
+        if (np.isnan(r1_d_aligned[i]) or 
+            np.isnan(s1_d_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(vol_ma.values[i] if i < len(vol_ma.values) else np.nan)):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -83,15 +77,15 @@ def generate_signals(prices):
             continue
         
         # Entry conditions: 
-        # Long: Price > daily R1 AND volume spike AND above daily EMA50
-        # Short: Price < daily S1 AND volume spike AND below daily EMA50
-        long_entry = (close[i] > r1_1d_aligned[i]) and \
+        # Long: Price > daily R1 AND volume spike AND above daily EMA34
+        # Short: Price < daily S1 AND volume spike AND below daily EMA34
+        long_entry = (close[i] > r1_d_aligned[i]) and \
                      vol_spike[i] and \
-                     (close[i] > ema_50_1d_aligned[i])
+                     (close[i] > ema_34_1d_aligned[i])
         
-        short_entry = (close[i] < s1_1d_aligned[i]) and \
+        short_entry = (close[i] < s1_d_aligned[i]) and \
                       vol_spike[i] and \
-                      (close[i] < ema_50_1d_aligned[i])
+                      (close[i] < ema_34_1d_aligned[i])
         
         if position == 0:
             if long_entry:
@@ -104,18 +98,20 @@ def generate_signals(prices):
                 signals[i] = 0.0
         else:
             # Exit conditions: 
-            # Long: Price crosses below daily S1 OR below daily EMA50
-            # Short: Price crosses above daily R1 OR above daily EMA50
+            # Long: Price crosses below daily pivot OR below daily EMA34
+            # Short: Price crosses above daily pivot OR above daily EMA34
             if position == 1:
-                if (close[i] < s1_1d_aligned[i]) or \
-                   (close[i] < ema_50_1d_aligned[i]):
+                pp_d_aligned = align_htf_to_ltf(prices, df_1d, pp_d)
+                if (close[i] < pp_d_aligned[i]) or \
+                   (close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (close[i] > r1_1d_aligned[i]) or \
-                   (close[i] > ema_50_1d_aligned[i]):
+                pp_d_aligned = align_htf_to_ltf(prices, df_1d, pp_d)
+                if (close[i] > pp_d_aligned[i]) or \
+                   (close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
