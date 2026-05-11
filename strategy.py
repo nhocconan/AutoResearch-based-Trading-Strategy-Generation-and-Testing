@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_1w_Camarilla_R1S1_Breakout_TrendVolume
-Hypothesis: Price breaking above weekly R1 or below weekly S1 with daily trend confirmation (EMA100) and volume spike. Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA100), buy breakouts above R1; in downtrend (price < EMA100), sell breakdowns below S1. Volume confirms institutional interest. Designed for daily timeframe with daily trend filter and weekly pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
+6h_12h_Fibonacci_Extension_Retest_Trend
+Hypothesis: Price retesting 126.8% Fibonacci extension levels from 12h swings with trend confirmation (12h EMA20) and volume filter. Works in trending markets by capturing continuation after pullbacks. Uses 12h swing points to project extensions, reducing false signals. Designed for 6h timeframe with 12h trend filter to avoid counter-trend trades. Targets 15-30 trades/year per symbol.
 """
 
-name = "1d_1w_Camarilla_R1S1_Breakout_TrendVolume"
-timeframe = "1d"
+name = "6h_12h_Fibonacci_Extension_Retest_Trend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,43 +23,68 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for pivot points
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 5:
+    # 12h data for swing points and trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    # Calculate weekly pivot points (standard formula)
-    # Using previous week's OHLC
-    w_high = df_1w['high'].values
-    w_low = df_1w['low'].values
-    w_close = df_1w['close'].values
-    
-    # Shift to use previous week's data (avoid look-ahead)
-    w_high_prev = np.roll(w_high, 1)
-    w_low_prev = np.roll(w_low, 1)
-    w_close_prev = np.roll(w_close, 1)
-    # First period: use current values to avoid NaN
-    w_high_prev[0] = w_high[0]
-    w_low_prev[0] = w_low[0]
-    w_close_prev[0] = w_close[0]
-    
-    # Pivot point calculation
-    pivot = (w_high_prev + w_low_prev + w_close_prev) / 3.0
-    # R1 and S1 levels
-    r1 = pivot + 1 * (w_high_prev - w_low_prev)
-    s1 = pivot - 1 * (w_high_prev - w_low_prev)
-    
-    # Align weekly R1/S1 to daily timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    
-    # Daily trend filter (EMA 100)
-    ema_100 = pd.Series(close).ewm(
-        span=100, adjust=False, min_periods=100
+    # 12h close for EMA trend filter
+    close_12h = df_12h['close'].values
+    ema_20_12h = pd.Series(close_12h).ewm(
+        span=20, adjust=False, min_periods=20
     ).mean().values
+    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Identify 12h swing highs and lows (simple fractal: higher high/low)
+    # Swing high: high > previous high and next high
+    # Swing low: low < previous low and next low
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    swing_high = np.zeros(len(high_12h), dtype=bool)
+    swing_low = np.zeros(len(low_12h), dtype=bool)
+    
+    for i in range(1, len(high_12h)-1):
+        if high_12h[i] > high_12h[i-1] and high_12h[i] > high_12h[i+1]:
+            swing_high[i] = True
+        if low_12h[i] < low_12h[i-1] and low_12h[i] < low_12h[i+1]:
+            swing_low[i] = True
+    
+    # Calculate Fibonacci extensions from recent swings
+    # For uptrend: extension from swing low to swing high
+    # For downtrend: extension from swing high to swing low
+    ext_1268 = np.full(len(high_12h), np.nan)
+    
+    last_swing_high_idx = -1
+    last_swing_low_idx = -1
+    
+    for i in range(len(high_12h)):
+        if swing_high[i]:
+            last_swing_high_idx = i
+        if swing_low[i]:
+            last_swing_low_idx = i
+        
+        # Calculate extension when we have both swing points
+        if last_swing_high_idx >= 0 and last_swing_low_idx >= 0:
+            # Determine trend based on order of swings
+            if last_swing_low_idx < last_swing_high_idx:
+                # Uptrend: low -> high, extension above high
+                swing_low_price = low_12h[last_swing_low_idx]
+                swing_high_price = high_12h[last_swing_high_idx]
+                diff = swing_high_price - swing_low_price
+                ext_1268[i] = swing_high_price + 1.268 * diff
+            else:
+                # Downtrend: high -> low, extension below low
+                swing_high_price = high_12h[last_swing_high_idx]
+                swing_low_price = low_12h[last_swing_low_idx]
+                diff = swing_high_price - swing_low_price
+                ext_1268[i] = swing_low_price - 1.268 * diff
+    
+    # Align extension level to 6h timeframe
+    ext_1268_aligned = align_htf_to_ltf(prices, df_12h, ext_1268)
+    
+    # Volume confirmation (24-period average on 6h)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -67,12 +92,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_100[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ext_1268_aligned[i]) or 
+            np.isnan(ema_20_12h_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -82,42 +108,54 @@ def generate_signals(prices):
             continue
         
         # Volume threshold
-        volume_spike = vol_ratio[i] > 2.0
+        volume_filter = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: break above weekly R1 + above daily EMA100 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_100[i] and 
-                volume_spike):
+            # Long: price near 126.8% extension (retest) + above 12h EMA20 + volume
+            # Allow 0.5% tolerance for retest
+            ext_level = ext_1268_aligned[i]
+            if (not np.isnan(ext_level) and
+                abs(close[i] - ext_level) / ext_level < 0.005 and  # within 0.5%
+                close[i] > ema_20_12h_aligned[i] and
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below weekly S1 + below daily EMA100 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_100[i] and 
-                  volume_spike):
+            # Short: price near 126.8% extension (retest) + below 12h EMA20 + volume
+            elif (not np.isnan(ext_level) and
+                  abs(close[i] - ext_level) / ext_level < 0.005 and  # within 0.5%
+                  close[i] < ema_20_12h_aligned[i] and
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to pivot or trend reversal
-            # Calculate weekly pivot for exit (use previous week's data)
-            pivot_val = (w_high_prev + w_low_prev + w_close_prev) / 3.0
-            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_val)
-            
-            if position == 1:
-                # Exit long: price returns to weekly pivot OR trend turns down
-                if (close[i] <= pivot_aligned[i]) or \
-                   (close[i] < ema_100[i]):
+            # Exit: price moves 1% away from extension level or trend reversal
+            ext_level = ext_1268_aligned[i]
+            if not np.isnan(ext_level):
+                if position == 1:
+                    # Exit long: price drops below extension or trend turns down
+                    if (close[i] < ext_level * 0.99) or \
+                       (close[i] < ema_20_12h_aligned[i]):
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
+                elif position == -1:
+                    # Exit short: price rises above extension or trend turns up
+                    if (close[i] > ext_level * 1.01) or \
+                       (close[i] > ema_20_12h_aligned[i]):
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
+            else:
+                # No extension level, exit on trend reversal
+                if position == 1 and close[i] < ema_20_12h_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close[i] > ema_20_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short: price returns to weekly pivot OR trend turns up
-                if (close[i] >= pivot_aligned[i]) or \
-                   (close[i] > ema_100[i]):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                    signals[i] = 0.25 if position == 1 else -0.25
     
     return signals
