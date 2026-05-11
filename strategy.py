@@ -1,128 +1,74 @@
 #!/usr/bin/env python3
 """
-1d_1w_Keltner_Channel_Breakout_TrendFilter
-Hypothesis: Uses weekly SuperTrend for trend direction, with price breaking above/below
-Keltner Channel on daily chart as entry signal. Requires volume confirmation. Designed to work in both
-bull and bear markets by following higher-timeframe trend while using daily for precise entries and exits.
-Targets low trade frequency (7-25/year) via weekly trend filter and daily Keltner breakout.
+6h_12h_Donchian_Breakout_WeeklyPivot_Direction_Volume
+Hypothesis: Uses 12h Donchian breakout with weekly pivot direction for trend filter and volume confirmation.
+Works in both bull and bear markets by following higher-timeframe structure (weekly pivot) while using
+12h Donchian for breakout signals. Targets low trade frequency (15-30/year) via strict confluence.
 """
 
-name = "1d_1w_Keltner_Channel_Breakout_TrendFilter"
-timeframe = "1d"
+name = "6h_12h_Donchian_Breakout_WeeklyPivot_Direction_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate SuperTrend indicator"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # First TR value (set to high-low)
-    tr[0] = tr1[0]
-    
-    # Average True Range
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-    
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + multiplier * atr
-    basic_lb = (high + low) / 2 - multiplier * atr
-    
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(close)
-    final_lb = np.zeros_like(close)
-    
-    # Initialize first values
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
-    
-    for i in range(1, len(close)):
-        # Final Upper Band
-        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        # Final Lower Band
-        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-    
-    # SuperTrend
-    supertrend = np.zeros_like(close)
-    for i in range(len(close)):
-        if i == 0:
-            supertrend[i] = final_ub[i]
-        elif supertrend[i-1] == final_ub[i-1] and close[i] <= final_ub[i]:
-            supertrend[i] = final_ub[i]
-        elif supertrend[i-1] == final_ub[i-1] and close[i] > final_ub[i]:
-            supertrend[i] = final_lb[i]
-        elif supertrend[i-1] == final_lb[i-1] and close[i] >= final_lb[i]:
-            supertrend[i] = final_lb[i]
-        elif supertrend[i-1] == final_lb[i-1] and close[i] < final_lb[i]:
-            supertrend[i] = final_ub[i]
-    
-    # Trend direction: 1 for uptrend, -1 for downtrend
-    trend = np.where(supertrend <= close, 1, -1)
-    
-    return supertrend, trend, atr
+def calculate_donchian(high, low, period=20):
+    """Calculate Donchian Channel"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
-def calculate_keltner_channel(high, low, close, period=20, multiplier=2):
-    """Calculate Keltner Channel"""
-    # Typical Price
-    tp = (high + low + close) / 3
-    
-    # EMA of Typical Price
-    ema_tp = pd.Series(tp).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    # Average True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-    
-    # Upper and Lower Bands
-    upper = ema_tp + multiplier * atr
-    lower = ema_tp - multiplier * atr
-    
-    return upper, lower, ema_tp
+def calculate_weekly_pivot(high, low, close):
+    """Calculate Weekly Pivot Points"""
+    pivot = (high + low + close) / 3
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    return pivot, r1, s1, r2, s2
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly SuperTrend for Trend Filter ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # --- 12h Donchian Channel ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    supertrend_1w, trend_1w, atr_1w = calculate_supertrend(
+    donchian_upper_12h, donchian_lower_12h = calculate_donchian(
+        df_12h['high'].values, df_12h['low'].values, period=20
+    )
+    
+    # Align 12h Donchian to 6h timeframe
+    donchian_upper_12h_6h = align_htf_to_ltf(prices, df_12h, donchian_upper_12h)
+    donchian_lower_12h_6h = align_htf_to_ltf(prices, df_12h, donchian_lower_12h)
+    
+    # --- Weekly Pivot Direction ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
+    
+    pivot, r1, s1, r2, s2 = calculate_weekly_pivot(
         df_1w['high'].values, df_1w['low'].values, df_1w['close'].values
     )
     
-    # Align weekly SuperTrend to daily timeframe
-    supertrend_1w_1d = align_htf_to_ltf(prices, df_1w, supertrend_1w)
-    trend_1w_1d = align_htf_to_ltf(prices, df_1w, trend_1w)
-    atr_1w_1d = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Align weekly pivot to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
     
-    # --- Daily Keltner Channel ---
-    kc_upper, kc_lower, kc_middle = calculate_keltner_channel(
-        high, low, close, period=20, multiplier=2
-    )
+    # Weekly trend: 1 if price > pivot, -1 if price < pivot
+    weekly_trend = np.where(close > pivot_6h, 1, -1)
     
     # --- Volume Spike Detection (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -133,12 +79,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 80
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(supertrend_1w_1d[i]) or np.isnan(trend_1w_1d[i]) or 
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
+        if (np.isnan(donchian_upper_12h_6h[i]) or np.isnan(donchian_lower_12h_6h[i]) or 
+            np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
             np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
@@ -152,30 +98,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: uptrend + price breaks above Keltner upper + volume
-            if (trend_1w_1d[i] == 1 and 
-                close[i] > kc_upper[i] and 
+            # Long: weekly uptrend + price breaks above 12h Donchian upper + volume
+            if (weekly_trend[i] == 1 and 
+                close[i] > donchian_upper_12h_6h[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + price breaks below Keltner lower + volume
-            elif (trend_1w_1d[i] == -1 and 
-                  close[i] < kc_lower[i] and 
+            # Short: weekly downtrend + price breaks below 12h Donchian lower + volume
+            elif (weekly_trend[i] == -1 and 
+                  close[i] < donchian_lower_12h_6h[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal or price returns to middle
+            # Exit conditions: weekly trend reversal or price returns to opposite Donchian band
             if position == 1:
-                # Exit long: trend turns down OR price closes below middle
-                if trend_1w_1d[i] == -1 or close[i] < kc_middle[i]:
+                # Exit long: weekly trend turns down OR price closes below 12h Donchian lower
+                if weekly_trend[i] == -1 or close[i] < donchian_lower_12h_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: trend turns up OR price closes above middle
-                if trend_1w_1d[i] == 1 or close[i] > kc_middle[i]:
+                # Exit short: weekly trend turns up OR price closes above 12h Donchian upper
+                if weekly_trend[i] == 1 or close[i] > donchian_upper_12h_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
