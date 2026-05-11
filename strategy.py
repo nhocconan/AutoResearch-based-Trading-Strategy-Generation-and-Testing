@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Williams_Alligator_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,28 +26,33 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     trend_up = close > ema_1d_aligned
     
-    # Camarilla levels from previous 1d session
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_val = df_1d['close'].values
-    R3 = close_1d_val + 1.1 * (high_1d - low_1d) / 6
-    S3 = close_1d_val - 1.1 * (high_1d - low_1d) / 6
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Williams Alligator (Williams SMMA)
+    def smma(arr, period):
+        sma = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return sma
+        sma[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            sma[i] = (sma[i-1] * (period-1) + arr[i]) / period
+        return sma
     
-    # Volume filter: volume > 1.8x 30-period average
-    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > 1.8 * vol_ma30
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for volume MA
+    start_idx = 20  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R3_aligned[i]) or
-            np.isnan(S3_aligned[i]) or np.isnan(vol_ma30[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,24 +61,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: close breaks above R3 + 1d uptrend + volume spike
-            if close[i] > R3_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: Lips > Teeth > Jaw (bullish alignment) + 1d uptrend + volume spike
+            if lips[i] > teeth[i] and teeth[i] > jaw[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: close breaks below S3 + 1d downtrend + volume spike
-            elif close[i] < S3_aligned[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Lips < Teeth < Jaw (bearish alignment) + 1d downtrend + volume spike
+            elif lips[i] < teeth[i] and teeth[i] < jaw[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close breaks below S3 or 1d trend down
-            if close[i] < S3_aligned[i] or not trend_up[i]:
+            # Long exit: Lips < Teeth (death cross) or 1d trend down
+            if lips[i] < teeth[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close breaks above R3 or 1d trend up
-            if close[i] > R3_aligned[i] or trend_up[i]:
+            # Short exit: Lips > Teeth (golden cross) or 1d trend up
+            if lips[i] > teeth[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
