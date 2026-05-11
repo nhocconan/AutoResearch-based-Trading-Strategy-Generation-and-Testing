@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-# 1d_1w_WeeklyBreakout_KAMA_TrendFilter
-# Hypothesis: Daily price breaks above/below weekly high/low with KAMA trend filter and volume confirmation.
-# Uses KAMA's adaptive smoothing to catch trends while avoiding whipsaws in ranging markets.
-# Designed for low trade frequency (10-25/year) to minimize fee drag on 1d timeframe.
+# 6h_12h_1d_Momentum_Regime_Volume
+# Hypothesis: Combines 12h momentum (RSI), 1d regime (ADX), and volume confirmation to capture trends while avoiding whipsaws. Works in bull via momentum breakouts in high ADX regimes, and in bear via mean reversion in low ADX regimes. Designed for low trade frequency (12-37/year) to minimize fee drag.
 
-name = "1d_1w_WeeklyBreakout_KAMA_TrendFilter"
-timeframe = "1d"
+name = "6h_12h_1d_Momentum_Regime_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,128 +12,125 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend and reference levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 12h data for momentum and 1d data for regime
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_12h) < 14 or len(df_1d) < 14:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly high and low
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
+    # 12h RSI(14) for momentum
+    rsi_period = 14
+    delta = np.diff(df_12h['close'].values, prepend=df_12h['close'].values[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_12h = 100 - (100 / (1 + rs))
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Shift by 1 to use previous week's data (no look-ahead)
-    weekly_high_prev = np.roll(weekly_high, 1)
-    weekly_low_prev = np.roll(weekly_low, 1)
-    weekly_high_prev[0] = weekly_high[0]
-    weekly_low_prev[0] = weekly_low[0]
+    # 1d ADX(14) for regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly levels to daily timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_prev)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_prev)
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1d[0] = high_1d[0] - low_1d[0]
     
-    # KAMA trend filter on weekly close
-    weekly_close = df_1w['close'].values
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(weekly_close, 10))
-    volatility = np.sum(np.abs(np.diff(weekly_close, 1)), axis=0) if len(weekly_close) > 1 else np.zeros_like(weekly_close)
-    # Handle first 10 values
-    change = np.concatenate([np.full(10, change[10] if len(change) > 10 else 0), change])
-    volatility = np.concatenate([np.full(10, volatility[10] if len(volatility) > 10 else 0), volatility])
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    # Calculate KAMA
-    kama = np.zeros_like(weekly_close)
-    kama[0] = weekly_close[0]
-    for i in range(1, len(weekly_close)):
-        kama[i] = kama[i-1] + sc[i] * (weekly_close[i] - kama[i-1])
-    # KAMA slope for trend
-    kama_slope = np.diff(kama, prepend=kama[0])
-    kama_slope_aligned = align_htf_to_ltf(prices, df_1w, kama_slope)
+    # Directional Movement
+    plus_dm = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    minus_dm = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
     
-    # ATR for volatility and trailing stop
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Smoothed values
+    atr_1d = pd.Series(tr_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    plus_di_1d = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr_1d + 1e-10)
+    minus_di_1d = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / (atr_1d + 1e-10)
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    adx_1d = pd.Series(dx_1d).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Volume confirmation (1.8x 20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # 6h ATR for volatility and stop
+    tr1_6h = high - low
+    tr2_6h = np.abs(high - np.roll(close, 1))
+    tr3_6h = np.abs(low - np.roll(close, 1))
+    tr_6h = np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))
+    tr_6h[0] = high[0] - low[0]
+    atr_6h = pd.Series(tr_6h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    
+    # Volume confirmation (1.5x 20-period average)
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    highest_high_since_entry = 0.0
-    lowest_low_since_entry = 0.0
     
     # Warmup
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(weekly_high_aligned[i]) or
-            np.isnan(weekly_low_aligned[i]) or
-            np.isnan(kama_slope_aligned[i]) or
-            np.isnan(atr[i]) or
+        if (np.isnan(rsi_12h_aligned[i]) or
+            np.isnan(adx_1d_aligned[i]) or
+            np.isnan(atr_6h[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                highest_high_since_entry = 0.0
-                lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from weekly KAMA slope
-        bullish_trend = kama_slope_aligned[i] > 0
-        bearish_trend = kama_slope_aligned[i] < 0
-        
-        # Volume confirmation (1.8x average)
-        volume_surge = volume[i] > 1.8 * vol_ma[i]
+        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
+        trending = adx_1d_aligned[i] > 25
+        ranging = adx_1d_aligned[i] < 20
         
         if position == 0:
-            # Long: price breaks above previous week's high in bullish trend with volume surge
-            if close[i] > weekly_high_aligned[i] and bullish_trend and volume_surge:
-                signals[i] = 0.25
-                position = 1
-                highest_high_since_entry = high[i]
-            # Short: price breaks below previous week's low in bearish trend with volume surge
-            elif close[i] < weekly_low_aligned[i] and bearish_trend and volume_surge:
-                signals[i] = -0.25
-                position = -1
-                lowest_low_since_entry = low[i]
+            # In trending regime: follow momentum
+            if trending:
+                if rsi_12h_aligned[i] > 60 and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi_12h_aligned[i] < 40 and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # In ranging regime: mean reversion at RSI extremes
+            elif ranging:
+                if rsi_12h_aligned[i] < 30 and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi_12h_aligned[i] > 70 and volume[i] > 1.5 * vol_ma[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
             if position == 1:
-                # Update highest high since entry
-                if high[i] > highest_high_since_entry:
-                    highest_high_since_entry = high[i]
-                
-                # Trailing stop: exit if price drops 2.5*ATR from highest high
-                if close[i] < highest_high_since_entry - 2.5 * atr[i]:
+                # Exit conditions
+                if (trending and rsi_12h_aligned[i] < 50) or \
+                   (ranging and rsi_12h_aligned[i] > 60) or \
+                   (close[i] < close[i-1] and atr_6h[i] > 0):  # Simple trailing condition
                     signals[i] = 0.0
                     position = 0
-                    highest_high_since_entry = 0.0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Update lowest low since entry
-                if low[i] < lowest_low_since_entry:
-                    lowest_low_since_entry = low[i]
-                
-                # Trailing stop: exit if price rises 2.5*ATR from lowest low
-                if close[i] > lowest_low_since_entry + 2.5 * atr[i]:
+                # Exit conditions
+                if (trending and rsi_12h_aligned[i] > 50) or \
+                   (ranging and rsi_12h_aligned[i] < 40) or \
+                   (close[i] > close[i-1] and atr_6h[i] > 0):  # Simple trailing condition
                     signals[i] = 0.0
                     position = 0
-                    lowest_low_since_entry = 0.0
                 else:
                     signals[i] = -0.25
     
