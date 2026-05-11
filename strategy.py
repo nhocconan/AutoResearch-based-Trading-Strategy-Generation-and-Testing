@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_ChopFilter_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,87 +17,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1D data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # KAMA on 1W for trend
-    close_1w = df_1w['close'].values
-    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility = np.abs(np.diff(close_1w))
-    er = np.zeros_like(close_1w)
-    er[0] = 0
-    for i in range(1, len(close_1w)):
-        if volatility[i] != 0:
-            er[i] = change[i] / volatility[i]
-        else:
-            er[i] = 1
-    sc = (er * 0.29 + 0.06) ** 2
-    kama = np.zeros_like(close_1w)
-    kama[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
-    kama_1w = kama
+    # Calculate Camarilla levels for previous day (H, L, C)
+    H = df_1d['high'].values
+    L = df_1d['low'].values
+    C = df_1d['close'].values
     
-    # Align KAMA
-    kama_1w_aligned = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Camarilla R1, S1 for previous day (shifted by 1 to avoid look-ahead)
+    R1 = C + 1.1 * (H - L) / 12
+    S1 = C - 1.1 * (H - L) / 12
     
-    # Chop on 1D
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_period = 14
-    atr = np.zeros(n)
-    atr[:atr_period] = np.nan
-    for i in range(atr_period, n):
-        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
-    sum_tr = np.zeros(n)
-    for i in range(n):
-        if i < atr_period:
-            sum_tr[i] = np.sum(tr[max(0, i-atr_period+1):i+1]) if i > 0 else 0
-        else:
-            sum_tr[i] = np.sum(tr[i-atr_period+1:i+1])
-    hh = np.zeros(n)
-    ll = np.zeros(n)
-    for i in range(n):
-        if i < atr_period:
-            hh[i] = np.max(high[max(0, i-atr_period+1):i+1]) if i > 0 else high[i]
-            ll[i] = np.min(low[max(0, i-atr_period+1):i+1]) if i > 0 else low[i]
-        else:
-            hh[i] = np.max(high[i-atr_period+1:i+1])
-            ll[i] = np.min(low[i-atr_period+1:i+1])
-    chop = np.zeros(n)
-    for i in range(n):
-        if hh[i] != ll[i] and not np.isnan(sum_tr[i]):
-            chop[i] = 100 * np.log10(sum_tr[i] / (hh[i] - ll[i])) / np.log10(atr_period)
-        else:
-            chop[i] = np.nan
+    # Align Camarilla levels
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # RSI on 1D
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
+    # 1D EMA34 for trend filter
+    ema34_1d = pd.Series(C).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = np.zeros(n)
     for i in range(n):
-        if i < 14:
-            avg_gain[i] = np.mean(gain[max(0, i-13):i+1]) if i > 0 else 0
-            avg_loss[i] = np.mean(loss[max(0, i-13):i+1]) if i > 0 else 0
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            avg_gain[i] = np.mean(gain[i-13:i+1])
-            avg_loss[i] = np.mean(loss[i-13:i+1])
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 14)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_1w_aligned[i]) or np.isnan(chop[i]) or np.isnan(rsi[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -105,25 +62,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long: price > KAMA, RSI > 50, Chop < 61.8 (trending)
-        if close[i] > kama_1w_aligned[i] and rsi[i] > 50 and chop[i] < 61.8:
-            if position == 0:
+        if position == 0:
+            # Long: Close > R1 and close > EMA34 and volume surge
+            if close[i] > R1_aligned[i] and close[i] > ema34_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
                 signals[i] = 0.25
                 position = 1
-            else:
-                signals[i] = 0.25
-        # Short: price < KAMA, RSI < 50, Chop < 61.8 (trending)
-        elif close[i] < kama_1w_aligned[i] and rsi[i] < 50 and chop[i] < 61.8:
-            if position == 0:
+            # Short: Close < S1 and close < EMA34 and volume surge
+            elif close[i] < S1_aligned[i] and close[i] < ema34_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
                 signals[i] = -0.25
                 position = -1
-            else:
-                signals[i] = -0.25
-        else:
-            if position != 0:
+        elif position == 1:
+            # Long exit: Close < S1 or close < EMA34
+            if close[i] < S1_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Short exit: Close > R1 or close > EMA34
+            if close[i] > R1_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
