@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
-timeframe = "12h"
+name = "1d_RSI_Candlestick_Pullback"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from scipy.stats import percentileofscore
 
 def generate_signals(prices):
     n = len(prices)
@@ -16,45 +16,52 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # 1. Load 1d data ONCE for HTF indicators
-    df_1d = get_htf_data(prices, '1d')
+    # RSI (14)
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[14] = np.mean(gain[1:15])
+    avg_loss[14] = np.mean(loss[1:15])
+    for i in range(15, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi[:14] = np.nan
     
-    # 2. 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # RSI moving average for trend filter
+    rsi_sma = np.full(n, np.nan)
+    for i in range(23, n):  # 14 + 9
+        rsi_sma[i] = np.nanmean(rsi[i-8:i+1])
     
-    # 3. Calculate daily high/low/close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Bullish engulfing pattern
+    bullish_engulf = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        bullish_engulf[i] = (close[i] > open_price[i-1]) and (open_price[i] < close[i-1]) and (close[i-1] < open_price[i-1])
     
-    # 4. Camarilla levels: R3, S3
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.25
-    s3 = close_1d - hl_range * 1.25
+    # Bearish engulfing pattern
+    bearish_engulf = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        bearish_engulf[i] = (close[i] < open_price[i-1]) and (open_price[i] > close[i-1]) and (close[i-1] > open_price[i-1])
     
-    # 5. Align Camarilla levels to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # 6. Volume filter: 20-period EMA for higher threshold (12h)
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
-    
-    # 7. Fixed position size to avoid churn
-    position_size = 0.25
+    # Volume filter: 20-day average
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma20[i] = np.mean(volume[i-19:i+1])
+    volume_ok = volume > vol_ma20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    position_size = 0.25
     
-    # Start after warmup
-    start_idx = 100
+    start_idx = 30  # Ensure enough data for RSI and volume
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if np.isnan(rsi[i]) or np.isnan(rsi_sma[i]) or np.isnan(volume_ok[i]):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -63,36 +70,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_ema1d = close[i] > ema34_1d_aligned[i]
-        price_below_ema1d = close[i] < ema34_1d_aligned[i]
-        breakout_long = close[i] > r3_aligned[i]
-        breakout_short = close[i] < s3_aligned[i]
-        
-        if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
-            if breakout_long and price_above_ema1d and volume_ok[i]:
-                signals[i] = position_size
-                position = 1
-            # Short: Price breaks below S3 + below 1d EMA34 + volume spike
-            elif breakout_short and price_below_ema1d and volume_ok[i]:
-                signals[i] = -position_size
-                position = -1
+        # Long: RSI < 30 (oversold) + bullish engulfing + volume confirmation
+        if rsi[i] < 30 and bullish_engulf[i] and volume_ok[i]:
+            signals[i] = position_size
+            position = 1
+        # Short: RSI > 70 (overbought) + bearish engulfing + volume confirmation
+        elif rsi[i] > 70 and bearish_engulf[i] and volume_ok[i]:
+            signals[i] = -position_size
+            position = -1
+        # Exit: RSI returns to neutral zone (40-60)
+        elif position == 1 and rsi[i] > 50:
+            signals[i] = 0.0
+            position = 0
+        elif position == -1 and rsi[i] < 50:
+            signals[i] = 0.0
+            position = 0
         else:
-            # Exit conditions - simplified to reduce churn
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses
-                if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = position_size
+                signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses
-                if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -position_size
+                signals[i] = -position_size
+            else:
+                signals[i] = 0.0
     
     return signals
