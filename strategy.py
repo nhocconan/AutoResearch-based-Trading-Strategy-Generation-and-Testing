@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Ichimoku_Cloud_Trend_Strategy
-Hypothesis: Use weekly Ichimoku Cloud for trend direction and support/resistance on daily timeframe.
-Buy when price is above cloud and Tenkan > Kijun (bullish), sell when price is below cloud and Tenkan < Kijun (bearish).
-Exit when price crosses back into cloud or Tenkan/Kijun cross reverses.
-Works in bull markets via cloud support and in bear markets via cloud resistance.
+4h_1d_Camarilla_R1S1_Breakout_TrendFilter
+Hypothesis: Price breaking above daily R1 or below daily S1 with daily trend confirmation (EMA50) and volume spike. Uses daily Camarilla levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with daily trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "1d_Weekly_Ichimoku_Cloud_Trend_Strategy"
-timeframe = "1d"
+name = "4h_1d_Camarilla_R1S1_Breakout_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,61 +17,64 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    # Price and volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Get weekly data for Ichimoku
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 52:  # Need at least 52 weeks for proper calculation
+    # Daily data for Camarilla pivot points
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate Ichimoku components on weekly data
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Calculate daily Camarilla pivot points using previous period's OHLC
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period9_high = pd.Series(high_w).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_w).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2.0
+    # Shift to use previous period's data (avoid look-ahead)
+    d_high_prev = np.roll(d_high, 1)
+    d_low_prev = np.roll(d_low, 1)
+    d_close_prev = np.roll(d_close, 1)
+    # First period: use current values to avoid NaN
+    d_high_prev[0] = d_high[0]
+    d_low_prev[0] = d_low[0]
+    d_close_prev[0] = d_close[0]
     
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period26_high = pd.Series(high_w).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_w).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2.0
+    # Calculate pivot point
+    pivot = (d_high_prev + d_low_prev + d_close_prev) / 3.0
+    # Calculate Camarilla R1 and S1 levels
+    r1 = d_close_prev + (1.1/12) * (d_high_prev - d_low_prev)
+    s1 = d_close_prev - (1.1/12) * (d_high_prev - d_low_prev)
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2.0
+    # Align daily R1/S1 to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period52_high = pd.Series(high_w).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_w).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2.0
+    # Daily trend filter (EMA 50)
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(
+        span=50, adjust=False, min_periods=50
+    ).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Chikou Span (Lagging Span): current close plotted 26 periods back
-    # We don't use Chikou for signals to avoid look-ahead
-    
-    # Align Ichimoku components to daily timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_weekly, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_weekly, kijun)
-    senkou_a_aligned = align_htf_to_ltf(prices, df_weekly, senkou_a)
-    senkou_b_aligned = align_htf_to_ltf(prices, df_weekly, senkou_b)
-    
-    # Calculate cloud top and bottom
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
+    # Volume confirmation (20-period average on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for Ichimoku (need 52 periods)
+    # Start after warmup
     start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -83,27 +83,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Volume threshold
+        volume_spike = vol_ratio[i] > 2.0
+        
         if position == 0:
-            # Long: price above cloud AND Tenkan > Kijun (bullish)
-            if (close[i] > cloud_top[i] and tenkan_aligned[i] > kijun_aligned[i]):
+            # Long: break above daily R1 + above daily EMA50 + volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_50_1d_aligned[i] and 
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below cloud AND Tenkan < Kijun (bearish)
-            elif (close[i] < cloud_bottom[i] and tenkan_aligned[i] < kijun_aligned[i]):
+            # Short: break below daily S1 + below daily EMA50 + volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_50_1d_aligned[i] and 
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: return to daily pivot or trend reversal
             if position == 1:
-                # Exit long: price falls below cloud OR Tenkan < Kijun (trend weakness)
-                if (close[i] < cloud_top[i]) or (tenkan_aligned[i] < kijun_aligned[i]):
+                # Exit long: price returns to daily pivot OR trend turns down
+                if (close[i] <= pivot_aligned[i]) or \
+                   (close[i] < ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above cloud OR Tenkan > Kijun (trend reversal)
-                if (close[i] > cloud_bottom[i]) or (tenkan_aligned[i] > kijun_aligned[i]):
+                # Exit short: price returns to daily pivot OR trend turns up
+                if (close[i] >= pivot_aligned[i]) or \
+                   (close[i] > ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
