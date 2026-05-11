@@ -1,113 +1,132 @@
 #!/usr/bin/env python3
 """
-6h_1d_Fisher_Transform_Reversal
-Hypothesis: Ehlers Fisher Transform on 1d closes identifies extreme reversals. 
-Long when Fisher crosses below -1.5 (oversold) with 6h bullish candle.
-Short when Fisher crosses above +1.5 (overbought) with 6h bearish candle.
-Exit when Fisher crosses back through zero.
-Works in both bull/bear markets by capturing mean-reversion swings.
-Target: 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
+12h_1d_1w_Camarilla_Pivot_Breakout_MultiTF
+Hypothesis: Combine daily and weekly Camarilla pivot levels with 12h price action to capture
+multi-timeframe breakout opportunities. Long when price breaks above weekly R3 and daily R3
+with volume confirmation. Short when price breaks below weekly S3 and daily S3 with volume
+confirmation. Exit when price returns to opposing pivot level (daily S1 for longs, daily R1 for shorts).
+Uses 12h timeframe to target 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Multi-timeframe confluence (daily + weekly) filters false breaks, improving win rate in both bull and bear markets.
 """
 
-name = "6h_1d_Fisher_Transform_Reversal"
-timeframe = "6h"
+name = "12h_1d_1w_Camarilla_Pivot_Breakout_MultiTF"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_ft_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Fisher Transform
+    # Get daily and weekly data for pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 2 or len(df_1w) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    open_6h = prices['open'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 1d Fisher Transform (Ehlers) ---
-    # Normalize price to [-1, 1] using recent min/max
+    # --- Daily Camarilla Pivots (from previous day) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate median price for smoother input
-    median_price = (high_1d + low_1d) / 2.0
+    # Use previous day's OHLC to calculate today's pivots
+    camarilla_high_1d = np.full_like(close_1d, np.nan)
+    camarilla_low_1d = np.full_like(close_1d, np.nan)
+    camarilla_close_1d = np.full_like(close_1d, np.nan)
     
-    # Normalize to [-1, 1] over 10-period lookback
-    def normalize_series(series, length):
-        highest = pd.Series(series).rolling(window=length, min_periods=length).max().values
-        lowest = pd.Series(series).rolling(window=length, min_periods=length).min().values
-        # Avoid division by zero
-        range_val = highest - lowest
-        range_val = np.where(range_val == 0, 1, range_val)
-        normalized = 2 * ((series - lowest) / range_val) - 1
-        # Clamp to [-0.999, 0.999] to prevent math domain error
-        normalized = np.clip(normalized, -0.999, 0.999)
-        return normalized
+    for i in range(1, len(close_1d)):
+        camarilla_high_1d[i] = high_1d[i-1]
+        camarilla_low_1d[i] = low_1d[i-1]
+        camarilla_close_1d[i] = close_1d[i-1]
     
-    normalized_price = normalize_series(median_price, 10)
+    # Calculate Daily Camarilla levels
+    R3_1d = camarilla_close_1d + ((camarilla_high_1d - camarilla_low_1d) * 1.2500)
+    S3_1d = camarilla_close_1d - ((camarilla_high_1d - camarilla_low_1d) * 1.2500)
+    R1_1d = camarilla_close_1d + ((camarilla_high_1d - camarilla_low_1d) * 1.0833)
+    S1_1d = camarilla_close_1d - ((camarilla_high_1d - camarilla_low_1d) * 1.0833)
     
-    # Fisher Transform: 0.5 * ln((1+x)/(1-x))
-    fish = 0.5 * np.log((1 + normalized_price) / (1 - normalized_price))
+    # --- Weekly Camarilla Pivots (from previous week) ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Smooth with 3-period EMA
-    fish_smoothed = pd.Series(fish).ewm(span=3, adjust=False).mean().values
+    # Use previous week's OHLC to calculate current week's pivots
+    camarilla_high_1w = np.full_like(close_1w, np.nan)
+    camarilla_low_1w = np.full_like(close_1w, np.nan)
+    camarilla_close_1w = np.full_like(close_1w, np.nan)
     
-    # Align Fisher to 6h timeframe
-    fish_aligned = align_htf_to_ltf(prices, df_1d, fish_smoothed)
+    for i in range(1, len(close_1w)):
+        camarilla_high_1w[i] = high_1w[i-1]
+        camarilla_low_1w[i] = low_1w[i-1]
+        camarilla_close_1w[i] = close_1w[i-1]
     
-    # --- Entry Conditions ---
-    # Bullish 6h candle: close > open
-    bullish_candle = close_6h > open_6h
-    # Bearish 6h candle: close < open
-    bearish_candle = close_6h < open_6h
+    # Calculate Weekly Camarilla levels
+    R3_1w = camarilla_close_1w + ((camarilla_high_1w - camarilla_low_1w) * 1.2500)
+    S3_1w = camarilla_close_1w - ((camarilla_high_1w - camarilla_low_1w) * 1.2500)
+    
+    # Align pivots to 12h timeframe
+    R3_1d_12h = align_htf_to_ltf(prices, df_1d, R3_1d)
+    S3_1d_12h = align_htf_to_ltf(prices, df_1d, S3_1d)
+    R1_1d_12h = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_12h = align_htf_to_ltf(prices, df_1d, S1_1d)
+    R3_1w_12h = align_htf_to_ltf(prices, df_1w, R3_1w)
+    S3_1w_12h = align_htf_to_ltf(prices, df_1w, S3_1w)
+    
+    # --- Volume Confirmation: 12h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after sufficient data for calculations
-    start_idx = 30
+    # Start after warmup period
+    start_idx = 50  # for volume MA and data alignment
     
     for i in range(start_idx, n):
-        # Skip if Fisher is not available
-        if np.isnan(fish_aligned[i]):
+        # Skip if any critical values are NaN
+        if (np.isnan(R3_1d_12h[i]) or np.isnan(S3_1d_12h[i]) or 
+            np.isnan(R3_1w_12h[i]) or np.isnan(S3_1w_12h[i]) or
+            np.isnan(R1_1d_12h[i]) or np.isnan(S1_1d_12h[i]) or
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        fish_val = fish_aligned[i]
-        fish_prev = fish_aligned[i-1] if i > 0 else fish_val
+        # Volume confirmation
+        vol_ok = volume_12h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Long: Fisher crosses below -1.5 (oversold) with bullish candle
-            if fish_prev > -1.5 and fish_val <= -1.5 and bullish_candle[i]:
+            # Look for entries only with multi-timeframe confluence and volume
+            if (close_12h[i] > R3_1d_12h[i] and close_12h[i] > R3_1w_12h[i] and vol_ok):
+                # Long: price breaks above both daily and weekly R3 + volume
                 signals[i] = 0.25
                 position = 1
-            # Short: Fisher crosses above +1.5 (overbought) with bearish candle
-            elif fish_prev < 1.5 and fish_val >= 1.5 and bearish_candle[i]:
+            elif (close_12h[i] < S3_1d_12h[i] and close_12h[i] < S3_1w_12h[i] and vol_ok):
+                # Short: price breaks below both daily and weekly S3 + volume
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when Fisher crosses zero (mean reversion complete)
+            # Exit conditions
             if position == 1:
-                # Exit long: Fisher crosses above zero
-                if fish_prev <= 0 and fish_val > 0:
+                # Exit long: price returns to daily S1 (opposite side)
+                if close_12h[i] <= S1_1d_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: Fisher crosses below zero
-                if fish_prev >= 0 and fish_val < 0:
+                # Exit short: price returns to daily R1 (opposite side)
+                if close_12h[i] >= R1_1d_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
