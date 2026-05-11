@@ -1,37 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_Williams_Alligator_ElderRay_Trend_v1"
-timeframe = "1d"
+name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def williams_alligator(high, low, close):
-    """Williams Alligator: 3 SMAs (Jaw 13, Teeth 8, Lips 5) with forward shift"""
-    high_s = pd.Series(high)
-    low_s = pd.Series(low)
-    close_s = pd.Series(close)
-    
-    # Median price
-    median_price = (high_s + low_s) / 2
-    
-    # Alligator lines
-    jaw = median_price.rolling(window=13, min_periods=13).mean().shift(8)   # Blue line
-    teeth = median_price.rolling(window=8, min_periods=8).mean().shift(5)    # Red line
-    lips = median_price.rolling(window=5, min_periods=5).mean().shift(3)     # Green line
-    
-    return jaw.values, teeth.values, lips.values
-
-def elder_ray(high, low, close):
-    """Elder Ray: Bull Power (High - EMA13), Bear Power (Low - EMA13)"""
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False, min_periods=13).mean()
-    
-    bull_power = high - ema13.values
-    bear_power = low - ema13.values
-    
-    return bull_power, bear_power
 
 def generate_signals(prices):
     n = len(prices)
@@ -43,41 +17,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter and Williams Alligator
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 13:
+    # 1d data for trend filter and Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Williams Alligator on weekly
-    jaw_1w, teeth_1w, lips_1w = williams_alligator(high_1w, low_1w, close_1w)
+    # Calculate EMA34 on 1d for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Elder Ray on weekly
-    bull_power_1w, bear_power_1w = elder_ray(high_1w, low_1w, close_1w)
+    # Align 1d EMA34 to 6h
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align weekly indicators to daily
-    jaw_1w_aligned = align_htf_to_ltf(prices, df_1w, jaw_1w)
-    teeth_1w_aligned = align_htf_to_ltf(prices, df_1w, teeth_1w)
-    lips_1w_aligned = align_htf_to_ltf(prices, df_1w, lips_1w)
-    bull_power_1w_aligned = align_htf_to_ltf(prices, df_1w, bull_power_1w)
-    bear_power_1w_aligned = align_htf_to_ltf(prices, df_1w, bear_power_1w)
+    # Calculate Camarilla levels from previous 1d bar
+    # Camarilla R3, S3 (using previous day's range)
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
     
-    # Daily volume spike filter
+    # Align Camarilla levels to 6h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume spike (20-period average) - conservative threshold
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 20  # Ensure volume MA is ready
+    start_idx = 34  # Ensure EMA34 is ready
     
     for i in range(start_idx, n):
-        if (np.isnan(jaw_1w_aligned[i]) or np.isnan(teeth_1w_aligned[i]) or 
-            np.isnan(lips_1w_aligned[i]) or np.isnan(bull_power_1w_aligned[i]) or
-            np.isnan(bear_power_1w_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,33 +60,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Alligator aligned (Lips > Teeth > Jaw), Bull Power positive, volume spike
-            if (lips_1w_aligned[i] > teeth_1w_aligned[i] > jaw_1w_aligned[i] and
-                bull_power_1w_aligned[i] > 0 and
+            # Long: break above R3, above 1d EMA34, volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator inverted (Lips < Teeth < Jaw), Bear Power negative, volume spike
-            elif (lips_1w_aligned[i] < teeth_1w_aligned[i] < jaw_1w_aligned[i] and
-                  bear_power_1w_aligned[i] < 0 and
+            # Short: break below S3, below 1d EMA34, volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Alligator misalignment or Bear Power negative
-            if (lips_1w_aligned[i] <= teeth_1w_aligned[i] or 
-                bear_power_1w_aligned[i] < 0):
+            # Exit long: break below S3 or below 1d EMA34
+            if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Alligator misalignment or Bull Power positive
-            if (lips_1w_aligned[i] >= teeth_1w_aligned[i] or 
-                bull_power_1w_aligned[i] > 0):
+            # Exit short: break above R3 or above 1d EMA34
+            if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
     
     return signals
+
+# Hypothesis: Camarilla R3/S3 levels act as strong support/resistance. 
+# Breakouts with volume confirmation and 1d EMA34 trend filter capture institutional flows.
+# Works in bull markets (breakouts continue) and bear markets (reversions at S3/R3). 
+# 6h timeframe reduces noise while capturing multi-day moves. 
+# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
