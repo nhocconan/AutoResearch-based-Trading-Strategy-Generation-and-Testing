@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1wTrend_Volume_v2
-# Hypothesis: 4h breakout at Camarilla R3/S3 levels with weekly trend filter and volume confirmation.
+# 4h_Camarilla_R1_S1_Breakout_1wTrend_Volume
+# Hypothesis: 4h breakout at Camarilla R1/S1 levels with weekly trend filter and volume confirmation.
 # Uses 1w EMA34 trend for direction, Camarilla from 1d for entry levels, and volume spike for confirmation.
 # Designed for low trade frequency (20-50/year) to minimize fee drift while capturing strong moves.
 
-name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume_v2"
+name = "4h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,13 +42,13 @@ def generate_signals(prices):
     # Calculate ranges
     range_hl = prev_high - prev_low
     
-    # Camarilla R3 and S3
-    r3 = prev_close + range_hl * 1.1 / 2
-    s3 = prev_close - range_hl * 1.1 / 2
+    # Camarilla R1 and S1 (tighter levels for higher probability)
+    r1 = prev_close + range_hl * 1.1 / 12
+    s1 = prev_close - range_hl * 1.1 / 12
     
     # Align Camarilla levels to 4h (previous day's levels available at 4h open)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # --- Weekly trend: EMA34 slope ---
     weekly_close = df_1w['close'].values
@@ -76,8 +76,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(ema_slope_34_1w_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
@@ -96,13 +96,13 @@ def generate_signals(prices):
         volume_surge = volume[i] > 2.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R3 in bullish trend with volume surge
-            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
+            # Long: price breaks above R1 in bullish trend with volume surge
+            if close[i] > r1_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: price breaks below S3 in bearish trend with volume surge
-            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
+            # Short: price breaks below S1 in bearish trend with volume surge
+            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
