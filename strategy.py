@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_VolumeSpike_Trend_HTF"
-timeframe = "4h"
+name = "1d_Weekly_Camarilla_R4_S4_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for Camarilla pivot and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # 50-period EMA for 1d trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate weekly Camarilla pivot levels (R4, S4)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r4_1w = close_1w + range_1w * 1.5
+    s4_1w = close_1w - range_1w * 1.5
     
-    # Align 1d EMA to 4h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align weekly R4 and S4 to daily
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # 4h indicators
-    # Donchian Channel (20-period)
-    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Weekly EMA8 for trend filter
+    ema8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema8_1w)
     
-    # Volume spike: current volume > 1.5 * 20-period average volume
+    # Volume spike detection: current volume > 2x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma_20 * 1.5)
+    volume_spike = volume > (vol_ma_20 * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 30  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema8_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -55,28 +61,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above Donchian upper band + volume spike + uptrend (price > 1d EMA50)
-            if (close[i] > high_max_20[i-1] and 
+            # Long: price breaks above R4 with volume spike and uptrend (EMA8 rising)
+            if (close[i] > r4_aligned[i] and 
                 volume_spike[i] and
-                close[i] > ema50_1d_aligned[i]):
+                ema8_1w_aligned[i] > ema8_1w_aligned[i-1]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below Donchian lower band + volume spike + downtrend (price < 1d EMA50)
-            elif (close[i] < low_min_20[i-1] and 
+            # Short: price breaks below S4 with volume spike and downtrend (EMA8 falling)
+            elif (close[i] < s4_aligned[i] and 
                   volume_spike[i] and
-                  close[i] < ema50_1d_aligned[i]):
+                  ema8_1w_aligned[i] < ema8_1w_aligned[i-1]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below Donchian lower band
-            if close[i] < low_min_20[i]:
+            # Exit long: price closes below R4 or trend reverses
+            if (close[i] < r4_aligned[i] or 
+                ema8_1w_aligned[i] < ema8_1w_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price breaks above Donchian upper band
-            if close[i] > high_max_20[i]:
+            # Exit short: price closes above S4 or trend reverses
+            if (close[i] > s4_aligned[i] or 
+                ema8_1w_aligned[i] > ema8_1w_aligned[i-1]):
                 signals[i] = 0.0
                 position = 0
             else:
