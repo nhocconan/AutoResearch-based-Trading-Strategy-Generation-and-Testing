@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_OrderBook_Imbalance_12hTrend_Confirmation_v1
-Hypothesis: Use 12h order book imbalance (buy/sell volume ratio) as a proxy for institutional bias, combined with 12h EMA50 trend filter and volume spike confirmation on 6h timeframe. In uptrends, buy when buying pressure exceeds selling; in downtrends, sell when selling pressure exceeds buying. Volume spike confirms conviction. Designed for low turnover (15-35 trades/year) to minimize fee drag while capturing sustained moves.
+12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike
+Hypothesis: Use weekly trend filter (price above/below 200 EMA) with daily Camarilla R1/S1 breakouts on 12h timeframe.
+In uptrend: buy R1 breakouts. In downtrend: sell S1 breakdowns. Volume spike confirms institutional participation.
+Weekly trend reduces whipsaw in sideways markets. Target: 15-30 trades per year on 12h timeframe.
 """
 
-name = "6h_OrderBook_Imbalance_12hTrend_Confirmation_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,47 +23,59 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # === 12H Data for Trend and Order Book Imbalance ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # === WEEKLY Data for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    taker_buy_volume_12h = df_12h['taker_buy_volume'].values
-    volume_12h = df_12h['volume'].values
+    close_1w = df_1w['close'].values
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Weekly EMA200 for trend filter
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # 12h order book imbalance: buy volume / total volume (range 0-1)
-    # >0.55 = buying pressure, <0.45 = selling pressure
-    obi_12h = np.divide(
-        taker_buy_volume_12h,
-        volume_12h,
-        out=np.full_like(taker_buy_volume_12h, 0.5),
-        where=volume_12h!=0
-    )
+    # === DAILY Data for Camarilla Pivots ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # Align 12H indicators to 6h timeframe
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    obi_12h_aligned = align_htf_to_ltf(prices, df_12h, obi_12h)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume spike: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Camarilla levels: R1/S1 = C ± (H-L) * 1.1/12
+    rang = prev_high - prev_low
+    r1 = prev_close + rang * 1.1 / 12
+    s1 = prev_close - rang * 1.1 / 12
+    
+    # Align daily Camarilla levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume spike: current volume > 2.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(obi_12h_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema_200_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +84,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: buying pressure > 55% AND uptrend (close > EMA50) AND volume spike
-            if obi_12h_aligned[i] > 0.55 and close[i] > ema_50_12h_aligned[i] and volume_spike[i]:
+            # Long: price breaks above R1 AND weekly uptrend (price > weekly EMA200) AND volume spike
+            if close[i] > r1_aligned[i] and close[i] > ema_200_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: selling pressure > 55% (obi < 0.45) AND downtrend (close < EMA50) AND volume spike
-            elif obi_12h_aligned[i] < 0.45 and close[i] < ema_50_12h_aligned[i] and volume_spike[i]:
+            # Short: price breaks below S1 AND weekly downtrend (price < weekly EMA200) AND volume spike
+            elif close[i] < s1_aligned[i] and close[i] < ema_200_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks (close < EMA50) OR imbalance turns negative (obi < 0.5)
-            if close[i] < ema_50_12h_aligned[i] or obi_12h_aligned[i] < 0.5:
+            # Long exit: price crosses below weekly EMA200 OR reverses below R1
+            if close[i] < ema_200_1w_aligned[i] or close[i] < r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: trend breaks (close > EMA50) OR imbalance turns positive (obi > 0.5)
-            if close[i] > ema_50_12h_aligned[i] or obi_12h_aligned[i] > 0.5:
+            # Short exit: price crosses above weekly EMA200 OR reverses above S1
+            if close[i] > ema_200_1w_aligned[i] or close[i] > s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
