@@ -1,7 +1,6 @@
-# 37
 #!/usr/bin/env python3
-name = "6h_WoW_Momentum_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,42 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for WoW momentum
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
+    close_12h = df_12h['close'].values
+    # 12h EMA34 for trend
+    ema34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_12h = close_12h > ema34_12h
+    
+    # Get 1d data for Camarilla levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Week-over-Week momentum (5-day momentum on daily)
-    mom_5d = np.full(len(close_1d), np.nan)
-    for i in range(5, len(close_1d)):
-        mom_5d[i] = close_1d[i] - close_1d[i-5]
+    # Calculate Camarilla levels (R3, S3) from previous 1d period
+    R3 = np.full(len(high_1d), np.nan)
+    S3 = np.full(len(high_1d), np.nan)
     
-    # Align WoW momentum to 6h timeframe
-    mom_5d_aligned = align_htf_to_ltf(prices, df_1d, mom_5d)
+    for i in range(1, len(high_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        if range_val > 0:
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Calculate 6h RSI(14) for momentum confirmation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Align indicators to 4h timeframe
+    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    avg_gain = np.full(n, np.nan)
-    avg_loss = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i < 14:
-            if i > 0:
-                avg_gain[i] = np.mean(gain[:i+1])
-                avg_loss[i] = np.mean(loss[:i+1])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume spike detection (20-period)
+    # Volume moving average (20-period) for confirmation
     vol_ma20 = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
@@ -65,12 +66,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = max(30, 34)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(mom_5d_aligned[i]) or 
-            np.isnan(rsi[i]) or
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
+            np.isnan(trend_up_12h_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -79,37 +81,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation
-        vol_spike = volume[i] > 1.5 * vol_ma20[i]
-        
         if position == 0:
-            # Long: Positive WoW momentum + RSI > 50 + volume spike
-            if (mom_5d_aligned[i] > 0 and 
-                rsi[i] > 50 and 
-                vol_spike):
-                signals[i] = 0.25
+            # Long: price breaks above R3 + uptrend + volume confirmation
+            if (close[i] > R3_aligned[i] and 
+                trend_up_12h_aligned[i] and 
+                volume[i] > 1.3 * vol_ma20[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Negative WoW momentum + RSI < 50 + volume spike
-            elif (mom_5d_aligned[i] < 0 and 
-                  rsi[i] < 50 and 
-                  vol_spike):
-                signals[i] = -0.25
+            # Short: price breaks below S3 + downtrend + volume confirmation
+            elif (close[i] < S3_aligned[i] and 
+                  not trend_up_12h_aligned[i] and 
+                  volume[i] > 1.3 * vol_ma20[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: Momentum turns negative or RSI < 40
-            if (mom_5d_aligned[i] <= 0 or 
-                rsi[i] < 40):
+            # Long exit: price breaks below S3 or trend changes
+            if (close[i] < S3_aligned[i] or 
+                not trend_up_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: Momentum turns positive or RSI > 60
-            if (mom_5d_aligned[i] >= 0 or 
-                rsi[i] > 60):
+            # Short exit: price breaks above R3 or trend changes
+            if (close[i] > R3_aligned[i] or 
+                trend_up_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
