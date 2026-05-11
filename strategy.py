@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_12hTrend_VolumeS
-Hypothesis: Uses Camarilla pivot levels from daily data for entry/exit, with 12h EMA trend filter and volume confirmation.
-Long when price breaks above R1 with volume and price > 12h EMA50; short when breaks below S1 with volume and price < 12h EMA50.
-Exit on opposite Camarilla level touch. Designed for moderate trade frequency with trend alignment to work in both bull and bear markets.
+1h_Pullback_4DTrend_Volume
+Hypothesis: In strong 4-day trends (1d EMA34), wait for pullbacks to the 21 EMA on 1h with volume confirmation.
+Go long on bullish pullbacks in uptrend, short on bearish pullbacks in downtrend.
+Uses 4h trend filter (EMA34) to avoid counter-trend trades and 1h for precise entry timing.
+Designed for low trade frequency by requiring trend alignment, pullback to EMA, and volume spike.
+Works in both bull and bear markets by following the 4-day trend.
 """
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_Pullback_4DTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,35 +20,24 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivots and 12h data for trend
-    df_1d = get_htf_data(prices, '1d')
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_1d) < 2 or len(df_12h) < 50:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily Camarilla Pivot Levels (R1, S1) ---
-    # Classic Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    camarilla_range = high_1d - low_1d
-    r1 = close_1d + camarilla_range * 1.1 / 12
-    s1 = close_1d - camarilla_range * 1.1 / 12
+    # --- 4h Trend Filter (EMA34) ---
+    close_4h = df_4h['close'].values
+    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
     
-    # Align Camarilla levels to 4h (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # --- 12h EMA50 Trend Filter ---
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # --- 1h EMA21 for pullback entries ---
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
     
     # --- Volume Spike Detection (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,18 +47,18 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (ensure 12h EMA has enough data)
-    start_idx = 50
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_21[i]) or
+            np.isnan(vol_ratio[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
@@ -76,33 +67,37 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above R1 with volume and above 12h EMA50
-            if (close[i] > r1_aligned[i] and 
-                volume_spike and 
-                close[i] > ema_50_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: uptrend (price > 4h EMA34), pullback to 1h EMA21 with volume
+            if (close[i] > ema_34_4h_aligned[i] and      # 4h uptrend
+                close[i] <= ema_21[i] * 1.01 and         # near or slightly above 1h EMA21 (pullback)
+                close[i] >= ema_21[i] * 0.99 and         # near or slightly below 1h EMA21
+                volume_spike):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 with volume and below 12h EMA50
-            elif (close[i] < s1_aligned[i] and 
-                  volume_spike and 
-                  close[i] < ema_50_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: downtrend (price < 4h EMA34), pullback to 1h EMA21 with volume
+            elif (close[i] < ema_34_4h_aligned[i] and    # 4h downtrend
+                  close[i] <= ema_21[i] * 1.01 and       # near or slightly above 1h EMA21 (pullback)
+                  close[i] >= ema_21[i] * 0.99 and       # near or slightly below 1h EMA21
+                  volume_spike):
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit conditions: touch opposite Camarilla level
+            # Exit conditions: trend reversal or loss of momentum
             if position == 1:
-                # Exit long: price touches or goes below S1
-                if close[i] <= s1_aligned[i]:
+                # Exit long: 4h trend turns down or price breaks above EMA21 with momentum
+                if (close[i] < ema_34_4h_aligned[i] * 0.995 or   # 4h trend broken
+                    close[i] > ema_21[i] * 1.02):                # broken above pullback zone
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price touches or goes above R1
-                if close[i] >= r1_aligned[i]:
+                # Exit short: 4h trend turns up or price breaks below EMA21 with momentum
+                if (close[i] > ema_34_4h_aligned[i] * 1.005 or   # 4h trend broken
+                    close[i] < ema_21[i] * 0.98):                # broken below pullback zone
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
