@@ -1,113 +1,137 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume
-# Hypothesis: Uses 4h Camarilla pivot levels (R1/S1) for breakout entries, filtered by 1d trend (EMA50) and volume surge.
-# Long when 1d EMA50 rising, price breaks above 4h R1 with volume confirmation; short when 1d EMA50 falling, price breaks below 4h S1 with volume.
-# 1h timeframe for precise entry timing, 4h for Camarilla levels, 1d for trend filter.
-# Works in bull markets (riding uptrends) and bear markets (riding downtrends) by following the 1d trend.
-# Volume filter avoids false breakouts; Camarilla levels provide objective support/resistance.
+# 6h_Supertrend_1w_Trend_Filter
+# Hypothesis: Use Supertrend on 6h for entry signals, filtered by 1w Supertrend direction.
+# Long when 1w Supertrend is bullish and 6h Supertrend turns bullish; short when 1w Supertrend is bearish and 6h Supertrend turns bearish.
+# The 1w Supertrend acts as a regime filter to avoid counter-trend trades during strong weekly trends.
+# Works in bull markets by riding uptrends and in bear markets by riding downtrends, avoiding whipsaws via higher timeframe filter.
+# Uses ATR-based Supertrend for dynamic support/resistance and trend detection.
 
-name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_Supertrend_1w_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_supertrend(high, low, close, period=10, multiplier=3.0):
+    """
+    Calculate Supertrend indicator.
+    Returns: supertrend values, direction (1 for uptrend, -1 for downtrend)
+    """
+    # Calculate ATR
+    tr1 = pd.Series(high).subtract(pd.Series(low)).abs()
+    tr2 = pd.Series(high).subtract(pd.Series(close).shift(1)).abs()
+    tr3 = pd.Series(low).subtract(pd.Series(close).shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Calculate upper and lower bands
+    hl_avg = (pd.Series(high) + pd.Series(low)) / 2
+    upper_band = (hl_avg + multiplier * atr).values
+    lower_band = (hl_avg - multiplier * atr).values
+    
+    # Initialize Supertrend and direction
+    supertrend = np.zeros_like(close)
+    direction = np.ones_like(close)  # Start with uptrend assumption
+    
+    supertrend[0] = upper_band[0]
+    direction[0] = 1
+    
+    for i in range(1, len(close)):
+        if close[i] > upper_band[i-1]:
+            direction[i] = 1
+        elif close[i] < lower_band[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+            
+        if direction[i] == 1:
+            supertrend[i] = max(lower_band[i], supertrend[i-1])
+        else:
+            supertrend[i] = min(upper_band[i], supertrend[i-1])
+            
+    return supertrend, direction
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 4h data for Camarilla pivot calculation
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Get 1w data for Supertrend regime filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:  # Need enough data for Supertrend
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
-    
-    # Extract price arrays
-    close = prices['close'].values
+    # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # --- 1d EMA50 for trend direction ---
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_slope = ema_50_1d - np.roll(ema_50_1d, 1)
-    ema_50_1d_slope[0] = 0
-    ema_50_1d_slope = pd.Series(ema_50_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
-    ema_50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d_slope)
+    # --- 1w Supertrend for regime filter ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    supertrend_1w, direction_1w = calculate_supertrend(high_1w, low_1w, close_1w, period=10, multiplier=3.0)
+    # Direction: 1 for uptrend, -1 for downtrend
+    direction_1w_aligned = align_htf_to_ltf(prices, df_1w, direction_1w)
     
-    # --- 4h Camarilla pivot levels (R1, S1) ---
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Typical price for pivot calculation
-    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
-    # Camarilla levels
-    camarilla_width = (high_4h - low_4h) * 1.1 / 12.0
-    r1_4h = close_4h + camarilla_width * 1.0  # R1 = C + (H-L)*1.1/12
-    s1_4h = close_4h - camarilla_width * 1.0  # S1 = C - (H-L)*1.1/12
-    
-    # Align Camarilla levels to 1h timeframe
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
-    
-    # --- Volume confirmation (volume > 24-period average on 1h) ---
-    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
-    vol_surge = volume > vol_ma
+    # --- 6h Supertrend for entry signals ---
+    supertrend_6h, direction_6h = calculate_supertrend(high, low, close, period=10, multiplier=3.0)
+    direction_6h_aligned = align_htf_to_ltf(prices, pd.DataFrame({'high': high, 'low': low, 'close': close}), direction_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for 1d EMA50 (50) and volume MA (24)
-    start_idx = 50
+    # Warmup: enough for Supertrend calculation
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1d_slope_aligned[i]) or
-            np.isnan(r1_4h_aligned[i]) or
-            np.isnan(s1_4h_aligned[i])):
+        if (np.isnan(direction_1w_aligned[i]) or
+            np.isnan(direction_6h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 1d EMA50 slope
-        uptrend = ema_50_1d_slope_aligned[i] > 0
-        downtrend = ema_50_1d_slope_aligned[i] < 0
+        # Regime filter from 1w Supertrend direction
+        weekly_uptrend = direction_1w_aligned[i] == 1
+        weekly_downtrend = direction_1w_aligned[i] == -1
+        
+        # Entry signal from 6h Supertrend direction change
+        if i > 0 and not np.isnan(direction_6h_aligned[i-1]):
+            # Bullish crossover: 6h Supertrend turns bullish
+            bullish_crossover = (direction_6h_aligned[i-1] == -1) and (direction_6h_aligned[i] == 1)
+            # Bearish crossover: 6h Supertrend turns bearish
+            bearish_crossover = (direction_6h_aligned[i-1] == 1) and (direction_6h_aligned[i] == -1)
+        else:
+            bullish_crossover = False
+            bearish_crossover = False
         
         if position == 0:
-            if uptrend and vol_surge[i]:
-                # Long: 1d uptrend + volume surge + price breaks above 4h R1
-                if close[i] > r1_4h_aligned[i]:
-                    signals[i] = 0.20
-                    position = 1
-            elif downtrend and vol_surge[i]:
-                # Short: 1d downtrend + volume surge + price breaks below 4h S1
-                if close[i] < s1_4h_aligned[i]:
-                    signals[i] = -0.20
-                    position = -1
+            if weekly_uptrend and bullish_crossover:
+                # Long: weekly uptrend + 6h Supertrend turns bullish
+                signals[i] = 0.25
+                position = 1
+            elif weekly_downtrend and bearish_crossover:
+                # Short: weekly downtrend + 6h Supertrend turns bearish
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Exit long: 1d trend turns down OR price breaks below 4h S1
-                if downtrend or close[i] < s1_4h_aligned[i]:
+                # Exit long: 6h Supertrend turns bearish (regardless of weekly trend)
+                if bearish_crossover:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: 1d trend turns up OR price breaks above 4h R1
-                if uptrend or close[i] > r1_4h_aligned[i]:
+                # Exit short: 6h Supertrend turns bullish (regardless of weekly trend)
+                if bullish_crossover:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
