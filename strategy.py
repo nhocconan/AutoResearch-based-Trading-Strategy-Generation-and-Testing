@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ADX_Alligator_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,51 +17,30 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data
+    # Get 1D data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Elder Ray on 1D: Bull Power = High - EMA13, Bear Power = EMA13 - Low
-    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = df_1d['high'].values - ema13_1d
-    bear_power = ema13_1d - df_1d['low'].values
+    # Calculate 1D EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align Elder Ray components
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # Calculate Camarilla levels from previous day (OHLC)
+    # R1 = C + (H-L)*1.1/12
+    # S1 = C - (H-L)*1.1/12
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # ADX on 6H (trend strength)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    plus_dm = np.concatenate([[np.nan], plus_dm])
-    minus_dm = np.concatenate([[np.nan], minus_dm])
+    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
-    atr_period = 14
-    atr = np.zeros(n)
-    atr[:atr_period] = np.nan
-    for i in range(atr_period, n):
-        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    # Align 1D data to 12h timeframe
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    plus_di = 100 * (pd.Series(plus_dm).ewm(span=atr_period, adjust=False).mean() / atr)
-    minus_di = 100 * (pd.Series(minus_dm).ewm(span=atr_period, adjust=False).mean() / atr)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=atr_period, adjust=False).mean()
-    
-    # Williams Alligator on 1D
-    sma13 = pd.Series(df_1d['close']).rolling(window=13, min_periods=13).mean().shift(8).values
-    sma8 = pd.Series(df_1d['close']).rolling(window=8, min_periods=8).mean().shift(5).values
-    sma5 = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).mean().shift(3).values
-    
-    jaw = align_htf_to_ltf(prices, df_1d, sma13)
-    teeth = align_htf_to_ltf(prices, df_1d, sma8)
-    lips = align_htf_to_ltf(prices, df_1d, sma5)
-    
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -75,9 +54,8 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
-            np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,35 +63,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
-        bullish_align = lips[i] > teeth[i] > jaw[i]
-        bearish_align = lips[i] < teeth[i] < jaw[i]
+        # Trend filter: price above/below EMA34
+        uptrend = close[i] > ema34_aligned[i]
+        downtrend = close[i] < ema34_aligned[i]
         
         if position == 0:
-            # Long: Bull power > 0, Bear power < 0, ADX > 25, Bullish Alligator, Volume surge
-            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] > 0 and 
-                adx[i] > 25 and bullish_align and 
-                volume[i] > 1.3 * vol_ma20[i]):
+            # Long: Price breaks above R1, uptrend, volume surge
+            if close[i] > r1_aligned[i] and uptrend and volume[i] > 1.5 * vol_ma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bull power < 0, Bear power > 0, ADX > 25, Bearish Alligator, Volume surge
-            elif (bull_power_aligned[i] < 0 and bear_power_aligned[i] < 0 and 
-                  adx[i] > 25 and bearish_align and 
-                  volume[i] > 1.3 * vol_ma20[i]):
+            # Short: Price breaks below S1, downtrend, volume surge
+            elif close[i] < s1_aligned[i] and downtrend and volume[i] > 1.5 * vol_ma20[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Elder Ray turns bearish OR Alligator loses alignment OR ADX weakens
-            if (bull_power_aligned[i] <= 0 or bear_power_aligned[i] <= 0 or 
-                not bullish_align or adx[i] < 20):
+            # Long exit: Price closes below S1 or trend turns down
+            if close[i] < s1_aligned[i] or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Elder Ray turns bullish OR Alligator loses alignment OR ADX weakens
-            if (bull_power_aligned[i] >= 0 or bear_power_aligned[i] >= 0 or 
-                not bearish_align or adx[i] < 20):
+            # Short exit: Price closes above R1 or trend turns up
+            if close[i] > r1_aligned[i] or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
