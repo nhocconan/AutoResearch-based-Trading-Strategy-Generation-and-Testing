@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_ChaikinFlow_1dTrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_30min"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,38 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA100 trend filter
+    # 1d data for trend filter (EMA34) and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Chaikin Money Flow (CMF) calculation on 4h
-    # MFM = [(Close - Low) - (High - Close)] / (High - Low)
-    # MFV = MFM * Volume
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    hl_range = high - low
-    hl_range = np.where(hl_range == 0, 1e-10, hl_range)  # avoid division by zero
-    mfm = ((close - low) - (high - close)) / hl_range
-    mfv = mfm * volume
+    # Calculate EMA34 on 1d for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 20-period sums for CMF
-    mfv_sum = np.zeros(n)
-    vol_sum = np.zeros(n)
-    period = 20
+    # Calculate Camarilla levels from previous 1d bar (R1, S1)
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    for i in range(period-1, n):
-        mfv_sum[i] = np.sum(mfv[i-period+1:i+1])
-        vol_sum[i] = np.sum(volume[i-period+1:i+1])
+    # Align 1d EMA34 and Camarilla levels to 12h
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    cmf = np.zeros(n)
-    cmf[period-1:] = mfv_sum[period-1:] / vol_sum[period-1:]
-    
-    # Volume filter: current volume > 1.5x 20-period average volume
-    vol_ma = np.zeros(n)
-    for i in range(period-1, n):
-        vol_ma[i] = np.mean(volume[i-period+1:i+1])
-    vol_filter = volume > (vol_ma * 1.5)
+    # Volume spike (24-period average on 12h timeframe)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(100, period-1)  # Ensure EMA100 and CMF are ready
+    start_idx = 34  # Ensure EMA34 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema100_1d_aligned[i]) or np.isnan(cmf[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,31 +57,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: CMF > 0.15, price above 1d EMA100, volume filter
-            if (cmf[i] > 0.15 and 
-                close[i] > ema100_1d_aligned[i] and 
-                vol_filter[i]):
-                signals[i] = 0.25
+            # Long: break above R1, above 1d EMA34, volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema34_1d_aligned[i] and 
+                vol_spike[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: CMF < -0.15, price below 1d EMA100, volume filter
-            elif (cmf[i] < -0.15 and 
-                  close[i] < ema100_1d_aligned[i] and 
-                  vol_filter[i]):
-                signals[i] = -0.25
+            # Short: break below S1, below 1d EMA34, volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  vol_spike[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: CMF < 0 or price below 1d EMA100
-            if cmf[i] < 0 or close[i] < ema100_1d_aligned[i]:
+            # Exit long: break below S1 or below 1d EMA34
+            if close[i] < s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: CMF > 0 or price above 1d EMA100
-            if cmf[i] > 0 or close[i] > ema100_1d_aligned[i]:
+            # Exit short: break above R1 or above 1d EMA34
+            if close[i] > r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
