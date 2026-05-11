@@ -1,157 +1,194 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_1wTrend_Volume
-Hypothesis: Williams Alligator (jaw/teeth/lips) on 12h filters direction, with 1w EMA50 trend filter and volume spike confirmation.
-Only trade when price is outside the Alligator's mouth (lips outside jaw/teeth) in the direction of the 1w trend.
-Volume must be above 1.5x median of last 50 periods to confirm conviction.
-Designed for 12-30 trades/year per symbol to minimize fee drag while capturing strong trends.
-Works in both bull and bear markets due to strong trend filter and volume confirmation.
+6h_Camarilla_Pivot_R3S3_RangeReversion_1dTrend
+Hypothesis: In ranging markets (ADX<25), price reverts to the mean from Camarilla R3/S3 levels. In trending markets (ADX>25), breakouts at R4/S4 continue with the 1d trend. Uses ADX regime filter to switch between mean reversion and trend following. Designed for 15-35 trades/year per symbol to avoid fee drag while capturing both range reversals and trend continuations.
 """
 
-name = "12h_WilliamsAlligator_1wTrend_Volume"
-timeframe = "12h"
+name = "6h_Camarilla_Pivot_R3S3_RangeReversion_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def williams_alligator(close, jaw_period=13, teeth_period=8, lips_period=5,
-                       jaw_shift=8, teeth_shift=5, lips_shift=3):
-    """Calculate Williams Alligator lines (SMMA based)."""
-    # SMMA (Smoothed Moving Average) approximation using EMA for simplicity
-    # In practice, SMMA = (prev_smma * (n-1) + close) / n
-    # We'll use EMA as proxy which is commonly accepted
-    jaw = pd.Series(close).ewm(span=jaw_period, adjust=False).mean().values
-    teeth = pd.Series(close).ewm(span=teeth_period, adjust=False).mean().values
-    lips = pd.Series(close).ewm(span=lips_period, adjust=False).mean().values
-    
-    # Apply shifts (delay)
-    jaw = np.roll(jaw, jaw_shift)
-    teeth = np.roll(teeth, teeth_shift)
-    lips = np.roll(lips, lips_shift)
-    
-    # Fill NaN from roll with first valid value
-    jaw[:jaw_shift] = jaw[jaw_shift] if jaw_shift < len(jaw) else 0
-    teeth[:teeth_shift] = teeth[teeth_shift] if teeth_shift < len(teeth) else 0
-    lips[:lips_shift] = lips[lips_shift] if lips_shift < len(lips) else 0
-    
-    return jaw, teeth, lips
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for ADX and Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # 6h OHLCV
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
     
-    # --- 1w Trend Filter: EMA50 ---
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # --- 1d ADX for regime detection (14 period) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # --- 12h Williams Alligator (13,8,5) ---
-    jaw, teeth, lips = williams_alligator(close_12h, 13, 8, 5, 8, 5, 3)
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # --- Volume Filter: spike above 1.5x median of last 50 periods ---
-    vol_median = pd.Series(volume_12h).rolling(window=50, min_periods=20).median().values
-    vol_threshold = vol_median * 1.5
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # --- 1d Camarilla Pivot Levels (using previous day) ---
+    # Calculate from previous day's OHLC
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # first bar
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = pivot + (range_val * 1.1 / 2.0)
+    s3 = pivot - (range_val * 1.1 / 2.0)
+    r4 = pivot + (range_val * 1.1)
+    s4 = pivot - (range_val * 1.1)
+    
+    # Align Camarilla levels to 6h
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # --- 6h Close for price reference ---
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 60  # for Alligator and EMA50
+    start_idx = 30  # for ADX calculation
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
+            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i])):
             if position != 0:
-                # Check stoploss (using ATR approximation from high-low)
-                # Approximate ATR as 20-period average of (high-low)
-                if i >= 20:
-                    atr_approx = np.mean(high_12h[i-20:i] - low_12h[i-20:i])
-                else:
-                    atr_approx = np.mean(high_12h[:i+1] - low_12h[:i+1])
-                if position == 1 and close_12h[i] <= entry_price - 2.0 * atr_approx:
+                # Check stoploss (1.5x ATR from entry)
+                atr_est = np.abs(high_6h[i] - low_6h[i])  # rough 6m ATR estimate
+                if position == 1 and close_6h[i] <= entry_price - 1.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_12h[i] >= entry_price + 2.0 * atr_approx:
+                elif position == -1 and close_6h[i] >= entry_price + 1.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1w trend
-        trend_up = close_12h[i] > ema50_1w_aligned[i]
-        trend_down = close_12h[i] < ema50_1w_aligned[i]
-        
-        # Alligator conditions: lips outside jaw/teeth in direction of trend
-        # For long: lips > jaw AND lips > teeth (bullish alignment)
-        # For short: lips < jaw AND lips < teeth (bearish alignment)
-        lips_above_jaw = lips[i] > jaw[i]
-        lips_above_teeth = lips[i] > teeth[i]
-        lips_below_jaw = lips[i] < jaw[i]
-        lips_below_teeth = lips[i] < teeth[i]
-        
-        # Volume filter: spike above 1.5x median
-        vol_ok = volume_12h[i] > vol_threshold[i]
+        # Determine regime: ADX < 25 = range, ADX > 25 = trend
+        is_range = adx_1d_aligned[i] < 25
+        is_trend = adx_1d_aligned[i] > 25
         
         if position == 0:
-            # Look for entries only in direction of 1w trend with Alligator alignment and volume spike
-            if trend_up and lips_above_jaw and lips_above_teeth and vol_ok:
-                # Long: price above Alligator teeth (strong bullish) + 1w uptrend + volume spike
-                signals[i] = 0.25
-                position = 1
-                entry_price = close_12h[i]
-            elif trend_down and lips_below_jaw and lips_below_teeth and vol_ok:
-                # Short: price below Alligator teeth (strong bearish) + 1w downtrend + volume spike
-                signals[i] = -0.25
-                position = -1
-                entry_price = close_12h[i]
+            # Look for entries based on regime
+            if is_range:
+                # Mean reversion: fade at R3/S3
+                if close_6h[i] <= r3_6h[i] and close_6h[i] > s3_6h[i]:
+                    # In range, look for rejection at levels
+                    if i > 0:
+                        # Rejection at R3 (failed breakout above)
+                        if close_6h[i-1] > r3_6h[i-1] and close_6h[i] < r3_6h[i]:
+                            signals[i] = -0.25  # short rejection
+                            position = -1
+                            entry_price = close_6h[i]
+                        # Rejection at S3 (failed breakdown below)
+                        elif close_6h[i-1] < s3_6h[i-1] and close_6h[i] > s3_6h[i]:
+                            signals[i] = 0.25   # long rejection
+                            position = 1
+                            entry_price = close_6h[i]
+            else:  # is_trend
+                # Trend following: breakout at R4/S4 continues
+                if close_6h[i] > r4_6h[i]:
+                    signals[i] = 0.25  # long breakout
+                    position = 1
+                    entry_price = close_6h[i]
+                elif close_6h[i] < s4_6h[i]:
+                    signals[i] = -0.25  # short breakdown
+                    position = -1
+                    entry_price = close_6h[i]
         else:
-            # Exit conditions: Alligator lines re-cross (trend weakening) or stoploss
+            # Manage existing position
             if position == 1:
-                # Stoploss approximation
-                if i >= 20:
-                    atr_approx = np.mean(high_12h[i-20:i] - low_12h[i-20:i])
-                else:
-                    atr_approx = np.mean(high_12h[:i+1] - low_12h[:i+1])
-                if close_12h[i] <= entry_price - 2.0 * atr_approx:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: lips cross back below teeth (weakening bullish momentum)
-                elif lips[i] < teeth[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                # Long position management
+                if is_range:
+                    # In range, take profit at pivot or S3
+                    if close_6h[i] <= pivot[i] or close_6h[i] <= s3_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below S3
+                    elif close_6h[i] < s3_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
+                else:  # is_trend
+                    # In trend, trail with 1d EMA20 or stop at S4
+                    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+                    if not np.isnan(ema20_1d_aligned[i]) and close_6h[i] < ema20_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below S4
+                    elif close_6h[i] < s4_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
             elif position == -1:
-                # Stoploss approximation
-                if i >= 20:
-                    atr_approx = np.mean(high_12h[i-20:i] - low_12h[i-20:i])
-                else:
-                    atr_approx = np.mean(high_12h[:i+1] - low_12h[:i+1])
-                if close_12h[i] >= entry_price + 2.0 * atr_approx:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: lips cross back above teeth (weakening bearish momentum)
-                elif lips[i] > teeth[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                # Short position management
+                if is_range:
+                    # In range, take profit at pivot or R3
+                    if close_6h[i] >= pivot[i] or close_6h[i] >= r3_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above R3
+                    elif close_6h[i] > r3_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
+                else:  # is_trend
+                    # In trend, trail with 1d EMA20 or stop at R4
+                    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+                    if not np.isnan(ema20_1d_aligned[i]) and close_6h[i] > ema20_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above R4
+                    elif close_6h[i] > r4_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
     
     return signals
