@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-6h_1d_Keltner_MeanReversion_With_Volume_Filter
-Hypothesis: Mean reversion at Keltner Channel extremes (2.0 * ATR) on 6b timeframe,
-filtered by 1d trend (EMA50) and volume spikes. Works in both bull and bear markets
-by fading extremes only when aligned with higher timeframe trend, reducing whipsaw.
-Targets ~20-30 trades/year (80-120 over 4 years) to minimize fee impact.
+4h_1d_KAMA_Direction_With_RSI_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction. 
+Combined with RSI for momentum confirmation and volume filter to avoid false breaks.
+Long when: KAMA upward, RSI > 50, volume above average
+Short when: KAMA downward, RSI < 50, volume above average
+Exit when: RSI crosses back to 50 or KAMA flips direction
+Designed for 4-8 trades per month per symbol (48-96 over 4 years) to minimize fee drag.
+Works in both bull (trend following) and bear (mean reversion via RSI extremes) markets.
 """
 
-name = "6h_1d_Keltner_MeanReversion_With_Volume_Filter"
-timeframe = "6h"
+name = "4h_1d_KAMA_Direction_With_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,89 +20,109 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for KAMA trend filter and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # 4h data
+    close_4h = prices['close'].values
+    volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
+    # --- 1d KAMA (Adaptive Trend) ---
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close_1d, n=10))  # |close(t) - close(t-10)|
+    volatility = np.sum(np.abs(np.diff(close_1d, n=1)), axis=0)  # sum of |diff| over 10 periods
+    # Handle array shapes properly
+    change_padded = np.concatenate([np.full(10, np.nan), change])
+    volatility_padded = np.concatenate([np.full(10, np.nan), volatility])
     
-    # --- Keltner Channel (20, 2.0) on 6h ---
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
+    # Avoid division by zero
+    er = np.where(volatility_padded != 0, change_padded / volatility_padded, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Calculate KAMA
+    kama = np.full_like(close_1d, np.nan)
+    kama[29] = close_1d[29]  # seed
+    for i in range(30, len(close_1d)):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # ATR(20)
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama)
     
-    # EMA(20) of close
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # --- 1d RSI (14) ---
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Keltner Bands
-    upper = ema20 + 2.0 * atr
-    lower = ema20 - 2.0 * atr
+    # Wilder's smoothing
+    avg_gain = np.full_like(close_1d, np.nan)
+    avg_loss = np.full_like(close_1d, np.nan)
+    avg_gain[13] = np.mean(gain[1:14])  # first average
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # --- Volume Filter: 20-period average ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # --- Volume Confirmation (4h) ---
+    vol_ma_20 = np.full_like(volume_4h, np.nan)
+    for i in range(20, len(volume_4h)):
+        vol_ma_20[i] = np.mean(volume_4h[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50  # for EMA20, ATR, EMA50_1d, vol_ma
+    start_idx = 60  # for KAMA and RSI stability
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(ema20[i]) or np.isnan(atr[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if any values are NaN
+        if (np.isnan(kama_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close[i] > ema50_1d_aligned[i]
-        trend_down = close[i] < ema50_1d_aligned[i]
+        # Determine KAMA direction (slope)
+        kama_rising = kama_1d_aligned[i] > kama_1d_aligned[i-1]
+        kama_falling = kama_1d_aligned[i] < kama_1d_aligned[i-1]
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma[i]
+        # Volume filter
+        vol_ok = volume_4h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for mean reversion entries: price at Keltner extreme
-            # Long: price at or below lower band + 1d uptrend + volume spike
-            if close[i] <= lower[i] and trend_up and vol_ok:
+            # Enter long: KAMA up, RSI > 50 (bullish momentum), volume confirmation
+            if kama_rising and rsi_1d_aligned[i] > 50 and vol_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: price at or above upper band + 1d downtrend + volume spike
-            elif close[i] >= upper[i] and trend_down and vol_ok:
+            # Enter short: KAMA down, RSI < 50 (bearish momentum), volume confirmation
+            elif kama_falling and rsi_1d_aligned[i] < 50 and vol_ok:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when price returns to EMA20 (mean)
+            # Exit conditions
             if position == 1:
-                if close[i] >= ema20[i]:
+                # Exit long: RSI drops below 50 OR KAMA turns down
+                if rsi_1d_aligned[i] < 50 or not kama_rising:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if close[i] <= ema20[i]:
+                # Exit short: RSI rises above 50 OR KAMA turns up
+                if rsi_1d_aligned[i] > 50 or not kama_falling:
                     signals[i] = 0.0
                     position = 0
                 else:
