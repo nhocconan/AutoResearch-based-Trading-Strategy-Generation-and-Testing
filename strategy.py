@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,47 +17,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for Camarilla calculation (previous day)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 6:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_12h = close_12h > ema50_12h
-    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
+    # Calculate previous day's high, low, close from 4h data
+    # Group 4h bars by day (6 bars per day)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Camarilla levels on daily (R3, S3)
+    # Calculate daily OHLC from 4h data
+    n_4h = len(df_4h)
+    days = n_4h // 6
+    if days < 1:
+        return np.zeros(n)
+    
+    # Previous day's OHLC (excluding current incomplete day)
+    prev_day_idx = max(0, days - 1)
+    start_idx = prev_day_idx * 6
+    end_idx = start_idx + 6
+    
+    if end_idx > len(high_4h):
+        return np.zeros(n)
+    
+    prev_high = np.max(high_4h[start_idx:end_idx])
+    prev_low = np.min(low_4h[start_idx:end_idx])
+    prev_close = close_4h[end_idx - 1]  # Last 4h bar of previous day
+    
+    # Camarilla levels
+    range_val = prev_high - prev_low
+    if range_val <= 0:
+        R1 = S1 = prev_close
+    else:
+        R1 = prev_close + (range_val * 1.1 / 12)
+        S1 = prev_close - (range_val * 1.1 / 12)
+    
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1d = close_1d > ema50_1d
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Calculate Camarilla levels
-    R3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Get 1d data for volume filter (average volume)
+    vol_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Align to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
-    # Volume confirmation: current volume > 2.0x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 2.0 * vol_ma20
+    # Volume confirmation: current volume > 1.5x 1-day average volume
+    volume_filter = volume > (1.5 * vol_avg_1d_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and Camarilla
+    start_idx = max(50, 6)  # Need enough data for EMA and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_12h_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(R1) or np.isnan(S1) or
+            np.isnan(trend_up_1d_aligned[i]) or
+            np.isnan(vol_avg_1d_aligned[i]) or
+            np.isnan(hours[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +93,37 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         if position == 0:
-            # Long: Break above R3 + 12h uptrend + volume confirmation
-            if close[i] > R3_aligned[i] and trend_up_12h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: Camarilla R1 breakout + 1d uptrend + volume filter + session
+            if (close[i] > R1 and 
+                trend_up_1d_aligned[i] and 
+                volume_filter[i] and 
+                in_session):
+                signals[i] = 0.20
                 position = 1
-            # Short: Break below S3 + 12h downtrend + volume confirmation
-            elif close[i] < S3_aligned[i] and not trend_up_12h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: Camarilla S1 breakdown + 1d downtrend + volume filter + session
+            elif (close[i] < S1 and 
+                  not trend_up_1d_aligned[i] and 
+                  volume_filter[i] and 
+                  in_session):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S3 OR 12h trend turns down
-            if close[i] < S3_aligned[i] or not trend_up_12h_aligned[i]:
+            # Long exit: Camarilla S1 breakdown OR 1d trend turns down
+            if (close[i] < S1 or not trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Price breaks above R3 OR 12h trend turns up
-            if close[i] > R3_aligned[i] or trend_up_12h_aligned[i]:
+            # Short exit: Camarilla R1 breakout OR 1d trend turns up
+            if (close[i] > R1 or trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
