@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_With_RSI_and_Chop
-Hypothesis: KAMA adapts to market noise, providing reliable trend direction in both bull and bear markets.
-Combined with RSI for momentum confirmation and Choppiness Index to avoid whipsaws in ranging markets.
-Designed for low turnover (7-25 trades/year) on 1d timeframe to minimize fee drag.
+6h_Polarized_EMA_Fade_1dTrend
+Hypothesis: In 6h timeframe, price often reverts to the 1-day EMA34 after extended moves.
+Fade extreme deviations from 1d EMA34 (beyond 2 ATR) only when 12h trend agrees.
+Use 12h EMA50 for trend filter and ATR for deviation measurement.
+Designed for low turnover in ranging/trending markets with clear mean reversion edge.
 """
 
-name = "1d_KAMA_Trend_Filter_With_RSI_and_Chop"
-timeframe = "1d"
+name = "6h_Polarized_EMA_Fade_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,66 +20,45 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === KAMA Trend (10-period ER) ===
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if hasattr(np.sum, 'axis') else np.abs(np.diff(close)).cumsum()
-    # Fix volatility calculation - it should be cumulative sum of absolute changes
-    volatility = np.nancumsum(np.abs(np.diff(close, prepend=close[0])))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === 1d EMA34 Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # === 12h EMA50 Trend Direction ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_6h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # === Choppiness Index (14-period) ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    # Avoid division by zero
-    range_hl = max_high - min_low
-    chop = np.where(range_hl != 0, 100 * np.log10(sum_atr / range_hl) / np.log10(14), 50)
-    
-    # === 1-week Trend Filter (EMA50) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # === ATR(22) for Deviation Measurement ===
+    tr1 = np.maximum(high[1:] - low[1:], 0)
+    tr2 = np.maximum(np.abs(high[1:] - close[:-1]), 0)
+    tr3 = np.maximum(np.abs(low[1:] - close[:-1]), 0)
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                        np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=22, adjust=False, min_periods=22).mean().values
     
     # === Signal Parameters ===
     position_size = 0.25
+    deviation_multiplier = 2.0  # Fade when price deviates > 2*ATR from 1d EMA34
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for indicators)
-    start_idx = 50  # covers KAMA and EMA50
+    # Start after warmup (need enough data for longest indicator)
+    start_idx = 100  # covers EMA34 and ATR
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(ema34_1d_6h[i]) or np.isnan(ema50_12h_6h[i]) or 
+            np.isnan(atr[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -87,29 +67,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Calculate deviation from 1d EMA34
+        deviation = close[i] - ema34_1d_6h[i]
+        
         if position == 0:
-            # Long: Price above KAMA + RSI > 50 + Chop < 61.8 (trending) + above weekly EMA50
-            if (close[i] > kama[i] and rsi[i] > 50 and chop[i] < 61.8 and 
-                close[i] > ema50_1w_aligned[i]):
+            # Long: Price significantly below 1d EMA34 AND 12h trend is up
+            if deviation < -deviation_multiplier * atr[i] and close[i] > ema50_12h_6h[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price below KAMA + RSI < 50 + Chop < 61.8 (trending) + below weekly EMA50
-            elif (close[i] < kama[i] and rsi[i] < 50 and chop[i] < 61.8 and 
-                  close[i] < ema50_1w_aligned[i]):
+            # Short: Price significantly above 1d EMA34 AND 12h trend is down
+            elif deviation > deviation_multiplier * atr[i] and close[i] < ema50_12h_6h[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions
+            # Exit: Price returns to touch or cross 1d EMA34
             if position == 1:
-                # Exit: Price crosses below KAMA OR RSI < 40 OR Chop > 61.8 (ranging)
-                if (close[i] < kama[i] or rsi[i] < 40 or chop[i] > 61.8):
+                if close[i] >= ema34_1d_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above KAMA OR RSI > 60 OR Chop > 61.8 (ranging)
-                if (close[i] > kama[i] or rsi[i] > 60 or chop[i] > 61.8):
+                if close[i] <= ema34_1d_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
