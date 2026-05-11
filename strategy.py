@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_WeeklyTrend_WeeklyVolume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,58 +17,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d and 1w data
-    df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    # Get weekly data
+    df_weekly = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20 or len(df_1w) < 20:
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # 1w trend: EMA34 > EMA89 = uptrend, EMA34 < EMA89 = downtrend
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1w = pd.Series(df_1w['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
-    trend_up_1w = ema34_1w > ema89_1w
-    trend_down_1w = ema34_1w < ema89_1w
+    # Weekly EMA21 trend
+    weekly_close = df_weekly['close'].values
+    ema21_weekly = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    weekly_trend_up = ema21_weekly > np.roll(ema21_weekly, 1)  # rising
+    weekly_trend_down = ema21_weekly < np.roll(ema21_weekly, 1)  # falling
     
-    # Align 1w trend
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    trend_down_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_down_1w)
+    # Weekly volume filter
+    weekly_volume = df_weekly['volume'].values
+    vol_mean = np.mean(weekly_volume[-10:]) if len(weekly_volume) >= 10 else np.mean(weekly_volume)
+    weekly_vol_high = weekly_volume > 1.5 * vol_mean
     
-    # Previous day's close for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Align to daily
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_weekly, weekly_trend_up)
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_weekly, weekly_trend_down)
+    weekly_vol_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_vol_high)
     
-    # Camarilla levels (using previous day's range)
-    R3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
-    S3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
-    R1 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 6
-    S1 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 6
-    
-    # Align Camarilla levels
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma20 = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    # Daily range filter: avoid extreme volatility
+    daily_range = (high - low) / close
+    range_mean = np.mean(daily_range[-20:]) if len(daily_range) >= 20 else np.mean(daily_range)
+    range_filter = daily_range < 2.0 * range_mean  # not too volatile
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(50, 20)
+    start_idx = 30
     
     for i in range(start_idx, n):
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(trend_up_1w_aligned[i]) or np.isnan(trend_down_1w_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]) or
+            np.isnan(weekly_vol_high_aligned[i]) or np.isnan(range_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,28 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 in 1w uptrend with volume surge
-            if (close[i] > R3_aligned[i] and 
-                trend_up_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+            # Long: weekly uptrend + high volume + not too volatile
+            if (weekly_trend_up_aligned[i] and 
+                weekly_vol_high_aligned[i] and 
+                range_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in 1w downtrend with volume surge
-            elif (close[i] < S3_aligned[i] and 
-                  trend_down_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+            # Short: weekly downtrend + high volume + not too volatile
+            elif (weekly_trend_down_aligned[i] and 
+                  weekly_vol_high_aligned[i] and 
+                  range_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or 1w trend changes
-            if (close[i] < R1_aligned[i] or not trend_up_1w_aligned[i]):
+            # Long exit: weekly trend turns down or volatility too high
+            if (not weekly_trend_up_aligned[i] or not range_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or 1w trend changes
-            if (close[i] > S1_aligned[i] or not trend_down_1w_aligned[i]):
+            # Short exit: weekly trend turns up or volatility too high
+            if (not weekly_trend_down_aligned[i] or not range_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
