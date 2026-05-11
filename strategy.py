@@ -1,12 +1,6 @@
 #!/usr/bin/env python3
-# 12h Camarilla Pivot Reversal Strategy
-# Uses daily Camarilla pivot levels (S3/R3) for mean-reversion entries
-# Only trades when price touches these levels with volume confirmation
-# Works in both bull/bear markets by fading extremes at key support/resistance
-# Target: 15-25 trades/year with tight entry conditions
-
-name = "12h_Camarilla_Pivot_Reversal_1d"
-timeframe = "12h"
+name = "1d_RangeBreakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,50 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 1w data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # R4 = close + ((high - low) * 1.5)
-    # R3 = close + ((high - low) * 1.25)
-    # R2 = close + ((high - low) * 1.166)
-    # R1 = close + ((high - low) * 1.083)
-    # S1 = close - ((high - low) * 1.083)
-    # S2 = close - ((high - low) * 1.166)
-    # S3 = close - ((high - low) * 1.25)
-    # S4 = close - ((high - low) * 1.5)
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1w = close_1w > ema50_1w
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
     
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    # Daily Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate pivot levels
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.25
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.25
-    camarilla_s4 = prev_close - (prev_high - prev_low) * 1.5
-    camarilla_r4 = prev_close + (prev_high - prev_low) * 1.5
-    
-    # Align to 12h timeframe (wait for daily bar to close)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    
-    # Volume confirmation: current volume > 1.5x 24-period average
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > 1.5 * vol_ma24
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 24  # Need volume MA data
+    start_idx = 50  # Need enough data for EMA and Donchian
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(s3_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(vol_ma24[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(trend_up_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,26 +52,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price touches S3 level with volume confirmation
-            if low[i] <= s3_aligned[i] and volume_filter[i]:
+            # Long: Donchian breakout + 1w uptrend + volume confirmation
+            if close[i] > donchian_high[i-1] and trend_up_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price touches R3 level with volume confirmation
-            elif high[i] >= r3_aligned[i] and volume_filter[i]:
+            # Short: Donchian breakdown + 1w downtrend + volume confirmation
+            elif close[i] < donchian_low[i-1] and not trend_up_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches S4 level or mean reversion to midpoint
-            midpoint = (s3_aligned[i] + r3_aligned[i]) / 2
-            if high[i] >= s4_aligned[i] or close[i] >= midpoint:
+            # Long exit: Donchian breakdown OR 1w trend turns down
+            if close[i] < donchian_low[i-1] or not trend_up_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches R4 level or mean reversion to midpoint
-            midpoint = (s3_aligned[i] + r3_aligned[i]) / 2
-            if low[i] <= r4_aligned[i] or close[i] <= midpoint:
+            # Short exit: Donchian breakout OR 1w trend turns up
+            if close[i] > donchian_high[i-1] or trend_up_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
