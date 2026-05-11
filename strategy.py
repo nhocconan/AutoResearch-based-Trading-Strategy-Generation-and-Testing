@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Uses Camarilla pivot levels (R1, S1) from 1-day timeframe for breakout entries on 4h timeframe, filtered by daily trend structure and volume spikes. The Camarilla levels provide natural support/resistance zones where price often reverses or breaks. Combined with daily trend (HH/HL for uptrend, LH/LL for downtrend) and volume confirmation (>1.5x 20-period average), this strategy aims to capture high-probability breakouts in both bull and bear markets. The 4h timeframe reduces trade frequency to avoid excessive fee drag while still capturing significant moves.
+# 12h_PriceChannel_Breakout_1wTrend_Volume
+# Hypothesis: Uses weekly trend + 12h price channel breakout (Donchian 20) + volume confirmation.
+# Long when: weekly uptrend (price > 50-week SMA) + 12h price breaks above 20-bar high + volume > 1.5x 20-bar avg.
+# Short when: weekly downtrend (price < 50-week SMA) + 12h price breaks below 20-bar low + volume > 1.5x 20-bar avg.
+# Exit when: price breaks back through the opposite channel boundary.
+# Weekly trend filter avoids whipsaws in ranging markets; breakout captures momentum.
+# Works in bull markets by catching early uptrends, in bear by catching early downtrends.
+# Volume confirmation reduces false breakouts. Designed for low trade frequency (<30/year).
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_PriceChannel_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,106 +18,91 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and trend structure
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d Camarilla levels (R1, S1) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- Weekly trend: price vs 50-week SMA ---
+    close_1w = df_1w['close'].values
+    sma_50 = np.full(len(close_1w), np.nan)
+    for i in range(50, len(close_1w)):
+        sma_50[i] = np.mean(close_1w[i-50:i])
+    weekly_uptrend = close_1w > sma_50
+    weekly_downtrend = close_1w < sma_50
     
-    # Calculate pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate Camarilla levels
-    r1 = pivot + 1.1 * (high_1d - low_1d) / 12.0
-    s1 = pivot - 1.1 * (high_1d - low_1d) / 12.0
+    # Align weekly trend to 12h
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend)
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend)
     
-    # --- 1d trend structure: HH/HL for uptrend, LH/LL for downtrend ---
-    # Higher High: today's high > yesterday's high
-    hh = high_1d > np.roll(high_1d, 1)
-    # Higher Low: today's low > yesterday's low
-    hl = low_1d > np.roll(low_1d, 1)
-    # Lower High: today's high < yesterday's high
-    lh = high_1d < np.roll(high_1d, 1)
-    # Lower Low: today's low < yesterday's low
-    ll = low_1d < np.roll(low_1d, 1)
-    # Uptrend: HH and HL
-    uptrend = hh & hl
-    # Downtrend: LH and LL
-    downtrend = lh & ll
-    # First bar: no previous day, set to False
-    uptrend[0] = False
-    downtrend[0] = False
+    # --- 12h Donchian channel (20-period) ---
+    high_max = np.full(n, np.nan)
+    low_min = np.full(n, np.nan)
+    for i in range(20, n):
+        high_max[i] = np.max(high[i-20:i])
+        low_min[i] = np.min(low[i-20:i])
     
-    # --- Volume confirmation (volume > 20-period average) ---
+    # --- Volume confirmation: > 1.5x 20-period average ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1d indicators to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for Camarilla (needs 2 periods) and volume MA(20)
-    start_idx = max(2, 20)  # Camarilla needs 2, vol MA needs 20
+    # Start after warmup (max of weekly SMA 50, Donchian 20, vol MA 20)
+    start_idx = 50  # weekly SMA needs 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(high_max[i]) or
+            np.isnan(low_min[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i])):
+            np.isnan(weekly_uptrend_aligned[i]) or
+            np.isnan(weekly_downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend from 1d
-        is_uptrend = uptrend_aligned[i]
-        is_downtrend = downtrend_aligned[i]
+        # Trend from weekly
+        is_weekly_up = weekly_uptrend_aligned[i]
+        is_weekly_down = weekly_downtrend_aligned[i]
         
         # Volume spike condition
-        vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
+        vol_spike = volume[i] > vol_ma[i] * 1.5
         
         if position == 0:
-            if is_uptrend and vol_spike:
-                # Long: daily uptrend + volume spike + close above R1 (bullish breakout)
-                if close[i] > r1_aligned[i]:
+            if is_weekly_up and vol_spike:
+                # Long: weekly uptrend + volume spike + price breaks above 20-bar high
+                if close[i] > high_max[i]:
                     signals[i] = 0.25
                     position = 1
-            elif is_downtrend and vol_spike:
-                # Short: daily downtrend + volume spike + close below S1 (bearish breakout)
-                if close[i] < s1_aligned[i]:
+            elif is_weekly_down and vol_spike:
+                # Short: weekly downtrend + volume spike + price breaks below 20-bar low
+                if close[i] < low_min[i]:
                     signals[i] = -0.25
                     position = -1
         else:
             if position == 1:
-                # Exit long: price falls below S1 OR daily uptrend breaks
-                if close[i] < s1_aligned[i] or not is_uptrend:
+                # Exit long: price breaks below 20-bar low (contrarian exit)
+                if close[i] < low_min[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above R1 OR daily downtrend breaks
-                if close[i] > r1_aligned[i] or not is_downtrend:
+                # Exit short: price breaks above 20-bar high (contrarian exit)
+                if close[i] > high_max[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
