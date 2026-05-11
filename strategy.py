@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_Weekly_Trend_Pullback
-Hypothesis: Price pulls back to EMA200 on 6h during a strong weekly trend (above/below weekly EMA50), entering in direction of weekly trend. Uses volume confirmation to avoid false breakouts. Designed to work in both bull and bear markets by following weekly trend. Targets ~15-25 trades/year.
+12h_1d_Camarilla_R3_S3_Breakout_Trend_v2
+Hypothesis: Price breaking above/below R3/S3 Camarilla levels on 12h, filtered by 1d EMA34 trend and volume above median. Exit on opposite Camarilla touch or ATR stop. Targets ~25-35 trades/year. Designed for trending and mean-reverting regimes via trend filter.
 """
 
-name = "6h_1d_Weekly_Trend_Pullback"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R3_S3_Breakout_Trend_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,92 +14,111 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for EMA200 (trend filter on 6h)
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Get weekly data for trend direction
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
-        return np.zeros(n)
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
-    
-    # --- 1d EMA200 for 6h trend filter ---
+    # --- 1d Trend Filter: EMA34 ---
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- 1w EMA50 for weekly trend direction ---
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # --- 12h Camarilla Levels (based on previous day) ---
+    # Calculate from previous 1d bar (shifted by 1 to avoid lookahead)
+    prev_close = np.roll(close_12h, 1)
+    prev_high = np.roll(high_12h, 1)
+    prev_low = np.roll(low_12h, 1)
+    prev_close[0] = close_12h[0]
+    prev_high[0] = high_12h[0]
+    prev_low[0] = low_12h[0]
     
-    # --- Volume filter: above 20-period median ---
-    vol_median = pd.Series(volume_6h).rolling(window=20, min_periods=10).median().values
+    # Camarilla R3 and S3 levels
+    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    
+    # --- Volume Filter: above median of last 20 periods ---
+    vol_median = pd.Series(volume_12h).rolling(window=20, min_periods=10).median().values
+    
+    # --- ATR for stoploss (14-period) ---
+    tr1 = np.abs(high_12h - low_12h)
+    tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+    tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after warmup period (200 for EMA200)
-    start_idx = 200
+    # Start after warmup period
+    start_idx = 34  # for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(vol_median[i])):
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_median[i]) or np.isnan(atr[i])):
             if position != 0:
-                # Check if price has moved against position significantly
-                if position == 1 and close_6h[i] < ema200_1d_aligned[i]:
+                # Check stoploss
+                if position == 1 and close_12h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] > ema200_1d_aligned[i]:
+                elif position == -1 and close_12h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = close_6h[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close_6h[i] < ema50_1w_aligned[i]
+        # Determine 1d trend
+        trend_up = close_12h[i] > ema34_1d_aligned[i]
+        trend_down = close_12h[i] < ema34_1d_aligned[i]
         
-        # Volume filter
-        vol_ok = volume_6h[i] > vol_median[i]
+        # Volume filter: above median
+        vol_ok = volume_12h[i] > vol_median[i]
         
         if position == 0:
-            # Look for pullback to EMA200 in direction of weekly trend
-            if weekly_uptrend and close_6h[i] <= ema200_1d_aligned[i] * 1.02 and \
-               close_6h[i] >= ema200_1d_aligned[i] * 0.98 and vol_ok:
-                # Long: pullback to EMA200 during weekly uptrend with volume
+            # Look for entries only in direction of 1d trend with volume
+            if close_12h[i] > camarilla_r3[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_6h[i]
-            elif weekly_downtrend and close_6h[i] >= ema200_1d_aligned[i] * 0.98 and \
-                 close_6h[i] <= ema200_1d_aligned[i] * 1.02 and vol_ok:
-                # Short: pullback to EMA200 during weekly downtrend with volume
+                entry_price = close_12h[i]
+            elif close_12h[i] < camarilla_s3[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_6h[i]
+                entry_price = close_12h[i]
         else:
-            # Exit when price crosses EMA200 against position
+            # Update stoploss and check exits
             if position == 1:
-                if close_6h[i] < ema200_1d_aligned[i]:
+                # Stoploss
+                if close_12h[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses below S3
+                elif close_12h[i] <= camarilla_s3[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if close_6h[i] > ema200_1d_aligned[i]:
+                # Stoploss
+                if close_12h[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses above R3
+                elif close_12h[i] >= camarilla_r3[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
