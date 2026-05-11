@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_1wPivot_Breakout_Trend_Volume_v2
-Hypothesis: Trade breakouts at weekly pivot levels (R1/S1) on daily timeframe with 1w trend filter and volume confirmation.
-Weekly pivots act as strong support/resistance levels. Breakouts in direction of weekly trend with volume confirmation
-should capture significant moves. Weekly pivot calculation provides fewer, more significant levels than daily pivots,
-reducing trade frequency. Works in bull/bear markets by aligning with weekly trend direction.
-Target: 15-25 trades/year on 1d timeframe.
+4h_KAMA_Trend_Volume_Signal
+Hypothesis: KAMA (Kaufman Adaptive Moving Average) captures trend with low lag in both trending and ranging markets.
+On 4h timeframe, when price crosses above/below KAMA with volume confirmation, it signals trend continuation.
+This adapts to market conditions, reducing whipsaw in sideways markets while capturing trends.
+Volume confirmation ensures only significant moves are traded. Works in bull/bear markets as KAMA adapts to volatility.
 """
 
-name = "1d_1wPivot_Breakout_Trend_Volume_v2"
-timeframe = "1d"
+name = "4h_KAMA_Trend_Volume_Signal"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,43 +25,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly OHLC for Pivot Points ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
+    # === KAMA Calculation (10-period ER, 2 and 30 for SC) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Correct volatility calculation: rolling sum of absolute changes
+    volatility_rolling = pd.Series(np.abs(np.diff(close, prepend=close[0]))).rolling(window=10, min_periods=1).sum().values
+    er = np.where(volatility_rolling > 0, change / volatility_rolling, 0)
     
-    # Calculate Weekly Pivot Points from previous week's OHLC
-    ph_w = df_1w['high'].values
-    pl_w = df_1w['low'].values
-    pc_w = df_1w['close'].values
+    # Smoothing Constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # (fast - slow) * er + slow, then squared
     
-    # Weekly Pivot Point (PP)
-    pp_w = (ph_w + pl_w + pc_w) / 3.0
-    # Weekly R1 and S1 (primary breakout levels)
-    r1_w = pp_w + (ph_w - pl_w)
-    s1_w = pp_w - (ph_w - pl_w)
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Align to daily timeframe
-    r1_1d = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_1d = align_htf_to_ltf(prices, df_1w, s1_w)
-    
-    # === Weekly Trend Filter (EMA34) ===
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # === Volume Filter (1.5x 20-period EMA on daily) ===
+    # === Volume Filter (1.5x 20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers weekly calculations)
-    start_idx = 50
+    # Start after warmup for KAMA
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(ema34_1d[i]) or np.isnan(volume_ok[i])):
+        if np.isnan(kama[i]) or np.isnan(volume_ok[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,31 +62,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above R1 with uptrend and volume
-            if (close[i] > r1_1d[i] and 
-                close[i] > ema34_1d[i] and 
-                volume_ok[i]):
+            # Long: price crosses above KAMA with volume
+            if close[i] > kama[i] and close[i-1] <= kama[i-1] and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below S1 with downtrend and volume
-            elif (close[i] < s1_1d[i] and 
-                  close[i] < ema34_1d[i] and 
-                  volume_ok[i]):
+            # Short: price crosses below KAMA with volume
+            elif close[i] < kama[i] and close[i-1] >= kama[i-1] and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below weekly pivot (mean reversion)
-            if close[i] < pp_w[i]:
+            # Exit long: price crosses below KAMA
+            if close[i] < kama[i] and close[i-1] >= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price closes above weekly pivot (mean reversion)
-            if close[i] > pp_w[i]:
+            # Exit short: price crosses above KAMA
+            if close[i] > kama[i] and close[i-1] <= kama[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.25
     
     return signals
