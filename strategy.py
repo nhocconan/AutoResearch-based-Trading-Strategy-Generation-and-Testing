@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm_v3
-# Hypothesis: Breakout of 1-day Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation.
-# This version reduces trade frequency by requiring both price close and open to confirm breakout,
-# and adds a minimum holding period to avoid whipsaws. Targets 25-35 trades/year.
-# Designed for BTC/ETH resilience in bull/bear markets via trend alignment and volume filters.
+# 1d_Donchian20_Breakout_1wTrend_Volume_Confirm_v1
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation.
+# Uses 1d timeframe to reduce trade frequency (target 10-25 trades/year). The 1-week EMA50
+# filter ensures we only trade in the direction of the higher-timeframe trend, improving
+# performance in both bull and bear markets. Volume confirmation adds conviction to breakouts.
+# Designed for BTC/ETH robustness with controlled trade frequency to minimize fee drag.
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm_v3"
-timeframe = "4h"
+name = "1d_Donchian20_Breakout_1wTrend_Volume_Confirm_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -30,19 +31,18 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Camarilla Pivot Levels (R3, S3) ===
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
+    # === 1d Donchian Channel (20-period) ===
+    # Highest high and lowest low over past 20 days
+    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d levels to 4h
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    # === 1w Data (loaded ONCE) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === 1d EMA34 Trend Filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === 1w EMA50 Trend Filter ===
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_1d = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -55,13 +55,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     holding_bars = 0
     
-    # Start after warmup (covers EMA34)
-    start_idx = 60
+    # Start after warmup (covers Donchian and EMA50)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema50_1w_1d[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,35 +71,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R3 (both open and close) + above 1d EMA34 + volume spike
-            if (open_price[i] > r3_4h[i] and close[i] > r3_4h[i] and 
-                close[i] > ema34_1d_4h[i] and volume_ok[i]):
+            # Long: Break above 20-day high + above 1w EMA50 + volume spike
+            if (high[i] > high_20[i] and close[i] > ema50_1w_1d[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
                 holding_bars = 0
-            # Short: Break below S3 (both open and close) + below 1d EMA34 + volume spike
-            elif (open_price[i] < s3_4h[i] and close[i] < s3_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and volume_ok[i]):
+            # Short: Break below 20-day low + below 1w EMA50 + volume spike
+            elif (low[i] < low_20[i] and close[i] < ema50_1w_1d[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
                 holding_bars = 0
         else:
-            # Enforce minimum holding period (12 bars)
+            # Enforce minimum holding period (5 days)
             holding_bars += 1
-            if holding_bars < 12:
+            if holding_bars < 5:
                 signals[i] = position_size if position == 1 else -position_size
                 continue
             
-            # Exit: Price closes below/above opposite level
+            # Exit: Price closes back inside the Donchian channel
             if position == 1:
-                if close[i] < s3_4h[i]:
+                if close[i] < low_20[i]:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > r3_4h[i]:
+                if close[i] > high_20[i]:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
