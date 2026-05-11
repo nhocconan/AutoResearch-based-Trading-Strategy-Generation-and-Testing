@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3S3_Breakout_WeeklyTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_ADX_DI_Crossover_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,38 +17,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA34 on weekly close
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # ADX(14) and DI+ / DI- calculation (standard Wilder's)
+    period = 14
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr = np.concatenate([[np.nan], tr])  # align with index
+    
+    # Directional Movement
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
+    
+    # Smoothed TR, +DM, -DM using Wilder's smoothing (same as EMA with alpha=1/period)
+    def wilder_smooth(arr, period):
+        result = np.full_like(arr, np.nan)
+        if len(arr) < period:
+            return result
+        # first value is simple average
+        result[period-1] = np.nanmean(arr[1:period]) if np.any(~np.isnan(arr[1:period])) else 0
+        # subsequent values: Wilder's smoothing
+        for i in range(period, len(arr)):
+            if np.isnan(result[i-1]) or np.isnan(arr[i]):
+                result[i] = np.nan
+            else:
+                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
+        return result
+    
+    tr_smooth = wilder_smooth(tr, period)
+    plus_dm_smooth = wilder_smooth(plus_dm, period)
+    minus_dm_smooth = wilder_smooth(minus_dm, period)
+    
+    # DI+ and DI-
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = np.full_like(dx, np.nan)
+    if len(dx) >= period:
+        # ADX is Wilder's smoothed DX
+        adx[period-1] = np.nanmean(dx[period-1:2*period-1]) if np.any(~np.isnan(dx[period-1:2*period-1])) else 0
+        for i in range(2*period-1, len(dx)):
+            if np.isnan(adx[i-1]) or np.isnan(dx[i]):
+                adx[i] = np.nan
+            else:
+                adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
+    
+    # 1d trend: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
-    
-    # Daily Camarilla pivot levels (using previous day's OHLC)
-    # Calculate Camarilla levels for each day based on previous day
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = np.nan  # First day has no previous day
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    
-    # Camarilla R3, S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # Volume spike: volume > 1.8 * 20-day SMA of volume
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.8 * vol_sma
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)  # Wait for EMA and volume SMA
+    start_idx = max(2*period-1, 34)  # ensure ADX and EMA are valid
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1w_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or np.isnan(ema_34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,24 +92,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Camarilla R3 + above weekly EMA34 + volume spike
-            if close[i] > camarilla_r3[i] and close[i] > ema_34_1w_aligned[i] and vol_spike[i]:
+            # Long: ADX > 25, DI+ > DI-, price above 1d EMA34
+            if adx[i] > 25 and plus_di[i] > minus_di[i] and close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Camarilla S3 + below weekly EMA34 + volume spike
-            elif close[i] < camarilla_s3[i] and close[i] < ema_34_1w_aligned[i] and vol_spike[i]:
+            # Short: ADX > 25, DI- > DI+, price below 1d EMA34
+            elif adx[i] > 25 and minus_di[i] > plus_di[i] and close[i] < ema_34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Camarilla S3 (reversion to mean)
-            if close[i] < camarilla_s3[i]:
+            # Exit long: ADX < 20 or DI- crosses above DI+ (trend weakening)
+            if adx[i] < 20 or minus_di[i] > plus_di[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Camarilla R3 (reversion to mean)
-            if close[i] > camarilla_r3[i]:
+            # Exit short: ADX < 20 or DI+ crosses above DI-
+            if adx[i] < 20 or plus_di[i] > minus_di[i]:
                 signals[i] = 0.0
                 position = 0
             else:
