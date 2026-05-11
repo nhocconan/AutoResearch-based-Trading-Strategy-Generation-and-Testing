@@ -1,12 +1,12 @@
-# 6h_1d_Market_Profile_Value_Area
-# Hypothesis: 6h chart with daily market profile value area (POC/VA) and 1d EMA trend filter.
-# In ranging markets, price reverts to value area POC; in trending markets, breaks above/below VA with trend continuation.
-# Works in both bull/bear by adapting to market structure via value area and trend filter.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Based on extensive testing, I'm focusing on a 4h strategy with strong entry conditions to limit trades.
+# The hypothesis: A 4h Donchian breakout combined with 1d trend filter and volume confirmation
+# will generate ~30-50 trades/year with sufficient edge in both bull and bear markets.
+# The 1d trend filter adapts to market regime, while volume confirmation ensures breakout strength.
+# Entry/exit logic is designed to be simple yet effective, avoiding overtrading.
 
 #!/usr/bin/env python3
-name = "6h_1d_Market_Profile_Value_Area"
-timeframe = "6h"
+name = "4h_Donchian_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -23,65 +23,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for market profile and trend
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Value Area (VA) and Point of Control (POC) for each day
-    # Using volume-weighted price distribution (simplified: VWAP over day)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    vwap = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1d = ema50_1d > np.roll(ema50_1d, 1)  # Rising EMA50
+    trend_down_1d = ema50_1d < np.roll(ema50_1d, 1)  # Falling EMA50
     
-    # VA boundaries: 1 standard deviation around VWAP
-    price_deviation = typical_price - vwap
-    # Variance of price deviation weighted by volume
-    var = ((price_deviation ** 2) * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-    std_dev = np.sqrt(var)
+    # Calculate 4h Donchian channels (20-period)
+    donchian_len = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    vwap_val = vwap.values
-    std_val = std_dev.values
+    for i in range(donchian_len - 1, n):
+        highest_high[i] = np.max(high[i-donchian_len+1:i+1])
+        lowest_low[i] = np.min(low[i-donchian_len+1:i+1])
     
-    va_high = vwap_val + std_val
-    va_low = vwap_val - std_val
-    poc = vwap_val  # POC at VWAP
+    # Calculate 20-period volume average for confirmation
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma20[i] = np.mean(volume[i-19:i+1])
+    # For early periods, use available data
+    for i in range(1, 20):
+        vol_ma20[i] = np.mean(volume[:i+1])
     
-    # Trend filter: EMA50 > EMA200 for uptrend
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_up = ema50_1d > ema200_1d
-    trend_down = ema50_1d < ema200_1d
-    
-    # Align all to 6h
-    poc_aligned = align_htf_to_ltf(prices, df_1d, poc)
-    va_high_aligned = align_htf_to_ltf(prices, df_1d, va_high)
-    va_low_aligned = align_htf_to_ltf(prices, df_1d, va_low)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma20 = np.zeros(n)
-    vol_sum = 0
-    for i in range(n):
-        vol_sum += volume[i]
-        if i >= 20:
-            vol_sum -= volume[i-20]
-        if i < 20:
-            vol_ma20[i] = vol_sum / (i+1) if i > 0 else 0
-        else:
-            vol_ma20[i] = vol_sum / 20
+    # Align 1d trend to 4h
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)
+    start_idx = max(50, 20)  # Ensure we have enough data
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(poc_aligned[i]) or np.isnan(va_high_aligned[i]) or np.isnan(va_low_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma20[i]) or np.isnan(trend_up_aligned[i]) or 
+            np.isnan(trend_down_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,40 +73,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price below VA low in uptrend with volume surge (mean reversion to value)
-            if (close[i] < va_low_aligned[i] and 
+            # Long: price breaks above Donchian upper band in uptrend with volume surge
+            if (close[i] > highest_high[i] and 
                 trend_up_aligned[i] and 
-                volume[i] > 1.3 * vol_ma20[i]):
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price above VA high in downtrend with volume surge (mean reversion to value)
-            elif (close[i] > va_high_aligned[i] and 
+            # Short: price breaks below Donchian lower band in downtrend with volume surge
+            elif (close[i] < lowest_low[i] and 
                   trend_down_aligned[i] and 
-                  volume[i] > 1.3 * vol_ma20[i]):
-                signals[i] = -0.25
-                position = -1
-            # Long breakout: price above VA high in uptrend with volume surge
-            elif (close[i] > va_high_aligned[i] and 
-                  trend_up_aligned[i] and 
-                  volume[i] > 1.3 * vol_ma20[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short breakout: price below VA low in downtrend with volume surge
-            elif (close[i] < va_low_aligned[i] and 
-                  trend_down_aligned[i] and 
-                  volume[i] > 1.3 * vol_ma20[i]):
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches POC or trend changes
-            if (close[i] >= poc_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: price falls below Donchian lower band or trend turns down
+            if (close[i] < lowest_low[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price reaches POC or trend changes
-            if (close[i] <= poc_aligned[i] or not trend_down_aligned[i]):
+            # Short exit: price rises above Donchian upper band or trend turns up
+            if (close[i] > highest_high[i] or not trend_down_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
