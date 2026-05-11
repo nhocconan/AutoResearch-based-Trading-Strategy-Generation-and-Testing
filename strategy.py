@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Angle_of_Descent_v1
-Hypothesis: Measures the angle of price descent from the 1d high using a 12h window.
-In bull markets, steep declines often reverse sharply; in bear markets, shallow declines
-continue the trend. Uses 1d high as reference and 12h EMA for trend filter.
-Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
+4h_Donchian_Breakout_Volume_Trend_v1
+Hypothesis: Combines 4h Donchian breakouts with volume confirmation and 1d trend filter.
+Breakouts above 20-period high with volume > 1.5x average and bullish 1d trend = long.
+Breakouts below 20-period low with volume > 1.5x average and bearish 1d trend = short.
+Designed to capture trending moves while avoiding false breakouts in ranging markets.
+Targets 30-60 trades per year (120-240 over 4 years) on 4h timeframe.
 """
 
-name = "6h_Angle_of_Descent_v1"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +18,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D Data for Reference High ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    high_1d = df_1d['high'].values
-    # Previous day's high (reference point)
-    ref_high_1d = high_1d  # this is the prior day's high
-    
-    # Align reference high to 6h
-    ref_high_aligned = align_htf_to_ltf(prices, df_1d, ref_high_1d)
-    
-    # === 12H Data for Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 21:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    # 12h EMA21 for trend
-    ema21_12h = pd.Series(close_12h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
-    
-    # === Calculate Angle of Descent ===
-    # Angle = arctan((current price - reference high) / time_in_bars)
-    # We use 12 bars (3 days) lookback for the angle calculation
-    lookback = 12  # 12 * 6h = 3 days
-    angle_of_descent = np.full(n, np.nan)
+    # === 4h Donchian Channel (20-period) ===
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
     for i in range(lookback, n):
-        if np.isnan(ref_high_aligned[i]):
-            continue
-        price_change = close[i] - ref_high_aligned[i]
-        # Normalize by reference price to get percentage change
-        price_change_pct = price_change / ref_high_aligned[i]
-        # Angle in degrees: arctan(price_change_pct * 100) * (180/pi) 
-        # Multiply by 100 to get reasonable angle values
-        angle = np.arctan(price_change_pct * 100) * (180 / np.pi)
-        angle_of_descent[i] = angle
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # === Volume Confirmation (1.5x average volume) ===
+    vol_ma = np.full(n, np.nan)
+    vol_period = 20
+    for i in range(vol_period, n):
+        vol_ma[i] = np.mean(volume[i-vol_period:i])
+    
+    volume_ratio = np.divide(volume, vol_ma, out=np.full(n, np.nan), where=vol_ma!=0)
+    
+    # === 1d Trend Filter (EMA34) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(100, lookback)
+    # Start after warmup period
+    start_idx = max(lookback, vol_period, 34)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ref_high_aligned[i]) or 
-            np.isnan(ema21_12h_aligned[i]) or 
-            np.isnan(angle_of_descent[i])):
+        if (np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ratio[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,26 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: shallow angle of descent (> -10 degrees) in downtrend (mean reversion bounce)
-            # OR steep angle of descent (< -30 degrees) in uptrend (panic sell exhaustion)
-            if (angle_of_descent[i] > -10 and ema21_12h_aligned[i] < close[i]) or \
-               (angle_of_descent[i] < -30 and ema21_12h_aligned[i] > close[i]):
+            # Long: breakout above Donchian high + volume confirmation + bullish 1d trend
+            if (close[i] > highest_high[i] and 
+                volume_ratio[i] > 1.5 and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: steep angle of descent (< -30 degrees) in downtrend (continuation)
-            elif angle_of_descent[i] < -30 and ema21_12h_aligned[i] > close[i]:
+            # Short: breakout below Donchian low + volume confirmation + bearish 1d trend
+            elif (close[i] < lowest_low[i] and 
+                  volume_ratio[i] > 1.5 and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: angle becomes too steep (> -30) indicating continued weakness
-            if angle_of_descent[i] < -30:
+            # Long exit: close below Donchian low or loss of 1d trend
+            if close[i] < lowest_low[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: angle flattens (> -10) indicating loss of momentum
-            if angle_of_descent[i] > -10:
+            # Short exit: close above Donchian high or loss of 1d trend
+            if close[i] > highest_high[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
