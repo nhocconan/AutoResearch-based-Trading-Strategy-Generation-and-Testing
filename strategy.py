@@ -1,13 +1,6 @@
-# 6h_Donchian20_1dTrend_VolumeBreakout
-# Hypothesis: Donchian breakouts on 6h timeframe with 1d trend filter and volume confirmation
-# captures breakout momentum while avoiding false signals in choppy markets.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
-# Volume filter ensures only significant breakouts are traded, reducing whipsaws.
-# Target: 12-37 trades/year per symbol.
-
 #!/usr/bin/env python3
-name = "6h_Donchian20_1dTrend_VolumeBreakout"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,40 +17,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate Camarilla levels for each day
+    camarilla_S3 = np.zeros(len(close_1d))
+    camarilla_R3 = np.zeros(len(close_1d))
+    camarilla_S1 = np.zeros(len(close_1d))
+    camarilla_R1 = np.zeros(len(close_1d))
     
-    # Align 1d EMA50 to 6h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    for i in range(len(close_1d)):
+        if i == 0:
+            camarilla_S3[i] = camarilla_R3[i] = camarilla_S1[i] = camarilla_R1[i] = close_1d[i]
+            continue
+        range_ = high_1d[i-1] - low_1d[i-1]
+        camarilla_S3[i] = close_1d[i-1] - (range_ * 1.1 / 4)
+        camarilla_R3[i] = close_1d[i-1] + (range_ * 1.1 / 4)
+        camarilla_S1[i] = close_1d[i-1] - (range_ * 1.1 / 6)
+        camarilla_R1[i] = close_1d[i-1] + (range_ * 1.1 / 6)
     
-    # Calculate Donchian channels (20-period) on 6h data
-    # Use rolling window with min_periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Align Camarilla levels to 12h timeframe
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S3)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R3)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
     
     # Volume spike detection (20-period average)
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)  # Require 2x average volume for breakout
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 2.0)  # Require strong volume spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = max(50, 20)
+    start_idx = max(20, 20)  # EMA50 and volume MA
     
     for i in range(start_idx, n):
-        # Skip if any required data is not available
-        if np.isnan(ema50_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isclose(close[i], 0) or np.isnan(ema50_1w_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or np.isnan(camarilla_R1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,24 +77,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above Donchian high + above 1d EMA50 + volume spike
-            if close[i] > donchian_high[i] and close[i] > ema50_1d_aligned[i] and vol_spike[i]:
+            # Long: price breaks above R3 with volume spike and weekly uptrend
+            if close[i] > camarilla_R3_aligned[i] and vol_spike[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below Donchian low + below 1d EMA50 + volume spike
-            elif close[i] < donchian_low[i] and close[i] < ema50_1d_aligned[i] and vol_spike[i]:
+            # Short: price breaks below S3 with volume spike and weekly downtrend
+            elif close[i] < camarilla_S3_aligned[i] and vol_spike[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price breaks below Donchian low
-            if close[i] < donchian_low[i]:
+            # Exit long: price breaks below S1 (reversal signal)
+            if close[i] < camarilla_S1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price breaks above Donchian high
-            if close[i] > donchian_high[i]:
+            # Exit short: price breaks above R1 (reversal signal)
+            if close[i] > camarilla_R1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
