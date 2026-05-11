@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_KeltnerBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_1dTrend_VolumeBreakout_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,40 +17,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50) and ATR
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1d = close_1d > ema50_1d
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # ATR(14) on 1d for Keltner channels
-    tr1 = np.maximum(high[1:], close[:-1]) - np.minimum(low[1:], close[:-1])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # Donchian Channel (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Keltner Channels on 6h: EMA20 ± 2*ATR(14)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper_keltner = ema20 + 2 * atr_1d
-    lower_keltner = ema20 - 2 * atr_1d
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for EMA20 and ATR
+    start_idx = 20  # Need enough data for Donchian and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -60,24 +52,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper Keltner + daily uptrend + volume confirmation
-            if close[i] > upper_keltner[i] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Price breaks above Donchian upper + daily uptrend + volume confirmation
+            if close[i] > high_20[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Keltner + daily downtrend + volume confirmation
-            elif close[i] < lower_keltner[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Price breaks below Donchian lower + daily downtrend + volume confirmation
+            elif close[i] < low_20[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price closes below EMA20 OR daily trend turns down
-            if close[i] < ema20[i] or not trend_up_1d_aligned[i]:
+            # Long exit: Price breaks below Donchian lower OR daily trend turns down
+            if close[i] < low_20[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price closes above EMA20 OR daily trend turns up
-            if close[i] > ema20[i] or trend_up_1d_aligned[i]:
+            # Short exit: Price breaks above Donchian upper OR daily trend turns up
+            if close[i] > high_20[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
