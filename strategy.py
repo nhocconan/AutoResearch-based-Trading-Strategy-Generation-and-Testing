@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Supertrend_Trend_4h_1d_Confirm"
-timeframe = "1h"
+name = "6h_WeeklyPivot_DonchianBreakout_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,62 +17,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h trend: Supertrend (ATR-based)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 30:
+    # Get weekly data for pivot and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # ATR for Supertrend
-    tr1 = high_4h[1:] - low_4h[1:]
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # 1d EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Basic upper and lower bands
-    hl2 = (high_4h + low_4h) / 2
-    upper = hl2 + 3 * atr
-    lower = hl2 - 3 * atr
+    # Weekly pivot calculation (previous week)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Supertrend calculation
-    supertrend = np.zeros_like(close_4h)
-    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
+    # Weekly pivot points
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    # R2 = P + (H - L)
+    # S2 = P - (H - L)
+    # R3 = H + 2*(P - L)
+    # S3 = L - 2*(H - P)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + range_1w
+    s2_1w = pivot_1w - range_1w
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    supertrend[0] = upper[0]
-    for i in range(1, len(close_4h)):
-        if close_4h[i] > supertrend[i-1]:
-            supertrend[i] = max(lower[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(upper[i], supertrend[i-1])
-            direction[i] = -1
+    # Align weekly pivot to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # Align 4h Supertrend direction to 1h
-    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
+    # Donchian channel (20 periods) on 6h
+    donchian_period = 20
+    dc_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    dc_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # 1d volume spike: current volume > 2x 24-period average (on 1h data)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_spike = volume > (vol_ma * 2)
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume spike: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = max(50, donchian_period)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(supertrend_dir_aligned[i]) or 
-            np.isnan(volume_spike[i]) or 
-            np.isnan(in_session[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,36 +91,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if in_session[i]:
-            if position == 0:
-                # Long: 4h uptrend AND volume spike
-                if supertrend_dir_aligned[i] == 1 and volume_spike[i]:
-                    signals[i] = 0.20
-                    position = 1
-                # Short: 4h downtrend AND volume spike
-                elif supertrend_dir_aligned[i] == -1 and volume_spike[i]:
-                    signals[i] = -0.20
-                    position = -1
-            elif position == 1:
-                # Long exit: 4h downtrend
-                if supertrend_dir_aligned[i] == -1:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20  # maintain position
-            elif position == -1:
-                # Short exit: 4h uptrend
-                if supertrend_dir_aligned[i] == 1:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20  # maintain position
-        else:
-            # Outside session: flatten
-            if position != 0:
+        if position == 0:
+            # Long: price breaks above Donchian high AND above weekly pivot AND uptrend AND volume spike
+            if close[i] > dc_high[i] and close[i] > pivot_aligned[i] and close[i] > ema_1d_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below Donchian low AND below weekly pivot AND downtrend AND volume spike
+            elif close[i] < dc_low[i] and close[i] < pivot_aligned[i] and close[i] < ema_1d_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Long exit: price falls below Donchian low OR below weekly pivot OR trend change
+            if close[i] < dc_low[i] or close[i] < pivot_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
+                signals[i] = 0.25  # maintain position
+        elif position == -1:
+            # Short exit: price rises above Donchian high OR above weekly pivot OR trend change
+            if close[i] > dc_high[i] or close[i] > pivot_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25  # maintain position
     
     return signals
