@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -26,12 +26,12 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for each 1d bar
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.250
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.250
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.083
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.083
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # 1d trend filter (EMA 34)
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -47,7 +47,7 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,24 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 + above 1d EMA + volume
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]:
+            # Long: break above R1 + above 1d EMA + volume
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3 + below 1d EMA + volume
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]:
+            # Short: break below S1 + below 1d EMA + volume
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S3 or below 1d EMA
-            if close[i] < camarilla_s3_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit long: break below S1 or below 1d EMA
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R3 or above 1d EMA
-            if close[i] > camarilla_r3_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit short: break above R1 or above 1d EMA
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
