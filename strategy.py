@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
+name = "4h_Donchian20_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,50 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily close for Camarilla and EMA34
+    # Donchian channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # 1-day trend filter: EMA(34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    trend_up = close > ema_34_1d_aligned
+    trend_down = close < ema_34_1d_aligned
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate previous day's Camarilla levels (shifted by 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close[0] = np.nan
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    
-    # Camarilla R1, S1, R3, S3
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 4
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 4
-    
-    # Align Camarilla levels to 4h
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Daily EMA34 for trend filter
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume spike detection on 4h
+    # Volume spike filter: volume > 2.0 * 20-period volume MA
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_spike = volume > 2.0 * volume_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 34  # ensure EMA34 and Camarilla ready
+    start_idx = max(20, 34)  # Donchian(20) and EMA(34)
     
     for i in range(start_idx, n):
-        if np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or np.isnan(ema_34_4h[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,24 +49,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close crosses above R1 with volume spike and price > EMA34
-            if close[i] > R1_4h[i] and close[i-1] <= R1_4h[i-1] and volume_spike[i] and close[i] > ema_34_4h[i]:
+            # Long breakout: price > upper band + uptrend + volume spike
+            if close[i] > highest_high[i] and trend_up[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close crosses below S1 with volume spike and price < EMA34
-            elif close[i] < S1_4h[i] and close[i-1] >= S1_4h[i-1] and volume_spike[i] and close[i] < ema_34_4h[i]:
+            # Short breakdown: price < lower band + downtrend + volume spike
+            elif close[i] < lowest_low[i] and trend_down[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close crosses below S1
-            if close[i] < S1_4h[i] and close[i-1] >= S1_4h[i-1]:
+            # Exit long: price < lower band OR trend reversal
+            if close[i] < lowest_low[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close crosses above R1
-            if close[i] > R1_4h[i] and close[i-1] <= R1_4h[i-1]:
+            # Exit short: price > upper band OR trend reversal
+            if close[i] > highest_high[i] or not trend_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
