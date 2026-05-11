@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,24 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Donchian(20) for trend filter (previous day)
+    # 1d Camarilla pivot levels (previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Donchian channels (20-period)
-    donchian_high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for each 1d bar
+    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.083
+    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.083
     
-    # Align 1d Donchian to 6h timeframe (use previous day's levels)
-    donchian_high_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_high_20)
-    donchian_low_20_aligned = align_htf_to_ltf(prices, df_1d, donchian_low_20)
+    # Align Camarilla levels to 12h timeframe (use previous day's levels)
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 6h Donchian(20) breakout levels (current period)
-    donchian_high_6h = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low_6h = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 1d trend filter (EMA 34)
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Volume filter (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -43,11 +44,10 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(donchian_high_6h[i]) or np.isnan(donchian_low_6h[i]) or \
-           np.isnan(donchian_high_20_aligned[i]) or np.isnan(donchian_low_20_aligned[i]):
+        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -56,24 +56,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above 6h Donchian high + above 1d Donchian high + volume
-            if close[i] > donchian_high_6h[i] and close[i] > donchian_high_20_aligned[i] and vol_filter[i]:
+            # Long: break above R1 + above 1d EMA + volume
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below 6h Donchian low + below 1d Donchian low + volume
-            elif close[i] < donchian_low_6h[i] and close[i] < donchian_low_20_aligned[i] and vol_filter[i]:
+            # Short: break below S1 + below 1d EMA + volume
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below 6h Donchian low
-            if close[i] < donchian_low_6h[i]:
+            # Exit long: break below S1 or below 1d EMA
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above 6h Donchian high
-            if close[i] > donchian_high_6h[i]:
+            # Exit short: break above R1 or above 1d EMA
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
