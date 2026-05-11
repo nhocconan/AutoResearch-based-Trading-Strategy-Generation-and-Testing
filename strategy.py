@@ -1,79 +1,145 @@
 #!/usr/bin/env python3
 """
-6h_Premium_Discount_Equilibrium
-Hypothesis: Mean reversion to weekly VWAP (fair value) with institutional bias detection.
-Long when price < weekly VWAP AND institutional buying pressure (delta > 0).
-Short when price > weekly VWAP AND institutional selling pressure (delta < 0).
-Uses 12h EMA50 trend filter to avoid counter-trend trades in strong moves.
-Volume confirmation ensures institutional participation.
-Designed for low frequency (15-30 trades/year) by requiring confluence of value, 
-momentum, and volume. Works in bull/bear by fading extremes to weekly equilibrium.
+4h_1d_SuperTrend_Keltner_Channel_Breakout
+Hypothesis: Uses SuperTrend from daily timeframe for trend direction, with price breaking above/below
+Keltner Channel on 4h chart as entry signal. Requires volume confirmation. Designed to work in both
+bull and bear markets by following higher-timeframe trend while using lower timeframe for precise
+entries and exits. Targets low trade frequency (15-40/year) via SuperTrend filter and Keltner breakout.
 """
 
-name = "6h_Premium_Discount_Equilibrium"
-timeframe = "6h"
+name = "4h_1d_SuperTrend_Keltner_Channel_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_vwap(high, low, close, volume):
-    """Calculate VWAP from typical price and volume"""
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = typical_price * volume
-    vwap_denominator = volume
-    return vwap_numerator, vwap_denominator
+def calculate_supertrend(high, low, close, period=10, multiplier=3):
+    """Calculate SuperTrend indicator"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # First TR value (set to high-low)
+    tr[0] = tr1[0]
+    
+    # Average True Range
+    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + multiplier * atr
+    basic_lb = (high + low) / 2 - multiplier * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(close)
+    final_lb = np.zeros_like(close)
+    
+    # Initialize first values
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    
+    for i in range(1, len(close)):
+        # Final Upper Band
+        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        # Final Lower Band
+        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+    
+    # SuperTrend
+    supertrend = np.zeros_like(close)
+    for i in range(len(close)):
+        if i == 0:
+            supertrend[i] = final_ub[i]
+        elif supertrend[i-1] == final_ub[i-1] and close[i] <= final_ub[i]:
+            supertrend[i] = final_ub[i]
+        elif supertrend[i-1] == final_ub[i-1] and close[i] > final_ub[i]:
+            supertrend[i] = final_lb[i]
+        elif supertrend[i-1] == final_lb[i-1] and close[i] >= final_lb[i]:
+            supertrend[i] = final_lb[i]
+        elif supertrend[i-1] == final_lb[i-1] and close[i] < final_lb[i]:
+            supertrend[i] = final_ub[i]
+    
+    # Trend direction: 1 for uptrend, -1 for downtrend
+    trend = np.where(supertrend <= close, 1, -1)
+    
+    return supertrend, trend, atr
+
+def calculate_keltner_channel(high, low, close, period=20, multiplier=2):
+    """Calculate Keltner Channel"""
+    # Typical Price
+    tp = (high + low + close) / 3
+    
+    # EMA of Typical Price
+    ema_tp = pd.Series(tp).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Average True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+    
+    # Upper and Lower Bands
+    upper = ema_tp + multiplier * atr
+    lower = ema_tp - multiplier * atr
+    
+    return upper, lower, ema_tp
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly VWAP for Fair Value ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # --- Daily SuperTrend for Trend Filter ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    vwap_num, vwap_den = calculate_vwap(
-        df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, df_1w['volume'].values
+    supertrend_1d, trend_1d, atr_1d = calculate_supertrend(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
     )
-    # Cumulative VWAP
-    cum_num = np.nancumsum(vwap_num)
-    cum_den = np.nancumsum(vwap_den)
-    vwap_1w = np.divide(cum_num, cum_den, out=np.full_like(cum_num, np.nan), where=cum_den!=0)
     
-    vwap_1w_6h = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # Align daily SuperTrend to 4h timeframe
+    supertrend_1d_4h = align_htf_to_ltf(prices, df_1d, supertrend_1d)
+    trend_1d_4h = align_htf_to_ltf(prices, df_1d, trend_1d)
+    atr_1d_4h = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # --- 12h EMA50 Trend Filter ---
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # --- 4h Keltner Channel ---
+    kc_upper, kc_lower, kc_middle = calculate_keltner_channel(
+        high, low, close, period=20, multiplier=2
+    )
     
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_6h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # --- Institutional Pressure via Delta (buyer - seller volume) ---
-    # Approximate using close relative to range: if close > midpoint, buying pressure
-    # This is a proxy for delta when true bid/ask volume unavailable
-    midpoint = (high + low) / 2.0
-    buying_pressure = close > midpoint  # True when closing in upper half
+    # --- Volume Spike Detection (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(vwap_1w_6h[i]) or np.isnan(ema_50_12h_6h[i])):
+        if (np.isnan(supertrend_1d_4h[i]) or np.isnan(trend_1d_4h[i]) or 
+            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
+            np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -82,36 +148,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Value zone: distance from weekly VWAP
-        vwap_dist_pct = (close[i] - vwap_1w_6h[i]) / vwap_1w_6h[i]
-        
-        # Trend filter: price relative to 12h EMA50
-        above_ema = close[i] > ema_50_12h_6h[i]
-        
-        # Institutional pressure confirmation
-        buying = buying_pressure[i]
+        # Volume confirmation threshold
+        volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: discount to weekly VWAP + buying pressure + below EMA (avoid chasing)
-            if vwap_dist_pct < -0.005 and buying and not above_ema:  # >0.5% below VWAP
+            # Long: uptrend + price breaks above Keltner upper + volume
+            if (trend_1d_4h[i] == 1 and 
+                close[i] > kc_upper[i] and 
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: premium to weekly VWAP + selling pressure + above EMA
-            elif vwap_dist_pct > 0.005 and not buying and above_ema:  # >0.5% above VWAP
+            # Short: downtrend + price breaks below Keltner lower + volume
+            elif (trend_1d_4h[i] == -1 and 
+                  close[i] < kc_lower[i] and 
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when price returns to VWAP equilibrium or trend fails
+            # Exit conditions: trend reversal or price returns to middle
             if position == 1:
-                # Exit long: price crosses VWAP OR strong selling pressure
-                if vwap_dist_pct > -0.002 or not buying:  # Near VWAP or selling pressure
+                # Exit long: trend turns down OR price closes below middle
+                if trend_1d_4h[i] == -1 or close[i] < kc_middle[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses VWAP OR strong buying pressure
-                if vwap_dist_pct < 0.002 or buying:  # Near VWAP or buying pressure
+                # Exit short: trend turns up OR price closes above middle
+                if trend_1d_4h[i] == 1 or close[i] > kc_middle[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
