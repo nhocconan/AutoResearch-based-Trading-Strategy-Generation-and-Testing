@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 1d_WeeklySupportResistance_Breakout_Volume
-# Hypothesis: Weekly support/resistance levels act as strong barriers in BTC/ETH.
-# Price breaking above weekly resistance with volume surge indicates bullish momentum,
-# while breaking below weekly support with volume surge indicates bearish momentum.
-# Weekly timeframe reduces noise and captures major trend shifts. Volume confirmation
-# filters false breakouts. Designed for low trade frequency (<25/year) to minimize fee drag.
-# Works in bull markets (breakouts continue) and bear markets (breakdowns accelerate).
+# 6h_ElderRay_Alligator_TrendFilter
+# Hypothesis: Elder Ray (Bull/Bear Power) combined with Williams Alligator acts as a robust trend filter.
+# Bull Power > 0 and Bear Power < 0 with price above Alligator teeth indicates strong uptrend.
+# Bear Power < 0 and Bull Power > 0 with price below Alligator teeth indicates strong downtrend.
+# Uses 1-day EMA13 for Alligator (Jaw, Teeth, Lip) and 13-period EMA for Elder Ray power calculation.
+# Designed for low trade frequency (~20-40/year) to minimize fee drift. Works in both bull and bear markets
+# by requiring strong alignment of price, momentum, and trend structure before entering.
 
-name = "1d_WeeklySupportResistance_Breakout_Volume"
-timeframe = "1d"
+name = "6h_ElderRay_Alligator_TrendFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,84 +20,86 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for support/resistance levels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Elder Ray and Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 6OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # --- Weekly support/resistance from previous week ---
-    prev_week_high = df_1w['high'].values
-    prev_week_low = df_1w['low'].values
-    prev_week_close = df_1w['close'].values
+    # --- Daily EMA13 for Alligator (Jaw, Teeth, Lip) ---
+    close_1d = df_1d['close'].values
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema8 = pd.Series(close_1d).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema5 = pd.Series(close_1d).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    weekly_range = prev_week_high - prev_week_low
+    # Alligator lines: Jaw (13), Teeth (8), Lip (5)
+    jaw = ema13
+    teeth = ema8
+    lips = ema5
     
-    # Weekly resistance (R1) and support (S1) - using classic pivot formula
-    # R1 = 2*P - L, S1 = 2*P - H where P = (H+L+C)/3
-    weekly_pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - prev_week_low
-    weekly_s1 = 2 * weekly_pivot - prev_week_high
+    # Align Alligator lines to 6h
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
-    # Align weekly levels to daily
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+    # --- Elder Ray Power: Bull Power = High - EMA13, Bear Power = Low - EMA13 ---
+    bull_power = high - ema13  # High minus EMA13 (using daily EMA13)
+    bear_power = low - ema13   # Low minus EMA13
     
-    # --- Volume confirmation (2.0x 20-day average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Elder Ray powers to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # --- ATR for stoploss ---
-    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
-    tr2 = np.absolute(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # --- Trend strength filter: ADX-like using EMA crossover (Teeth > Jaw = uptrend) ---
+    # We'll use teeth > jaw as bullish trend, teeth < jaw as bearish trend
+    bullish_trend = teeth_aligned > jaw_aligned
+    bearish_trend = teeth_aligned < jaw_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Warmup
-    start_idx = 30
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
-        
         if position == 0:
-            # Long: price breaks above weekly resistance with volume surge
-            if close[i] > weekly_r1_aligned[i] and volume_surge:
+            # Long: Bull Power > 0, Bear Power < 0, price above Teeth, bullish trend
+            if (bull_power_aligned[i] > 0 and 
+                bear_power_aligned[i] < 0 and 
+                close[i] > teeth_aligned[i] and 
+                bullish_trend[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly support with volume surge
-            elif close[i] < weekly_s1_aligned[i] and volume_surge:
+            # Short: Bear Power < 0, Bull Power > 0, price below Teeth, bearish trend
+            elif (bear_power_aligned[i] < 0 and 
+                  bull_power_aligned[i] > 0 and 
+                  close[i] < teeth_aligned[i] and 
+                  bearish_trend[i]):
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price drops below weekly support OR 2.5*ATR trailing stop
-                if close[i] < weekly_s1_aligned[i] or close[i] < high[i] - 2.5 * atr[i]:
+                # Exit long: Bear Power >= 0 OR price crosses below Teeth
+                if bear_power_aligned[i] >= 0 or close[i] < teeth_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above weekly resistance OR 2.5*ATR trailing stop
-                if close[i] > weekly_r1_aligned[i] or close[i] > low[i] + 2.5 * atr[i]:
+                # Exit short: Bull Power <= 0 OR price crosses above Teeth
+                if bull_power_aligned[i] <= 0 or close[i] > teeth_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
