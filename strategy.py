@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_1dTrend_With_Volume"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_1dTrend_VolumeSqueeze"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +17,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla pivots
+    # Get 1d data for trend filter and volatility (ATR)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 50:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA20 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=20, min_periods=20).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Get 1d data for Camarilla pivots (from previous 1d bar)
+    # Calculate 1d ATR(14) for Keltner channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d - low_1d, np.abs(high_1d - np.roll(close_1d, 1)))
+    tr2 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high_1d[0] - low_1d[0]  # first period
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Previous 1d bar's range
-    range_1d = high_1d - low_1d
+    # Calculate 4h EMA20 for Keltner center line
+    ema_20 = pd.Series(close).ewm(span=20, min_periods=20).mean().values
     
-    # Calculate Camarilla R1 and S1 levels
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
+    # Calculate Keltner upper and lower bands (2x ATR multiplier)
+    keltner_upper = ema_20 + 2 * atr_1d_aligned
+    keltner_lower = ema_20 - 2 * atr_1d_aligned
     
-    # Align Camarilla levels to 12h timeframe (using previous 1d bar's values)
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume squeeze: current volume < 0.5x 20-period average (low volatility breakout setup)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_squeeze = volume < (vol_ma * 0.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,8 +58,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_squeeze[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,24 +68,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 1d EMA50 (uptrend) AND volume surge
-            if close[i] > r1_12h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
+            # Long: price breaks above upper Keltner band AND above 1d EMA20 (uptrend) AND volume squeeze (volatility contraction before expansion)
+            if close[i] > keltner_upper[i] and close[i] > ema_1d_aligned[i] and volume_squeeze[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND below 1d EMA50 (downtrend) AND volume surge
-            elif close[i] < s1_12h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
+            # Short: price breaks below lower Keltner band AND below 1d EMA20 (downtrend) AND volume squeeze
+            elif close[i] < keltner_lower[i] and close[i] < ema_1d_aligned[i] and volume_squeeze[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below 1d EMA50 (trend change)
-            if close[i] < s1_12h[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price falls below EMA20 OR below lower Keltner band (mean reversion or trend change)
+            if close[i] < ema_20[i] or close[i] < keltner_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above 1d EMA50 (trend change)
-            if close[i] > r1_12h[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price rises above EMA20 OR above upper Keltner band (mean reversion or trend change)
+            if close[i] > ema_20[i] or close[i] > keltner_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
