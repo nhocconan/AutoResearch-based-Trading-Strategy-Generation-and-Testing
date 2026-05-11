@@ -1,12 +1,6 @@
-# Based on extensive testing, I'm focusing on a 4h strategy with strong entry conditions to limit trades.
-# The hypothesis: A 4h Donchian breakout combined with 1d trend filter and volume confirmation
-# will generate ~30-50 trades/year with sufficient edge in both bull and bear markets.
-# The 1d trend filter adapts to market regime, while volume confirmation ensures breakout strength.
-# Entry/exit logic is designed to be simple yet effective, avoiding overtrading.
-
 #!/usr/bin/env python3
-name = "4h_Donchian_Trend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -23,48 +17,65 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter
+    # Get daily and weekly data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 20 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
+    # Weekly pivot points (using previous week)
+    prev_week_high = df_1w['high'].shift(1).values
+    prev_week_low = df_1w['low'].shift(1).values
+    prev_week_close = df_1w['close'].shift(1).values
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3
+    r1 = 2 * pivot - prev_week_low
+    s1 = 2 * pivot - prev_week_high
+    r2 = pivot + (prev_week_high - prev_week_low)
+    s2 = pivot - (prev_week_high - prev_week_low)
+    r3 = r2 + (r1 - s1)
+    s3 = s2 - (r1 - s1)
+    
+    # Daily trend filter (EMA34 > EMA89)
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1d = ema50_1d > np.roll(ema50_1d, 1)  # Rising EMA50
-    trend_down_1d = ema50_1d < np.roll(ema50_1d, 1)  # Falling EMA50
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
+    trend_up_1d = ema34_1d > ema89_1d
+    trend_down_1d = ema34_1d < ema89_1d
     
-    # Calculate 4h Donchian channels (20-period)
-    donchian_len = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    
-    for i in range(donchian_len - 1, n):
-        highest_high[i] = np.max(high[i-donchian_len+1:i+1])
-        lowest_low[i] = np.min(low[i-donchian_len+1:i+1])
-    
-    # Calculate 20-period volume average for confirmation
-    vol_ma20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma20[i] = np.mean(volume[i-19:i+1])
-    # For early periods, use available data
-    for i in range(1, 20):
-        vol_ma20[i] = np.mean(volume[:i+1])
-    
-    # Align 1d trend to 4h
+    # Align all to 12h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
+    
+    # Volume filter: current volume > 2.0x 50-period average
+    vol_ma50 = np.zeros(n)
+    vol_sum = 0.0
+    for i in range(n):
+        vol_sum += volume[i]
+        if i < 50:
+            vol_ma50[i] = vol_sum / (i + 1)
+        else:
+            vol_sum -= volume[i - 50]
+            vol_ma50[i] = vol_sum / 50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Ensure we have enough data
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma20[i]) or np.isnan(trend_up_aligned[i]) or 
-            np.isnan(trend_down_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(vol_ma50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,31 +84,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian upper band in uptrend with volume surge
-            if (close[i] > highest_high[i] and 
+            # Long: price breaks above R3 in weekly uptrend with volume surge
+            if (close[i] > r3_aligned[i] and 
                 trend_up_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = 0.25
+                volume[i] > 2.0 * vol_ma50[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below Donchian lower band in downtrend with volume surge
-            elif (close[i] < lowest_low[i] and 
+            # Short: price breaks below S3 in weekly downtrend with volume surge
+            elif (close[i] < s3_aligned[i] and 
                   trend_down_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -0.25
+                  volume[i] > 2.0 * vol_ma50[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price falls below Donchian lower band or trend turns down
-            if (close[i] < lowest_low[i] or not trend_up_aligned[i]):
+            # Long exit: price falls below R1 or weekly trend changes
+            if (close[i] < r1_aligned[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: price rises above Donchian upper band or trend turns up
-            if (close[i] > highest_high[i] or not trend_down_aligned[i]):
+            # Short exit: price rises above S1 or weekly trend changes
+            if (close[i] > s1_aligned[i] or not trend_down_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
