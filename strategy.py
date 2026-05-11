@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA50_Trend_Volume"
-timeframe = "4h"
+name = "6h_ParabolicSAR_1dTrend_VolumeFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 1d data ONCE for trend and pivot levels
+    # Load 1d data ONCE for trend and SAR
     df_1d = get_htf_data(prices, '1d')
     
-    # 2. 1d EMA50 for trend filter (more responsive than EMA200)
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 3. Calculate daily high/low/close for Camarilla levels
+    # Parabolic SAR calculation (AF=0.02, max=0.2)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 4. Camarilla levels: R1, S1 (inner levels for tighter entries)
-    hl_range = high_1d - low_1d
-    r1 = close_1d + hl_range * 1.09
-    s1 = close_1d - hl_range * 1.09
+    # Initialize SAR array
+    sar = np.zeros_like(close_1d)
+    trend = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
+    af = 0.02
+    max_af = 0.2
     
-    # 5. Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Set initial values
+    sar[0] = low_1d[0]
+    ep = high_1d[0]  # Extreme point
+    trend[0] = 1
     
-    # 6. Volume filter: 20-period EMA for spike detection
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    for i in range(1, len(close_1d)):
+        if trend[i-1] == 1:  # Uptrend
+            sar[i] = sar[i-1] + af * (ep - sar[i-1])
+            if low_1d[i] < sar[i]:  # Trend reversal
+                trend[i] = -1
+                sar[i] = ep
+                ep = low_1d[i]
+                af = 0.02
+            else:
+                trend[i] = 1
+                if high_1d[i] > ep:
+                    ep = high_1d[i]
+                    af = min(af + 0.02, max_af)
+                else:
+                    af = min(af + 0.02, max_af)
+        else:  # Downtrend
+            sar[i] = sar[i-1] + af * (ep - sar[i-1])
+            if high_1d[i] > sar[i]:  # Trend reversal
+                trend[i] = 1
+                sar[i] = ep
+                ep = high_1d[i]
+                af = 0.02
+            else:
+                trend[i] = -1
+                if low_1d[i] < ep:
+                    ep = low_1d[i]
+                    af = min(af + 0.02, max_af)
+                else:
+                    af = min(af + 0.02, max_af)
     
-    # 7. Fixed position size to avoid churn
+    # Align SAR and trend to 6h
+    sar_aligned = align_htf_to_ltf(prices, df_1d, sar)
+    trend_aligned = align_htf_to_ltf(prices, df_1d, trend)
+    
+    # Volume filter: 24-period EMA for spike detection (4 days on 6h chart)
+    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
+    volume_ok = volume > vol_ema24 * 1.5
+    
+    # Fixed position size
     position_size = 0.25
     
     signals = np.zeros(n)
@@ -53,8 +85,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(sar_aligned[i]) or np.isnan(trend_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -64,32 +96,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema50 = close[i] > ema50_1d_aligned[i]
-        price_below_ema50 = close[i] < ema50_1d_aligned[i]
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        price_above_sar = close[i] > sar_aligned[i]
+        price_below_sar = close[i] < sar_aligned[i]
+        uptrend = trend_aligned[i] == 1
+        downtrend = trend_aligned[i] == -1
         
         if position == 0:
-            # Long: Price breaks above R1 + above 1d EMA50 + volume spike
-            if breakout_long and price_above_ema50 and volume_ok[i]:
+            # Long: Price above SAR + uptrend + volume spike
+            if price_above_sar and uptrend and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S1 + below 1d EMA50 + volume spike
-            elif breakout_short and price_below_ema50 and volume_ok[i]:
+            # Short: Price below SAR + downtrend + volume spike
+            elif price_below_sar and downtrend and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit conditions
             if position == 1:
-                # Exit: Price crosses below S1 OR trend reverses
-                if close[i] < s1_aligned[i] or close[i] < ema50_1d_aligned[i]:
+                # Exit: Price crosses below SAR OR trend reverses to downtrend
+                if price_below_sar or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R1 OR trend reverses
-                if close[i] > r1_aligned[i] or close[i] > ema50_1d_aligned[i]:
+                # Exit: Price crosses above SAR OR trend reverses to uptrend
+                if price_above_sar or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
