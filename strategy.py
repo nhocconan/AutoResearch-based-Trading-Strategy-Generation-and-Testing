@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,28 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for calculations (1d timeframe)
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
+    # Calculate Camarilla levels (R3, S3) from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate previous day's Camarilla levels (R3, S3)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    range_val = prev_high - prev_low
+    # Previous day's Camarilla levels
+    R3 = np.full(len(high_1d), np.nan)
+    S3 = np.full(len(high_1d), np.nan)
     
-    # R3 = prev_close + (range * 1.1 / 4), S3 = prev_close - (range * 1.1 / 4)
-    R3 = prev_close + range_val * 1.1 / 4
-    S3 = prev_close - range_val * 1.1 / 4
-    
-    # Set first day to NaN (no previous day)
-    R3[0] = np.nan
-    S3[0] = np.nan
+    for i in range(1, len(high_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        R3[i] = prev_close + range_val * 1.1 / 4
+        S3[i] = prev_close - range_val * 1.1 / 4
     
     # Get weekly trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -49,35 +48,31 @@ def generate_signals(prices):
     ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     trend_up = close_1w > ema20
     
-    # Align daily indicators to 1d timeframe (they are already daily)
-    # For 1d timeframe, we use previous day's values for today's signal
-    R3_today = np.roll(R3, 1)  # Yesterday's R3 for today's signal
-    S3_today = np.roll(S3, 1)  # Yesterday's S3 for today's signal
-    R3_today[0] = np.nan
-    S3_today[0] = np.nan
-    
-    # Align weekly trend to daily
+    # Align indicators to 12h timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
     
-    # Volume moving average (20-period) for confirmation
-    vol_ma20 = np.zeros(n)
+    # Volume moving average (10-period) for confirmation
+    vol_ma10 = np.full(n, np.nan)
     for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        if i < 10:
+            if i > 0:
+                vol_ma10[i] = np.mean(volume[:i+1])
         else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+            vol_ma10[i] = np.mean(volume[i-9:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for indicators
+    start_idx = max(20, 10)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_today[i]) or 
-            np.isnan(S3_today[i]) or
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
             np.isnan(trend_up_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+            np.isnan(vol_ma10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,27 +82,27 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R3 + uptrend + volume confirmation
-            if (close[i] > R3_today[i] and 
+            if (close[i] > R3_aligned[i] and 
                 trend_up_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+                volume[i] > 1.5 * vol_ma10[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 + downtrend + volume confirmation
-            elif (close[i] < S3_today[i] and 
+            elif (close[i] < S3_aligned[i] and 
                   not trend_up_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+                  volume[i] > 1.5 * vol_ma10[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S3 or trend changes
-            if (close[i] < S3_today[i] or not trend_up_aligned[i]):
+            if (close[i] < S3_aligned[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above R3 or trend changes
-            if (close[i] > R3_today[i] or trend_up_aligned[i]):
+            if (close[i] > R3_aligned[i] or trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
