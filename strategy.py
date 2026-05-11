@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Weekly_Pivot_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,63 +17,87 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for pivot levels and trend
+    # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1w = close_1w > ema50_1w
     
-    # Calculate weekly pivot points (standard formula)
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
-    r2 = pivot + (high_1w - low_1w)
-    s2 = pivot - (high_1w - low_1w)
-    r3 = high_1w + 2 * (pivot - low_1w)
-    s3 = low_1w - 2 * (high_1w - pivot)
-    
-    # Weekly trend: close above/below 20-period EMA
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up_1w = close_1w > ema20_1w
-    
-    # Get daily data for volume confirmation
+    # Get daily data for weekly range and volatility
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align all weekly indicators to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    # Weekly ATR(14) for volatility regime (using daily data)
+    tr1 = np.zeros(len(df_1d))
+    tr1[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(df_1d)):
+        tr = high_1d[i] - low_1d[i]
+        tr2 = abs(high_1d[i] - close_1d[i-1])
+        tr3 = abs(low_1d[i] - close_1d[i-1])
+        tr1[i] = max(tr, tr2, tr3)
+    
+    atr14_1d = pd.Series(tr1).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Weekly range for adaptive position sizing
+    weekly_range = high_1d - low_1d
+    range_ma20 = pd.Series(weekly_range).rolling(window=20, min_periods=20).mean().values
+    
+    # Get daily data for Camarilla levels (R3, S3)
+    high_1d_cam = df_1d['high'].values
+    low_1d_cam = df_1d['low'].values
+    close_1d_cam = df_1d['close'].values
+    
+    # Calculate Camarilla levels (R3, S3) from previous day
+    R3 = np.full(len(high_1d_cam), np.nan)
+    S3 = np.full(len(high_1d_cam), np.nan)
+    
+    for i in range(1, len(high_1d_cam)):
+        prev_high = high_1d_cam[i-1]
+        prev_low = low_1d_cam[i-1]
+        prev_close = close_1d_cam[i-1]
+        range_val = prev_high - prev_low
+        if range_val > 0:
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
+    
+    # Align indicators to 12h timeframe
     trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
+    range_ma20_aligned = align_htf_to_ltf(prices, df_1d, range_ma20)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Volume moving average (20-period) for confirmation
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            if i > 0:
+                vol_ma20[i] = np.mean(volume[:i+1])
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)  # Need enough data for indicators
+    start_idx = max(30, 50)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or
-            np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
             np.isnan(trend_up_1w_aligned[i]) or
-            np.isnan(vol_ma20_1d_aligned[i])):
+            np.isnan(atr14_1d_aligned[i]) or
+            np.isnan(range_ma20_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,34 +105,42 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Adaptive position sizing based on volatility regime
+        # Low volatility: smaller position, High volatility: larger position
+        vol_ratio = atr14_1d_aligned[i] / range_ma20_aligned[i] if range_ma20_aligned[i] > 0 else 1.0
+        # Scale position size: 0.15 in low vol, 0.30 in high vol
+        base_size = 0.15 + 0.15 * min(vol_ratio, 1.0)  # Cap at 0.30
+        
         if position == 0:
-            # Long: price breaks above R2 with weekly uptrend and volume confirmation
-            if (close[i] > r2_aligned[i] and 
+            # Long: price breaks above R3 + weekly uptrend + volume confirmation
+            if (close[i] > R3_aligned[i] and 
                 trend_up_1w_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20_1d_aligned[i]):
-                signals[i] = 0.25
+                volume[i] > 1.3 * vol_ma20[i]):
+                signals[i] = base_size
                 position = 1
-            # Short: price breaks below S2 with weekly downtrend and volume confirmation
-            elif (close[i] < s2_aligned[i] and 
+            # Short: price breaks below S3 + weekly downtrend + volume confirmation
+            elif (close[i] < S3_aligned[i] and 
                   not trend_up_1w_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20_1d_aligned[i]):
-                signals[i] = -0.25
+                  volume[i] > 1.3 * vol_ma20[i]):
+                signals[i] = -base_size
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or trend changes
-            if (close[i] < s1_aligned[i] or 
-                not trend_up_1w_aligned[i]):
+            # Long exit: price breaks below S3 or trend changes or volatility spike
+            if (close[i] < S3_aligned[i] or 
+                not trend_up_1w_aligned[i] or
+                atr14_1d_aligned[i] > 2.0 * range_ma20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = base_size
         elif position == -1:
-            # Short exit: price breaks above R1 or trend changes
-            if (close[i] > r1_aligned[i] or 
-                trend_up_1w_aligned[i]):
+            # Short exit: price breaks above R3 or trend changes or volatility spike
+            if (close[i] > R3_aligned[i] or 
+                trend_up_1w_aligned[i] or
+                atr14_1d_aligned[i] > 2.0 * range_ma20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -base_size
     
     return signals
