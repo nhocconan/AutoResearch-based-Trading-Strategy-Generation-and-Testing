@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Direction_RSI_Chop_Filter
-Hypothesis: On daily timeframe, use KAMA for trend direction (adaptive to choppy/trending markets),
-combined with RSI for overbought/oversold conditions and Choppiness Index as regime filter.
-Only trade when KAMA direction aligns with RSI extremes in non-choppy markets (CHOP < 38.2 for trend,
-CHOP > 61.8 for mean reversion). Designed for low frequency (<25/year) to avoid fee drag.
-Works in both bull (trend following) and bear (mean reversion in ranges) markets.
+6h_VWAP_MeanReversion_12hTrend_Filter
+Hypothesis: Price mean-reverts to VWAP in ranging markets but trends with 12h EMA.
+Long when price < VWAP and 12h EMA rising; short when price > VWAP and 12h EMA falling.
+Uses VWAP deviation bands for entry/exit to avoid whipsaws. Designed for low trade frequency.
 """
 
-name = "1d_KAMA_Direction_RSI_Chop_Filter"
-timeframe = "1d"
+name = "6h_VWAP_MeanReversion_12hTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,122 +16,86 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter (higher timeframe)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 34:
         return np.zeros(n)
     
-    close = prices['close'].values
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- KAMA (Kaufman Adaptive Moving Average) ---
-    # Fast EMA period = 2, Slow EMA period = 30
-    fast_end = 2
-    slow_end = 30
+    # --- 12h EMA34 for trend filter ---
+    close_12h = df_12h['close']
+    ema_34_12h = close_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_rising = ema_34_12h > np.roll(ema_34_12h, 1)
+    ema_34_12h_falling = ema_34_12h < np.roll(ema_34_12h, 1)
+    ema_34_12h_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h_rising)
+    ema_34_12h_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h_falling)
     
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # Will be corrected below
+    # --- VWAP calculation (session-based, reset daily) ---
+    # Approximate VWAP using typical price * volume
+    typical_price = (high + low + close) / 3
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    # Avoid division by zero
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
     
-    # Proper ER calculation: ER = |close[i] - close[i-n]| / sum(|close[i] - close[i-1]|) for i-n to i
-    lookback = 10
-    er = np.zeros(n)
-    for i in range(lookback, n):
-        if i >= lookback:
-            price_change = np.abs(close[i] - close[i - lookback])
-            price_volatility = np.sum(np.abs(np.diff(close[i - lookback:i + 1])))
-            if price_volatility > 0:
-                er[i] = price_change / price_volatility
-            else:
-                er[i] = 0
-    # Fill beginning with 0
-    er[:lookback] = 0
-    
-    # Smoothing constants
-    sc = (er * (2/(fast_end + 1) - 2/(slow_end + 1)) + 2/(slow_end + 1)) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
+    # Reset VWAP at midnight UTC (simplified: reset when hour is 0)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    vwap_reset = (hours == 0) & (np.arange(len(hours)) > 0)
+    vwap_cumsum = np.cumsum(typical_price * volume)
+    vol_cumsum = np.cumsum(volume)
+    # Reset cumulative sums at midnight
+    vwap = np.full_like(close, np.nan)
+    vwap[0] = typical_price[0]
     for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        if vwap_reset[i]:
+            vwap[i] = typical_price[i]
+            vwap_cumsum[i] = typical_price[i] * volume[i]
+            vol_cumsum[i] = volume[i]
+        else:
+            vwap_cumsum[i] = vwap_cumsum[i-1] + typical_price[i] * volume[i]
+            vol_cumsum[i] = vol_cumsum[i-1] + volume[i]
+            if vol_cumsum[i] != 0:
+                vwap[i] = vwap_cumsum[i] / vol_cumsum[i]
+            else:
+                vwap[i] = vwap[i-1]
     
-    # --- RSI (14-period) ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[avg_loss == 0] = 100  # When no losses
-    
-    # --- Choppiness Index (14-period) ---
-    # True Range
+    # VWAP bands (1.5 * ATR for dynamic bands)
+    atr_period = 14
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period
+    tr[0] = tr1[0]
+    atr = np.full_like(close, np.nan)
+    atr[atr_period-1] = np.mean(tr[:atr_period])
+    for i in range(atr_period, n):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # ATR (14-period) using Wilder's smoothing
-    atr = np.zeros(n)
-    atr[13] = np.mean(tr[1:15])
-    for i in range(15, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of TR over 14 periods
-    tr_sum = np.zeros(n)
-    for i in range(13, n):
-        if i == 13:
-            tr_sum[i] = np.sum(tr[1:15])
-        else:
-            tr_sum[i] = tr_sum[i-1] - tr[i-14] + tr[i]
-    
-    # Choppiness Index
-    chop = np.zeros(n)
-    for i in range(13, n):
-        if atr[i] > 0 and tr_sum[i] > 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / (atr[i] * 14)) / np.log10(14)
-        else:
-            chop[i] = 50  # Neutral
-    
-    # --- Weekly Trend Filter ---
-    close_1w = df_1w['close'].values
-    if len(close_1w) >= 20:
-        sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-        sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
-        weekly_uptrend = close > sma_20_1w_aligned
-        weekly_downtrend = close < sma_20_1w_aligned
-    else:
-        weekly_uptrend = np.ones(n, dtype=bool)
-        weekly_downtrend = np.zeros(n, dtype=bool)
+    vwap_upper = vwap + 1.5 * atr
+    vwap_lower = vwap - 1.5 * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = max(50, atr_period)
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or invalid
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or
-            np.isnan(chop[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_12h_rising_aligned[i]) or 
+            np.isnan(ema_34_12h_falling_aligned[i]) or
+            np.isnan(vwap[i]) or
+            np.isnan(vwap_upper[i]) or
+            np.isnan(vwap_lower[i])):
+            # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -142,45 +104,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine market regime
-        is_trending = chop[i] < 38.2  # Trending market
-        is_ranging = chop[i] > 61.8   # Ranging/choppy market
+        # Determine trend
+        uptrend = ema_34_12h_rising_aligned[i]
+        downtrend = ema_34_12h_falling_aligned[i]
         
-        # KAMA direction
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Mean reversion signals
+        price_below_vwap = close[i] < vwap[i]
+        price_above_vwap = close[i] > vwap[i]
+        at_lower_band = low[i] <= vwap_lower[i]
+        at_upper_band = high[i] >= vwap_upper[i]
         
         if position == 0:
-            if is_trending:
-                # Trending market: follow KAMA direction with RSI filter
-                if price_above_kama and rsi[i] < 40:  # Pullback in uptrend
-                    signals[i] = 0.25
-                    position = 1
-                elif price_below_kama and rsi[i] > 60:  # Bounce in downtrend
-                    signals[i] = -0.25
-                    position = -1
-            elif is_ranging:
-                # Ranging market: mean reversion at RSI extremes
-                if rsi[i] < 30:  # Oversold
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 70:  # Overbought
-                    signals[i] = -0.25
-                    position = -1
-            # In neutral chop (38.2 <= CHOP <= 61.8), wait for clearer signal
+            if uptrend and price_below_vwap and at_lower_band:
+                # Uptrend: buy dip to VWAP lower band
+                signals[i] = 0.25
+                position = 1
+            elif downtrend and price_above_vwap and at_upper_band:
+                # Downtrend: sell rally to VWAP upper band
+                signals[i] = -0.25
+                position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: RSI overbought or trend change
-                exit_signal = (rsi[i] > 70) or (price_below_kama and is_trending)
+                # Exit long: price reaches VWAP or breaks above upper band
+                exit_signal = (close[i] >= vwap[i]) or (high[i] >= vwap_upper[i] * 1.05)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI oversold or trend change
-                exit_signal = (rsi[i] < 30) or (price_above_kama and is_trending)
+                # Exit short: price reaches VWAP or breaks below lower band
+                exit_signal = (close[i] <= vwap[i]) or (low[i] <= vwap_lower[i] * 0.95)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
