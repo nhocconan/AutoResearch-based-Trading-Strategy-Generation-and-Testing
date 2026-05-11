@@ -1,95 +1,72 @@
 #!/usr/bin/env python3
 """
-4h_ADX_Trend_RSI_MeanReversion_v1
-Hypothesis: Combines ADX trend strength with RSI mean-reversion on 4h timeframe.
-In trending markets (ADX > 25), trades pullbacks to EMA21 in trend direction.
-In ranging markets (ADX < 20), trades RSI extremes (30/70) for mean reversion.
-Uses volume confirmation to filter false signals. Designed for low trade frequency
-(20-30 trades/year) to avoid fee drag while adapting to bull/bear markets.
+1d_1w_WeeklyDonchianBreakout_VolumeTrend
+Hypothesis: Weekly Donchian breakout (20-week) with volume confirmation and 1-week EMA trend filter.
+Trades breakouts in trending markets (EMA20) and mean-reversion at channel bounds in ranging markets.
+Designed for low trade frequency (target: 10-25 trades/year) to avoid fee drag while capturing multi-week trends.
+Works in both bull and bear markets by adapting to trend (breakouts) and range (mean reversion) conditions.
 """
 
-name = "4h_ADX_Trend_RSI_MeanReversion_v1"
-timeframe = "4h"
+name = "1d_1w_WeeklyDonchianBreakout_VolumeTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from math import isnan
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Extract price arrays
+    # Get weekly data for Donchian channels and EMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    # Daily OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- ADX Calculation (14-period) ---
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
+    # --- Weekly EMA20 for trend filter ---
+    close_1w = df_1w['close']
+    ema_20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # --- Weekly Donchian Channels (20-period) ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Smoothed values
-    def _wilder_smoothing(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.nansum(arr[:period]) / period
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Upper channel: highest high of past 20 weeks
+    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Lower channel: lowest low of past 20 weeks
+    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    atr = _wilder_smoothing(tr, 14)
-    plus_di = 100 * _wilder_smoothing(plus_dm, 14) / atr
-    minus_di = 100 * _wilder_smoothing(minus_dm, 14) / atr
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = _wilder_smoothing(dx, 14)
+    # Align to daily (Donchian levels are valid for the entire week)
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
     
-    # --- EMA21 for pullback entries ---
-    close_series = pd.Series(close)
-    ema_21 = close_series.ewm(span=21, adjust=False, min_periods=21).mean().values
-    
-    # --- RSI (14-period) ---
-    delta = np.diff(close)
-    delta = np.insert(delta, 0, 0)  # First element has no delta
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = _wilder_smoothing(gain, 14)
-    avg_loss = _wilder_smoothing(loss, 14)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # --- Volume Confirmation (1.5x 20-period average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    # --- Volume Spike Detection (2.0x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ema.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    bars_since_entry = 0
     
-    # Start after warmup period
-    start_idx = 50
+    # Start after warmup
+    start_idx = 60  # Need enough weekly data
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (isnan(adx[i]) or isnan(ema_21[i]) or isnan(rsi[i]) or 
-            isnan(vol_confirm[i]) or isnan(plus_di[i]) or isnan(minus_di[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(upper_20_aligned[i]) or
+            np.isnan(lower_20_aligned[i]) or
+            np.isnan(vol_spike[i])):
+            # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -98,44 +75,69 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine market regime
-        is_trending = adx[i] > 25
-        is_ranging = adx[i] < 20
+        bars_since_entry += 1
+        
+        # Determine trend based on price vs EMA20
+        price_above_ema = close[i] > ema_20_1w_aligned[i]
+        price_below_ema = close[i] < ema_20_1w_aligned[i]
+        
+        # Breakout signals (price breaks weekly Donchian with volume confirmation)
+        # No minimum distance filter to allow natural breakouts
+        long_breakout = (high[i] > upper_20_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < lower_20_aligned[i]) and vol_spike[i]
+        
+        # Mean reversion at channel bounds (price touches opposite band)
+        # Only in non-trending conditions (price near EMA within 1.0%)
+        near_ema = abs(close[i] - ema_20_1w_aligned[i]) / ema_20_1w_aligned[i] * 100 < 1.0
+        long_reversion = (low[i] <= lower_20_aligned[i]) and near_ema and not vol_spike[i]
+        short_reversion = (high[i] >= upper_20_aligned[i]) and near_ame and not vol_spike[i]
         
         if position == 0:
-            # Look for new entries
-            if is_trending:
-                # Trend mode: trade pullbacks to EMA21
-                if plus_di[i] > minus_di[i]:  # Uptrend
-                    if low[i] <= ema_21[i] and vol_confirm[i]:
-                        signals[i] = 0.25
-                        position = 1
-                else:  # Downtrend
-                    if high[i] >= ema_21[i] and vol_confirm[i]:
-                        signals[i] = -0.25
-                        position = -1
-            elif is_ranging:
-                # Range mode: trade RSI extremes
-                if rsi[i] < 30 and vol_confirm[i]:  # Oversold
+            # Enforce minimum 3-bar hold after entry (prevents immediate reversal)
+            if bars_since_entry < 3:
+                signals[i] = 0.0
+                continue
+                
+            if price_above_ema:
+                # Uptrend: favor long breakouts, avoid shorts
+                if long_breakout:
                     signals[i] = 0.25
                     position = 1
-                elif rsi[i] > 70 and vol_confirm[i]:  # Overbought
+                    bars_since_entry = 0
+            elif price_below_ema:
+                # Downtrend: favor short breakouts, avoid longs
+                if short_breakout:
                     signals[i] = -0.25
                     position = -1
+                    bars_since_entry = 0
+            else:
+                # Near EMA: allow mean reversion at channel bounds
+                if long_reversion:
+                    signals[i] = 0.25
+                    position = 1
+                    bars_since_entry = 0
+                elif short_reversion:
+                    signals[i] = -0.25
+                    position = -1
+                    bars_since_entry = 0
         else:
-            # Manage existing position
+            # Exit conditions
             if position == 1:
-                # Exit long: RSI overbought or trend reversal
-                if rsi[i] > 70 or (plus_di[i] < minus_di[i] and adx[i] > 25):
+                # Exit long: price touches lower band (support) or breaks below EMA
+                exit_signal = (low[i] <= lower_20_aligned[i]) or (close[i] < ema_20_1w_aligned[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI oversold or trend reversal
-                if rsi[i] < 30 or (plus_di[i] > minus_di[i] and adx[i] > 25):
+                # Exit short: price touches upper band (resistance) or breaks above EMA
+                exit_signal = (high[i] >= upper_20_aligned[i]) or (close[i] > ema_20_1w_aligned[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
+                    bars_since_entry = 0
                 else:
                     signals[i] = -0.25
     
