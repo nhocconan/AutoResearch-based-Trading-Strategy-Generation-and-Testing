@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 6h_1d_Williams_VIX_Fix_Signal
-# Hypothesis: Uses Williams VIX Fix (volatility spike detector) on daily timeframe to identify high-volatility regimes.
-# Combines with 6-hour price action: long when price > VWAP and volatility spike, short when price < VWAP and volatility spike.
-# VIX Fix helps identify panic selling or euphoria buying, providing edge in both trending and ranging markets.
-# Target: 20-40 trades/year to minimize fee drag while capturing volatility-driven moves.
+# 12h_1d_Camarilla_R3_S3_Breakout_Trend_Volume
+# Hypothesis: Combines daily trend filter with 12-hour Camarilla R3/S3 breakouts and volume confirmation.
+# In bull markets, daily uptrend + 12h breakout above R3 captures strong momentum.
+# In bear markets, daily downtrend + 12h breakdown below S3 captures accelerated moves.
+# Volume filter ensures breakouts have conviction, reducing false signals.
+# Target: 12-37 trades/year to minimize fee drag while capturing meaningful moves.
 
-name = "6h_1d_Williams_VIX_Fix_Signal"
-timeframe = "6h"
+name = "12h_1d_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,84 +19,84 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1-day data for VIX Fix calculation
+    # Get 1-day data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 22:  # Need at least 22 days for lookback
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily Williams VIX Fix ---
-    # VIX Fix = (Highest Close in lookback - Low) / Highest Close in lookback * 100
-    # We invert it to get a volatility spike signal: higher = more fear
-    lookback = 22
-    highest_close = pd.Series(df_1d['close'].values).rolling(window=lookback, min_periods=lookback).max().values
-    vix_fix = (highest_close - df_1d['low'].values) / highest_close * 100
-    vix_fix_ma = pd.Series(vix_fix).rolling(window=10, min_periods=10).mean().values  # Smooth the signal
+    # --- 1d EMA50 for trend filter ---
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Align daily VIX Fix to 6h
-    vix_fix_aligned = align_htf_to_ltf(prices, df_1d, vix_fix_ma)
+    # --- Daily Camarilla levels (R3, S3) from previous day ---
+    prev_1d_high = df_1d['high'].values
+    prev_1d_low = df_1d['low'].values
+    prev_1d_close = df_1d['close'].values
     
-    # --- 6-hour VWAP for intraday trend ---
-    typical_price = (high + low + close) / 3.0
-    vwap_num = pd.Series(typical_price * volume).cumsum().values
-    vwap_den = pd.Series(volume).cumsum().values
-    vwap = vwap_num / vwap_den
+    camarilla_width = (prev_1d_high - prev_1d_low) * 1.1 / 2.0
+    camarilla_r3 = prev_1d_close + camarilla_width
+    camarilla_s3 = prev_1d_close - camarilla_width
+    
+    # Align daily Camarilla levels to 12h
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # --- Volume confirmation (2x 24-period average on 12h) ---
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for VIX Fix calculation (22 + 10 for smoothing)
-    start_idx = 35
+    # Warmup: enough for 1d EMA50 (50 periods) and 24-period volume MA
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vix_fix_aligned[i]) or
-            np.isnan(vwap[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volatility spike detection: VIX Fix above its 50-period upper band
-        # Using rolling mean + 2*std as dynamic threshold
-        if i >= 50:  # Need enough data for volatility regime detection
-            vix_slice = vix_fix_aligned[start_idx:i+1]
-            if len(vix_slice) >= 20:
-                vix_mean = np.nanmean(vix_slice[-20:])
-                vix_std = np.nanstd(vix_slice[-20:])
-                volatility_threshold = vix_mean + 2.0 * vix_std
-                volatility_spike = vix_fix_aligned[i] > volatility_threshold
-            else:
-                volatility_spike = False
-        else:
-            volatility_spike = False
+        # Volume confirmation
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: volatility spike + price above VWAP (buying panic/dip)
-            if volatility_spike and close[i] > vwap[i]:
+            # Long: price breaks above R3 with volume surge and daily uptrend
+            if (close[i] > camarilla_r3_aligned[i] and 
+                volume_surge and 
+                ema_50_1d_aligned[i] < close[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: volatility spike + price below VWAP (selling euphoria/rally)
-            elif volatility_spike and close[i] < vwap[i]:
+            # Short: price breaks below S3 with volume surge and daily downtrend
+            elif (close[i] < camarilla_s3_aligned[i] and 
+                  volume_surge and 
+                  ema_50_1d_aligned[i] > close[i]):
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: volatility subsides OR price crosses below VWAP
-                if (not volatility_spike) or (close[i] < vwap[i]):
+                # Exit long: price drops below S3 OR daily EMA50 turns down
+                if (close[i] < camarilla_s3_aligned[i] or 
+                    close[i] < ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: volatility subsides OR price crosses above VWAP
-                if (not volatility_spike) or (close[i] > vwap[i]):
+                # Exit short: price rises above R3 OR daily EMA50 turns up
+                if (close[i] > camarilla_r3_aligned[i] or 
+                    close[i] > ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
