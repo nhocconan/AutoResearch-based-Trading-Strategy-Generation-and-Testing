@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
-timeframe = "4h"
+name = "1d_WeeklyDonchianBreakout_TrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,47 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla and EMA
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    # Weekly data for Donchian and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    volume_1w = df_1w['volume'].values
     
-    # Previous day's range
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Weekly Donchian Channel (20-period)
+    upper_20 = np.full_like(high_1w, np.nan)
+    lower_20 = np.full_like(low_1w, np.nan)
     
-    # Camarilla levels (previous day)
-    range_val = prev_high - prev_low
-    R1 = prev_close + (range_val * 1.1 / 12)
-    S1 = prev_close - (range_val * 1.1 / 12)
+    for i in range(20, len(high_1w)):
+        upper_20[i] = np.max(high_1w[i-19:i+1])
+        lower_20[i] = np.min(low_1w[i-19:i+1])
     
-    # 34 EMA on 1d close for trend
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Weekly trend filter (50 EMA)
+    ema50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume spike (20-period average)
+    # Daily volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 1.8)
     
-    # Align all 1d indicators to 4h
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
-    ema_34_4h = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Align weekly indicators to daily
+    upper_20_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_20_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
+    ema50_aligned = align_htf_to_ltf(prices, df_1w, ema50)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)
+    start_idx = 20  # Need enough data for Donchian
     
     for i in range(start_idx, n):
-        if np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(ema_34_4h[i]):
+        if np.isnan(upper_20_aligned[i]) or np.isnan(lower_20_aligned[i]) or np.isnan(ema50_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,27 +62,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: close > R1 + uptrend + volume spike
-            if close[i] > R1_4h[i] and close[i] > ema_34_4h[i] and vol_spike[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above weekly Donchian upper + above weekly EMA50 + volume spike
+            if close[i] > upper_20_aligned[i] and close[i] > ema50_aligned[i] and vol_spike[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: close < S1 + downtrend + volume spike
-            elif close[i] < S1_4h[i] and close[i] < ema_34_4h[i] and vol_spike[i]:
-                signals[i] = -0.25
+            # Short: Price breaks below weekly Donchian lower + below weekly EMA50 + volume spike
+            elif close[i] < lower_20_aligned[i] and close[i] < ema50_aligned[i] and vol_spike[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: close < S1
-            if close[i] < S1_4h[i]:
+            # Exit long: Price closes below weekly Donchian lower
+            if close[i] < lower_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Exit short: close > R1
-            if close[i] > R1_4h[i]:
+            # Exit short: Price closes above weekly Donchian upper
+            if close[i] > upper_20_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
