@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_12hTrend
-# Hypothesis: Captures breakouts with momentum by combining 12h trend direction (EMA200)
-# with Keltner Channel breakouts on 4h, confirmed by volume surge. Works in both bull and bear markets
-# by following the higher timeframe trend. Uses ATR-based stop via position reversal when trend changes.
-# Designed for low trade frequency (<400 total 4h trades) to minimize fee drag.
+# 1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume
+# Hypothesis: Uses 4h Camarilla pivot levels (R1/S1) for breakout entries, filtered by 1d trend (EMA50) and volume surge.
+# Long when 1d EMA50 rising, price breaks above 4h R1 with volume confirmation; short when 1d EMA50 falling, price breaks below 4h S1 with volume.
+# 1h timeframe for precise entry timing, 4h for Camarilla levels, 1d for trend filter.
+# Works in bull markets (riding uptrends) and bear markets (riding downtrends) by following the 1d trend.
+# Volume filter avoids false breakouts; Camarilla levels provide objective support/resistance.
 
-name = "4h_Keltner_Breakout_12hTrend"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -15,87 +16,98 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 12h data for EMA200 trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 200:
+    # Get 4h data for Camarilla pivot calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
+    
+    # Extract price arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 12h EMA200 for trend direction ---
-    close_12h = df_12h['close'].values
-    ema_200_12h = pd.Series(close_12h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema_200_12h_slope = ema_200_12h - np.roll(ema_200_12h, 1)
-    ema_200_12h_slope[0] = 0
-    ema_200_12h_slope = pd.Series(ema_200_12h_slope).ewm(span=5, adjust=False, min_periods=1).mean().values
-    ema_200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h)
-    ema_200_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_200_12h_slope)
+    # --- 1d EMA50 for trend direction ---
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_slope = ema_50_1d - np.roll(ema_50_1d, 1)
+    ema_50_1d_slope[0] = 0
+    ema_50_1d_slope = pd.Series(ema_50_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
+    ema_50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d_slope)
     
-    # --- 4h Keltner Channel (20, 1.5) ---
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr = pd.Series(high - low).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema_20 + 1.5 * atr
-    keltner_lower = ema_20 - 1.5 * atr
+    # --- 4h Camarilla pivot levels (R1, S1) ---
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # --- Volume confirmation (volume > 30-period average) ---
-    vol_ma = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    # Typical price for pivot calculation
+    typical_price_4h = (high_4h + low_4h + close_4h) / 3.0
+    # Camarilla levels
+    camarilla_width = (high_4h - low_4h) * 1.1 / 12.0
+    r1_4h = close_4h + camarilla_width * 1.0  # R1 = C + (H-L)*1.1/12
+    s1_4h = close_4h - camarilla_width * 1.0  # S1 = C - (H-L)*1.1/12
+    
+    # Align Camarilla levels to 1h timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # --- Volume confirmation (volume > 24-period average on 1h) ---
+    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
     vol_surge = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA200 (200) and EMA20/ATR (20)
-    start_idx = 200
+    # Warmup: enough for 1d EMA50 (50) and volume MA (24)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_200_12h_aligned[i]) or
-            np.isnan(ema_200_12h_slope_aligned[i]) or
-            np.isnan(ema_20[i]) or
-            np.isnan(atr[i]) or
-            np.isnan(keltner_upper[i]) or
-            np.isnan(keltner_lower[i])):
+        if (np.isnan(ema_50_1d_slope_aligned[i]) or
+            np.isnan(r1_4h_aligned[i]) or
+            np.isnan(s1_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 12h EMA200 slope
-        uptrend = ema_200_12h_slope_aligned[i] > 0
-        downtrend = ema_200_12h_slope_aligned[i] < 0
+        # Trend direction from 1d EMA50 slope
+        uptrend = ema_50_1d_slope_aligned[i] > 0
+        downtrend = ema_50_1d_slope_aligned[i] < 0
         
         if position == 0:
             if uptrend and vol_surge[i]:
-                # Long: 12h uptrend + volume surge + close above Keltner upper
-                if close[i] > keltner_upper[i]:
-                    signals[i] = 0.25
+                # Long: 1d uptrend + volume surge + price breaks above 4h R1
+                if close[i] > r1_4h_aligned[i]:
+                    signals[i] = 0.20
                     position = 1
             elif downtrend and vol_surge[i]:
-                # Short: 12h downtrend + volume surge + close below Keltner lower
-                if close[i] < keltner_lower[i]:
-                    signals[i] = -0.25
+                # Short: 1d downtrend + volume surge + price breaks below 4h S1
+                if close[i] < s1_4h_aligned[i]:
+                    signals[i] = -0.20
                     position = -1
         else:
             if position == 1:
-                # Exit long: 12h trend turns down OR close below Keltner lower
-                if downtrend or close[i] < keltner_lower[i]:
+                # Exit long: 1d trend turns down OR price breaks below 4h S1
+                if downtrend or close[i] < s1_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: 12h trend turns up OR close above Keltner upper
-                if uptrend or close[i] > keltner_upper[i]:
+                # Exit short: 1d trend turns up OR price breaks above 4h R1
+                if uptrend or close[i] > r1_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
