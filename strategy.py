@@ -1,119 +1,113 @@
 #!/usr/bin/env python3
 """
-1d_Camarilla_Pivot_Breakout_1wTrend_Volume
-Hypothesis: Daily Camarilla pivot breakouts filtered by weekly trend and volume confirmation.
-- Long when price breaks above R3 (prior day) with volume > 20-day average and weekly EMA20 uptrend
-- Short when price breaks below S3 (prior day) with volume > 20-day average and weekly EMA20 downtrend
-- Exit when price returns to opposite pivot (S1 for longs, R1 for shorts)
-Targets 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
-Uses weekly trend filter to avoid counter-trend trades in ranging markets.
+6h_1d_Fisher_Transform_Reversal
+Hypothesis: Ehlers Fisher Transform on 1d closes identifies extreme reversals. 
+Long when Fisher crosses below -1.5 (oversold) with 6h bullish candle.
+Short when Fisher crosses above +1.5 (overbought) with 6h bearish candle.
+Exit when Fisher crosses back through zero.
+Works in both bull/bear markets by capturing mean-reversion swings.
+Target: 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
 """
 
-name = "1d_Camarilla_Pivot_Breakout_1wTrend_Volume"
-timeframe = "1d"
+name = "6h_1d_Fisher_Transform_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_ft_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Fisher Transform
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Daily OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # 6h OHLCV
+    close_6h = prices['close'].values
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
     
-    # --- Weekly Trend Filter: EMA20 ---
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # --- 1d Fisher Transform (Ehlers) ---
+    # Normalize price to [-1, 1] using recent min/max
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # --- Daily Camarilla Pivots (previous day) ---
-    high_1d = high
-    low_1d = low
-    close_1d = close
+    # Calculate median price for smoother input
+    median_price = (high_1d + low_1d) / 2.0
     
-    # Calculate pivots from previous day's data
-    camarilla_high = np.full_like(close_1d, np.nan)
-    camarilla_low = np.full_like(close_1d, np.nan)
-    camarilla_close = np.full_like(close_1d, np.nan)
+    # Normalize to [-1, 1] over 10-period lookback
+    def normalize_series(series, length):
+        highest = pd.Series(series).rolling(window=length, min_periods=length).max().values
+        lowest = pd.Series(series).rolling(window=length, min_periods=length).min().values
+        # Avoid division by zero
+        range_val = highest - lowest
+        range_val = np.where(range_val == 0, 1, range_val)
+        normalized = 2 * ((series - lowest) / range_val) - 1
+        # Clamp to [-0.999, 0.999] to prevent math domain error
+        normalized = np.clip(normalized, -0.999, 0.999)
+        return normalized
     
-    for i in range(1, len(close_1d)):
-        # Use previous day's OHLC to calculate today's pivots
-        camarilla_high[i] = high_1d[i-1]
-        camarilla_low[i] = low_1d[i-1]
-        camarilla_close[i] = close_1d[i-1]
+    normalized_price = normalize_series(median_price, 10)
     
-    # Calculate Camarilla levels
-    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
-    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
-    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
-    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
+    # Fisher Transform: 0.5 * ln((1+x)/(1-x))
+    fish = 0.5 * np.log((1 + normalized_price) / (1 - normalized_price))
     
-    # Align pivots to daily timeframe (already daily, but ensure proper shift)
-    R3_d = align_htf_to_ltf(prices, pd.DataFrame({'close': close_1d}, index=prices.index), R3)
-    S3_d = align_htf_to_ltf(prices, pd.DataFrame({'close': close_1d}, index=prices.index), S3)
-    R1_d = align_htf_to_ltf(prices, pd.DataFrame({'close': close_1d}, index=prices.index), R1)
-    S1_d = align_htf_to_ltf(prices, pd.DataFrame({'close': close_1d}, index=prices.index), S1)
+    # Smooth with 3-period EMA
+    fish_smoothed = pd.Series(fish).ewm(span=3, adjust=False).mean().values
     
-    # --- Volume Confirmation: daily volume > 20-day average ---
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Fisher to 6h timeframe
+    fish_aligned = align_htf_to_ltf(prices, df_1d, fish_smoothed)
+    
+    # --- Entry Conditions ---
+    # Bullish 6h candle: close > open
+    bullish_candle = close_6h > open_6h
+    # Bearish 6h candle: close < open
+    bearish_candle = close_6h < open_6h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 50  # for EMA20 and volume MA
+    # Start after sufficient data for calculations
+    start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(R3_d[i]) or np.isnan(S3_d[i]) or 
-            np.isnan(R1_d[i]) or np.isnan(S1_d[i]) or
-            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
+        # Skip if Fisher is not available
+        if np.isnan(fish_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        trend_up = close[i] > ema20_1w_aligned[i]
-        trend_down = close[i] < ema20_1w_aligned[i]
-        
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma_20[i]
+        fish_val = fish_aligned[i]
+        fish_prev = fish_aligned[i-1] if i > 0 else fish_val
         
         if position == 0:
-            # Look for entries only in direction of weekly trend with volume
-            if close[i] > R3_d[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + weekly uptrend + volume
+            # Long: Fisher crosses below -1.5 (oversold) with bullish candle
+            if fish_prev > -1.5 and fish_val <= -1.5 and bullish_candle[i]:
                 signals[i] = 0.25
                 position = 1
-            elif close[i] < S3_d[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + weekly downtrend + volume
+            # Short: Fisher crosses above +1.5 (overbought) with bearish candle
+            elif fish_prev < 1.5 and fish_val >= 1.5 and bearish_candle[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit when Fisher crosses zero (mean reversion complete)
             if position == 1:
-                # Exit long: price returns to S1 (opposite side)
-                if close[i] <= S1_d[i]:
+                # Exit long: Fisher crosses above zero
+                if fish_prev <= 0 and fish_val > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to R1 (opposite side)
-                if close[i] >= R1_d[i]:
+                # Exit short: Fisher crosses below zero
+                if fish_prev >= 0 and fish_val < 0:
                     signals[i] = 0.0
                     position = 0
                 else:
