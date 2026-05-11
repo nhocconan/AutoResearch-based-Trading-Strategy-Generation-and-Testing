@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "6h"
+name = "4h_Donchian_Breakout_Volume_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,66 +17,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Previous day's Camarilla levels
-    R3 = np.zeros(len(high_1d))
-    S3 = np.zeros(len(high_1d))
-    
-    for i in range(len(high_1d)):
-        if i < 1:
-            R3[i] = np.nan
-            S3[i] = np.nan
-        else:
-            # Camarilla formulas using previous day's range
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            prev_close = close_1d[i-1]
-            range_val = prev_high - prev_low
-            R3[i] = prev_close + range_val * 1.1 / 4
-            S3[i] = prev_close - range_val * 1.1 / 4
-    
-    # Get weekly trend filter
+    # Get weekly data for secondary trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     
+    # Calculate daily EMA(34) for trend
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
+    
+    # Calculate weekly EMA(20) for secondary trend
     close_1w = df_1w['close'].values
-    ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up = close_1w > ema20
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_up_1w = close_1w > ema20_1w
     
-    # Align indicators to 6h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
+    # Calculate Donchian channels (20-period) on 4h data
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
     
-    # Volume moving average (10-period) for confirmation
-    vol_ma10 = np.zeros(n)
     for i in range(n):
-        if i < 10:
-            vol_ma10[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        if i < 20:
+            donchian_high[i] = np.max(high[:i+1]) if i > 0 else high[i]
+            donchian_low[i] = np.min(low[:i+1]) if i > 0 else low[i]
         else:
-            vol_ma10[i] = np.mean(volume[i-9:i+1])
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
+    
+    # Calculate volume moving average (20-period) for confirmation
+    vol_ma20 = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    
+    # Align higher timeframe trends to 4h
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 10)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or
-            np.isnan(vol_ma10[i])):
+        if (np.isnan(trend_up_1d_aligned[i]) or 
+            np.isnan(trend_up_1w_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,28 +79,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + uptrend + volume confirmation
-            if (close[i] > R3_aligned[i] and 
-                trend_up_aligned[i] and 
-                volume[i] > 1.5 * vol_ma10[i]):
+            # Long: price breaks above Donchian high + both trends up + volume confirmation
+            if (close[i] > donchian_high[i] and 
+                trend_up_1d_aligned[i] and 
+                trend_up_1w_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + downtrend + volume confirmation
-            elif (close[i] < S3_aligned[i] and 
-                  not trend_up_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma10[i]):
+            # Short: price breaks below Donchian low + both trends down + volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  not trend_up_1d_aligned[i] and 
+                  not trend_up_1w_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes
-            if (close[i] < S3_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: price breaks below Donchian low or trend changes
+            if (close[i] < donchian_low[i] or 
+                not trend_up_1d_aligned[i] or 
+                not trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes
-            if (close[i] > R3_aligned[i] or trend_up_aligned[i]):
+            # Short exit: price breaks above Donchian high or trend changes
+            if (close[i] > donchian_high[i] or 
+                trend_up_1d_aligned[i] or 
+                trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
