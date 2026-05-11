@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_With_Volume_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,15 +17,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and pivot calculation
+    # Get 1d data for trend filter (using 1d EMA50)
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Get 1d data for Camarilla pivots (from previous 1d bar)
@@ -40,13 +40,13 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
     camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Align Camarilla levels to 12h timeframe (using previous 1d bar's values)
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 4h timeframe (using previous 1d bar's values)
+    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 2.0x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -56,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
             np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,24 +66,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 1d EMA34 (uptrend) AND volume surge
-            if close[i] > r1_12h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R1 AND above 1d EMA50 (uptrend) AND volume surge
+            if close[i] > r1_4h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND below 1d EMA34 (downtrend) AND volume surge
-            elif close[i] < s1_12h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S1 AND below 1d EMA50 (downtrend) AND volume surge
+            elif close[i] < s1_4h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below 1d EMA34 (trend change)
-            if close[i] < s1_12h[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price falls below S1 OR below 1d EMA50 (trend change)
+            if close[i] < s1_4h[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above 1d EMA34 (trend change)
-            if close[i] > r1_12h[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price rises above R1 OR above 1d EMA50 (trend change)
+            if close[i] > r1_4h[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
