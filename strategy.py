@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyDonchianBreakout_20_TrendFilter_Volume"
-timeframe = "1d"
+name = "6h_RSI_Bollinger_Band_Squeeze"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,42 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w Donchian channels (20-period high/low)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    # Calculate Donchian upper/lower: 20-period high/low
-    upper_1w = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
-    lower_1w = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
-    
-    # 1w trend filter: close above/below 20-period EMA
-    close_1w = df_1w['close'].values
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-    trend_up = close > ema_20_1w_aligned
-    
-    # 1d volume filter: volume > 1.5x 20-day average
+    # 1d Bollinger Bands: middle=20, std=2
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
-    vol_1d = df_1d['volume'].values
-    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_filter = volume > 1.5 * vol_ma20_1d_aligned
+    close_1d = df_1d['close'].values
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_middle + 2 * bb_std
+    bb_lower = bb_middle - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    bb_width_ma10 = pd.Series(bb_width).rolling(window=10, min_periods=10).mean().values
+    bb_width_ma10_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ma10)
+    bb_width_threshold = 0.05  # Squeeze threshold
+    
+    # 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 6h Bollinger Bands for entry/exit
+    bb_middle_6h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std_6h = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper_6h = bb_middle_6h + 2 * bb_std_6h
+    bb_lower_6h = bb_middle_6h - 2 * bb_std_6h
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for Donchian and EMA
+    start_idx = 20  # Need enough data for BB and RSI
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(bb_width_ma10_aligned[i]) or
+            np.isnan(bb_upper_6h[i]) or np.isnan(bb_lower_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,25 +66,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Bollinger Squeeze condition: low volatility
+        squeeze = bb_width_ma10_aligned[i] < bb_width_threshold
+        
         if position == 0:
-            # Long: Close above weekly Donchian upper + 1w uptrend + volume filter
-            if close[i] > upper_1w_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: RSI < 30 (oversold) + squeeze + price at lower band
+            if rsi[i] < 30 and squeeze and close[i] <= bb_lower_6h[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below weekly Donchian lower + 1w downtrend + volume filter
-            elif close[i] < lower_1w_aligned[i] and not trend_up[i] and volume_filter[i]:
+            # Short: RSI > 70 (overbought) + squeeze + price at upper band
+            elif rsi[i] > 70 and squeeze and close[i] >= bb_upper_6h[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below weekly Donchian lower or 1w trend down
-            if close[i] < lower_1w_aligned[i] or not trend_up[i]:
+            # Long exit: RSI > 50 or price at upper band
+            if rsi[i] > 50 or close[i] >= bb_upper_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above weekly Donchian upper or 1w trend up
-            if close[i] > upper_1w_aligned[i] or trend_up[i]:
+            # Short exit: RSI < 50 or price at lower band
+            if rsi[i] < 50 or close[i] <= bb_lower_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
