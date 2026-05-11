@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_KAMA_RSI_Trend_Signal_v1"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,70 +9,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Get 1D data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 100:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # KAMA on 1D
+    # Calculate Camarilla pivot levels for previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.zeros_like(close_1d)
-    er[1:] = change[1:] / (volatility + 1e-10)
-    sc = (er * 0.1 + 0.06) ** 2
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    kama_1d = kama
     
-    # RSI on 1D
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate pivot and ranges
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align KAMA and RSI
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # Camarilla levels
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    s3 = close_1d - (range_1d * 1.1 / 4)
     
-    # KAMA trend on 6H
-    change_6h = np.abs(np.diff(close, prepend=close[0]))
-    volatility_6h = np.abs(np.diff(close))
-    er_6h = np.zeros_like(close)
-    er_6h[1:] = change_6h[1:] / (volatility_6h + 1e-10)
-    sc_6h = (er_6h * 0.1 + 0.06) ** 2
-    kama_6h = np.zeros_like(close)
-    kama_6h[0] = close[0]
-    for i in range(1, len(close)):
-        kama_6h[i] = kama_6h[i-1] + sc_6h[i] * (close[i] - kama_6h[i-1])
+    # Align levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: volume > 1.2x 30-period average
-    vol_ma30 = np.zeros(n)
+    # 1D EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = np.zeros(n)
     for i in range(n):
-        if i < 30:
-            vol_ma30[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            vol_ma30[i] = np.mean(volume[i-29:i+1])
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 100
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or 
-            np.isnan(kama_6h[i]) or np.isnan(vol_ma30[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,29 +71,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend direction from 1D KAMA
-        trend_up = close_1d[-1] > kama_1d[-1] if len(close_1d) > 0 else False  # Simplified for alignment
-        trend_down = close_1d[-1] < kama_1d[-1] if len(close_1d) > 0 else False
-        
         if position == 0:
-            # Long: price > 1D KAMA, RSI > 50, volume surge
-            if close[i] > kama_aligned[i] and rsi_aligned[i] > 50 and volume[i] > 1.2 * vol_ma30[i]:
+            # Long: price breaks above R1, above EMA34 (bullish trend), volume surge
+            if (close[i] > r1_aligned[i] and close[i] > ema34_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < 1D KAMA, RSI < 50, volume surge
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] < 50 and volume[i] > 1.2 * vol_ma30[i]:
+            # Short: price breaks below S1, below EMA34 (bearish trend), volume surge
+            elif (close[i] < s1_aligned[i] and close[i] < ema34_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price < 1D KAMA or RSI < 40
-            if close[i] < kama_aligned[i] or rsi_aligned[i] < 40:
+            # Long exit: price breaks below S1 or trend turns bearish
+            if close[i] < s1_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price > 1D KAMA or RSI > 60
-            if close[i] > kama_aligned[i] or rsi_aligned[i] > 60:
+            # Short exit: price breaks above R1 or trend turns bullish
+            if close[i] > r1_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
