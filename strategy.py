@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "1h_4h1d_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,6 +17,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Session filter: 8-20 UTC (pre-compute hours)
+    hours = prices.index.hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
     # 1d trend: EMA34
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
@@ -25,14 +29,6 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     trend_up = close > ema_1d_aligned
-    
-    # 1w trend: EMA20
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Previous day's Camarilla levels (R3, S3)
     df_1d_prev = df_1d.copy()
@@ -64,7 +60,16 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
-            np.isnan(vol_ma20[i]) or np.isnan(ema_1w_aligned[i])):
+            np.isnan(vol_ma20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Apply session filter: only trade during 8-20 UTC
+        if not session_mask[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,27 +78,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close > R3 + 1d uptrend + 1w uptrend + volume spike
-            if close[i] > R3_aligned[i] and trend_up[i] and close[i] > ema_1w_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: Close > R3 + 1d uptrend + volume spike
+            if close[i] > R3_aligned[i] and trend_up[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Close < S3 + 1d downtrend + 1w downtrend + volume spike
-            elif close[i] < S3_aligned[i] and not trend_up[i] and close[i] < ema_1w_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: Close < S3 + 1d downtrend + volume spike
+            elif close[i] < S3_aligned[i] and not trend_up[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Close < S3 or 1d trend down or 1w trend down
-            if close[i] < S3_aligned[i] or not trend_up[i] or close[i] < ema_1w_aligned[i]:
+            # Long exit: Close < S3 or 1d trend down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Close > R3 or 1d trend up or 1w trend up
-            if close[i] > R3_aligned[i] or trend_up[i] or close[i] > ema_1w_aligned[i]:
+            # Short exit: Close > R3 or 1d trend up
+            if close[i] > R3_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
