@@ -1,11 +1,11 @@
-# 4H_TRIX_VOLUME_RSI_Signal_v1
-# Hypothesis: TRIX (12-period) momentum combined with volume confirmation and RSI filter
-# provides reliable entries in both bull and bear markets. Uses 4h timeframe with 1d RSI
-# and volume spike for confirmation. TRIX crossovers signal momentum shifts, filtered
-# by volume > 1.5x average and RSI between 30-70 to avoid extremes. Targets 50-150
-# trades over 4 years with low frequency to minimize fee drag.
+#!/usr/bin/env python3
+# 4H_CAMARILLA_VOLUME_SQUEEZE_V1
+# Hypothesis: Camarilla pivot levels (from 1d) combined with Bollinger Band squeeze (volatility contraction)
+# and volume confirmation provides high-probability breakout entries. Works in both bull and bear markets
+# by capturing volatility expansion after contraction. Uses 4h timeframe with 1d Camarilla levels.
+# Target: 20-40 trades/year to minimize fee drag while capturing strong moves.
 
-name = "4H_TRIX_VOLUME_RSI_Signal_v1"
+name = "4H_CAMARILLA_VOLUME_SQUEEZE_V1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,9 +18,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for RSI (HTF)
+    # Get 1d data for Camarilla levels and BB squeeze
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # 4h OHLCV
@@ -29,29 +29,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- TRIX (12-period) on 4h ---
-    # Calculate EMA1, EMA2, EMA3 then % change
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
-    
-    # --- 1d RSI (14-period) ---
+    # --- Camarilla Pivot Levels (from 1d) ---
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
     
-    # Align 1d RSI to 4h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # --- Volume Spike (4h) ---
+    # Camarilla levels
+    r1 = close_1d + (range_1d * 1.1 / 12)
+    r2 = close_1d + (range_1d * 1.1 / 6)
+    r3 = close_1d + (range_1d * 1.1 / 4)
+    r4 = close_1d + (range_1d * 1.1 / 2)
+    
+    s1 = close_1d - (range_1d * 1.1 / 12)
+    s2 = close_1d - (range_1d * 1.1 / 6)
+    s3 = close_1d - (range_1d * 1.1 / 4)
+    s4 = close_1d - (range_1d * 1.1 / 2)
+    
+    # Align Camarilla levels to 4h
+    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
+    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # --- Bollinger Band Squeeze (20, 2) on 1d ---
+    # Measures volatility contraction - precursor to expansion
+    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean()
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std()
+    bb_upper = bb_middle + (2 * bb_std)
+    bb_lower = bb_middle - (2 * bb_std)
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    
+    # Squeeze condition: BB width below 20-period average
+    bb_width_ma = bb_width.rolling(window=20, min_periods=20).mean()
+    squeeze = bb_width < bb_width_ma.values
+    
+    # Align squeeze to 4h
+    squeeze_4h = align_htf_to_ltf(prices, df_1d, squeeze.values)
+    
+    # --- Volume Confirmation (4h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (1.5 * vol_ma.values)
     
@@ -62,23 +86,21 @@ def generate_signals(prices):
     start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if RSI is NaN
-        if np.isnan(rsi_1d_aligned[i]):
+        # Skip if Camarilla levels or squeeze data is not ready
+        if np.isnan(r1_4h[i]) or np.isnan(squeeze_4h[i]):
             if position != 0:
-                # Simple trailing stop: exit if TRIX reverses
-                if position == 1 and trix[i] < trix[i-1]:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and trix[i] > trix[i-1]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                # Hold position until clear exit
+                signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Entry conditions
-        long_entry = (trix[i] > trix[i-1]) and vol_spike[i] and (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
-        short_entry = (trix[i] < trix[i-1]) and vol_spike[i] and (rsi_1d_aligned[i] > 30) and (rsi_1d_aligned[i] < 70)
+        # Entry conditions: price near S3/R3 AND volatility squeeze AND volume spike
+        # Long: price near S3 with bullish bias
+        near_s3 = abs(close[i] - s3_4h[i]) / s3_4h[i] < 0.005  # Within 0.5% of S3
+        # Short: price near R3 with bearish bias
+        near_r3 = abs(close[i] - r3_4h[i]) / r3_4h[i] < 0.005  # Within 0.5% of R3
+        
+        long_entry = near_s3 and squeeze_4h[i] and vol_spike[i] and (close[i] > close[i-1])
+        short_entry = near_r3 and squeeze_4h[i] and vol_spike[i] and (close[i] < close[i-1])
         
         if position == 0:
             if long_entry:
@@ -88,15 +110,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit on TRIX reversal or RSI extreme
+            # Exit conditions: price reaches opposite level OR squeeze releases
             if position == 1:
-                if (trix[i] < trix[i-1]) or (rsi_1d_aligned[i] >= 70) or (rsi_1d_aligned[i] <= 30):
+                # Exit if price reaches R3 or squeeze breaks down
+                if close[i] >= r3_4h[i] or not squeeze_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (trix[i] > trix[i-1]) or (rsi_1d_aligned[i] >= 70) or (rsi_1d_aligned[i] <= 30):
+                # Exit if price reaches S3 or squeeze breaks down
+                if close[i] <= s3_4h[i] or not squeeze_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
