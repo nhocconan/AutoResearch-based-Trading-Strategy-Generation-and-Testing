@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
+name = "4h_Bollinger_Band_Width_Regime_Keltner_Breakout"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34) and volume calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # Bollinger Band Width for regime detection (20-period)
+    ma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_bb = ma20 + 2 * std20
+    lower_bb = ma20 - 2 * std20
+    bb_width = (upper_bb - lower_bb) / ma20
+    bb_width = np.nan_to_num(bb_width, nan=0.0)
     
-    # Previous day high, low, close for Camarilla calculation
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Bollinger Band Width percentile (50-period) for regime
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).rank(pct=True) * 100
+    bb_width_percentile = bb_width_percentile.fillna(50).values
     
-    # Calculate Camarilla levels R3 and S3 (outer bands for breakout)
-    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # Keltner Channel (20-period, ATR multiplier 1.5)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first value
+    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean()
+    ma20_atr = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    upper_keltner = ma20_atr + 1.5 * atr
+    lower_keltner = ma20_atr - 1.5 * atr
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    
-    # 1d volume filter: 20-period average
-    df_1d_vol = df_1d['volume'].values
-    vol_ma_1d = pd.Series(df_1d_vol).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = df_1d_vol / vol_ma_1d
+    # Volume surge filter (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    
-    # Align all 1d data to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
-    
-    # Session filter: 8-20 UTC (aligned to 4h)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(bb_width_percentile[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -68,48 +64,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Check session
-        if not in_session[i]:
-            if position == 1:
-                signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume threshold - avoid low-volume false breakouts
-        volume_surge = vol_ratio_aligned[i] > 1.5
+        # Regime filter: Bollinger Band Width percentile
+        # Range: BB width percentile > 50 (high volatility)
+        # Trend: BB width percentile <= 50 (low volatility)
+        is_range = bb_width_percentile[i] > 50
+        is_trend = bb_width_percentile[i] <= 50
         
         if position == 0:
-            # Long: Price breaks above R3 with volume and above 1d EMA34 trend
-            if (close[i] > r3_aligned[i] and 
-                volume_surge and 
-                close[i] > ema_34_aligned[i]):
+            # Long entry: price breaks above upper Keltner in range regime with volume
+            if (is_range and 
+                close[i] > upper_keltner[i] and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 with volume and below 1d EMA34 trend
-            elif (close[i] < s3_aligned[i] and 
-                  volume_surge and 
-                  close[i] < ema_34_aligned[i]):
+            # Short entry: price breaks below lower Keltner in range regime with volume
+            elif (is_range and 
+                  close[i] < lower_keltner[i] and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite S1/R1 level (inner band for mean reversion)
+            # Exit: price returns to middle Keltner line (mean reversion)
             if position == 1:
-                # Calculate S1 for exit
-                s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-                s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-                if close[i] <= s1_aligned[i]:
+                if close[i] <= ma20_atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Calculate R1 for exit
-                r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-                r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-                if close[i] >= r1_aligned[i]:
+                if close[i] >= ma20_atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
