@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_OrderBook_Imbalance_4hTrend_Volume
-Hypothesis: Order book imbalance (proxy via tick rule + volume) predicts short-term direction. 
-Trades only when aligned with 4h EMA20 trend and confirmed by volume spikes. 
-Uses 4h for trend direction and 1h for entry timing to avoid overtrading. 
-Designed for low turnover (~20-30 trades/year) to minimize fee drag in ranging 2025 markets.
+6h_Weekly_Pivot_Daily_Trend_Continuation
+Hypothesis: Weekly pivot levels from 1w provide strong structural support/resistance.
+Continuations above weekly R4 or below weekly S4 are traded only when aligned with 1d EMA34 trend
+and confirmed by volume spikes, targeting breakout moves in both bull and bear markets.
+Designed for low turnover (~15-25 trades/year) to minimize fee drag on 6h timeframe.
 """
 
-name = "1h_OrderBook_Imbalance_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Daily_Trend_Continuation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,56 +17,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # === Tick Rule: Buy Volume Proxy ===
-    # Use taker buy volume as proxy for aggressive buying pressure
-    # When taker buy volume > 50% of total volume, bias is bullish
-    volume_imbalance = taker_buy_volume - (volume - taker_buy_volume)  # buy - sell
-    volume_imbalance_ratio = volume_imbalance / volume  # normalized [-1, 1]
+    # === Weekly Pivot Levels (R4/S4 for breakout) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 4h EMA20 Trend Filter ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r4 = pivot_1w + (range_1w * 1.1)
+    s4 = pivot_1w - (range_1w * 1.1)
     
-    # === Volume Spike Filter (20-period EMA) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
+    # Align weekly levels to 6h
+    r4_6h = align_htf_to_ltf(prices, df_1w, r4)
+    s4_6h = align_htf_to_ltf(prices, df_1w, s4)
     
-    # === Session Filter: 08:00-20:00 UTC ===
-    # Pre-compute hours from DatetimeIndex (already datetime64[ms])
-    hours = prices.index.hour
-    session_ok = (hours >= 8) & (hours <= 20)
+    # === 1d EMA34 Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Filter (24-period EMA for 6h) ===
+    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
+    volume_ok = volume > vol_ema24 * 2.0  # Require 2x average volume
     
     # === Signal Parameters ===
-    position_size = 0.20
+    position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 30  # covers EMA20
+    # Start after warmup (need enough data for indicators)
+    start_idx = 100  # covers EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(volume_ok[i]) or 
-            np.isnan(volume_imbalance_ratio[i])):
-            if position == 1:
-                signals[i] = 0.0
-            elif position == -1:
-                signals[i] = 0.0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if not session_ok[i]:
+        if (np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or 
+            np.isnan(ema34_1d_6h[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -76,26 +72,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Positive imbalance + above 4h EMA20 + volume spike
-            if volume_imbalance_ratio[i] > 0.15 and close[i] > ema20_4h_aligned[i] and volume_ok[i]:
+            # Long: Break above weekly R4 + above 1d EMA34 + volume spike
+            if close[i] > r4_6h[i] and close[i] > ema34_1d_6h[i] and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Negative imbalance + below 4h EMA20 + volume spike
-            elif volume_imbalance_ratio[i] < -0.15 and close[i] < ema20_4h_aligned[i] and volume_ok[i]:
+            # Short: Break below weekly S4 + below 1d EMA34 + volume spike
+            elif close[i] < s4_6h[i] and close[i] < ema34_1d_6h[i] and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions: reversal of imbalance or trend
+            # Exit conditions: reverse signal or trend failure
             if position == 1:
-                # Exit: Negative imbalance or price below 4h EMA20
-                if volume_imbalance_ratio[i] < -0.05 or close[i] < ema20_4h_aligned[i]:
+                # Exit: Price breaks below weekly S4 OR closes below 1d EMA34
+                if close[i] < s4_6h[i] or close[i] < ema34_1d_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Positive imbalance or price above 4h EMA20
-                if volume_imbalance_ratio[i] > 0.05 or close[i] > ema20_4h_aligned[i]:
+                # Exit: Price breaks above weekly R4 OR closes above 1d EMA34
+                if close[i] > r4_6h[i] or close[i] > ema34_1d_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
