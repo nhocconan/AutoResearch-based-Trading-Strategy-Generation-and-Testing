@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Camarilla_R3S3_Breakout_Trend_v1
-Hypothesis: Uses weekly Camarilla pivot levels (R3/S3) for breakout signals on the daily chart.
-Trades only in bullish weekly trends (price > weekly EMA34) to avoid bearish whipsaws.
-Requires volume confirmation (volume > 1.5x 20-day average) to filter false breakouts.
-Designed for low trade frequency (~10-20 trades/year) with strong directional bias.
-Works in bull markets via breakouts and avoids bear markets via trend filter.
+12h_Weekly_OBV_Divergence_v1
+Hypothesis: Uses On-Balance Volume (OBV) divergence from price on weekly timeframe to identify exhaustion.
+When price makes new high/low but OBV fails to confirm, anticipate reversal. Trades only on 12h timeframe
+with weekly OBV divergence as filter. Works in bull/bear markets by catching exhaustion moves.
+Target: 15-30 trades/year (60-120 over 4 years) with strict divergence confirmation.
 """
 
-name = "1d_Weekly_Camarilla_R3S3_Breakout_Trend_v1"
-timeframe = "1d"
+name = "12h_Weekly_OBV_Divergence_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,50 +20,45 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for Camarilla pivots and trend filter
+    # Get weekly data for OBV calculation
     df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 34:
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly EMA34 for trend filter ---
-    weekly_close = df_weekly['close'].values
-    ema34_weekly = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema34_weekly)
+    # --- Weekly OBV ---
+    close_weekly = df_weekly['close'].values
+    volume_weekly = df_weekly['volume'].values
     
-    # --- Weekly Camarilla levels (R3, S3) ---
-    # Using previous week's OHLC to calculate current week's levels
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close_prev = df_weekly['close'].values
+    # Calculate OBV: cumulative volume with sign based on price change
+    price_change = np.diff(close_weekly, prepend=close_weekly[0])
+    volume_signed = np.where(price_change > 0, volume_weekly,
+                            np.where(price_change < 0, -volume_weekly, 0))
+    obv = np.cumsum(volume_signed)
     
-    # Calculate Camarilla: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    rng = weekly_high - weekly_low
-    r3 = weekly_close_prev + rng * 1.1 / 4
-    s3 = weekly_close_prev - rng * 1.1 / 4
+    # Align weekly OBV to 12h timeframe
+    obv_aligned = align_htf_to_ltf(prices, df_weekly, obv)
     
-    # Align to daily (using previous week's levels for current week's trading)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    # --- Price extremes detection on 12h ---
+    # Look for new 20-period highs/lows
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # --- Volume confirmation (daily) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
+    # --- Divergence conditions ---
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 40
+    start_idx = max(lookback, 20)  # Ensure sufficient lookback
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(ema34_weekly_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
-            # Maintain position if valid, otherwise flat
+        if np.isnan(obv_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -73,22 +67,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: only trade long in bullish weekly trend
-        bullish_trend = close[i] > ema34_weekly_aligned[i]
+        # Current price and OBV
+        curr_close = close[i]
+        curr_obv = obv_aligned[i]
+        
+        # Bearish divergence: price makes new high but OBV fails to confirm
+        bearish_div = (curr_close >= highest_high[i]) and (curr_obv <= obv_aligned[i-1])
+        
+        # Bullish divergence: price makes new low but OBV fails to confirm
+        bullish_div = (curr_close <= lowest_low[i]) and (curr_obv >= obv_aligned[i-1])
         
         if position == 0:
-            # Look for breakout above R3 with volume confirmation
-            if bullish_trend and close[i] > r3_aligned[i] and volume[i] > 1.5 * vol_ma[i]:
+            # Enter on divergence signals
+            if bullish_div:
                 signals[i] = 0.25
                 position = 1
+            elif bearish_div:
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit conditions: close below S3 or trend turns bearish
+            # Exit conditions: opposite divergence or time-based
             if position == 1:
-                exit_signal = (close[i] < s3_aligned[i]) or (close[i] <= ema34_weekly_aligned[i])
+                # Exit long on bearish divergence or after 3 bars
+                exit_signal = bearish_div or (i >= start_idx + 3)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
+            elif position == -1:
+                # Exit short on bullish divergence or after 3 bars
+                exit_signal = bullish_div or (i >= start_idx + 3)
+                if exit_signal:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
