@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_MidPoint_Reversal_1dTrend_Filter
-Hypothesis: Uses price crossing above/below the previous day's midpoint (pivot) as entry signal, filtered by daily trend (1d EMA34) and volume confirmation. Exits when price reverts to the previous day's midpoint or trend reverses. Designed for low trade frequency (12-37/year) with clear signals in both bull and bear markets by following the higher timeframe trend.
+1h_4h1d_Camarilla_R1S1_Breakout_TrendFilter
+Hypothesis: Uses 1h price breaking above/below Camarilla R1/S1 levels as entry signals, filtered by 4h EMA50 trend and 1d volume spike. Exits when price reverts to daily open or trend reverses. Designed for low trade frequency (<50/year) with clear signals in both bull and bear markets by following the higher timeframe trend.
 """
 
-name = "12h_MidPoint_Reversal_1dTrend_Filter"
-timeframe = "12h"
+name = "1h_4h1d_Camarilla_R1S1_Breakout_TrendFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +17,51 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # 12h price data
+    # 1h price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_price = prices['open'].values
     
-    # Previous day's high and low (for midpoint calculation)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    # First day has no previous - set to current values to avoid false signals
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    # Previous day's midpoint (pivot)
-    prev_mid = (prev_high + prev_low) / 2.0
-    
-    # Daily trend filter (1d EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # 4h data for trend and Camarilla levels
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
-        span=34, adjust=False, min_periods=34
+    # 4h EMA50 for trend filter
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # 4h Camarilla levels (R1, S1)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
+    
+    # Camarilla calculation: (High - Low) * 1.1 / 12
+    r1_4h = close_4h + (high_4h - low_4h) * 1.1 / 12
+    s1_4h = close_4h - (high_4h - low_4h) * 1.1 / 12
+    
+    # Align Camarilla levels to 1h
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    
+    # 1d volume for volume spike filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = vol_1d / vol_ma_1d
+    vol_ratio_1d = np.nan_to_num(vol_ratio_1d, nan=1.0)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,50 +70,51 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(prev_mid[i]) or np.isnan(ema_34_12h[i]) or 
-            np.isnan(vol_ratio[i])):
+        # Skip if any required data is NaN or outside session
+        if (np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(ema_50_4h_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or
+            not in_session[i]):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.0
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = 0.0
             else:
                 signals[i] = 0.0
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.5
+        volume_spike = vol_ratio_1d_aligned[i] > 1.5
         
         if position == 0:
-            # Long: price crosses above previous day's midpoint + above daily EMA34 + volume
-            if (close[i] > prev_mid[i] and 
-                close[i] > ema_34_12h[i] and 
+            # Long: price breaks above R1 + above 4h EMA50 + volume spike + in session
+            if (close[i] > r1_4h_aligned[i] and 
+                close[i] > ema_50_4h_aligned[i] and 
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: price crosses below previous day's midpoint + below daily EMA34 + volume
-            elif (close[i] < prev_mid[i] and 
-                  close[i] < ema_34_12h[i] and 
+            # Short: price breaks below S1 + below 4h EMA50 + volume spike + in session
+            elif (close[i] < s1_4h_aligned[i] and 
+                  close[i] < ema_50_4h_aligned[i] and 
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price returns to previous day's midpoint OR trend turns down
-                if (close[i] <= prev_mid[i]) or \
-                   (close[i] < ema_34_12h[i]):
+                # Exit long: price returns to daily open OR trend turns down
+                if (close[i] <= open_price[i]) or \
+                   (close[i] < ema_50_4h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price returns to previous day's midpoint OR trend turns up
-                if (close[i] >= prev_mid[i]) or \
-                   (close[i] > ema_34_12h[i]):
+                # Exit short: price returns to daily open OR trend turns up
+                if (close[i] >= open_price[i]) or \
+                   (close[i] > ema_50_4h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
