@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+# Strategy: 1h VWAP Pullback with 4h Trend & Volume Filter
+# Hypothesis: In trending markets (4h EMA50), price pulls back to VWAP on 1h, offering high-probability entries.
+# Volume spike confirms institutional interest. Works in both bull/bear by following 4h trend.
+# Target: 15-30 trades/year via strict 4h trend + VWAP + volume confluence.
+
+name = "1h_VWAP_Pullback_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,48 +22,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h data for trend filter (EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_4h = df_4h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 4h EMA50 for trend direction
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Calculate EMA50 on 12h
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # 1h VWAP (volume-weighted average price)
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    vwap = vwap_numerator / vwap_denominator
     
-    # Align 12h EMA50 to 4h
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1, S1 (using previous day's range)
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume spike (24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # 1h volume spike (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)  # 1.5x average volume
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure EMA50 is ready
+    start_idx = 50  # Ensure 4h EMA50 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(vwap[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,31 +60,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1, above 12h EMA50, volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and 
+            # Long: 4h uptrend, price pulls back to VWAP, volume spike
+            if (close[i] > ema50_4h_aligned[i] and  # 4h uptrend
+                close[i] <= vwap[i] * 1.005 and    # near/below VWAP (allow 0.5% overshoot)
                 vol_spike[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1, below 12h EMA50, volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
+            # Short: 4h downtrend, price pulls back to VWAP, volume spike
+            elif (close[i] < ema50_4h_aligned[i] and  # 4h downtrend
+                  close[i] >= vwap[i] * 0.995 and    # near/above VWAP (allow 0.5% overshoot)
                   vol_spike[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below 12h EMA50
-            if close[i] < s1_aligned[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit long: 4h trend reversal or price moves above VWAP + 0.5%
+            if (close[i] < ema50_4h_aligned[i] or 
+                close[i] > vwap[i] * 1.005):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: break above R1 or above 12h EMA50
-            if close[i] > r1_aligned[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit short: 4h trend reversal or price moves below VWAP - 0.5%
+            if (close[i] > ema50_4h_aligned[i] or 
+                close[i] < vwap[i] * 0.995):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
