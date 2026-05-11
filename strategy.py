@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_KAMA_1dTrend_Volume
-# Hypothesis: Uses KAMA to determine trend direction on 4h timeframe, filtered by daily trend (HH/HL or LH/LL) and volume spike.
-# Long when: daily uptrend (HH & HL), volume > 1.5x 20-period average, and KAMA shows upward trend (price > KAMA).
-# Short when: daily downtrend (LH & LL), volume > 1.5x 20-period average, and KAMA shows downward trend (price < KAMA).
-# Exit when price crosses back over KAMA or daily trend breaks.
-# KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends.
-# Works in bull markets by catching uptrends and in bear by catching downtrends with adaptive smoothing.
+# 6h_ADX_1dTrend_Volume
+# Hypothesis: Uses ADX to measure trend strength on 6h timeframe, filtered by daily trend direction (HH/HL or LL/LH) and volume spike.
+# Long when: daily uptrend (HH & HL), ADX > 25 (strong trend), volume > 1.5x 20-period average, and +DI > -DI.
+# Short when: daily downtrend (LH & LL), ADX > 25, volume > 1.5x 20-period average, and -DI > +DI.
+# Exit when ADX falls below 20 (weakening trend) or daily trend reverses.
+# ADX filters out sideways markets, capturing only strong trends, which works in both bull and bear markets.
+# Works in bull markets by catching strong uptrends and in bear by catching strong downtrends.
 
-name = "4h_KAMA_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_ADX_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data for trend structure (HH, HL, LH, LL)
@@ -25,7 +25,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -50,54 +50,65 @@ def generate_signals(prices):
     uptrend[0] = False
     downtrend[0] = False
     
-    # --- KAMA calculation (adaptive moving average) ---
-    # Parameters: ER length = 10, Fast EMA = 2, Slow EMA = 30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0) if False else None  # placeholder
+    # --- ADX calculation (trend strength) ---
+    adx_period = 14
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
     
-    # Proper volatility calculation: sum of absolute changes over ER period
-    er_period = 10
-    volatility_sum = np.zeros(n)
-    for i in range(er_period, n):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-er_period:i+1])))
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(er_period, n):
-        if volatility_sum[i] > 0:
-            er[i] = change[i] / volatility_sum[i]
-        else:
-            er[i] = 0
+    # Smoothed values
+    def smooth(arr, period):
+        result = np.full_like(arr, np.nan, dtype=float)
+        if len(arr) < period:
+            return result
+        # Initial average
+        result[period-1] = np.mean(arr[:period])
+        # Wilder smoothing
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)    # EMA(2)
-    slow_sc = 2 / (30 + 1)   # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    atr = smooth(tr, adx_period)
+    plus_di = 100 * smooth(plus_dm, adx_period) / atr
+    minus_di = 100 * smooth(minus_dm, adx_period) / atr
     
-    # KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # DX and ADX
+    dx = np.zeros_like(plus_di)
+    dx[:] = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
+    adx = smooth(dx, adx_period)
     
     # --- Volume confirmation (volume > 20-period average) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align 1d trend indicators to 4h timeframe
+    # Align 1d trend indicators to 6h timeframe
     uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
     downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
+    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for KAMA (needs er_period) and volume MA(20)
-    start_idx = max(er_period, 20)
+    # Warmup: enough for ADX (2*period) and volume MA(20)
+    start_idx = max(2 * adx_period, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or
+        if (np.isnan(adx_aligned[i]) or
+            np.isnan(plus_di_aligned[i]) or
+            np.isnan(minus_di_aligned[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(uptrend_aligned[i]) or
             np.isnan(downtrend_aligned[i])):
@@ -110,31 +121,34 @@ def generate_signals(prices):
         is_uptrend = uptrend_aligned[i]
         is_downtrend = downtrend_aligned[i]
         
+        # ADX and DI
+        adx_val = adx_aligned[i]
+        plus_di_val = plus_di_aligned[i]
+        minus_di_val = minus_di_aligned[i]
+        
         # Volume spike condition
         vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
         
         if position == 0:
-            if is_uptrend and vol_spike:
-                # Long: daily uptrend + volume spill + price above KAMA
-                if close[i] > kama[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif is_downtrend and vol_spike:
-                # Short: daily downtrend + volume spike + price below KAMA
-                if close[i] < kama[i]:
-                    signals[i] = -0.25
-                    position = -1
+            if is_uptrend and adx_val > 25 and vol_spike and plus_di_val > minus_di_val:
+                # Long: daily uptrend + strong trend + volume spike + bullish DI
+                signals[i] = 0.25
+                position = 1
+            elif is_downtrend and adx_val > 25 and vol_spike and minus_di_val > plus_di_val:
+                # Short: daily downtrend + strong trend + volume spike + bearish DI
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Exit long: price falls below KAMA OR daily uptrend breaks
-                if close[i] < kama[i] or not is_uptrend:
+                # Exit long: ADX falls below 20 OR daily uptrend breaks
+                if adx_val < 20 or not is_uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above KAMA OR daily downtrend breaks
-                if close[i] > kama[i] or not is_downtrend:
+                # Exit short: ADX falls below 20 OR daily downtrend breaks
+                if adx_val < 20 or not is_downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
