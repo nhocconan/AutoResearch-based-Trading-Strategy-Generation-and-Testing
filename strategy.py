@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WeeklyVolatilityBreakout"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,64 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for weekly volatility calculation (uses previous week's ATR)
+    # 1d data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate weekly ATR(5) using previous 5 days
-    atr_5 = np.zeros(len(close_1d))
-    for i in range(5, len(close_1d)):
-        tr = np.max([
-            high_1d[i] - low_1d[i],
-            abs(high_1d[i] - close_1d[i-1]),
-            abs(low_1d[i] - close_1d[i-1])
-        ])
-        atr_5[i] = np.mean([
-            high_1d[i-4] - low_1d[i-4],
-            abs(high_1d[i-4] - close_1d[i-5]),
-            abs(low_1d[i-4] - close_1d[i-5]),
-            high_1d[i-3] - low_1d[i-3],
-            abs(high_1d[i-3] - close_1d[i-4]),
-            abs(low_1d[i-3] - close_1d[i-4]),
-            high_1d[i-2] - low_1d[i-2],
-            abs(high_1d[i-2] - close_1d[i-3]),
-            abs(low_1d[i-2] - close_1d[i-3]),
-            high_1d[i-1] - low_1d[i-1],
-            abs(high_1d[i-1] - close_1d[i-2]),
-            abs(low_1d[i-1] - close_1d[i-2]),
-            tr
-        ])
+    # Calculate Camarilla pivot levels using previous day's OHLC
+    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
+    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
     
-    # Weekly volatility breakout: price breaks above/below previous week's high/low + volatility
-    prev_week_high = np.concatenate([[np.nan]*5, high_1d[:-5]]).max(axis=1)  # Max of previous 5 days
-    prev_week_low = np.concatenate([[np.nan]*5, low_1d[:-5]]).min(axis=1)    # Min of previous 5 days
+    camarilla_r1 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
+    camarilla_s1 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
     
-    # Add volatility buffer
-    upper_band = prev_week_high + (atr_5 * 0.5)
-    lower_band = prev_week_low - (atr_5 * 0.5)
+    # 1d EMA34 trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-day average
+    # Volume spike detection (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (vol_ma * 1.5)
+    vol_spike = volume > (vol_ma * 2.0)
     
-    # Align weekly bands to daily timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    # Align all indicators to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(20, 5)  # Ensure enough data for volatility and volume
+    start_idx = max(2, 34, 20)
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,24 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above upper band with volume confirmation
-            if close[i] > upper_band_aligned[i] and vol_confirm[i]:
+            # Long: Price breaks above R1 with volume spike and above 1d EMA34
+            if (close[i] > camarilla_r1_aligned[i] and 
+                vol_spike[i] and 
+                close[i] > ema_34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower band with volume confirmation
-            elif close[i] < lower_band_aligned[i] and vol_confirm[i]:
+            # Short: Price breaks below S1 with volume spike and below 1d EMA34
+            elif (close[i] < camarilla_s1_aligned[i] and 
+                  vol_spike[i] and 
+                  close[i] < ema_34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price closes below lower band or volatility drops
-            if close[i] < lower_band_aligned[i] or not vol_confirm[i]:
+            # Exit long: Price closes below R1 or 1d EMA34
+            if close[i] < camarilla_r1_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price closes above upper band or volatility drops
-            if close[i] > upper_band_aligned[i] or not vol_confirm[i]:
+            # Exit short: Price closes above S1 or 1d EMA34
+            if close[i] > camarilla_s1_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
