@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ADX_Trend_EMA_200_RSI_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,83 +17,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for EMA200 and RSI
+    # Get 1d data for Camarilla pivot and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # EMA200 on daily
+    # 1d Camarilla pivot levels (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # RSI(14) on daily
-    delta = pd.Series(close_1d).diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = -delta.where(delta < 0, 0.0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.fillna(50).values  # neutral when undefined
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Previous day's OHLC for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Get 6h data for ADX
-    df_6h = get_htf_data(prices, '6h')
-    if len(df_6h) < 14:
-        return np.zeros(n)
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_val = prev_high - prev_low
     
-    high_6h = df_6h['high'].values
-    low_6h = df_6h['low'].values
-    close_6h = df_6h['close'].values
+    # Camarilla levels
+    r1 = pivot + (range_val * 1.1 / 12)
+    s1 = pivot - (range_val * 1.1 / 12)
+    r2 = pivot + (range_val * 1.1 / 6)
+    s2 = pivot - (range_val * 1.1 / 6)
+    r3 = pivot + (range_val * 1.1 / 4)
+    s3 = pivot - (range_val * 1.1 / 4)
     
-    # ADX(14) calculation
-    plus_dm = np.zeros(len(high_6h))
-    minus_dm = np.zeros(len(high_6h))
-    tr = np.zeros(len(high_6h))
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    for i in range(1, len(high_6h)):
-        high_diff = high_6h[i] - high_6h[i-1]
-        low_diff = low_6h[i-1] - low_6h[i]
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        tr[i] = max(high_6h[i] - low_6h[i], abs(high_6h[i] - close_6h[i-1]), abs(low_6h[i] - close_6h[i-1]))
+    # 1d trend filter: EMA34
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Smooth with Wilder's smoothing (alpha = 1/period)
-    atr_6h = np.zeros(len(high_6h))
-    plus_di_6h = np.zeros(len(high_6h))
-    minus_di_6h = np.zeros(len(high_6h))
-    
-    # Initial values
-    atr_6h[0] = tr[0]
-    plus_di_6h[0] = 0
-    minus_di_6h[0] = 0
-    
-    for i in range(1, len(high_6h)):
-        atr_6h[i] = (atr_6h[i-1] * 13 + tr[i]) / 14
-        plus_di_6h[i] = 100 * (plus_dm[i] / atr_6h[i]) if atr_6h[i] != 0 else 0
-        minus_di_6h[i] = 100 * (minus_dm[i] / atr_6h[i]) if atr_6h[i] != 0 else 0
-    
-    dx = np.zeros(len(high_6h))
-    for i in range(len(high_6h)):
-        di_sum = plus_di_6h[i] + minus_di_6h[i]
-        dx[i] = 100 * abs(plus_di_6h[i] - minus_di_6h[i]) / di_sum if di_sum != 0 else 0
-    
-    adx_6h = np.zeros(len(high_6h))
-    adx_6h[0] = dx[0]
-    for i in range(1, len(high_6h)):
-        adx_6h[i] = (adx_6h[i-1] * 13 + dx[i]) / 14
-    
-    adx_6h_aligned = align_htf_to_ltf(prices, df_6h, adx_6h)
+    # Volume filter: current volume > 1.5x 20-period average (approx 5 days on 4h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 200  # enough for EMA200 and ADX
+    # Start after warmup
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(adx_6h_aligned[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -102,31 +82,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above EMA200, RSI > 50, ADX > 25
-            if (close[i] > ema200_1d_aligned[i] and 
-                rsi_1d_aligned[i] > 50 and 
-                adx_6h_aligned[i] > 25):
+            # Long: price crosses above R1 AND above 1d EMA34 AND volume filter
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below EMA200, RSI < 50, ADX > 25
-            elif (close[i] < ema200_1d_aligned[i] and 
-                  rsi_1d_aligned[i] < 50 and 
-                  adx_6h_aligned[i] > 25):
+            # Short: price crosses below S1 AND below 1d EMA34 AND volume filter
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below EMA200 OR RSI < 40
-            if close[i] < ema200_1d_aligned[i] or rsi_1d_aligned[i] < 40:
+            # Long exit: price falls below S1
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Exit short: price above EMA200 OR RSI > 60
-            if close[i] > ema200_1d_aligned[i] or rsi_1d_aligned[i] > 60:
+            # Short exit: price rises above R1
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.25  # maintain position
     
     return signals
