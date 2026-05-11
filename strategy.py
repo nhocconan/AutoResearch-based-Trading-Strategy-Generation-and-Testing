@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-name = "12h_Williams_Fractal_Trend_Breakout"
-timeframe = "12h"
+name = "4h_TRIX_VolumeSpike_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf  # Note: align_ltf_to_htf is not used; we use align_htf_to_ltf
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -18,43 +17,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1W data for trend context
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    # Get 1D data for Williams Fractals
+    # Get 1D data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1W EMA34 for trend filter
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # TRIX (1-period rate of change of triple EMA) - 15 period
+    ema1 = pd.Series(close).ewm(span=15, adjust=False).mean()
+    ema2 = ema1.ewm(span=15, adjust=False).mean()
+    ema3 = ema2.ewm(span=15, adjust=False).mean()
+    trix = 100 * (ema3.pct_change())
+    trix_signal = trix.ewm(span=9, adjust=False).mean()
     
-    # Williams Fractals on 1D (requires 2-bar confirmation after center)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    n_1d = len(high_1d)
-    
-    bullish_fractal = np.zeros(n_1d, dtype=bool)
-    bearish_fractal = np.zeros(n_1d, dtype=bool)
-    
-    for i in range(2, n_1d - 2):
-        # Bullish fractal: low[i] is lowest of i-2,i-1,i,i+1,i+2
-        if (low[i] < low[i-1] and low[i] < low[i-2] and 
-            low[i] < low[i+1] and low[i] < low[i+2]):
-            bullish_fractal[i] = True
-        # Bearish fractal: high[i] is highest of i-2,i-1,i,i+1,i+2
-        if (high[i] > high[i-1] and high[i] > high[i-2] and 
-            high[i] > high[i+1] and high[i] > high[i+2]):
-            bearish_fractal[i] = True
-    
-    # Align fractals with 2-bar additional delay for confirmation
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bullish_fractal.astype(float), additional_delay_bars=2)
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1d, bearish_fractal.astype(float), additional_delay_bars=2)
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume spike: current volume > 2.0x 20-period average
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -62,15 +37,19 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
+    # 1D EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema34_1w_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i]) or np.isnan(bearish_fractal_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(trix.iloc[i]) or np.isnan(trix_signal.iloc[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -78,29 +57,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Price above/below 1W EMA34 for trend filter
-        price_above_ema = close[i] > ema34_1w_aligned[i]
-        price_below_ema = close[i] < ema34_1w_aligned[i]
+        # TRIX crossover signals
+        trix_cross_up = trix.iloc[i] > trix_signal.iloc[i] and trix.iloc[i-1] <= trix_signal.iloc[i-1]
+        trix_cross_down = trix.iloc[i] < trix_signal.iloc[i] and trix.iloc[i-1] >= trix_signal.iloc[i-1]
         
         if position == 0:
-            # Long: Bullish fractal confirmed, price above 1W EMA34, volume surge
-            if bullish_fractal_aligned[i] > 0.5 and price_above_ema and volume[i] > 1.5 * vol_ma20[i]:
+            # Long: TRIX bullish crossover + price above 1D EMA34 + volume spike
+            if (trix_cross_up and 
+                close[i] > ema34_1d_aligned[i] and 
+                volume[i] > 2.0 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bearish fractal confirmed, price below 1W EMA34, volume surge
-            elif bearish_fractal_aligned[i] > 0.5 and price_below_ema and volume[i] > 1.5 * vol_ma20[i]:
+            # Short: TRIX bearish crossover + price below 1D EMA34 + volume spike
+            elif (trix_cross_down and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bearish fractal OR price crosses below 1W EMA34
-            if bearish_fractal_aligned[i] > 0.5 or close[i] < ema34_1w_aligned[i]:
+            # Long exit: TRIX bearish crossover or price below 1D EMA34
+            if trix_cross_down or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bullish fractal OR price crosses above 1W EMA34
-            if bullish_fractal_aligned[i] > 0.5 or close[i] > ema34_1w_aligned[i]:
+            # Short exit: TRIX bullish crossover or price above 1D EMA34
+            if trix_cross_up or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
