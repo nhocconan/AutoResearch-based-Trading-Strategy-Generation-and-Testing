@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume
+4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Solid
 Hypothesis: Price breaking above daily R3 or below daily S3 with 1-day trend confirmation (EMA34) and volume spike. Uses daily pivot levels as strong support/resistance. In uptrend, buy breakouts above R3; in downtrend, sell breakdowns below S3. Volume confirms institutional interest. Designed for 4h timeframe with 1d trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Solid"
 timeframe = "4h"
 leverage = 1.0
 
@@ -100,7 +100,7 @@ def generate_signals(prices):
                 position = -1
         else:
             # Exit conditions: return to pivot or trend reversal
-            # Calculate aligned pivot for exit
+            # Calculate pivot for exit (use previous day's data)
             pivot_val = (d_high_prev + d_low_prev + d_close_prev) / 3.0
             pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_val)
             
