@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Fibonacci_Camarilla_Combo_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -46,14 +46,14 @@ def generate_signals(prices):
     r4_1d = close_1d + range_1d * 1.1 / 2
     s4_1d = close_1d - range_1d * 1.1 / 2
     
-    # Align Camarilla levels to 6h
+    # Align Camarilla levels to 4h
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Volume spike: current volume > 2x 24-period average
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume spike: current volume > 2x 24-period average (6 periods for 4h = 1 day)
+    vol_ma = pd.Series(volume).rolling(window=6, min_periods=6).mean().values
     volume_spike = volume > (vol_ma * 2)
     
     signals = np.zeros(n)
