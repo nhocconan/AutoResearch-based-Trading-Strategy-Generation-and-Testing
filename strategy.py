@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 6h_ADX_1dTrend_Volume
-# Hypothesis: Uses ADX to measure trend strength on 6h timeframe, filtered by daily trend direction (HH/HL or LL/LH) and volume spike.
-# Long when: daily uptrend (HH & HL), ADX > 25 (strong trend), volume > 1.5x 20-period average, and +DI > -DI.
-# Short when: daily downtrend (LH & LL), ADX > 25, volume > 1.5x 20-period average, and -DI > +DI.
-# Exit when ADX falls below 20 (weakening trend) or daily trend reverses.
-# ADX filters out sideways markets, capturing only strong trends, which works in both bull and bear markets.
-# Works in bull markets by catching strong uptrends and in bear by catching strong downtrends.
+# 12h_W1_Engulfing_Pullback
+# Hypothesis: Combines weekly bullish/bearish engulfing patterns with 12h price pullback to weekly VWAP for high-probability entries.
+# Weekly bullish engulfing + price > weekly VWAP + pullback (close < 12h EMA20) = long.
+# Weekly bearish engulfing + price < weekly VWAP + pullback (close > 12h EMA20) = short.
+# Uses weekly timeframe for structure (engulfing/VWAP) and 12h for timing (EMA pullback).
+# Works in bull markets by buying dips in uptrends and in bear by selling rallies in downtrends.
+# Low-frequency signal (~15-25 trades/year) minimizes fee drag.
 
-name = "6h_ADX_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_W1_Engulfing_Pullback"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,135 +20,100 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend structure (HH, HL, LH, LL)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for engulfing and VWAP
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d trend structure: HH/HL for uptrend, LH/LL for downtrend ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # Higher High: today's high > yesterday's high
-    hh = high_1d > np.roll(high_1d, 1)
-    # Higher Low: today's low > yesterday's low
-    hl = low_1d > np.roll(low_1d, 1)
-    # Lower High: today's high < yesterday's high
-    lh = high_1d < np.roll(high_1d, 1)
-    # Lower Low: today's low < yesterday's low
-    ll = low_1d < np.roll(low_1d, 1)
-    # Uptrend: HH and HL
-    uptrend = hh & hl
-    # Downtrend: LH and LL
-    downtrend = lh & ll
-    # First bar: no previous day, set to False
-    uptrend[0] = False
-    downtrend[0] = False
+    # --- Weekly bullish/bearish engulfing ---
+    open_1w = df_1w['open'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # --- ADX calculation (trend strength) ---
-    adx_period = 14
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
+    bullish_engulf = (close_1w > open_1w) & (open_1w < close_1w) & \
+                     (close_1w > open_1w) & (open_1w < close_1w) & \
+                     (close_1w >= open_1w) & (open_1w <= close_1w) & \
+                     (close_1w > open_1w.shift(1)) & (open_1w < close_1w.shift(1))
+    bearish_engulf = (close_1w < open_1w) & (open_1w > close_1w) & \
+                     (close_1w < open_1w) & (open_1w > close_1w) & \
+                     (close_1w <= open_1w) & (open_1w >= close_1w) & \
+                     (close_1w < open_1w.shift(1)) & (open_1w > close_1w.shift(1))
+    # Fix: proper engulfing conditions
+    bullish_engulf = (close_1w > open_1w) & (open_1w < close_1w.shift(1)) & (close_1w > open_1w.shift(1)) & (open_1w < close_1w.shift(1))
+    bearish_engulf = (close_1w < open_1w) & (open_1w > close_1w.shift(1)) & (close_1w < open_1w.shift(1)) & (open_1w > close_1w.shift(1))
+    # First bar: no previous week
+    bullish_engulf[0] = False
+    bearish_engulf[0] = False
     
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # --- Weekly VWAP (volume-weighted average price) ---
+    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
+    vol_price_1w = typical_price_1w * volume_1w if 'volume_1w' in df_1w.columns else typical_price_1w * df_1w['volume'].values
+    cum_vol_price = np.cumsum(vol_price_1w)
+    cum_vol = np.cumsum(df_1w['volume'].values)
+    vwap_1w = np.divide(cum_vol_price, cum_vol, out=np.zeros_like(cum_vol_price), where=cum_vol!=0)
     
-    # Smoothed values
-    def smooth(arr, period):
-        result = np.full_like(arr, np.nan, dtype=float)
-        if len(arr) < period:
-            return result
-        # Initial average
-        result[period-1] = np.mean(arr[:period])
-        # Wilder smoothing
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # --- 12h EMA20 for pullback timing ---
+    close_s = pd.Series(close)
+    ema_20 = close_s.ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    atr = smooth(tr, adx_period)
-    plus_di = 100 * smooth(plus_dm, adx_period) / atr
-    minus_di = 100 * smooth(minus_dm, adx_period) / atr
-    
-    # DX and ADX
-    dx = np.zeros_like(plus_di)
-    dx[:] = np.where((plus_di + minus_di) != 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0)
-    adx = smooth(dx, adx_period)
-    
-    # --- Volume confirmation (volume > 20-period average) ---
-    vol_ma = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
-    
-    # Align 1d trend indicators to 6h timeframe
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    plus_di_aligned = align_htf_to_ltf(prices, df_1d, plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, df_1d, minus_di)
+    # Align weekly indicators to 12h timeframe
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bullish_engulf)
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1w, bearish_engulf)
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for ADX (2*period) and volume MA(20)
-    start_idx = max(2 * adx_period, 20)
+    # Warmup: enough for weekly data and EMA20
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(adx_aligned[i]) or
-            np.isnan(plus_di_aligned[i]) or
-            np.isnan(minus_di_aligned[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i])):
+        if (np.isnan(bullish_engulf_aligned[i]) or
+            np.isnan(bearish_engulf_aligned[i]) or
+            np.isnan(vwap_1w_aligned[i]) or
+            np.isnan(ema_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend from 1d
-        is_uptrend = uptrend_aligned[i]
-        is_downtrend = downtrend_aligned[i]
+        # Weekly conditions
+        is_bullish_engulf = bullish_engulf_aligned[i]
+        is_bearish_engulf = bearish_engulf_aligned[i]
+        price_vs_vwap = close[i] - vwap_1w_aligned[i]
         
-        # ADX and DI
-        adx_val = adx_aligned[i]
-        plus_di_val = plus_di_aligned[i]
-        minus_di_val = minus_di_aligned[i]
-        
-        # Volume spike condition
-        vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
+        # 12h pullback condition
+        pullback_long = close[i] < ema_20[i]   # price below EMA20 = pullback in uptrend
+        pullback_short = close[i] > ema_20[i]  # price above EMA20 = pullback in downtrend
         
         if position == 0:
-            if is_uptrend and adx_val > 25 and vol_spike and plus_di_val > minus_di_val:
-                # Long: daily uptrend + strong trend + volume spike + bullish DI
+            if is_bullish_engulf and price_vs_vwap > 0 and pullback_long:
+                # Long: weekly bullish engulf + price above weekly VWAP + 12h pullback
                 signals[i] = 0.25
                 position = 1
-            elif is_downtrend and adx_val > 25 and vol_spike and minus_di_val > plus_di_val:
-                # Short: daily downtrend + strong trend + volume spike + bearish DI
+            elif is_bearish_engulf and price_vs_vwap < 0 and pullback_short:
+                # Short: weekly bearish engulf + price below weekly VWAP + 12h pullback
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: ADX falls below 20 OR daily uptrend breaks
-                if adx_val < 20 or not is_uptrend:
+                # Exit long: weekly bearish engulf OR price crosses below weekly VWAP
+                if is_bearish_engulf or price_vs_vwap < 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: ADX falls below 20 OR daily downtrend breaks
-                if adx_val < 20 or not is_downtrend:
+                # Exit short: weekly bullish engulf OR price crosses above weekly VWAP
+                if is_bullish_engulf or price_vs_vwap > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
