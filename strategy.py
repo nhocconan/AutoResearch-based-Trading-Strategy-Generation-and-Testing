@@ -1,6 +1,13 @@
+# 12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Camarilla R1/S1 breakout on 12h timeframe with 1d trend filter (EMA34) and volume confirmation.
+# Uses tighter entry (R1/S1 instead of R3/S3) for better win rate, with volume filter to avoid false breakouts.
+# Designed to work in both bull and bear markets by following 1d trend direction.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within fee drag limits.
+# Uses discrete position sizing (0.25) to minimize churn.
+
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_Volume"
-timeframe = "1h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,12 +24,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
@@ -35,27 +37,22 @@ def generate_signals(prices):
     # Previous 1d bar's range
     range_1d = high_1d - low_1d
     
-    # Calculate Camarilla R1 and S1 levels (tighter, more precise)
+    # Calculate Camarilla R1 and S1 levels (tighter than R3/S3)
     camarilla_r1 = close_1d + (range_1d * 1.1 / 6)
     camarilla_s1 = close_1d - (range_1d * 1.1 / 6)
     
-    # Align Camarilla levels to 1h timeframe (using previous 1d bar's values)
-    r1_1h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align Camarilla levels to 12h timeframe (using previous 1d bar's values)
+    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    close_4h_series = pd.Series(close_4h)
-    ema_4h = close_4h_series.ewm(span=50, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # 1d EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema_1d = close_1d_series.ewm(span=34, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume filter: current volume > 1.5x 24-period average (balanced for 1h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Volume filter: current volume > 1.5x 30-period average
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     volume_filter = volume > (vol_ma * 1.5)
-    
-    # Session filter: 08:00 to 20:00 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,8 +62,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,27 +72,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 4h EMA50 (uptrend) AND volume surge AND session
-            if close[i] > r1_1h[i] and close[i] > ema_4h_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # Long: price breaks above R1 AND above 1d EMA34 (uptrend) AND volume surge
+            if close[i] > r1_12h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND below 4h EMA50 (downtrend) AND volume surge AND session
-            elif close[i] < s1_1h[i] and close[i] < ema_4h_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # Short: price breaks below S1 AND below 1d EMA34 (downtrend) AND volume surge
+            elif close[i] < s1_12h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below 4h EMA50 (trend change)
-            if close[i] < s1_1h[i] or close[i] < ema_4h_aligned[i]:
+            # Long exit: price falls below S1 OR below 1d EMA34 (trend change)
+            if close[i] < s1_12h[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above 4h EMA50 (trend change)
-            if close[i] > r1_1h[i] or close[i] > ema_4h_aligned[i]:
+            # Short exit: price rises above R1 OR above 1d EMA34 (trend change)
+            if close[i] > r1_12h[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
