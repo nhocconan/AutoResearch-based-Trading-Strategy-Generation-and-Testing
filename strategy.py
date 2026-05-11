@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_VolumeSpike_1dTrend_FadeFromDailyVWAP
-Hypothesis: Fade price moves away from daily VWAP on 6h timeframe during low volatility periods, 
-but only when aligned with daily trend. Uses volume spike as entry trigger and daily trend filter.
-Works in bull/bear markets by fading mean-reversion moves in trending environments.
+12h_Donchian20_Breakout_1dTrend_Volume
+Hypothesis: Trade Donchian(20) breakouts on 12h timeframe with 1d EMA50 trend filter and volume confirmation.
+In breakouts, price often continues in the direction of the breakout. The 1d EMA50 ensures we trade with the
+daily trend, reducing false breakouts. Volume confirmation adds conviction. Works in bull/bear markets by aligning
+with daily trend direction. Target: 15-35 trades/year.
 """
 
-name = "6h_VolumeSpike_1dTrend_FadeFromDailyVWAP"
-timeframe = "6h"
+name = "12h_Donchian20_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -24,39 +25,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily VWAP ===
+    # === Donchian Channel (20-period) ===
+    lookback = 20
+    highest = np.full(n, np.nan)
+    lowest = np.full(n, np.nan)
+    for i in range(lookback-1, n):
+        highest[i] = np.max(high[i-lookback+1:i+1])
+        lowest[i] = np.min(low[i-lookback+1:i+1])
+    
+    # === Daily Trend Filter (EMA50) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate daily VWAP components
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-    pv = typical_price * df_1d['volume']
-    cum_pv = pv.cumsum()
-    cum_vol = df_1d['volume'].cumsum()
-    vwap = cum_pv / cum_vol
-    vwap_values = vwap.values
-    
-    # Align VWAP to 6h timeframe
-    vwap_6h = align_htf_to_ltf(prices, df_1d, vwap_values)
-    
-    # === Daily Trend Filter (EMA50) ===
     ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === Volume Spike Filter (2.5x 30-period EMA on 6h) ===
-    vol_ema30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
-    volume_spike = volume > vol_ema30 * 2.5
+    # === Volume Filter (1.5x 20-period EMA on 12h) ===
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers daily calculations)
-    start_idx = 60
+    # Start after warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_6h[i]) or np.isnan(ema50_6h[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(highest[i]) or np.isnan(lowest[i]) or 
+            np.isnan(ema50_12h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price below VWAP, uptrend, volume spike (fade downside deviation)
-            if (close[i] < vwap_6h[i] and 
-                close[i] > ema50_6h[i] and 
-                volume_spike[i]):
+            # Long breakout: price closes above upper band with uptrend and volume
+            if (close[i] > highest[i] and 
+                close[i] > ema50_12h[i] and 
+                volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price above VWAP, downtrend, volume spike (fade upside deviation)
-            elif (close[i] > vwap_6h[i] and 
-                  close[i] < ema50_6h[i] and 
-                  volume_spike[i]):
+            # Short breakdown: price closes below lower band with downtrend and volume
+            elif (close[i] < lowest[i] and 
+                  close[i] < ema50_12h[i] and 
+                  volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses above VWAP (mean reversion complete) or trend breaks
-            if close[i] >= vwap_6h[i] or close[i] < ema50_6h[i]:
+            # Long exit: price closes below lower band (mean reversion)
+            if close[i] < lowest[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses below VWAP (mean reversion complete) or trend breaks
-            if close[i] <= vwap_6h[i] or close[i] > ema50_6h[i]:
+            # Short exit: price closes above upper band (mean reversion)
+            if close[i] > highest[i]:
                 signals[i] = 0.0
                 position = 0
             else:
