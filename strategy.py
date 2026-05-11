@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-# 4h_ThreeWhiteSoldiers_BlackCrows_Volume
-# Hypothesis: Captures trend reversals using Three White Soldiers/Black Crows candlestick patterns
-# with volume confirmation and 12h EMA trend filter. Works in bull markets (catching bottoms) and
-# bear markets (catching tops) by identifying exhaustion patterns. Uses 12h EMA50 for trend
-# filtering to avoid counter-trend trades. Target: 20-50 trades/year to minimize fee drag.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike
+# Hypothesis: Uses 1d Camarilla pivot levels (R3/S3) as key support/resistance. Enters long when price breaks above R3 with 1d uptrend (EMA34 rising) and volume spike; enters short when price breaks below S3 with 1d downtrend and volume spike. Exits when price returns to the 1d EMA34 or trend reverses. Works in bull markets by catching breakouts above resistance and in bear markets by catching breakdowns below support. Volume confirmation reduces false breakouts. 12h timeframe limits trades to avoid fee drag.
 
-name = "4h_ThreeWhiteSoldiers_BlackCrows_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,98 +12,94 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for Camarilla levels, EMA34 trend, and volume average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h OHLCV
-    open_price = prices['open'].values
+    # 12h OHLCV
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h EMA50 for trend filter ---
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_prev = np.roll(ema_50_12h, 1)
-    ema_50_12h_prev[0] = ema_50_12h[0]
-    ema_50_12h_slope = ema_50_12h - ema_50_12h_prev
-    ema_50_12h_slope = pd.Series(ema_50_12h_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_50_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h_slope)
+    # --- 1d Camarilla levels (R3, S3) ---
+    # Formula: R3 = close + 1.1 * (high - low) * 1.1/2? Wait, standard Camarilla:
+    # Actually: R4 = close + ((high-low) * 1.1/2), R3 = close + ((high-low) * 1.1/4)
+    # But we want R3 and S3: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    rng = high_1d - low_1d
+    r3 = close_1d + 1.1 * rng / 4
+    s3 = close_1d - 1.1 * rng / 4
     
-    # --- Three White Soldiers (bullish reversal) ---
-    # Three consecutive bullish closes with higher closes
-    bull1 = close > open_price
-    bull2 = np.roll(close, 1) > np.roll(open_price, 1)
-    bull3 = np.roll(close, 2) > np.roll(open_price, 2)
-    higher_close1 = close > np.roll(close, 1)
-    higher_close2 = np.roll(close, 1) > np.roll(close, 2)
-    three_white_soldiers = bull1 & bull2 & bull3 & higher_close1 & higher_close2
+    # --- 1d EMA34 for trend direction ---
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_slope = ema_34_1d - np.roll(ema_34_1d, 1)
+    ema_34_1d_slope[0] = 0
+    ema_34_1d_slope = pd.Series(ema_34_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values  # smooth slope
     
-    # --- Three Black Crows (bearish reversal) ---
-    # Three consecutive bearish closes with lower closes
-    bear1 = close < open_price
-    bear2 = np.roll(close, 1) < np.roll(open_price, 1)
-    bear3 = np.roll(close, 2) < np.roll(open_price, 2)
-    lower_close1 = close < np.roll(close, 1)
-    lower_close2 = np.roll(close, 1) < np.roll(close, 2)
-    three_black_crows = bear1 & bear2 & bear3 & lower_close1 & lower_close2
+    # --- 1d volume confirmation (volume > 20-period average) ---
+    vol_20_1d = pd.Series(df_1d['volume'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # --- Volume confirmation (volume > 20-period average) ---
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > vol_ma
+    # Align all 1d indicators to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_34_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_slope)
+    vol_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for pattern detection (3 bars) and EMA50 (50+3)
-    start_idx = 50
+    # Warmup: enough for EMA34 (34) and smoothing (3)
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(ema_50_12h_slope_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema_34_1d_aligned[i]) or
+            np.isnan(ema_34_1d_slope_aligned[i]) or
+            np.isnan(vol_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend filter from 12h EMA50 slope
-        uptrend = ema_50_12h_slope_aligned[i] > 0
-        downtrend = ema_50_12h_slope_aligned[i] < 0
+        # Trend direction from 1d EMA34 slope
+        uptrend = ema_34_1d_slope_aligned[i] > 0
+        downtrend = ema_34_1d_slope_aligned[i] < 0
+        
+        # Volume spike condition
+        vol_spike = volume[i] > vol_20_1d_aligned[i] * 1.5  # 50% above average
         
         if position == 0:
-            # Long: Three White Soldiers + volume surge + in 12h uptrend or ranging
-            if three_white_soldiers[i] and vol_surge[i]:
-                # Allow long in uptrend or ranging (avoid strong downtrend)
-                if not downtrend:  # not in strong 12h downtrend
+            if uptrend and vol_spike:
+                # Long: 1d uptrend + volume spike + price above R3
+                if close[i] > r3_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-            # Short: Three Black Crows + volume surge + in 12h downtrend or ranging
-            elif three_black_crows[i] and vol_surge[i]:
-                # Allow short in downtrend or ranging (avoid strong uptrend)
-                if not uptrend:  # not in strong 12h uptrend
+            elif downtrend and vol_spike:
+                # Short: 1d downtrend + volume spike + price below S3
+                if close[i] < s3_aligned[i]:
                     signals[i] = -0.25
                     position = -1
         else:
             if position == 1:
-                # Exit conditions for long
-                # Exit on Three Black Crows (reversal signal) or strong 12h downtrend
-                if three_black_crows[i] or downtrend:
+                # Exit long: price returns to EMA34 OR trend turns down
+                if close[i] < ema_34_1d_aligned[i] or downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit conditions for short
-                # Exit on Three White Soldiers (reversal signal) or strong 12h uptrend
-                if three_white_soldiers[i] or uptrend:
+                # Exit short: price returns to EMA34 OR trend turns up
+                if close[i] > ema_34_1d_aligned[i] or uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
