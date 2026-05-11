@@ -1,17 +1,13 @@
-#!/usr/bin/env python3
-"""
-1h_4h1d_EMA_Crossover_Signal
-Hypothesis: Combines 4h EMA trend (EMA34) with 1d EMA trend filter (EMA50) and 1h EMA entry (EMA12/26).
-Only takes long when 4h and 1d EMAs are bullish (price > EMA) and 1h EMA12 crosses above EMA26.
-Short when 4h and 1d EMAs are bearish and 1h EMA12 crosses below EMA26.
-Adds volume confirmation (volume > 1.5x 20-bar average) to avoid false breakouts.
-Uses 0.20 position size to limit drawdown. Designed for low trade frequency by requiring
-multi-timeframe alignment and volume confirmation. Works in bull markets via trend following
-and in bear markets via short signals during downtrends.
-"""
+# 6h_Weekly_Pivot_Daily_Trend_Filter_v1
+# Hypothesis: Uses weekly pivot points from 1w timeframe to determine market bias, and daily EMA34 for trend filtering.
+# Enters long when price breaks above weekly R1 with volume confirmation and above daily EMA34.
+# Enters short when price breaks below weekly S1 with volume confirmation and below daily EMA34.
+# Uses volume spike (1.5x 20-period average) for confirmation. Designed for low trade frequency by requiring
+# multiple confluence factors: weekly pivot breakout, volume confirmation, and trend alignment.
+# Works in both bull and bear markets by following the trend filter (daily EMA34) which adapts to market conditions.
 
-name = "1h_4h1d_EMA_Crossover_Signal"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_Daily_Trend_Filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,53 +19,64 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 4h and 1d data for trend filters
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) < 34 or len(df_1d) < 50:
+    # Get weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 1:
         return np.zeros(n)
     
-    # 1h OHLCV
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 4h EMA34 Trend Filter ---
-    close_4h = df_4h['close'].values
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
+    # --- Weekly Pivot Points (standard calculation) ---
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # --- 1d EMA50 Trend Filter ---
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # --- 1h EMA12 and EMA26 for Entry ---
-    ema_12 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema_26 = pd.Series(close).ewm(span=26, adjust=False, min_periods=26).mean().values
+    # Align weekly levels to 6h
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # --- Volume Confirmation ---
+    # --- Volume Spike Detection (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    
+    # --- Daily Trend Filter (EMA34 on 1d close) ---
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(ema_12[i]) or np.isnan(ema_26[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_34_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
@@ -77,34 +84,36 @@ def generate_signals(prices):
         # Volume confirmation threshold
         volume_spike = vol_ratio[i] > 1.5
         
-        # Determine trend alignment
-        bullish_trend = (close[i] > ema_34_4h_aligned[i]) and (close[i] > ema_50_1d_aligned[i])
-        bearish_trend = (close[i] < ema_34_4h_aligned[i]) and (close[i] < ema_50_1d_aligned[i])
-        
         if position == 0:
-            # Long: bullish trend + EMA12 crosses above EMA26 + volume
-            if bullish_trend and (ema_12[i] > ema_26[i]) and (ema_12[i-1] <= ema_26[i-1]) and volume_spike:
-                signals[i] = 0.20
+            # Long: price breaks above weekly R1 with volume, above daily EMA34
+            if (close[i] > r1_1w_aligned[i] and 
+                volume_spike and 
+                close[i] > ema_34_aligned[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: bearish trend + EMA12 crosses below EMA26 + volume
-            elif bearish_trend and (ema_12[i] < ema_26[i]) and (ema_12[i-1] >= ema_26[i-1]) and volume_spike:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S1 with volume, below daily EMA34
+            elif (close[i] < s1_1w_aligned[i] and 
+                  volume_spike and 
+                  close[i] < ema_34_aligned[i]):
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal or EMA cross in opposite direction
+            # Exit conditions: opposite breakout or loss of trend
             if position == 1:
-                # Exit long: bearish trend or EMA12 crosses below EMA26
-                if bearish_trend or (ema_12[i] < ema_26[i] and ema_12[i-1] >= ema_26[i-1]):
+                # Exit long: price breaks below weekly S1 or below daily EMA34
+                if (close[i] < s1_1w_aligned[i] or 
+                    close[i] < ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: bullish trend or EMA12 crosses above EMA26
-                if bullish_trend or (ema_12[i] > ema_26[i] and ema_12[i-1] <= ema_26[i-1]):
+                # Exit short: price breaks above weekly R1 or above daily EMA34
+                if (close[i] > r1_1w_aligned[i] or 
+                    close[i] > ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
