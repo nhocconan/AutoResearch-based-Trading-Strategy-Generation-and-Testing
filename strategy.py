@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-# 1d_Camarilla_R3S3_Breakout_WeeklyTrend
-# Hypothesis: Uses weekly trend direction with Camarilla pivot breakout on daily chart.
-# Long when: 1) weekly trend is bullish (price > weekly EMA34), 2) price breaks above Camarilla R3 level, 3) volume > 1.5x 20-day average.
-# Short when: 1) weekly trend is bearish (price < weekly EMA34), 2) price breaks below Camarilla S3 level, 3) volume > 1.5x 20-day average.
-# Exit when price returns to daily EMA34 or weekly trend reverses.
-# Weekly trend filter reduces noise and aligns with higher timeframe momentum.
-# Camarilla R3/S3 levels provide institutional support/resistance with statistical edge.
-# Volume confirmation filters out weak breakouts.
-# Designed for low trade frequency (target: 20-50 trades/year) to minimize fee drag.
+# 6h_ParabolicSAR_1dTrend_Volume
+# Hypothesis: Uses Parabolic SAR for trend-following entries on 6h timeframe, filtered by daily trend structure and volume spikes.
+# Long when: daily uptrend (HH & HL), volume > 1.5x 20-period average, and Parabolic SAR flips below price (bullish signal).
+# Short when: daily downtrend (LH & LL), volume > 1.5x 20-period average, and Parabolic SAR flips above price (bearish signal).
+# Exit when Parabolic SAR reverses position or daily trend breaks.
+# Designed to capture strong trends while avoiding false breakouts in low-volume conditions.
+# Works in bull markets by catching uptrends early and in bear markets by catching downtrends.
+# Parabolic SAR provides clear entry/exit signals with built-in acceleration factor.
 
-name = "1d_Camarilla_R3S3_Breakout_WeeklyTrend"
-timeframe = "1d"
+name = "6h_ParabolicSAR_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,97 +18,136 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for trend structure (HH, HL, LH, LL)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly trend: price vs EMA34 ---
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    weekly_trend_up = close_1w > ema34_1w
-    weekly_trend_down = close_1w < ema34_1w
+    # --- 1d trend structure: HH/HL for uptrend, LH/LL for downtrend ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # Higher High: today's high > yesterday's high
+    hh = high_1d > np.roll(high_1d, 1)
+    # Higher Low: today's low > yesterday's low
+    hl = low_1d > np.roll(low_1d, 1)
+    # Lower High: today's high < yesterday's high
+    lh = high_1d < np.roll(high_1d, 1)
+    # Lower Low: today's low < yesterday's low
+    ll = low_1d < np.roll(low_1d, 1)
+    # Uptrend: HH and HL
+    uptrend = hh & hl
+    # Downtrend: LH and LL
+    downtrend = lh & ll
+    # First bar: no previous day, set to False
+    uptrend[0] = False
+    downtrend[0] = False
     
-    # Align weekly trend to daily
-    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up)
-    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down)
+    # --- Parabolic SAR calculation ---
+    # Initialize SAR with first high-low range
+    sar = np.zeros(n)
+    trend = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    af = 0.02  # acceleration factor
+    max_af = 0.2
+    ep = high[0]  # extreme point
     
-    # --- Daily EMA34 for exit ---
-    close_series = pd.Series(close)
-    ema34 = close_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    sar[0] = low[0]  # start with SAR at low
     
-    # --- Camarilla pivot levels (based on previous day) ---
-    # R3 = close + 1.1 * (high - low)
-    # S3 = close - 1.1 * (high - low)
-    # Using previous day's OHLC to avoid look-ahead
-    camarilla_r3 = np.roll(close, 1) + 1.1 * (np.roll(high, 1) - np.roll(low, 1))
-    camarilla_s3 = np.roll(close, 1) - 1.1 * (np.roll(high, 1) - np.roll(low, 1))
-    # First bar: no previous day
-    camarilla_r3[0] = np.nan
-    camarilla_s3[0] = np.nan
+    for i in range(1, n):
+        # Prior SAR
+        sar[i] = sar[i-1] + af * (ep - sar[i-1])
+        
+        # Check for trend reversal
+        if trend[i-1] == 1:  # was in uptrend
+            if low[i] <= sar[i]:  # price broke below SAR -> downtrend
+                trend[i] = -1
+                sar[i] = ep  # SAR becomes prior EP
+                ep = low[i]  # reset EP to current low
+                af = 0.02  # reset acceleration factor
+            else:  # still in uptrend
+                trend[i] = 1
+                if high[i] > ep:  # new high
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+                # SAR should not exceed prior two lows
+                sar[i] = min(sar[i], low[i-1], low[i-2] if i>=2 else low[i-1])
+        else:  # was in downtrend
+            if high[i] >= sar[i]:  # price broke above SAR -> uptrend
+                trend[i] = 1
+                sar[i] = ep  # SAR becomes prior EP
+                ep = high[i]  # reset EP to current high
+                af = 0.02  # reset acceleration factor
+            else:  # still in downtrend
+                trend[i] = -1
+                if low[i] < ep:  # new low
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
+                # SAR should not be below prior two highs
+                sar[i] = max(sar[i], high[i-1], high[i-2] if i>=2 else high[i-1])
     
-    # --- Volume confirmation (volume > 20-day average) ---
+    # --- Volume confirmation (volume > 20-period average) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
+    # Align 1d trend indicators to 6h timeframe
+    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
+    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA34 and volume MA(20)
-    start_idx = max(34, 20)
+    # Warmup: enough for Parabolic SAR (needs at least 2 periods) and volume MA(20)
+    start_idx = max(2, 20)  # SAR needs 2, vol MA needs 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34[i]) or
-            np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i]) or
+        if (np.isnan(sar[i]) or
             np.isnan(vol_ma[i]) or
-            np.isnan(weekly_trend_up_aligned[i]) or
-            np.isnan(weekly_trend_down_aligned[i])):
+            np.isnan(uptrend_aligned[i]) or
+            np.isnan(downtrend_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Weekly trend
-        is_weekly_up = weekly_trend_up_aligned[i]
-        is_weekly_down = weekly_trend_down_aligned[i]
+        # Trend from 1d
+        is_uptrend = uptrend_aligned[i]
+        is_downtrend = downtrend_aligned[i]
         
         # Volume spike condition
         vol_spike = volume[i] > vol_ma[i] * 1.5  # 50% above average
         
         if position == 0:
-            if is_weekly_up and vol_spike:
-                # Long: weekly uptrend + volume spike + price above Camarilla R3
-                if close[i] > camarilla_r3[i]:
+            if is_uptrend and vol_spike:
+                # Long: daily uptrend + volume spike + price above SAR (bullish SAR)
+                if close[i] > sar[i]:
                     signals[i] = 0.25
                     position = 1
-            elif is_weekly_down and vol_spike:
-                # Short: weekly downtrend + volume spike + price below Camarilla S3
-                if close[i] < camarilla_s3[i]:
+            elif is_downtrend and vol_spike:
+                # Short: daily downtrend + volume spike + price below SAR (bearish SAR)
+                if close[i] < sar[i]:
                     signals[i] = -0.25
                     position = -1
         else:
             if position == 1:
-                # Exit long: price returns to EMA34 OR weekly trend turns down
-                if close[i] < ema34[i] or not is_weekly_up:
+                # Exit long: price falls below SAR OR daily uptrend breaks
+                if close[i] < sar[i] or not is_uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to EMA34 OR weekly trend turns up
-                if close[i] > ema34[i] or not is_weekly_down:
+                # Exit short: price rises above SAR OR daily downtrend breaks
+                if close[i] > sar[i] or not is_downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
