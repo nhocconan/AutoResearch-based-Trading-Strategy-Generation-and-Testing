@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_TRIX_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,53 +17,61 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for TRIX and volume
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
+    # Calculate Camarilla levels (R1, S1) from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    vol_1d = df_1d['volume'].values
     
-    # Calculate TRIX (12-period EMA of EMA of EMA of close, then ROC)
-    ema1 = pd.Series(close_1d).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    R1 = np.zeros(len(high_1d))
+    S1 = np.zeros(len(high_1d))
     
-    # Rate of change of the triple EMA
-    trix_raw = np.zeros(len(ema3))
-    for i in range(len(ema3)):
-        if i < 12:
-            trix_raw[i] = np.nan
+    for i in range(len(high_1d)):
+        if i < 1:
+            R1[i] = np.nan
+            S1[i] = np.nan
         else:
-            trix_raw[i] = (ema3[i] - ema3[i-1]) / ema3[i-1] * 100
+            # Camarilla formulas using previous day's range
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            range_val = prev_high - prev_low
+            R1[i] = prev_close + range_val * 1.1 / 2
+            S1[i] = prev_close - range_val * 1.1 / 2
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_raw).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Daily EMA34 for trend filter
+    close_1d_series = pd.Series(close_1d)
+    ema34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema34  # True for uptrend, False for downtrend
     
-    # Daily volume moving average (20-period)
-    vol_ma20 = np.zeros(len(vol_1d))
-    for i in range(len(vol_1d)):
+    # Align indicators to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
+    
+    # Volume moving average (20-period) for confirmation
+    vol_ma20 = np.zeros(n)
+    for i in range(n):
         if i < 20:
-            vol_ma20[i] = np.mean(vol_1d[:i+1]) if i > 0 else 0
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            vol_ma20[i] = np.mean(vol_1d[i-19:i+1])
-    
-    # Align indicators to 6h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_raw)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(34, 20)  # Ensure EMA34 and volume MA are ready
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(trix_aligned[i]) or 
-            np.isnan(trix_signal_aligned[i]) or
-            np.isnan(vol_ma20_aligned[i])):
+        if (np.isnan(R1_aligned[i]) or 
+            np.isnan(S1_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,30 +80,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above signal line + volume confirmation
-            if (trix_aligned[i] > trix_signal_aligned[i] and 
-                trix_aligned[i-1] <= trix_signal_aligned[i-1] and
-                volume[i] > 1.5 * vol_ma20_aligned[i]):
+            # Long: price breaks above R1 + uptrend + volume confirmation
+            if (close[i] > R1_aligned[i] and 
+                trend_up_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal line + volume confirmation
-            elif (trix_aligned[i] < trix_signal_aligned[i] and 
-                  trix_aligned[i-1] >= trix_signal_aligned[i-1] and
-                  volume[i] > 1.5 * vol_ma20_aligned[i]):
+            # Short: price breaks below S1 + downtrend + volume confirmation
+            elif (close[i] < S1_aligned[i] and 
+                  not trend_up_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below signal line
-            if (trix_aligned[i] < trix_signal_aligned[i] and 
-                trix_aligned[i-1] >= trix_signal_aligned[i-1]):
+            # Long exit: price breaks below S1 or trend changes to downtrend
+            if (close[i] < S1_aligned[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above signal line
-            if (trix_aligned[i] > trix_signal_aligned[i] and 
-                trix_aligned[i-1] <= trix_signal_aligned[i-1]):
+            # Short exit: price breaks above R1 or trend changes to uptrend
+            if (close[i] > R1_aligned[i] or trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
