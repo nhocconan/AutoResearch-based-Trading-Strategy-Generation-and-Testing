@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_Trend_RSI_Range"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_Pullback_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,44 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA for trend direction (ER=10, FA=2, SC=30)
-    change = np.abs(close - np.roll(close, 10))
-    change[0:10] = 0
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
-    volatility = np.concatenate([[0], volatility])
-    for i in range(10, len(volatility)):
-        volatility[i] = np.sum(np.abs(close[i-9:i+1] - close[i-10:i]))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]
-    for i in range(10, n):
+    # KAMA trend on 1d
+    price_series = pd.Series(close)
+    change = abs(price_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change / volatility.replace(0, np.finfo(float).eps)
+    er = er.fillna(0)
+    sc = (er * 0.06 + 0.06) ** 2  # fast=2, slow=30
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
         kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_dir = np.where(close > kama, 1, -1)
     
-    # RSI for range condition (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    # RSI(14) for pullback
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=14, min_periods=14).mean()
+    avg_loss = loss.rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
     rsi = 100 - (100 / (1 + rs))
-    rsi = np.nan_to_num(rsi, nan=50)
+    rsi = rsi.fillna(50).values
     
-    # Volume surge filter (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Weekly trend filter (1w)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    weekly_ma = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean()
+    weekly_ma_values = weekly_ma.values
+    weekly_ma_aligned = align_htf_to_ltf(prices, df_1w, weekly_ma_values)
+    
+    # Volume filter (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    # Start after warmup
-    start_idx = 30
+    position = 0
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or 
+            np.isnan(weekly_ma_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -64,28 +69,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price above KAMA (uptrend) AND RSI in oversold range (30-40) with volume
-            if (close[i] > kama[i] and 
-                30 <= rsi[i] <= 40 and 
+            # Long: KAMA up, weekly trend up, RSI pullback <40, volume surge
+            if (kama_dir[i] == 1 and 
+                close[i] > weekly_ma_aligned[i] and 
+                rsi[i] < 40 and 
                 vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price below KAMA (downtrend) AND RSI in overbought range (60-70) with volume
-            elif (close[i] < kama[i] and 
-                  60 <= rsi[i] <= 70 and 
+            # Short: KAMA down, weekly trend down, RSI pullback >60, volume surge
+            elif (kama_dir[i] == -1 and 
+                  close[i] < weekly_ma_aligned[i] and 
+                  rsi[i] > 60 and 
                   vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price crosses back below/above KAMA (trend reversal)
+            # Exit: RSI reverts to middle or trend changes
             if position == 1:
-                if close[i] <= kama[i]:
+                if rsi[i] > 60 or kama_dir[i] == -1:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if close[i] >= kama[i]:
+                if rsi[i] < 40 or kama_dir[i] == 1:
                     signals[i] = 0.0
                     position = 0
                 else:
