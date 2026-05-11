@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "6h_Range_Breakout_with_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,29 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla and trend
+    # Get daily data for range calculation
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's high, low, close for Camarilla levels
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # Calculate daily range (high-low) and its 20-period average
+    daily_range = df_1d['high'].values - df_1d['low'].values
+    range_ma20 = np.zeros(len(daily_range))
+    for i in range(len(daily_range)):
+        if i < 20:
+            range_ma20[i] = np.mean(daily_range[:i+1]) if i > 0 else 0
+        else:
+            range_ma20[i] = np.mean(daily_range[i-19:i+1])
     
-    # Calculate Camarilla levels (R1, S1)
-    # R1 = close + 1.1*(high-low)/12
-    # S1 = close - 1.1*(high-low)/12
-    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Range expansion signal: today's range > 1.5 * 20-day average range
+    range_expansion = daily_range > (1.5 * range_ma20)
     
-    # Daily EMA34 for trend filter
-    daily_close = df_1d['close'].values
-    ema34_d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    daily_trend = daily_close > ema34_d
+    # Direction from close vs open: bullish if close > open, bearish otherwise
+    daily_direction = df_1d['close'].values > df_1d['open'].values
     
-    # Volume spike detection (2x 20-period average)
+    # Align to 6h timeframe
+    range_expansion_aligned = align_htf_to_ltf(prices, df_1d, range_expansion)
+    daily_direction_aligned = align_htf_to_ltf(prices, df_1d, daily_direction)
+    
+    # Volume confirmation: current volume > 1.5 * 20-period volume average
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -47,21 +49,15 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # Align Camarilla levels and trend to 4h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 34)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(daily_trend_aligned[i]) or
+        if (np.isnan(range_expansion_aligned[i]) or 
+            np.isnan(daily_direction_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,28 +67,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + volume spike
-            if (close[i] > camarilla_r1_aligned[i] and 
-                daily_trend_aligned[i] and 
-                volume[i] > 2.0 * vol_ma20[i]):
+            # Enter long: range expansion + bullish daily direction + volume spike
+            if (range_expansion_aligned[i] and 
+                daily_direction_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend + volume spike
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  not daily_trend_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma20[i]):
+            # Enter short: range expansion + bearish daily direction + volume spike
+            elif (range_expansion_aligned[i] and 
+                  not daily_direction_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or trend changes
-            if (close[i] < camarilla_s1_aligned[i] or not daily_trend_aligned[i]):
+            # Exit long: range contraction or volume drops below average
+            if (not range_expansion_aligned[i] or 
+                volume[i] < 0.8 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 or trend changes
-            if (close[i] > camarilla_r1_aligned[i] or daily_trend_aligned[i]):
+            # Exit short: range contraction or volume drops below average
+            if (not range_expansion_aligned[i] or 
+                volume[i] < 0.8 * vol_ma20[i]):
                 signals[i] = 0.0
                 position = 0
             else:
