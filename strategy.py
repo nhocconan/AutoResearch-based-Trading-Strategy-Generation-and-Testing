@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,34 +12,46 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) - 4h timeframe
-    period = 20
-    highest = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    # 1d trend filter (EMA 50)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # 1w trend filter (weekly EMA)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Volume filter (volume > 20-period average)
+    # Daily Camarilla levels for R1 and S1
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels for each daily bar
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume filter (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > vol_ma
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)
+    start_idx = max(21, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(highest[i]) or np.isnan(lowest[i]) or np.isnan(ema_1d_50_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,24 +60,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + above 1d EMA50 + volume
-            if close[i] > highest[i] and close[i] > ema_1d_50_aligned[i] and vol_filter[i]:
+            # Long: price breaks above R1 + above weekly EMA + volume
+            if high[i] > camarilla_r1_aligned[i] and close[i] > ema_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + below 1d EMA50 + volume
-            elif close[i] < lowest[i] and close[i] < ema_1d_50_aligned[i] and vol_filter[i]:
+            # Short: price breaks below S1 + below weekly EMA + volume
+            elif low[i] < camarilla_s1_aligned[i] and close[i] < ema_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price closes below Donchian low
-            if close[i] < lowest[i]:
+            # Exit long: price breaks below S1 or below weekly EMA
+            if low[i] < camarilla_s1_aligned[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price closes above Donchian high
-            if close[i] > highest[i]:
+            # Exit short: price breaks above R1 or above weekly EMA
+            if high[i] > camarilla_r1_aligned[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
