@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_1dTrend_VolumeFilter"
-timeframe = "12h"
+name = "1d_Camarilla_R1_S1_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,21 +17,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Get 1w data for trend filter (using 1w EMA34)
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 20:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Get 1d data for Camarilla pivots (from previous 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1d = high
+    low_1d = low
+    close_1d = close
     
     # Previous 1d bar's range
     range_1d = high_1d - low_1d
@@ -39,10 +39,6 @@ def generate_signals(prices):
     # Calculate Camarilla R1 and S1 levels
     camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
     camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
-    
-    # Align Camarilla levels to 12h timeframe (using previous 1d bar's values)
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,27 +62,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 1d EMA34 (uptrend) AND volume surge
-            if close[i] > r1_12h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 AND above 1w EMA34 (uptrend) AND volume surge
+            if close[i] > camarilla_r1[i] and close[i] > ema_1w_aligned[i] and volume_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below S1 AND below 1d EMA34 (downtrend) AND volume surge
-            elif close[i] < s1_12h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 AND below 1w EMA34 (downtrend) AND volume surge
+            elif close[i] < camarilla_s1[i] and close[i] < ema_1w_aligned[i] and volume_filter[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below 1d EMA34 (trend change)
-            if close[i] < s1_12h[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price falls below S1 OR below 1w EMA34 (trend change)
+            if close[i] < camarilla_s1[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.30  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above 1d EMA34 (trend change)
-            if close[i] > r1_12h[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price rises above R1 OR above 1w EMA34 (trend change)
+            if close[i] > camarilla_r1[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.30  # maintain position
     
     return signals
