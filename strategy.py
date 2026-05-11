@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_RSI_Trend_Filter
-Hypothesis: Use RSI(14) on 6h for momentum with 1d trend filter (EMA50) and volume confirmation.
-Long when RSI < 30 (oversold) and price above 1d EMA50 with volume > 1.5x median.
-Short when RSI > 70 (overbought) and price below 1d EMA50 with volume > 1.5x median.
-Exit when RSI returns to neutral zone (40-60) or opposite extreme.
-Designed to work in both bull (buy dips in uptrend) and bear (sell rallies in downtrend).
-Target: 15-30 trades/year to avoid fee drag.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Solid
+Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA34 trend and volume above 1.5x median.
+Focus on tight entries (R1/S1 tighter than R3/S3) to reduce trade count and improve win rate. Works in bull via uptrend breaks,
+in bear via downtrend breaks. Volume confirms conviction. Target: 20-50 trades/year.
 """
 
-name = "6h_RSI_Trend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Solid"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -27,80 +24,104 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
+    # --- 1d Trend Filter: EMA34 ---
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- RSI(14) on 6h ---
-    delta = np.diff(close_6h, prepend=close_6h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # --- 4h Camarilla Levels (based on previous day) ---
+    # Calculate from previous 4h bar (shifted by 1 to avoid lookahead)
+    prev_close = np.roll(close_4h, 1)
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close[0] = close_4h[0]
+    prev_high[0] = high_4h[0]
+    prev_low[0] = low_4h[0]
+    
+    # Camarilla R1 and S1 levels (tighter than R3/S3)
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
     
     # --- Volume Filter: above 1.5x median of last 20 periods ---
-    vol_median = pd.Series(volume_6h).rolling(window=20, min_periods=10).median().values
+    vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
     vol_threshold = vol_median * 1.5
+    
+    # --- ATR for stoploss (14-period) ---
+    tr1 = np.abs(high_4h - low_4h)
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA50
+    start_idx = 34  # for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
-                # Simple exit on invalid data
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
+                # Check stoploss
+                if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close_4h[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
         # Determine 1d trend
-        trend_up = close_6h[i] > ema50_1d_aligned[i]
-        trend_down = close_6h[i] < ema50_1d_aligned[i]
+        trend_up = close_4h[i] > ema34_1d_aligned[i]
+        trend_down = close_4h[i] < ema34_1d_aligned[i]
         
         # Volume filter: above 1.5x median
-        vol_ok = volume_6h[i] > vol_threshold[i]
+        vol_ok = volume_4h[i] > vol_threshold[i]
         
         if position == 0:
             # Look for entries only in direction of 1d trend with volume
-            if rsi[i] < 30 and trend_up and vol_ok:
-                # Long: RSI oversold + 1d uptrend + volume
+            if close_4h[i] > camarilla_r1[i] and trend_up and vol_ok:
+                # Long: price breaks above R1 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_6h[i]
-            elif rsi[i] > 70 and trend_down and vol_ok:
-                # Short: RSI overbought + 1d downtrend + volume
+                entry_price = close_4h[i]
+            elif close_4h[i] < camarilla_s1[i] and trend_down and vol_ok:
+                # Short: price breaks below S1 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_6h[i]
+                entry_price = close_4h[i]
         else:
-            # Exit conditions
+            # Update stoploss and check exits
             if position == 1:
-                # Exit: RSI returns to neutral (40-60) or becomes overbought
-                if rsi[i] >= 40:
+                # Stoploss
+                if close_4h[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses below S1
+                elif close_4h[i] <= camarilla_s1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit: RSI returns to neutral (40-60) or becomes oversold
-                if rsi[i] <= 60:
+                # Stoploss
+                if close_4h[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses above R1
+                elif close_4h[i] >= camarilla_r1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
