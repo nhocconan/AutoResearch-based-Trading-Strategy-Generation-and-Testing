@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_WeeklyPivot_R3S3_Breakout_TrendVolume
-Hypothesis: Price breaking above weekly R3 or below weekly S3 with daily trend confirmation (EMA34) and volume spike. Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA34 daily), buy breakouts above R3; in downtrend (price < EMA34 daily), sell breakdowns below S3. Volume confirms institutional interest. Designed for 4h timeframe with weekly pivot structure and daily trend filter to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets by capturing strong momentum moves after breaking key weekly levels.
+1d_WeeklyPivot_R3S3_Breakout_TrendVolume
+Hypothesis: Price breaking above weekly R3 or below weekly S3 with daily trend confirmation (EMA34) and volume spike on daily timeframe. Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA34 daily), buy breakouts above R3; in downtrend (price < EMA34 daily), sell breakdowns below S3. Volume confirms institutional interest. Designed for 1d timeframe with weekly pivot structure and daily trend filter to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets by capturing strong momentum moves after breaking key weekly levels.
 """
 
-name = "4h_1d_WeeklyPivot_R3S3_Breakout_TrendVolume"
-timeframe = "4h"
+name = "1d_WeeklyPivot_R3S3_Breakout_TrendVolume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume
@@ -53,7 +53,7 @@ def generate_signals(prices):
     w_r3 = w_close_prev + (1.1/4) * (w_high_prev - w_low_prev)
     w_s3 = w_close_prev - (1.1/4) * (w_high_prev - w_low_prev)
     
-    # Align weekly R3/S3 to 4h timeframe
+    # Align weekly R3/S3 to daily timeframe
     w_r3_aligned = align_htf_to_ltf(prices, df_1w, w_r3)
     w_s3_aligned = align_htf_to_ltf(prices, df_1w, w_s3)
     w_pivot_aligned = align_htf_to_ltf(prices, df_1w, w_pivot)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     ).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (20-period average on 4h)
+    # Volume confirmation (20-period average on daily)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -74,16 +74,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(w_r3_aligned[i]) or np.isnan(w_s3_aligned[i]) or 
             np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
             continue
@@ -96,13 +96,13 @@ def generate_signals(prices):
             if (close[i] > w_r3_aligned[i] and 
                 close[i] > ema_34_1d_aligned[i] and 
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
             # Short: break below weekly S3 + below daily EMA34 + volume spike
             elif (close[i] < w_s3_aligned[i] and 
                   close[i] < ema_34_1d_aligned[i] and 
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit conditions: return to weekly pivot or trend reversal
@@ -113,7 +113,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             elif position == -1:
                 # Exit short: price returns to weekly pivot OR trend turns up
                 if (close[i] >= w_pivot_aligned[i]) or \
@@ -121,6 +121,6 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
