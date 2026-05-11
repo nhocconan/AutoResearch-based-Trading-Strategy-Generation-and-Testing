@@ -1,22 +1,15 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtrader_essentials import (
-    get_htf_data,
-    align_htf_to_ltf,
-    calculate_camarilla,
-    calculate_rsi,
-    calculate_atr,
-)
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -33,42 +26,47 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     trend_up = close > ema_1d_aligned
     
-    # Daily volume filter: volume > 1.5x 20-day average
+    # Daily volume filter: volume > 1.8x 20-day average
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_filter = volume > 1.5 * vol_ma20_1d_aligned
+    volume_filter = volume > 1.8 * vol_ma20_1d_aligned
     
-    # 1d Camarilla pivot levels (based on previous day's range)
-    # Calculate for each day, then align to 6h
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = np.roll(close_1d, 1)  # previous close
-    close_1d_prev[0] = close_1d[0]  # first value
+    # Calculate Camarilla levels from previous 1d candle (H, L, C)
+    # Camarilla: R3 = C + (H-L)*1.1/2, S3 = C - (H-L)*1.1/2
+    # We need previous day's H, L, C
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
     
-    camarilla = calculate_camarilla(high_1d, low_1d, close_1d_prev)
-    # camarilla returns dict with R3, R4, S3, S4 levels
-    r3 = camarilla['R3']
-    r4 = camarilla['R4']
-    s3 = camarilla['S3']
-    s4 = camarilla['S4']
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + camarilla_range * 1.1 / 2
+    s3 = prev_close - camarilla_range * 1.1 / 2
     
-    # Align Camarilla levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA, volume, and Camarilla
+    start_idx = 40  # Need enough data for EMA, volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(r3[i]) or np.isnan(s3[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: Close above R4 with daily uptrend and volume
-            if close[i] > r4_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: Close above R3 + daily uptrend + volume filter
+            if close[i] > r3[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: Close below S4 with daily downtrend and volume
-            elif close[i] < s4_aligned[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Close below S3 + daily downtrend + volume filter
+            elif close[i] < s3[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below R3 or daily trend down
-            if close[i] < r3_aligned[i] or not trend_up[i]:
+            # Long exit: Close below S3 or daily trend down
+            if close[i] < s3[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above S3 or daily trend up
-            if close[i] > s3_aligned[i] or trend_up[i]:
+            # Short exit: Close above R3 or daily trend up
+            if close[i] > r3[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
