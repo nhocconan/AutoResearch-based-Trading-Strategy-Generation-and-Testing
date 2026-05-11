@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-"""
-4h_1d_Donchian_Breakout_Trend_50pctVolume_Exit_ATR
-Hypothesis: Price breaking above/below 20-period Donchian channels on 4h, filtered by 1d EMA50 trend and volume above 50th percentile (to avoid chop). Exit on opposite Donchian touch or ATR stop. Targets ~25-35 trades/year.
-"""
+# 4h_1d_Donchian_Breakout_Trend_50pctVolume_Exit_ATR
+# Hypothesis: Price breaking above/below 20-period Donchian channels on 4h, filtered by 1d EMA50 trend and volume above 50th percentile (to avoid chop). Exit on opposite Donchian touch or ATR stop. Targets ~25-35 trades/year.
 
 name = "4h_1d_Donchian_Breakout_Trend_50pctVolume_Exit_ATR"
 timeframe = "4h"
