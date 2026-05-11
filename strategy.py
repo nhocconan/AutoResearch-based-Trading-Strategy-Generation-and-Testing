@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Combine Camarilla pivot levels (R3/S3) from 1d with trend filter from 1d EMA50 and volume spike confirmation for breakout trades. Works in bull markets (buy R3 breakouts in uptrend) and bear markets (sell S3 breakdowns in downtrend). Volume spike confirms institutional interest. Target: 20-50 trades per year on 4h timeframe.
+4h_4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_v1
+Hypothesis: Breakout at daily R3/S3 with trend filter from 1d EMA50 and volume spike confirmation. Works in bull (buy R3 breakouts in uptrend) and bear (sell S3 breakdowns in downtrend). Volume spike confirms institutional interest. Target: 20-50 trades per year on 4h timeframe.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v1"
+name = "4h_4H_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,9 +35,9 @@ def generate_signals(prices):
     prev_high = np.roll(high_1d, 1)
     prev_low = np.roll(low_1d, 1)
     prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]  # First day uses same day's high
-    prev_low[0] = low_1d[0]    # First day uses same day's low
-    prev_close[0] = close_1d[0] # First day uses same day's close
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
     
     # Camarilla levels: R3/S3 = C ± (H-L) * 1.1/2
     rang = prev_high - prev_low
