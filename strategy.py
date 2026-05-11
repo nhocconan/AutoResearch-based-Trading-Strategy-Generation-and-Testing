@@ -1,100 +1,117 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R1S1_Breakout_1dTrend_Volume
-# Hypothesis: Trade Camarilla R1/S1 breakouts on 12h with 1d trend filter and volume confirmation.
-# Long when price breaks above R1 in 1d uptrend with volume surge; short when breaks below S1 in 1d downtrend with volume surge.
-# Works in bull markets (riding uptrends) and bear markets (riding downtrends) by following higher timeframe trend.
-# Uses volume confirmation to avoid false breakouts and time-based exits to manage risk.
+# 4h_ThreeBand_Squeeze_Breakout
+# Hypothesis: Combines Bollinger Band squeeze, Donchian breakout, and 1-day trend to capture explosive moves in both bull and bear markets.
+# Bollinger Band width below 20th percentile indicates low volatility (squeeze).
+# Breakout occurs when price closes above/below Donchian(20) channel.
+# Direction confirmed by 1-day EMA50 slope to avoid counter-trend trades.
+# Volume surge (>1.5x 20-period average) filters false breakouts.
+# Works in bull markets (catching breakouts) and bear markets (catching breakdowns).
+# Uses fixed position size of 0.25 to manage risk and reduce fee churn.
 
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_ThreeBand_Squeeze_Breakout"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Get 1d data for trend and Camarilla levels
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d EMA34 for trend direction ---
+    # --- Bollinger Band (20, 2) width ---
+    close_series = pd.Series(close)
+    bb_mid = close_series.rolling(window=20, min_periods=20).mean()
+    bb_std = close_series.rolling(window=20, min_periods=20).std()
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_mid
+    bb_width_values = bb_width.values
+    
+    # Bollinger Band width percentile (20-period lookback)
+    bb_width_percentile = pd.Series(bb_width_values).rolling(window=20, min_periods=20).rank(pct=True).values
+    
+    # --- Donchian Channel (20) ---
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # --- 1-day EMA50 for trend direction ---
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_slope = ema_34_1d - np.roll(ema_34_1d, 1)
-    ema_34_1d_slope[0] = 0
-    ema_34_1d_slope = pd.Series(ema_34_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values  # smooth slope
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_slope = ema_50_1d - np.roll(ema_50_1d, 1)
+    ema_50_1d_slope[0] = 0
+    ema_50_1d_slope = pd.Series(ema_50_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d_slope)
     
-    # --- 1d Camarilla levels (R1, S1) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_shift = np.roll(close_1d, 1)
-    close_1d_shift[0] = close_1d[0]
-    R1 = close_1d_shift + (1.1/12) * (high_1d - low_1d)
-    S1 = close_1d_shift - (1.1/12) * (high_1d - low_1d)
-    
-    # --- Volume confirmation (volume > 20-period average) ---
+    # --- Volume confirmation (volume > 1.5x 20-period average) ---
     vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > vol_ma
-    
-    # Align 1d indicators to 12h timeframe
-    ema_34_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d_slope)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    vol_surge = volume > 1.5 * vol_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA34 (34) and smoothing (3)
-    start_idx = 40
+    # Warmup: enough for BB (20), Donchian (20), EMA50 slope (50+3)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_1d_slope_aligned[i]) or
-            np.isnan(R1_aligned[i]) or
-            np.isnan(S1_aligned[i])):
+        if (np.isnan(bb_width_percentile[i]) or
+            np.isnan(donchian_high[i]) or
+            np.isnan(donchian_low[i]) or
+            np.isnan(ema_50_1d_slope_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 1d EMA34 slope
-        uptrend = ema_34_1d_slope_aligned[i] > 0
-        downtrend = ema_34_1d_slope_aligned[i] < 0
+        # Squeeze condition: BB width below 20th percentile
+        squeeze = bb_width_percentile[i] < 0.20
+        
+        # Breakout conditions
+        breakout_up = close[i] > donchian_high[i]
+        breakout_down = close[i] < donchian_low[i]
+        
+        # Trend direction from 1-day EMA50 slope
+        uptrend = ema_50_1d_slope_aligned[i] > 0
+        downtrend = ema_50_1d_slope_aligned[i] < 0
         
         if position == 0:
-            if uptrend and vol_surge[i]:
-                # Long: 1d uptrend + volume surge + price breaks above R1
-                if close[i] > R1_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend and vol_surge[i]:
-                # Short: 1d downtrend + volume surge + price breaks below S1
-                if close[i] < S1_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            if squeeze and breakout_up and vol_surge[i] and uptrend:
+                # Long: squeeze breakout up + volume surge + 1-day uptrend
+                signals[i] = 0.25
+                position = 1
+            elif squeeze and breakout_down and vol_surge[i] and downtrend:
+                # Short: squeeze breakout down + volume surge + 1-day downtrend
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Exit long: 1d trend turns down OR price breaks below S1 (reversal)
-                if downtrend or close[i] < S1_aligned[i]:
+                # Exit long: price closes below Donchian mid or trend reverses
+                donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+                if close[i] < donchian_mid or not uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: 1d trend turns up OR price breaks above R1 (reversal)
-                if uptrend or close[i] > R1_aligned[i]:
+                # Exit short: price closes above Donchian mid or trend reverses
+                donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
+                if close[i] > donchian_mid or not downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
