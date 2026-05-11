@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_Pivot_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_1w_KAMA_Trend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Camarilla pivot levels (previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # KAMA parameters
+    er_len = 10
+    fast = 2
+    slow = 30
+    
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, n=er_len))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Using loop for clarity and correctness
+    er = np.zeros(n)
+    for i in range(er_len, n):
+        price_change = np.abs(close[i] - close[i-er_len])
+        price_volatility = np.sum(np.abs(np.diff(close[i-er_len:i+1])))
+        if price_volatility > 0:
+            er[i] = price_change / price_volatility
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    
+    # Calculate KAMA
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # 1-week trend filter (EMA 34 on weekly close)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels for each 1d bar
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.500
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.250
-    camarilla_r2 = close_1d + (high_1d - low_1d) * 1.166
-    camarilla_r1 = close_1d + (high_1d - low_1d) * 1.083
-    camarilla_s1 = close_1d - (high_1d - low_1d) * 1.083
-    camarilla_s2 = close_1d - (high_1d - low_1d) * 1.166
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.250
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.500
-    
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # 1d trend filter (EMA 34)
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Volume filter (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,7 +62,7 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(kama[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,24 +71,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + above 1d EMA + volume
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]:
+            # Long: price above KAMA and above weekly EMA + volume
+            if close[i] > kama[i] and close[i] > ema_1w_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below 1d EMA + volume
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]:
+            # Short: price below KAMA and below weekly EMA + volume
+            elif close[i] < kama[i] and close[i] < ema_1w_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below 1d EMA
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_1d_aligned[i]:
+            # Exit long: price below KAMA or below weekly EMA
+            if close[i] < kama[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R1 or above 1d EMA
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_1d_aligned[i]:
+            # Exit short: price above KAMA or above weekly EMA
+            if close[i] > kama[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
