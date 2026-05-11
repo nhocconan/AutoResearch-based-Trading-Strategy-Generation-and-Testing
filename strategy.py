@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WilliamsAlligator_1dTrend_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,16 +27,27 @@ def generate_signals(prices):
     trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Williams Alligator on 6h: Jaw (13), Teeth (8), Lips (5)
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values
+    # Calculate Camarilla levels from previous 1d high/low/close
+    # We need daily high, low, close
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator alignment: all three lines in order for trend
-    # Bullish: Lips > Teeth > Jaw
-    # Bearish: Lips < Teeth < Jaw
-    bullish_aligned = (lips > teeth) & (teeth > jaw)
-    bearish_aligned = (lips < teeth) & (teeth < jaw)
+    # Calculate Camarilla levels for each day
+    H = high_1d
+    L = low_1d
+    C = close_1d
+    range_hl = H - L
+    
+    # Camarilla levels
+    R4 = C + range_hl * 1.1 / 2
+    R3 = C + range_hl * 1.1 / 4
+    S3 = C - range_hl * 1.1 / 4
+    S4 = C - range_hl * 1.1 / 2
+    
+    # Align to 12h timeframe
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
     
     # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
             np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,24 +70,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Alligator bullish alignment + daily uptrend + volume confirmation
-            if bullish_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Price breaks above R3 + daily uptrend + volume confirmation
+            if close[i] > R3_12h[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Alligator bearish alignment + daily downtrend + volume confirmation
-            elif bearish_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Price breaks below S3 + daily downtrend + volume confirmation
+            elif close[i] < S3_12h[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Alligator alignment breaks bearish OR daily trend turns down
-            if bearish_aligned[i] or not trend_up_1d_aligned[i]:
+            # Long exit: Price breaks below S3 or daily trend turns down
+            if close[i] < S3_12h[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Alligator alignment breaks bullish OR daily trend turns up
-            if bullish_aligned[i] or trend_up_1d_aligned[i]:
+            # Short exit: Price breaks above R3 or daily trend turns up
+            if close[i] > R3_12h[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
