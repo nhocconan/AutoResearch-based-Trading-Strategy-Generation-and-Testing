@@ -1,68 +1,72 @@
-#!/usr/bin/env python3
-"""
-4h_Three_Inside_Up_Down_Trend_Confirm
-Hypothesis: Uses Three Inside Up/Down candlestick patterns for reversal signals, confirmed by 1-day EMA trend and volume spike.
-Designed for low trade frequency (<25/year) to avoid fee drag while capturing high-probability reversals in both bull and bear markets.
-"""
+# 12h_Williams_Alligator_Trend_Confirmation_v1
+# Hypothesis: Uses Williams Alligator (Jaw/Teeth/Lips) on 12h chart with 1d/200 EMA trend filter.
+# Long when price > Teeth and Lips > Jaw (bullish alignment) and price > 1d EMA200.
+# Short when price < Teeth and Lips < Jaw (bearish alignment) and price < 1d EMA200.
+# Williams Alligator uses smoothed moving averages (SMMA) to filter noise.
+# Designed for low trade frequency (<25/year) to avoid fee drag while capturing trends.
+# Works in both bull and bear markets by following the trend defined by higher timeframe.
 
-name = "4h_Three_Inside_Up_Down_Trend_Confirm"
-timeframe = "4h"
+name = "12h_Williams_Alligator_Trend_Confirmation_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def smma(data, period):
+    """Smoothed Moving Average (SMMA)"""
+    if len(data) < period:
+        return np.full_like(data, np.nan, dtype=float)
+    result = np.full_like(data, np.nan, dtype=float)
+    # First value is SMA
+    result[period-1] = np.mean(data[:period])
+    # Subsequent values: SMMA = (prev_smma * (period-1) + current_price) / period
+    for i in range(period, len(data)):
+        result[i] = (result[i-1] * (period-1) + data[i]) / period
+    return result
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for 200 EMA trend filter (updated daily)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 4h OHLCV
-    open_ = prices['open'].values
+    # 12h OHLCV
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    close_1d = df_1d['close']
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # --- 1d EMA200 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # --- Volume Spike Detection (2x 20-period EMA) ---
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ema.values)
+    # --- Williams Alligator on 12h data (Jaw=13, Teeth=8, Lips=5) ---
+    # All lines are SMMA (Smoothed Moving Average)
+    jaw = smma(close, 13)
+    teeth = smma(close, 8)
+    lips = smma(close, 5)
     
-    # --- Three Inside Up/Down Pattern Detection ---
-    # Three Inside Up: Bearish candle, then bullish engulfing, then bullish confirmation
-    # Three Inside Down: Bullish candle, then bearish engulfing, then bearish confirmation
-    
-    # Bullish engulfing: current candle engulfs previous bearish candle
-    bullish_engulfing = (close > open_) & (open_ < close) & (close > open_[1]) & (open_ < close[1]) & (close[1] < open_[1])
-    # Bearish engulfing: current candle engulfs previous bullish candle
-    bearish_engulfing = (close < open_) & (open_ > close) & (close < open_[1]) & (open_ > close[1]) & (close[1] > open_[1])
-    
-    # Three Inside Up: previous candle was bearish, then bullish engulfing, then current bullish
-    three_inside_up = (close[1] < open_[1]) & bullish_engulfing & (close > open_)
-    # Three Inside Down: previous candle was bullish, then bearish engulfing, then current bearish
-    three_inside_down = (close[1] > open_[1]) & bearish_engulfing & (close < open_)
+    # Align Alligator lines (already on 12h, no alignment needed for same TF)
+    # But we'll keep the pattern for consistency if we ever change TF
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
+    # Start after warmup (need enough data for Alligator)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(ema_200_1d_aligned[i]) or 
+            np.isnan(jaw[i]) or
+            np.isnan(teeth[i]) or
+            np.isnan(lips[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -72,33 +76,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Williams Alligator signals:
+        # Bullish: Lips > Teeth > Jaw (all aligned upward)
+        # Bearish: Lips < Teeth < Jaw (all aligned downward)
+        bullish_alignment = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        bearish_alignment = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
+        
+        # Trend filter: price vs 1d EMA200
+        price_above_ema200 = close[i] > ema_200_1d_aligned[i]
+        price_below_ema200 = close[i] < ema_200_1d_aligned[i]
         
         if position == 0:
-            if price_above_ema:
-                # Uptrend: look for Three Inside Down (bearish reversal) for short
-                if three_inside_down[i] and vol_spike[i]:
-                    signals[i] = -0.25
-                    position = -1
-            elif price_below_ema:
-                # Downtrend: look for Three Inside Up (bullish reversal) for long
-                if three_inside_up[i] and vol_spike[i]:
-                    signals[i] = 0.25
-                    position = 1
+            # Look for new entries
+            if bullish_alignment and price_above_ema200:
+                # Strong bullish alignment with higher timeframe uptrend
+                signals[i] = 0.25
+                position = 1
+            elif bearish_alignment and price_below_ema200:
+                # Strong bearish alignment with higher timeframe downtrend
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit conditions: reverse signal or trend failure
+            # Exit conditions: reverse Alligator alignment or trend change
             if position == 1:
-                # Exit long: Three Inside Down forms or price breaks below EMA
-                if three_inside_down[i] or (close[i] < ema_34_1d_aligned[i]):
+                # Exit long: bearish alignment OR price breaks below EMA200
+                if bearish_alignment or price_below_ema200:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: Three Inside Up forms or price breaks above EMA
-                if three_inside_up[i] or (close[i] > ema_34_1d_aligned[i]):
+                # Exit short: bullish alignment OR price breaks above EMA200
+                if bullish_alignment or price_above_ema200:
                     signals[i] = 0.0
                     position = 0
                 else:
