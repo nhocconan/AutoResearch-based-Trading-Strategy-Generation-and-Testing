@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "6h_ADX_DI_Crossover_1dTrend"
+name = "6h_Ichimoku_Cloud_Trend_With_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 52:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,73 +17,52 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ADX(14) and DI+ / DI- calculation (standard Wilder's)
-    period = 14
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr = np.concatenate([[np.nan], tr])  # align with index
-    
-    # Directional Movement
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
-    
-    # Smoothed TR, +DM, -DM using Wilder's smoothing (same as EMA with alpha=1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # first value is simple average
-        result[period-1] = np.nanmean(arr[1:period]) if np.any(~np.isnan(arr[1:period])) else 0
-        # subsequent values: Wilder's smoothing
-        for i in range(period, len(arr)):
-            if np.isnan(result[i-1]) or np.isnan(arr[i]):
-                result[i] = np.nan
-            else:
-                result[i] = result[i-1] - (result[i-1] / period) + arr[i]
-        return result
-    
-    tr_smooth = wilder_smooth(tr, period)
-    plus_dm_smooth = wilder_smooth(plus_dm, period)
-    minus_dm_smooth = wilder_smooth(minus_dm, period)
-    
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = np.full_like(dx, np.nan)
-    if len(dx) >= period:
-        # ADX is Wilder's smoothed DX
-        adx[period-1] = np.nanmean(dx[period-1:2*period-1]) if np.any(~np.isnan(dx[period-1:2*period-1])) else 0
-        for i in range(2*period-1, len(dx)):
-            if np.isnan(adx[i-1]) or np.isnan(dx[i]):
-                adx[i] = np.nan
-            else:
-                adx[i] = adx[i-1] - (adx[i-1] / period) + dx[i]
-    
-    # 1d trend: EMA34
+    # 1d Ichimoku components (conversion, base, span A/B)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 52:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    period_tenkan = 9
+    max_high_9 = pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    min_low_9 = pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (max_high_9 + min_low_9) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    period_kijun = 26
+    max_high_26 = pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    min_low_26 = pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (max_high_26 + min_low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods forward
+    senkou_a = ((tenkan + kijun) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods forward
+    period_senkou_b = 52
+    max_high_52 = pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    min_low_52 = pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = ((max_high_52 + min_low_52) / 2)
+    
+    # Align Ichimoku components to 6h timeframe (wait for daily bar close)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # Volume spike: volume > 2.0 * 50-period SMA of volume (on 6h)
+    vol_sma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    vol_spike = volume > 2.0 * vol_sma
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(2*period-1, 34)  # ensure ADX and EMA are valid
+    start_idx = 52  # Need Senkou B calculation
     
     for i in range(start_idx, n):
-        if np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]) or np.isnan(ema_34_1d_aligned[i]):
+        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(senkou_a_6h[i]) or np.isnan(senkou_b_6h[i]) or np.isnan(vol_sma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -91,25 +70,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Cloud top and bottom
+        cloud_top = max(senkou_a_6h[i], senkou_b_6h[i])
+        cloud_bottom = min(senkou_a_6h[i], senkou_b_6h[i])
+        
         if position == 0:
-            # Long: ADX > 25, DI+ > DI-, price above 1d EMA34
-            if adx[i] > 25 and plus_di[i] > minus_di[i] and close[i] > ema_34_1d_aligned[i]:
+            # Long: Tenkan > Kijun (bullish cross) AND price above cloud AND volume spike
+            if tenkan_6h[i] > kijun_6h[i] and close[i] > cloud_top and vol_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25, DI- > DI+, price below 1d EMA34
-            elif adx[i] > 25 and minus_di[i] > plus_di[i] and close[i] < ema_34_1d_aligned[i]:
+            # Short: Tenkan < Kijun (bearish cross) AND price below cloud AND volume spike
+            elif tenkan_6h[i] < kijun_6h[i] and close[i] < cloud_bottom and vol_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: ADX < 20 or DI- crosses above DI+ (trend weakening)
-            if adx[i] < 20 or minus_di[i] > plus_di[i]:
+            # Exit long: Tenkan crosses below Kijun OR price drops below cloud
+            if tenkan_6h[i] < kijun_6h[i] or close[i] < cloud_bottom:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: ADX < 20 or DI+ crosses above DI-
-            if adx[i] < 20 or plus_di[i] > minus_di[i]:
+            # Exit short: Tenkan crosses above Kijun OR price rises above cloud
+            if tenkan_6h[i] > kijun_6h[i] or close[i] > cloud_top:
                 signals[i] = 0.0
                 position = 0
             else:
