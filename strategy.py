@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_1w_Donchian_Breakout_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # Weekly Donchian channels (20-period)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla R1 and S1
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Camarilla R1 = Close + (High - Low) * 1.1 / 12
-    # Camarilla S1 = Close - (High - Low) * 1.1 / 12
-    R1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
-    S1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
+    # Upper band: highest high over past 20 weeks
+    upper_20 = pd.Series(high_1w).rolling(window=20, min_periods=20).max().values
+    # Lower band: lowest low over past 20 weeks
+    lower_20 = pd.Series(low_1w).rolling(window=20, min_periods=20).min().values
     
-    # Align to 4h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
+    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_20)
+    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_20)
     
-    # 12h EMA50 for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Volume spike: current volume > 2x 20-period average
+    # Volume filter: current volume > 1.5x 20-day average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2 * volume_ma)
+    volume_filter = volume > (1.5 * volume_ma)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure indicators are ready
+    start_idx = 60  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or 
+            np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +53,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1, uptrend (price > EMA50), volume spike
-            if (close[i] > R1_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and
-                volume_spike[i]):
+            # Long: price breaks above weekly Donchian upper band + volume filter
+            if close[i] > upper_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1, downtrend (price < EMA50), volume spike
-            elif (close[i] < S1_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and
-                  volume_spike[i]):
+            # Short: price breaks below weekly Donchian lower band + volume filter
+            elif close[i] < lower_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S1 (opposite level)
-            if close[i] < S1_aligned[i]:
+            # Exit long: price crosses below weekly Donchian lower band
+            if close[i] < lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1 (opposite level)
-            if close[i] > R1_aligned[i]:
+            # Exit short: price crosses above weekly Donchian upper band
+            if close[i] > upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
