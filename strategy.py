@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeS
-Hypothesis: Use 4h trend and daily volatility to filter 1h Camarilla breakouts.
-Trades only during 08-20 UTC to avoid low-liquidity periods. Targets 15-37 trades/year.
-Works in bull/bear by aligning with 4h trend and requiring volume confirmation.
+6h_Keltner_MeanReversion_1wTrend
+Hypothesis: Mean revert off Keltner lower/upper bands in ranging markets (identified by weekly ADX < 20), with weekly trend filter (price > weekly EMA50 for longs, < for shorts). Works in bull/bear by using weekly trend to avoid counter-trend trades. Target: 15-30 trades/year on 6h.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_VolumeS"
-timeframe = "1h"
+name = "6h_Keltner_MeanReversion_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -22,51 +20,64 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Daily OHLC for Camarilla Pivots ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Weekly Data for Trend and Regime ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Camarilla R1/S1 (most significant levels for breakout)
-    camarilla_r1 = pc + (ph - pl) * 1.1 / 2
-    camarilla_s1 = pc - (ph - pl) * 1.1 / 2
+    # Weekly ADX for ranging market detection (ADX < 20 = range)
+    def calculate_adx(high, low, close, period=14):
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(high)
+        tr = np.zeros_like(high)
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(0, high[i] - high[i-1])
+            minus_dm[i] = max(0, low[i-1] - low[i])
+            if plus_dm[i] > minus_dm[i]:
+                minus_dm[i] = 0
+            elif minus_dm[i] > plus_dm[i]:
+                plus_dm[i] = 0
+            else:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        atr = np.zeros_like(high)
+        atr[period] = np.mean(tr[1:period+1])
+        for i in range(period+1, len(high)):
+            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+        
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False).mean().values / atr
+        dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+        adx = pd.Series(dx).ewm(span=period, adjust=False).mean().values
+        return adx
     
-    # Align to 1h timeframe
-    r1_1h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values)
+    adx_6h = align_htf_to_ltf(prices, df_1w, adx_1w)
     
-    # === 4h Trend Filter (EMA34) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
-    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1h = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # === Volume Filter (1.5x 20-period EMA on 1h) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
-    
-    # === Session Filter: 08-20 UTC ===
-    hours = prices.index.hour
-    session_ok = (hours >= 8) & (hours <= 20)
+    # === 6h Keltner Channel (20, 2.0) ===
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
+    atr = pd.Series(high - low).ewm(span=20, adjust=False, min_periods=20).mean()
+    upper_keltner = ema20 + 2.0 * atr
+    lower_keltner = ema20 - 2.0 * atr
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or np.isnan(ema34_1h[i]) or 
-            np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
+        if (np.isnan(ema50_6h[i]) or np.isnan(adx_6h[i]) or 
+            np.isnan(upper_keltner[i]) or np.isnan(lower_keltner[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,7 +85,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if not session_ok[i]:
+        # Only trade in ranging markets (weekly ADX < 20)
+        if adx_6h[i] >= 20:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,31 +95,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R1 with uptrend and volume
-            if (close[i] > r1_1h[i] and 
-                close[i] > ema34_1h[i] and 
-                volume_ok[i]):
-                signals[i] = 0.20
+            # Long: price touches lower Keltner band and weekly uptrend
+            if (low[i] <= lower_keltner[i] and 
+                close[i] > ema50_6h[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S1 with downtrend and volume
-            elif (close[i] < s1_1h[i] and 
-                  close[i] < ema34_1h[i] and 
-                  volume_ok[i]):
-                signals[i] = -0.20
+            # Short: price touches upper Keltner band and weekly downtrend
+            elif (high[i] >= upper_keltner[i] and 
+                  close[i] < ema50_6h[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 (reversal)
-            if close[i] < s1_1h[i]:
+            # Long exit: price crosses above EMA20 (mean reversion complete) or hits upper band
+            if close[i] >= ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price breaks above R1 (reversal)
-            if close[i] > r1_1h[i]:
+            # Short exit: price crosses below EMA20 (mean reversion complete) or hits lower band
+            if close[i] <= ema20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
