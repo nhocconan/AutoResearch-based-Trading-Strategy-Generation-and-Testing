@@ -1,61 +1,48 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS
-Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for entry when price breaks out of these key levels in the direction of the 12h EMA50 trend, with volume confirmation. Exits on opposite Camarilla level (S1 for longs, R1 for shorts) or trend reversal. Designed to work in both bull and bear markets by following 12h trend filter and trading breakouts from institutional pivot levels. Targets 20-40 trades/year via strict entry conditions combining trend, level break, and volume.
+1d_HighLowBreakout_WeeklyTrend_Filter
+Hypothesis: Uses daily price breaking above yesterday's high or below yesterday's low as entry signal, filtered by weekly trend (1w EMA50) and volume confirmation. Exits when price reverts to the previous day's close or trend reverses. Designed for low trade frequency (<25/year) with clear signals in both bull and bear markets by following the higher timeframe trend.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1d_HighLowBreakout_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    pivot = (high + low + close) / 3
-    range_ = high - low
-    r1 = close + (range_ * 1.1 / 12)
-    s1 = close - (range_ * 1.1 / 12)
-    return r1, s1, pivot
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily Camarilla Levels ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Previous day's high and low (for breakout detection)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    # First day has no previous - set to current values to avoid false signals
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Weekly trend filter (1w EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    r1_1d, s1_1d, pivot_1d = calculate_camarilla(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
-    )
-    
-    # Align daily Camarilla to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
-    pivot_4h = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # --- 12h EMA50 Trend Filter ---
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(
         span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # --- Volume Spike Detection (20-period average) ---
+    # Volume confirmation (20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -68,9 +55,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(pivot_4h[i]) or np.isnan(ema_50_4h[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(prev_high[i]) or np.isnan(prev_low[i]) or 
+            np.isnan(ema_50_1d[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -80,37 +66,35 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.8
+        volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above R1 + above 12h EMA50 + volume
-            if (close[i] > r1_4h[i] and 
-                close[i] > ema_50_4h[i] and 
-                close[i-1] <= r1_4h[i-1] and  # crossed above R1 this bar
+            # Long: price breaks above previous day's high + above weekly EMA50 + volume
+            if (close[i] > prev_high[i] and 
+                close[i] > ema_50_1d[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below 12h EMA50 + volume
-            elif (close[i] < s1_4h[i] and 
-                  close[i] < ema_50_4h[i] and 
-                  close[i-1] >= s1_4h[i-1] and  # crossed below S1 this bar
+            # Short: price breaks below previous day's low + below weekly EMA50 + volume
+            elif (close[i] < prev_low[i] and 
+                  close[i] < ema_50_1d[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price crosses below S1 OR trend turns down
-                if (close[i] < s1_4h[i] and close[i-1] >= s1_4h[i-1]) or \
-                   (close[i] < ema_50_4h[i]):
+                # Exit long: price returns to previous day's close OR trend turns down
+                if (close[i] <= prev_close[i]) or \
+                   (close[i] < ema_50_1d[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses above R1 OR trend turns up
-                if (close[i] > r1_4h[i] and close[i-1] <= r1_4h[i-1]) or \
-                   (close[i] > ema_50_4h[i]):
+                # Exit short: price returns to previous day's close OR trend turns up
+                if (close[i] >= prev_close[i]) or \
+                   (close[i] > ema_50_1d[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
