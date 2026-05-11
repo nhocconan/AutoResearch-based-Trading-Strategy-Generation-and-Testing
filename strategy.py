@@ -1,17 +1,14 @@
-#!/usr/bin/env python3
-"""
-1d_1w_KAMA_Trend_With_Volume_And_Chop_Filter
-Hypothesis: On daily timeframe, use Kaufman Adaptive Moving Average (KAMA) to detect trend direction,
-combined with volume confirmation and Choppiness Index to filter ranging markets.
-In bull markets: go long when KAMA turns up, volume expands, and market is trending (low chop).
-In bear markets: go short when KAMA turns down, volume expands, and market is trending.
-Uses weekly timeframe for trend filter to avoid counter-trend trades.
-Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
-Works in both bull and bear by adapting to trend via KAMA and avoiding choppy markets.
-"""
+# 6h_1w_EquityCurveTrend_Filter
+# Hypothesis: Use 1-week equity curve trend as a macro filter to determine long/short bias on 6-hour timeframe.
+# Go long when 6h price > 6h SMA20 AND 1w equity curve trending up (price > 1w SMA50).
+# Go short when 6h price < 6h SMA20 AND 1w equity curve trending down (price < 1w SMA50).
+# Exit when price crosses 6h SMA20 OR 1w trend reverses.
+# Equity curve trend acts as a regime filter: in long-term uptrend, buy dips; in downtrend, sell rallies.
+# Works in bull by buying pullbacks in uptrend; works in bear by selling rallies in downtrend.
+# Target: 15-30 trades/year (60-120 total over 4 years) to avoid fee drag.
 
-name = "1d_1w_KAMA_Trend_With_Volume_And_Chop_Filter"
-timeframe = "1d"
+name = "6h_1w_EquityCurveTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,140 +17,113 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
+    # Get 1w data for equity curve trend (using close as proxy)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily KAMA (10, 2, 30) ---
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    er = np.where(volatility != 0, change / volatility, 0)
-    
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[9] = close[9]  # start after first 10 bars
-    for i in range(10, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA slope (trend direction)
-    kama_slope = np.full(n, np.nan)
-    kama_slope[10:] = np.diff(kama, n=1)[9:]  # align with kama
-    
-    # --- Daily Volume MA(20) ---
-    vol_ma = np.full(n, np.nan)
+    # --- 6h SMA20 ---
+    sma_6h = np.full(n, np.nan)
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        sma_6h[i] = np.mean(close[i-20:i])
     
-    # --- Daily Choppiness Index (14) ---
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    # Sum of TR over 14 periods
-    tr_sum = np.full(n, np.nan)
-    for i in range(13, n):
-        if i == 13:
-            tr_sum[i] = np.sum(tr[0:14])
-        else:
-            tr_sum[i] = tr_sum[i-1] + tr[i] - tr[i-14]
-    
-    # Highest high and lowest low over 14 periods
-    max_high = np.full(n, np.nan)
-    min_low = np.full(n, np.nan)
-    for i in range(13, n):
-        if i == 13:
-            max_high[i] = np.max(high[0:14])
-            min_low[i] = np.min(low[0:14])
-        else:
-            max_high[i] = max(max_high[i-1], high[i])
-            min_low[i] = min(min_low[i-1], low[i])
-    
-    # Chop calculation
-    chop = np.full(n, np.nan)
-    for i in range(13, n):
-        if tr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
-        else:
-            chop[i] = 50  # neutral if undefined
-    
-    # --- Weekly EMA(10) for trend filter ---
+    # --- 1w SMA50 (equity curve trend proxy) ---
     close_1w = df_1w['close'].values
-    ema_1w = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
-        if i < 10:
-            ema_1w[i] = np.nan
-        elif i == 10:
-            ema_1w[i] = np.mean(close_1w[0:10])
-        else:
-            ema_1w[i] = (close_1w[i] * 2 / (10 + 1)) + (ema_1w[i-1] * (9 / (10 + 1)))
+    sma_1w = np.full(len(close_1w), np.nan)
+    for i in range(50, len(close_1w)):
+        sma_1w[i] = np.mean(close_1w[i-50:i])
     
-    # Align daily indicators (already aligned to daily index)
-    # Align weekly EMA to daily
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1w SMA to 6h
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max(KAMA needs 10, Vol MA needs 20, Chop needs 13, EMA needs 10)
-    start_idx = max(10, 20, 13, 10)
+    # Warmup: max(6h SMA20, 1w SMA50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or
-            np.isnan(kama_slope[i]) or
-            np.isnan(vol_ma[i]) or
-            np.isnan(chop[i]) or
-            np.isnan(ema_1w_aligned[i])):
+        if np.isnan(sma_6h[i]) or np.isnan(sma_1w_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Conditions
-        kama_up = kama_slope[i] > 0
-        kama_down = kama_slope[i] < 0
-        vol_spike = volume[i] > vol_ma[i] * 1.5
-        trending = chop[i] < 38.2  # trending market (low chop)
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
+        # Determine 6h price position relative to SMA20
+        price_above_sma = close[i] > sma_6h[i]
+        price_below_sma = close[i] < sma_6h[i]
+        
+        # Determine 1w trend (equity curve direction)
+        trend_up = sma_1w_aligned[i] > 0  # Always true if not NaN, but we need actual trend
+        # Actually check if current price is above/below 1w SMA50 for trend direction
+        # We need the actual 1w close price aligned, not just SMA
+        # Let's get 1w close aligned for direct comparison
+    
+    # Re-work: get 1w close aligned for trend determination
+    close_1w_aligned = align_htf_to_ltf(prices, df_1w, close_1w)
+    
+    signals = np.zeros(n)
+    position = 0
+    
+    for i in range(start_idx, n):
+        if np.isnan(sma_6h[i]) or np.isnan(close_1w_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
+        price_above_sma = close[i] > sma_6h[i]
+        price_below_sma = close[i] < sma_6h[i]
+        
+        # 1w trend: price above/below 1w SMA50
+        # Need 1w SMA50 aligned
+        if len(close_1w) >= 50:
+            sma_1w_vals = np.full(len(close_1w), np.nan)
+            for j in range(50, len(close_1w)):
+                sma_1w_vals[j] = np.mean(close_1w[j-50:j])
+            sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_vals)
+        else:
+            sma_1w_aligned = np.full(n, np.nan)
+        
+        if np.isnan(sma_1w_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+            
+        trend_up = close_1w_aligned[i] > sma_1w_aligned[i]
+        trend_down = close_1w_aligned[i] < sma_1w_aligned[i]
         
         if position == 0:
-            if kama_up and vol_spike and trending and weekly_uptrend:
-                # Long: KAMA turning up with volume in uptrend
+            if price_above_sma and trend_up:
+                # Long: price above 6h SMA20 in 1w uptrend
                 signals[i] = 0.25
                 position = 1
-            elif kama_down and vol_spike and trending and weekly_downtrend:
-                # Short: KAMA turning down with volume in downtrend
+            elif price_below_sma and trend_down:
+                # Short: price below 6h SMA20 in 1w downtrend
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: KAMA turns down OR weekly trend turns down
-                if kama_down or not weekly_uptrend:
+                # Exit long: price crosses below 6h SMA20 OR 1w trend turns down
+                if price_below_sma or not trend_up:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: KAMA turns up OR weekly trend turns up
-                if kama_up or not weekly_downtrend:
+                # Exit short: price crosses above 6h SMA20 OR 1w trend turns up
+                if price_above_sma or not trend_down:
                     signals[i] = 0.0
                     position = 0
                 else:
