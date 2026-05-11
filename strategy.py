@@ -1,75 +1,73 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-6h_ISS_Trend_Reversal
-Hypothesis: Combines Intra-Session Sentiment (ISS) from 1d open/close with 6h momentum. 
-ISS = (close - open) / (high - low) of prior day. Strong ISS indicates institutional bias. 
-Enter long when ISS > 0.2 + 6h RSI(14) < 30 (oversold in uptrend bias). 
-Enter short when ISS < -0.2 + 6h RSI(14) > 70 (overbought in downtrend bias). 
-Exit when ISS reverses or RSI reaches opposite extreme. 
-Works in bull/bear by using daily sentiment as regime filter. Targets 15-30 trades/year.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
+Hypothesis: Uses daily Camarilla pivot levels (R1/S1) for entry when price breaks out of these key levels in the direction of the 1d EMA50 trend, with volume confirmation. Exits on opposite Camarilla level (S1 for longs, R1 for shorts) or trend reversal. Designed to work in both bull and bear markets by following 1d trend filter and trading breakouts from institutional pivot levels. Targets 15-30 trades/year via strict entry conditions combining trend, level break, and volume.
 """
 
-name = "6h_ISS_Trend_Reversal"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3
+    range_ = high - low
+    r1 = close + (range_ * 1.1 / 12)
+    s1 = close - (range_ * 1.1 / 12)
+    return r1, s1, pivot
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # 6h data
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- Daily ISS (Intra-Session Sentiment) ---
+    # --- Daily Camarilla Levels ---
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ISS for each day: (close - open) / (high - low)
-    iss_raw = (df_1d['close'].values - df_1d['open'].values) / (df_1d['high'].values - df_1d['low'].values)
-    # Avoid division by zero
-    iss_raw = np.where((df_1d['high'].values - df_1d['low'].values) == 0, 0, iss_raw)
-    iss_1d = iss_raw  # Already daily values
+    r1_1d, s1_1d, pivot_1d = calculate_camarilla(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
     
-    # Align daily ISS to 6h
-    iss_6h = align_htf_to_ltf(prices, df_1d, iss_1d)
+    # Align daily Camarilla to 12h
+    r1_12h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_12h = align_htf_to_ltf(prices, df_1d, s1_1d)
+    pivot_12h = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # --- 6h RSI(14) ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # --- 1d EMA50 Trend Filter ---
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
+    ).mean().values
+    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average
-    avg_loss[13] = np.mean(loss[1:14])
-    
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)  # All gains
-    rsi = np.where(avg_gain == 0, 0, rsi)    # All losses
+    # --- Volume Spike Detection (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(iss_6h[i]) or np.isnan(rsi[i]):
+        if (np.isnan(r1_12h[i]) or np.isnan(s1_12h[i]) or 
+            np.isnan(pivot_12h[i]) or np.isnan(ema_50_12h[i]) or
+            np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -78,27 +76,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Volume confirmation threshold
+        volume_spike = vol_ratio[i] > 1.8
+        
         if position == 0:
-            # Long: strong bullish ISS + RSI oversold
-            if iss_6h[i] > 0.2 and rsi[i] < 30:
+            # Long: price breaks above R1 + above 1d EMA50 + volume
+            if (close[i] > r1_12h[i] and 
+                close[i] > ema_50_12h[i] and 
+                close[i-1] <= r1_12h[i-1] and  # crossed above R1 this bar
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: strong bearish ISS + RSI overbought
-            elif iss_6h[i] < -0.2 and rsi[i] > 70:
+            # Short: price breaks below S1 + below 1d EMA50 + volume
+            elif (close[i] < s1_12h[i] and 
+                  close[i] < ema_50_12h[i] and 
+                  close[i-1] >= s1_12h[i-1] and  # crossed below S1 this bar
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: ISS turns bearish OR RSI overbought
-                if iss_6h[i] < 0 or rsi[i] > 70:
+                # Exit long: price crosses below S1 OR trend turns down
+                if (close[i] < s1_12h[i] and close[i-1] >= s1_12h[i-1]) or \
+                   (close[i] < ema_50_12h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: ISS turns bullish OR RSI oversold
-                if iss_6h[i] > 0 or rsi[i] < 30:
+                # Exit short: price crosses above R1 OR trend turns up
+                if (close[i] > r1_12h[i] and close[i-1] <= r1_12h[i-1]) or \
+                   (close[i] > ema_50_12h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
