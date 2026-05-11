@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Controlled"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Controlled"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA34 for trend filter (HTF)
+    # Calculate 1d EMA34 for trend filter (HTF) - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -27,12 +27,12 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
+    # Camarilla levels: R3, S3
     hl_range = high_1d - low_1d
     r3 = close_1d + hl_range * 1.25
     s3 = close_1d - hl_range * 1.25
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
@@ -40,7 +40,7 @@ def generate_signals(prices):
     vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
     volume_ok = volume > vol_ema50 * 2.5  # Further increased threshold to reduce trades
     
-    # Fixed position size to reduce trade frequency and control risk
+    # Fixed position size to avoid churn
     position_size = 0.25
     
     signals = np.zeros(n)
@@ -77,7 +77,7 @@ def generate_signals(prices):
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions - simplified to reduce churn
             if position == 1:
                 # Exit: Price crosses below S3 OR trend reverses
                 if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
