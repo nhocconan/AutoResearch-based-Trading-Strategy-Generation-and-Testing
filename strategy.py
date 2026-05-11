@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ParabolicSAR_1dTrend_VolumeFilter"
-timeframe = "6h"
+name = "4h_RSI_Extremes_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,64 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 1d data ONCE for trend and SAR
+    # 1. Load 1d data ONCE
     df_1d = get_htf_data(prices, '1d')
     
-    # Parabolic SAR calculation (AF=0.02, max=0.2)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 2. 1d EMA200 for trend filter
+    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Initialize SAR array
-    sar = np.zeros_like(close_1d)
-    trend = np.ones_like(close_1d)  # 1 for uptrend, -1 for downtrend
-    af = 0.02
-    max_af = 0.2
+    # 3. 14-period RSI on 4h timeframe
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Set initial values
-    sar[0] = low_1d[0]
-    ep = high_1d[0]  # Extreme point
-    trend[0] = 1
+    # 4. Volume filter: 20-period EMA for spike detection
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
-    for i in range(1, len(close_1d)):
-        if trend[i-1] == 1:  # Uptrend
-            sar[i] = sar[i-1] + af * (ep - sar[i-1])
-            if low_1d[i] < sar[i]:  # Trend reversal
-                trend[i] = -1
-                sar[i] = ep
-                ep = low_1d[i]
-                af = 0.02
-            else:
-                trend[i] = 1
-                if high_1d[i] > ep:
-                    ep = high_1d[i]
-                    af = min(af + 0.02, max_af)
-                else:
-                    af = min(af + 0.02, max_af)
-        else:  # Downtrend
-            sar[i] = sar[i-1] + af * (ep - sar[i-1])
-            if high_1d[i] > sar[i]:  # Trend reversal
-                trend[i] = 1
-                sar[i] = ep
-                ep = high_1d[i]
-                af = 0.02
-            else:
-                trend[i] = -1
-                if low_1d[i] < ep:
-                    ep = low_1d[i]
-                    af = min(af + 0.02, max_af)
-                else:
-                    af = min(af + 0.02, max_af)
-    
-    # Align SAR and trend to 6h
-    sar_aligned = align_htf_to_ltf(prices, df_1d, sar)
-    trend_aligned = align_htf_to_ltf(prices, df_1d, trend)
-    
-    # Volume filter: 24-period EMA for spike detection (4 days on 6h chart)
-    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
-    volume_ok = volume > vol_ema24 * 1.5
-    
-    # Fixed position size
+    # 5. Fixed position size
     position_size = 0.25
     
     signals = np.zeros(n)
@@ -85,7 +48,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(sar_aligned[i]) or np.isnan(trend_aligned[i]) or 
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi[i]) or 
             np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
@@ -96,32 +59,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_sar = close[i] > sar_aligned[i]
-        price_below_sar = close[i] < sar_aligned[i]
-        uptrend = trend_aligned[i] == 1
-        downtrend = trend_aligned[i] == -1
+        price_above_ema200 = close[i] > ema200_1d_aligned[i]
+        price_below_ema200 = close[i] < ema200_1d_aligned[i]
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         if position == 0:
-            # Long: Price above SAR + uptrend + volume spike
-            if price_above_sar and uptrend and volume_ok[i]:
+            # Long: RSI oversold + above 1d EMA200 + volume spike
+            if rsi_oversold and price_above_ema200 and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price below SAR + downtrend + volume spike
-            elif price_below_sar and downtrend and volume_ok[i]:
+            # Short: RSI overbought + below 1d EMA200 + volume spike
+            elif rsi_overbought and price_below_ema200 and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit: Price crosses below SAR OR trend reverses to downtrend
-                if price_below_sar or not uptrend:
+                # Exit: RSI crosses above 50 OR trend reverses
+                if rsi[i] > 50 or close[i] < ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above SAR OR trend reverses to uptrend
-                if price_above_sar or not downtrend:
+                # Exit: RSI crosses below 50 OR trend reverses
+                if rsi[i] < 50 or close[i] > ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
