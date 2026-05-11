@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Pivot_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Breakouts from daily Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
-In strong trends, price breaking above R3 or below S3 with volume confirms institutional participation.
-Trades only in direction of higher timeframe trend to avoid counter-trend whipsaws.
-Designed for low frequency (15-35 trades/year) to minimize fee drag in both bull and bear markets.
+6h_Alligator_Trend_Filtered_Pullback
+Hypothesis: Use Williams Alligator (13/8/5 SMAs) on 1d to define trend, then enter pullbacks
+on 6h when price touches the Alligator's teeth (8-period SMA) in direction of trend.
+The Alligator acts as a dynamic support/resistance in trending markets, providing
+high-probability pullback entries. Works in both bull and bear markets by following
+the higher timeframe trend, avoiding counter-trend whipsaws. Low frequency due to
+strict pullback requirement and trend filter.
 """
 
-name = "6h_Pivot_R3S3_Breakout_1dTrend_Volume"
+name = "6h_Alligator_Trend_Filtered_Pullback"
 timeframe = "6h"
 leverage = 1.0
 
@@ -20,39 +22,51 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivot and trend filter
+    # Get 1d data for Alligator and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 13:
         return np.zeros(n)
     
     # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # --- 1d Camarilla pivot levels (R3, S3) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # --- 1d Williams Alligator ---
+    # Jaw: 13-period SMMA, shifted 8 bars
+    # Teeth: 8-period SMMA, shifted 5 bars  
+    # Lips: 5-period SMMA, shifted 3 bars
     close_1d = df_1d['close'].values
     
-    # Calculate pivot point
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Calculate Camarilla levels: R3/S3
-    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
-    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
+    def smma(arr, period):
+        """Smoothed Moving Average (SMMA) - same as RMA/Wilder's"""
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=float)
+        result = np.full_like(arr, np.nan, dtype=float)
+        # First value is simple average
+        result[period-1] = np.mean(arr[:period])
+        # Subsequent values: (prev * (period-1) + current) / period
+        for i in range(period, len(arr)):
+            result[i] = (result[i-1] * (period-1) + arr[i]) / period
+        return result
     
-    # Align R3/S3 to 6s timeframe (using previous day's levels for breakout)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    jaw_raw = smma(close_1d, 13)
+    teeth_raw = smma(close_1d, 8)
+    lips_raw = smma(close_1d, 5)
     
-    # --- 1d EMA34 for trend filter ---
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Shift as per Alligator definition
+    jaw = np.roll(jaw_raw, 8)
+    teeth = np.roll(teeth_raw, 5)
+    lips = np.roll(lips_raw, 3)
     
-    # --- Volume Spike (6h) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
+    # Align to 6h timeframe
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    
+    # Trend direction: price > teeth = uptrend, price < teeth = downtrend
+    trend_up = close > teeth_aligned
+    trend_down = close < teeth_aligned
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,9 +76,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i])):
+        if (np.isnan(jaw_aligned[i]) or 
+            np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -74,9 +88,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions: Breakout of R3/S3 with volume and trend alignment
-        long_entry = (close[i] > r3_aligned[i]) and vol_spike[i] and (close[i] > ema_34_1d_aligned[i])
-        short_entry = (close[i] < s3_aligned[i]) and vol_spike[i] and (close[i] < ema_34_1d_aligned[i])
+        # Entry conditions: Pullback to teeth in direction of trend
+        # Long: price touches/slightly above teeth during uptrend
+        # Short: price touches/slightly below teeth during downtrend
+        # Using 0.1% buffer to avoid whipsaws
+        buffer = teeth_aligned[i] * 0.001
+        long_entry = (close[i] >= teeth_aligned[i] - buffer) and (close[i] <= teeth_aligned[i] + buffer) and trend_up[i]
+        short_entry = (close[i] >= teeth_aligned[i] - buffer) and (close[i] <= teeth_aligned[i] + buffer) and trend_down[i]
         
         if position == 0:
             if long_entry:
@@ -88,19 +106,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: Price returns to pivot level or trend reversal
+            # Exit conditions: Price moves beyond lips (Alligator waking up)
             if position == 1:
-                # Exit if price crosses below pivot or trend turns down
-                pp_aligned = align_htf_to_ltf(prices, df_1d, (high_1d + low_1d + close_1d) / 3.0)
-                if (close[i] < pp_aligned[i]) or (close[i] < ema_34_1d_aligned[i]):
+                # Exit if price crosses below lips (trend weakening)
+                if close[i] < lips_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit if price crosses above pivot or trend turns up
-                pp_aligned = align_htf_to_ltf(prices, df_1d, (high_1d + low_1d + close_1d) / 3.0)
-                if (close[i] > pp_aligned[i]) or (close[i] > ema_34_1d_aligned[i]):
+                # Exit if price crosses above lips (trend weakening)
+                if close[i] > lips_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
