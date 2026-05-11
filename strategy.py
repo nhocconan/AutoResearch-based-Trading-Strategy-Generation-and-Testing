@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_400_500_DMA_Crossover_Pullback_v1
-Hypothesis: Uses 400 and 500-period exponential moving averages on 1h timeframe to identify long-term trend,
-with 6h price retracement to the 400 EMA as entry signal. Works in bull markets by buying dips in uptrends
-and in bear markets by selling rallies in downtrends. Target: 15-25 trades/year to minimize fee drag.
+12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Uses Camarilla pivot points from daily timeframe with breakout at R1/S1 levels,
+confirmed by daily trend (EMA34) and volume spike. Designed to capture strong intraday moves
+while avoiding false breakouts in choppy markets. Target: 15-25 trades/year to minimize fee drag.
 """
 
-name = "6h_400_500_DMA_Crossover_Pullback_v1"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,39 +16,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 600:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1h data for EMA calculation (trend identification)
-    df_1h = get_htf_data(prices, '1h')
-    if len(df_1h) < 500:
+    # Get 1d data for Camarilla pivots, trend, and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Calculate 400 and 500 EMA on 1h close
-    close_1h = df_1h['close'].values
-    ema_400 = pd.Series(close_1h).ewm(span=400, adjust=False, min_periods=400).mean().values
-    ema_500 = pd.Series(close_1h).ewm(span=500, adjust=False, min_periods=500).mean().values
-    
-    # Determine trend: 400 EMA > 500 EMA = uptrend, < = downtrend
-    trend_up = ema_400 > ema_500
-    
-    # Align trend signals to 6h timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_1h, trend_up)
-    
-    # 6h price data
-    close = prices['close'].values
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # --- Daily Camarilla Pivot Points (R1, S1) ---
+    # Using previous day's OHLC
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Calculate pivot and support/resistance levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    r1 = pivot + (prev_high - prev_low) * 1.1 / 12
+    s1 = pivot - (prev_high - prev_low) * 1.1 / 12
+    
+    # Align to 12h timeframe (wait for daily close)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # --- Daily Trend Filter (EMA34) ---
+    ema_34 = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
+    # --- Volume Spike Detection (12h) ---
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ma.values)  # Significant volume spike
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 600
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(trend_up_aligned[i]):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_34_aligned[i]) or
+            np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -58,61 +76,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        is_uptrend = trend_up_aligned[i]
-        is_downtrend = not is_uptrend
+        # Determine trend based on price vs EMA34
+        is_uptrend = close[i] > ema_34_aligned[i]
+        is_downtrend = close[i] < ema_34_aligned[i]
         
-        # Entry conditions: price retracement to 400 EMA on 6b chart
-        # Need to calculate 400 EMA on 6h timeframe for entry reference
-        # But we only have 1h EMA aligned - so we'll use price action relative to recent swings
-        
-        # Alternative: use 6h price crossing 400 EMA (from 1h) as dynamic support/resistance
-        # Since we don't have 6h EMA, we'll use a simpler approach: 
-        # In uptrend: buy when price pulls back to near recent low and shows rejection
-        # In downtrend: sell when price rallies to near recent high and shows rejection
-        
-        # Calculate 20-period high/low on 6h for context
-        if i >= 20:
-            recent_high = np.max(high[i-20:i])
-            recent_low = np.min(low[i-20:i])
-        else:
-            recent_high = high[i]
-            recent_low = low[i]
-        
-        # Define proximity zones (within 1% of recent extremes)
-        proximity_threshold = 0.01
-        near_high = abs(close[i] - recent_high) / recent_high < proximity_threshold
-        near_low = abs(close[i] - recent_low) / recent_low < proximity_threshold
-        
-        # Rejection signals: wick rejection from levels
-        body_size = abs(close[i] - prices['open'].iloc[i])
-        upper_wick = high[i] - max(close[i], prices['open'].iloc[i])
-        lower_wick = min(close[i], prices['open'].iloc[i]) - low[i]
-        
-        # Strong rejection: wick at least 2x body size
-        strong_lower_rejection = lower_wick > 2 * body_size and body_size > 0
-        strong_upper_rejection = upper_wick > 2 * body_size and body_size > 0
+        # Breakout signals at Camarilla R1/S1 levels
+        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
         
         if position == 0:
-            # In uptrend: look for long near support (recent low) with rejection
-            if is_uptrend and near_low and strong_lower_rejection:
+            # Only take longs in uptrend, shorts in downtrend
+            if is_uptrend and long_breakout:
                 signals[i] = 0.25
                 position = 1
-            # In downtrend: look for short near resistance (recent high) with rejection
-            elif is_downtrend and near_high and strong_upper_rejection:
+            elif is_downtrend and short_breakout:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: trend reversal or opposite rejection
-            if position == 1:  # Long position
-                # Exit if trend turns down or we get rejection at resistance
-                if not is_uptrend or (near_high and strong_upper_rejection):
+            # Exit conditions: price reaches opposite S1/R1 or trend reversal
+            if position == 1:
+                exit_signal = (low[i] < s1_aligned[i]) or (close[i] < ema_34_aligned[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            elif position == -1:  # Short position
-                # Exit if trend turns up or we get rejection at support
-                if is_uptrend or (near_low and strong_lower_rejection):
+            elif position == -1:
+                exit_signal = (high[i] > r1_aligned[i]) or (close[i] > ema_34_aligned[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
