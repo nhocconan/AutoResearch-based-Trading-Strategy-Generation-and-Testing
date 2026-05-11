@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
-# 12h_1w_1d_HTF_Confluence_Trend_Filter
-# Hypothesis: Combines 1w trend (EMA50) with 1d momentum (RSI>50) and 12h volume confirmation.
-# Uses 1w EMA50 for primary trend direction, 1d RSI for momentum filter, and 12h volume spike for entry confirmation.
-# Designed for low turnover (target 15-25 trades/year) to minimize fee drag in 2025 ranging markets.
-# Long when: price > 1w EMA50 AND 1d RSI > 50 AND volume > 1.5x 20-period EMA volume.
-# Short when: price < 1w EMA50 AND 1d RSI < 50 AND volume > 1.5x 20-period EMA volume.
-# Exit when trend reverses (price crosses 1w EMA50 in opposite direction).
-# Uses 1w EMA50 as dynamic trend filter to avoid counter-trend trades in both bull and bear markets.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm
+# Hypothesis: Breakout of 1-day Camarilla R3/S3 levels on 4h chart with confirmation from 1-day EMA34 trend and volume spike. 
+# Targets 20-35 trades/year to minimize fee drag. Uses momentum to avoid false breakouts. 
+# Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
 
-name = "12h_1w_1d_HTF_Confluence_Trend_Filter"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,76 +22,87 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1w EMA50 Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # === 1d RSI(14) Momentum Filter ===
+    # === 1d Data (loaded ONCE) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_12h = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # === 1d Camarilla Pivot Levels (R3, S3) ===
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
+    
+    # Align 1d levels to 4h
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 1d EMA34 Trend Filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
     
     # === Signal Parameters ===
-    position_size = 0.25
+    position_size = 0.25  # 25% of capital per trade
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    holding_bars = 0
     
-    # Start after warmup (max of 1w EMA50 and 1d RSI warmup)
-    start_idx = 100  # covers EMA50 and RSI
+    # Start after warmup (covers EMA34)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_12h[i]) or np.isnan(rsi_1d_12h[i]) or 
-            np.isnan(volume_ok[i])):
-            if position == 1:
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_ok[i])):
+            if position != 0:
                 signals[i] = 0.0
-            elif position == -1:
-                signals[i] = 0.0
+                position = 0
+                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Above 1w EMA50 + RSI > 50 + volume spike
-            if (close[i] > ema50_1w_12h[i] and 
-                rsi_1d_12h[i] > 50 and 
+            # Long: Break above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_4h[i] and 
+                close[i] > ema34_1d_4h[i] and 
                 volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Below 1w EMA50 + RSI < 50 + volume spike
-            elif (close[i] < ema50_1w_12h[i] and 
-                  rsi_1d_12h[i] < 50 and 
+                holding_bars = 0
+            # Short: Break below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_4h[i] and 
+                  close[i] < ema34_1d_4h[i] and 
                   volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
+                holding_bars = 0
         else:
-            # Hold position until trend reverses
+            # Enforce minimum holding period (10 bars)
+            holding_bars += 1
+            if holding_bars < 10:
+                signals[i] = position_size if position == 1 else -position_size
+                continue
+            
+            # Exit: Price closes below/above opposite level
             if position == 1:
-                # Exit: Price crosses below 1w EMA50
-                if close[i] < ema50_1w_12h[i]:
+                if close[i] < s3_4h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above 1w EMA50
-                if close[i] > ema50_1w_12h[i]:
+                if close[i] > r3_4h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
