@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_OrderBlock_Equilibrium_WeeklyTrend_v1
-Hypothesis: Institutional order blocks (OB) act as support/resistance. In weekly uptrend, buy at bullish OB when price tests it; in weekly downtrend, sell at bearish OB when price tests it. Equilibrium (midpoint of daily range) filters for mean-reversion within the OB zone. Weekly trend avoids counter-trend trades. Target: 15-30 trades/year on 6h.
+12h_TRIX_0_VolumeSpike_PhaseFilter
+Hypothesis: TRIX crossing zero indicates momentum shift. Combine with volume spike (>1.5x 20-period avg) and price above/below 1w EMA50 for trend filter. Long when TRIX crosses above zero in uptrend with volume spike. Short when TRIX crosses below zero in downtrend with volume spike. Uses 12h primary timeframe to limit trades and reduce fee drag. Works in both bull and bear markets by following momentum shifts confirmed by volume and trend.
 """
 
-name = "6h_OrderBlock_Equilibrium_WeeklyTrend_v1"
-timeframe = "6h"
+name = "12h_TRIX_0_VolumeSpike_PhaseFilter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,78 +20,43 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
     # === 1W Data for Trend Filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 50:
         return np.zeros(n)
     
     close_1w = df_1w['close'].values
-    # Weekly EMA20 for trend
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # EMA50 on 1w close for trend filter
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === 1D Data for Order Blocks and Equilibrium ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # === TRIX Calculation (12-period EMA of 12-period EMA of 12-period EMA of price) ===
+    # TRIX = 100 * (EMA3 - EMA3_prev) / EMA3_prev
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3_prev = np.roll(ema3, 1)
+    ema3_prev[0] = ema3[0]
+    trix = 100 * (ema3 - ema3_prev) / ema3_prev
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Bullish OB: down candle (close < open) followed by up candle -> OB = [low, high] of down candle
-    # Bearish OB: up candle (close > open) followed by down candle -> OB = [low, high] of up candle
-    open_1d = df_1d['open'].values
-    
-    bullish_ob_high = np.full(len(high_1d), np.nan)
-    bullish_ob_low = np.full(len(high_1d), np.nan)
-    bearish_ob_high = np.full(len(high_1d), np.nan)
-    bearish_ob_low = np.full(len(high_1d), np.nan)
-    
-    for i in range(1, len(high_1d)):
-        # Bullish OB: red candle then green candle
-        if close_1d[i-1] < open_1d[i-1] and close_1d[i] > open_1d[i]:
-            bullish_ob_high[i] = high_1d[i-1]
-            bullish_ob_low[i] = low_1d[i-1]
-        # Bearish OB: green candle then red candle
-        if close_1d[i-1] > open_1d[i-1] and close_1d[i] < open_1d[i]:
-            bearish_ob_high[i] = high_1d[i-1]
-            bearish_ob_low[i] = low_1d[i-1]
-    
-    # Forward-fill OBs to keep them active until broken
-    # Convert to pandas Series for ffill, then back to array
-    bullish_ob_high_series = pd.Series(bullish_ob_high).ffill()
-    bullish_ob_low_series = pd.Series(bullish_ob_low).ffill()
-    bearish_ob_high_series = pd.Series(bearish_ob_high).ffill()
-    bearish_ob_low_series = pd.Series(bearish_ob_low).ffill()
-    
-    bullish_ob_high = bullish_ob_high_series.values
-    bullish_ob_low = bullish_ob_low_series.values
-    bearish_ob_high = bearish_ob_high_series.values
-    bearish_ob_low = bearish_ob_low_series.values
-    
-    # Equilibrium: midpoint of daily range
-    equilibrium_1d = (high_1d + low_1d) / 2.0
-    
-    # Align 1D data to 6h timeframe
-    bullish_ob_high_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_high)
-    bullish_ob_low_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_low)
-    bearish_ob_high_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_high)
-    bearish_ob_low_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_low)
-    equilibrium_aligned = align_htf_to_ltf(prices, df_1d, equilibrium_1d)
+    # === Volume Spike: current volume > 1.5x 20-period average ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 20
+    # Start after warmup for TRIX and EMA
+    start_idx = 36
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(bullish_ob_high_aligned[i]) or 
-            np.isnan(bearish_ob_low_aligned[i]) or 
-            np.isnan(ema_20_1w_aligned[i])):
+        if (np.isnan(trix[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(ema3[i]) or 
+            np.isnan(ema3_prev[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -99,38 +64,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
-        
         if position == 0:
-            # Long: weekly uptrend + price tests bullish OB (within OB zone) + price > equilibrium (bullish bias)
-            if (weekly_uptrend and 
-                not np.isnan(bullish_ob_high_aligned[i]) and 
-                not np.isnan(bullish_ob_low_aligned[i]) and
-                low[i] <= bullish_ob_high_aligned[i] and  # price touches or penetrates OB high
-                high[i] >= bullish_ob_low_aligned[i] and  # price touches or penetrates OB low
-                close[i] > equilibrium_aligned[i]):
+            # Long: TRIX crosses above zero AND uptrend (price > 1w EMA50) AND volume spike
+            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly downtrend + price tests bearish OB + price < equilibrium (bearish bias)
-            elif (weekly_downtrend and 
-                  not np.isnan(bearish_ob_high_aligned[i]) and 
-                  not np.isnan(bearish_ob_low_aligned[i]) and
-                  low[i] <= bearish_ob_high_aligned[i] and
-                  high[i] >= bearish_ob_low_aligned[i] and
-                  close[i] < equilibrium_aligned[i]):
+            # Short: TRIX crosses below zero AND downtrend (price < 1w EMA50) AND volume spike
+            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below equilibrium OR weekly trend turns down
-            if close[i] < equilibrium_aligned[i] or not weekly_uptrend:
+            # Long exit: TRIX crosses below zero OR price crosses below 1w EMA50
+            if trix[i] < 0 or close[i] < ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above equilibrium OR weekly trend turns up
-            if close[i] > equilibrium_aligned[i] or not weekly_downtrend:
+            # Short exit: TRIX crosses above zero OR price crosses above 1w EMA50
+            if trix[i] > 0 or close[i] > ema_50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
