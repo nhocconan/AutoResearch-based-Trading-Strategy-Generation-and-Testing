@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_WeeklyPivotBias_VolumeFilter"
-timeframe = "6h"
+name = "12h_WKLY_PIVOT_BIAS_VOLUME"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,50 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly pivot bias (from Monday open)
+    # Weekly trend: EMA21 on weekly close
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
+    if len(df_1w) < 21:
         return np.zeros(n)
-    week_open = df_1d['open'].values  # This is wrong - need to fix
+    close_1w = df_1w['close'].values
+    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    weekly_up = close > ema_21_1w_aligned  # Price above weekly EMA21 = bullish bias
     
-    # Actually, let's implement properly:
-    # Get weekly data properly
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 1:
-        return np.zeros(n)
-    # Weekly bias: if weekly close > weekly open -> bullish bias
-    weekly_bias = df_1w['close'] > df_1w['open']
-    weekly_bias_vals = weekly_bias.values
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias_vals)
-    
-    # Daily trend filter
+    # Daily pivot-based levels (using previous day)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 2:
         return np.zeros(n)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    trend_up = close > ema_1d_aligned
     
-    # 6h Donchian channels
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Previous day's values for today's pivot calculation
+    high_prev = np.roll(high_1d, 1)
+    low_prev = np.roll(low_1d, 1)
+    close_prev = np.roll(close_1d, 1)
+    high_prev[0] = np.nan
+    low_prev[0] = np.nan
+    close_prev[0] = np.nan
     
-    # Volume filter: volume > 1.3x 24-period average (4 days worth)
-    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > 1.3 * vol_ma24
+    # Classic pivot point and support/resistance
+    pivot = (high_prev + low_prev + close_prev) / 3.0
+    r1 = 2 * pivot - low_prev
+    s1 = 2 * pivot - high_prev
+    r2 = pivot + (high_prev - low_prev)
+    s2 = pivot - (high_prev - low_prev)
+    
+    # Align daily levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Volume filter: volume > 1.8x 30-period average
+    vol_ma30 = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    volume_filter = volume > 1.8 * vol_ma30
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 24)  # Need enough data for indicators
+    start_idx = 30  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(weekly_bias_aligned[i]) or
-            np.isnan(vol_ma24[i])):
+        if (np.isnan(ema_21_1w_aligned[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(vol_ma30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,30 +78,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above Donchian high + weekly bullish bias + daily uptrend + volume spike
-            if (close[i] > highest_high[i] and 
-                weekly_bias_aligned[i] and 
-                trend_up[i] and 
-                volume_filter[i]):
+            # Long: Price > R1 + weekly uptrend + volume spike
+            if close[i] > r1_aligned[i] and weekly_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below Donchian low + weekly bearish bias + daily downtrend + volume spike
-            elif (close[i] < lowest_low[i] and 
-                  not weekly_bias_aligned[i] and 
-                  not trend_up[i] and 
-                  volume_filter[i]):
+            # Short: Price < S1 + weekly downtrend + volume spike
+            elif close[i] < s1_aligned[i] and not weekly_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Break below Donchian low or weekly bias turns bearish
-            if close[i] < lowest_low[i] or not weekly_bias_aligned[i]:
+            # Long exit: Price < S1 or weekly trend down
+            if close[i] < s1_aligned[i] or not weekly_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Break above Donchian high or weekly bias turns bullish
-            if close[i] > highest_high[i] or weekly_bias_aligned[i]:
+            # Short exit: Price > R1 or weekly trend up
+            if close[i] > r1_aligned[i] or weekly_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
