@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,44 +17,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Calculate Camarilla levels for 1h (based on previous 1h bar)
+    # Camarilla levels: H4 = close + 1.5*(high-low), L4 = close - 1.5*(high-low)
+    # Use previous bar's high/low/close to avoid lookahead
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = high[0]  # fill first value
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    camarilla_H4 = prev_close + 1.5 * (prev_high - prev_low)
+    camarilla_L4 = prev_close - 1.5 * (prev_high - prev_low)
+    
+    # 4h trend filter: EMA34 on 4h close
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 34:
         return np.zeros(n)
+    close_4h = df_4h['close'].values
+    ema34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_4h = close_4h > ema34_4h
+    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
     
-    # Calculate Camarilla pivot levels (R1, S1) from previous day
-    # (High, Low, Close of previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 1d volume filter: current 1h volume > 2x 24-period average of 1h volume
+    # (24 1h bars = 1 day)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > 2.0 * vol_ma24
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.0 / 12)
-    s1 = pivot - (range_1d * 1.0 / 12)
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
+    # Session filter: 8-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA and Camarilla
+    start_idx = 34  # Need enough data for EMA34 and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(camarilla_H4[i]) or np.isnan(camarilla_L4[i]) or
+            np.isnan(trend_up_4h_aligned[i]) or np.isnan(vol_ma24[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,27 +73,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close > R1 + 1d uptrend + volume confirmation
-            if close[i] > r1_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: Close > Camarilla H4 + 4h uptrend + volume spike
+            if close[i] > camarilla_H4[i] and trend_up_4h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Close < S1 + 1d downtrend + volume confirmation
-            elif close[i] < s1_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: Close < Camarilla L4 + 4h downtrend + volume spike
+            elif close[i] < camarilla_L4[i] and not trend_up_4h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Close < S1 OR 1d trend turns down
-            if close[i] < s1_aligned[i] or not trend_up_1d_aligned[i]:
+            # Long exit: Close < Camarilla L4 OR 4h trend turns down
+            if close[i] < camarilla_L4[i] or not trend_up_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Close > R1 OR 1d trend turns up
-            if close[i] > r1_aligned[i] or trend_up_1d_aligned[i]:
+            # Short exit: Close > Camarilla H4 OR 4h trend turns up
+            if close[i] > camarilla_H4[i] or trend_up_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
