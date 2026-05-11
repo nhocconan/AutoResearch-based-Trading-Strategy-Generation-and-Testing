@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike. Works in bull/bear by using trend direction from higher timeframe.
-# Long when: price breaks above Camarilla R3, 1d EMA34 rising, volume > 1.8x 20-period avg.
-# Short when: price breaks below Camarilla S3, 1d EMA34 falling, volume > 1.8x 20-period avg.
-# Exit when price returns to Camarilla pivot (midpoint) or 1d EMA34 trend reverses.
+# 1h_4hTrend_1dVolatilityBreakout
+# Hypothesis: Use 4h trend (via 20 EMA) for directional bias and 1d volatility expansion (ATR breakout) for entries on 1h.
+# Long when: 4h EMA20 rising, 1h close breaks above 1h open + 0.5*1d ATR, volume > 1.2x 20-period average.
+# Short when: 4h EMA20 falling, 1h close breaks below 1h open - 0.5*1d ATR, volume > 1.2x 20-period average.
+# Exit when 4h EMA20 trend reverses or price crosses back to 1h open.
+# Works in bull by catching trend continuations and in bear by catching breakdowns with trend filter.
+# Volatility breakout captures momentum bursts, 4h EMA filters counter-trend noise.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_4hTrend_1dVolatilityBreakout"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,58 +20,59 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for EMA34 trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for EMA20 trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Get 1d data for ATR(14)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # 1h OHLCV
     close = prices['close'].values
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Camarilla levels from previous day ---
-    # Using previous day's OHLC to calculate today's levels (no look-ahead)
-    camarilla_pivot = np.full(n, np.nan)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    
-    # Calculate daily OHLC from 12h data (simplified: use first/last of day)
-    # For each bar, use previous day's high/low/close
-    # We'll approximate by using rolling window of 2 bars (since 12h * 2 = 24h)
-    if n >= 2:
-        # Shift by 2 to get previous day's values (2 * 12h = 24h)
-        prev_high = np.roll(high, 2)
-        prev_low = np.roll(low, 2)
-        prev_close = np.roll(close, 2)
-        # Set first 2 values to NaN
-        prev_high[:2] = np.nan
-        prev_low[:2] = np.nan
-        prev_close[:2] = np.nan
-        
-        camarilla_pivot = (prev_high + prev_low + prev_close) / 3
-        range_hl = prev_high - prev_low
-        camarilla_r3 = camarilla_pivot + range_hl * 1.1 / 4
-        camarilla_s3 = camarilla_pivot - range_hl * 1.1 / 4
-    
-    # --- 1d EMA34 trend ---
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    for i in range(34, len(close_1d)):
-        if i == 34:
-            ema_1d[i] = np.mean(close_1d[0:34])
+    # --- 4h EMA20 trend ---
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    for i in range(20, len(close_4h)):
+        if i == 20:
+            ema_4h[i] = np.mean(close_4h[0:20])
         else:
-            ema_1d[i] = (close_1d[i] * 2 / (34 + 1)) + (ema_1d[i-1] * (33 / (34 + 1)))
+            ema_4h[i] = (close_4h[i] * 2 / (20 + 1)) + (ema_4h[i-1] * (19 / (20 + 1)))
     
     # EMA slope (rising/falling)
-    ema_slope = np.full(len(close_1d), np.nan)
-    for i in range(35, len(close_1d)):
-        ema_slope[i] = ema_1d[i] - ema_1d[i-1]
+    ema_slope = np.full(len(close_4h), np.nan)
+    for i in range(21, len(close_4h)):
+        ema_slope[i] = ema_4h[i] - ema_4h[i-1]
     
-    # Align 1d EMA and slope to 12h
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_slope)
+    # Align 4h EMA and slope to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_slope)
+    
+    # --- 1d ATR(14) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    tr = np.zeros(len(close_1d))
+    tr[0] = high_1d[0] - low_1d[0]
+    for i in range(1, len(close_1d)):
+        tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    
+    atr_1d = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if i == 14:
+            atr_1d[i] = np.mean(tr[0:14])
+        else:
+            atr_1d[i] = (tr[i] * 1 + atr_1d[i-1] * 13) / 14  # Wilder smoothing
+    
+    # Align 1d ATR to 1h
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # --- Volume confirmation (volume > 20-period average) ---
     vol_ma = np.full(n, np.nan)
@@ -79,52 +82,50 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for Camarilla (need 2 bars), EMA34, and volume MA(20)
-    start_idx = max(2, 35, 20)
+    # Warmup: enough for 4h EMA20, 1d ATR14, and volume MA20
+    start_idx = max(20, 14, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r3[i]) or
-            np.isnan(camarilla_s3[i]) or
-            np.isnan(camarilla_pivot[i]) or
-            np.isnan(ema_1d_aligned[i]) or
+        if (np.isnan(ema_4h_aligned[i]) or
             np.isnan(ema_slope_aligned[i]) or
+            np.isnan(atr_1d_aligned[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Camarilla breakout conditions
-        breakout_up = close[i] > camarilla_r3[i]
-        breakout_down = close[i] < camarilla_s3[i]
+        # Volatility breakout conditions
+        breakout_up = close[i] > open_[i] + 0.5 * atr_1d_aligned[i]
+        breakout_down = close[i] < open_[i] - 0.5 * atr_1d_aligned[i]
         
         # Volume spike condition
-        vol_spike = volume[i] > vol_ma[i] * 1.8  # 80% above average
+        vol_spike = volume[i] > vol_ma[i] * 1.2  # 20% above average
         
         if position == 0:
             if breakout_up and ema_slope_aligned[i] > 0 and vol_spike:
-                # Long: upward breakout + rising EMA34 + volume spike
-                signals[i] = 0.25
+                # Long: upward volatility breakout + rising 4h EMA20 + volume spike
+                signals[i] = 0.20
                 position = 1
             elif breakout_down and ema_slope_aligned[i] < 0 and vol_spike:
-                # Short: downward breakout + falling EMA34 + volume spike
-                signals[i] = -0.25
+                # Short: downward volatility breakout + falling 4h EMA20 + volume spike
+                signals[i] = -0.20
                 position = -1
         else:
             if position == 1:
-                # Exit long: price falls to pivot OR EMA34 slope turns negative
-                if close[i] < camarilla_pivot[i] or ema_slope_aligned[i] < 0:
+                # Exit long: 4h EMA20 trend turns negative OR price falls back to open
+                if ema_slope_aligned[i] < 0 or close[i] < open_[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price rises to pivot OR EMA34 slope turns positive
-                if close[i] > camarilla_pivot[i] or ema_slope_aligned[i] > 0:
+                # Exit short: 4h EMA20 trend turns positive OR price rises back to open
+                if ema_slope_aligned[i] > 0 or close[i] > open_[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
