@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_RSI_Pullback_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,23 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA34
+    # 1d trend: close above/below 1d EMA34
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     trend_up = close > ema_1d_aligned
     
-    # 1d volume filter: volume > 1.5x 20-day average
+    # Daily volume filter: volume > 1.5x 20-day average
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # 12h Donchian channel (20)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # RSI(14) on 4h
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -42,12 +48,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 60  # Need enough data for EMA, volume, Donchian
+    start_idx = 40  # Need enough data for RSI, EMA, and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,24 +70,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Breakout above Donchian high + daily uptrend + volume spike
-            if close[i] > donchian_high[i] and trend_up[i] and volume_filter[i]:
+            # Long: RSI < 30 (oversold) + daily uptrend + volume filter
+            if rsi[i] < 30 and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Breakdown below Donchian low + daily downtrend + volume spike
-            elif close[i] < donchian_low[i] and not trend_up[i] and volume_filter[i]:
+            # Short: RSI > 70 (overbought) + daily downtrend + volume filter
+            elif rsi[i] > 70 and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below Donchian low or daily trend down
-            if close[i] < donchian_low[i] or not trend_up[i]:
+            # Long exit: RSI > 50 (mean reversion) or daily trend down
+            if rsi[i] > 50 or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above Donchian high or daily trend up
-            if close[i] > donchian_high[i] or trend_up[i]:
+            # Short exit: RSI < 50 (mean reversion) or daily trend up
+            if rsi[i] < 50 or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
