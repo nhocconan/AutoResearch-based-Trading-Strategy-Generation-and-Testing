@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Donchian20_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,42 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend and volume context
+    # 1d data for trend filter and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
     # 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # 1d volume spike filter (20-period average)
+    # 1d ATR (14-period) for volatility filter
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # 1d volume average (20-period)
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     vol_spike_1d = volume_1d > (vol_ma_1d * 1.5)
     
-    # Align 1d indicators to 6h timeframe
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Donchian channels on 12h price (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 6h Donchian channels (20-period)
-    high_max = np.zeros(n)
-    low_min = np.zeros(n)
-    for i in range(n):
-        if i < 19:
-            high_max[i] = np.nan
-            low_min[i] = np.nan
-        else:
-            high_max[i] = np.max(high[i-19:i+1])
-            low_min[i] = np.min(low[i-19:i+1])
+    # Align 1d indicators to 12h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0
     
-    for i in range(20, n):
-        # Skip if any required data is NaN
-        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_spike_1d_aligned[i]):
+    start_idx = max(20, 34, 14, 20)
+    
+    for i in range(start_idx, n):
+        if np.isnan(ema34_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,23 +66,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above Donchian upper + 1d uptrend + volume spike
-            if close[i] > high_max[i] and close[i] > ema34_1d_aligned[i] and vol_spike_1d_aligned[i]:
+            if close[i] > highest_high[i] and close[i] > ema34_1d_aligned[i] and vol_spike_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below Donchian lower + 1d downtrend + volume spike
-            elif close[i] < low_min[i] and close[i] < ema34_1d_aligned[i] and vol_spike_1d_aligned[i]:
+            elif close[i] < lowest_low[i] and close[i] < ema34_1d_aligned[i] and vol_spike_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: price breaks below Donchian lower
-            if close[i] < low_min[i]:
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: price breaks above Donchian upper
-            if close[i] > high_max[i]:
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
