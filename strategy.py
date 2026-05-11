@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_RSI_Chop"
-timeframe = "4h"
+name = "1d_Camarilla_Pivot_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,63 +12,82 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d data for KAMA, RSI, Choppiness Index
+    # 1d data for Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # KAMA (Kaufman Adaptive Moving Average) - ER = 10
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d))
-    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
-    er = np.clip(er, 0, 1)
-    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)  # Fast SC=2, Slow SC=30
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
+    # 1w data for trend (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
+        return np.zeros(n)
     
-    # RSI (14-period)
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
+    close_1w = df_1w['close'].values
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Choppiness Index (14-period)
-    atr1 = np.abs(np.diff(high_1d, prepend=high_1d[0]))
-    atr2 = np.abs(np.diff(low_1d, prepend=low_1d[0]))
-    atr3 = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    tr = np.maximum(atr1, np.maximum(atr2, atr3))
-    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = np.zeros_like(close_1d)
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
+    # Calculate Camarilla pivot levels for previous day
+    # R4 = C + ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4)
+    # R2 = C + ((H-L) * 1.1/6)
+    # R1 = C + ((H-L) * 1.1/12)
+    # S1 = C - ((H-L) * 1.1/12)
+    # S2 = C - ((H-L) * 1.1/6)
+    # S3 = C - ((H-L) * 1.1/4)
+    # S4 = C - ((H-L) * 1.1/2)
     
-    # Align indicators to 4h timeframe
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Use previous day's OHLC to calculate pivot levels (no look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    
+    # First day has no previous day
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    # Calculate pivot levels
+    R1 = prev_close + ((prev_high - prev_low) * 1.1 / 12)
+    R2 = prev_close + ((prev_high - prev_low) * 1.1 / 6)
+    R3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    R4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    S1 = prev_close - ((prev_high - prev_low) * 1.1 / 12)
+    S2 = prev_close - ((prev_high - prev_low) * 1.1 / 6)
+    S3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    S4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
+    
+    # Align pivot levels to 1d timeframe (they are already daily)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    
+    # Volume spike (20-period average)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 30  # Ensure all indicators are ready
+    start_idx = 20  # Need volume MA and previous day data
     
     for i in range(start_idx, n):
-        if np.isnan(kama_aligned[i]) or np.isnan(rsi_aligned[i]) or np.isnan(chop_aligned[i]):
+        if np.isnan(R1_aligned[i]) or np.isnan(R2_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(R4_aligned[i]) or \
+           np.isnan(S1_aligned[i]) or np.isnan(S2_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(S4_aligned[i]) or \
+           np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,24 +96,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA + RSI < 40 + Chop > 61.8 (range)
-            if close[i] > kama_aligned[i] and rsi_aligned[i] < 40 and chop_aligned[i] > 61.8:
+            # Long: Close breaks above R3 with volume spike and price above weekly EMA34
+            if close[i] > R3_aligned[i] and vol_spike[i] and close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below KAMA + RSI > 60 + Chop > 61.8 (range)
-            elif close[i] < kama_aligned[i] and rsi_aligned[i] > 60 and chop_aligned[i] > 61.8:
+            # Short: Close breaks below S3 with volume spike and price below weekly EMA34
+            elif close[i] < S3_aligned[i] and vol_spike[i] and close[i] < ema34_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Price below KAMA OR RSI > 60
-            if close[i] < kama_aligned[i] or rsi_aligned[i] > 60:
+            # Exit long: Close breaks below R1 or reverses below weekly EMA
+            if close[i] < R1_aligned[i] or close[i] < ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Price above KAMA OR RSI < 40
-            if close[i] > kama_aligned[i] or rsi_aligned[i] < 40:
+            # Exit short: Close breaks above S1 or reverses above weekly EMA
+            if close[i] > S1_aligned[i] or close[i] > ema34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
