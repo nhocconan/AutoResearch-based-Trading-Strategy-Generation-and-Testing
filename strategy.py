@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian_20_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1d_1w_RSI_Divergence_Signal"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,28 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend context
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Daily EMA50 for trend filter
-    daily_close = df_1d['close'].values
-    ema50_d = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_trend = daily_close > ema50_d  # True for uptrend
+    # Weekly EMA200 for long-term trend
+    weekly_close = df_1w['close'].values
+    ema200_w = pd.Series(weekly_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    weekly_trend = weekly_close > ema200_w  # True for uptrend
     
-    # Donchian(20) channels
-    donchian_high = np.zeros(n)
-    donchian_low = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            donchian_high[i] = np.max(high[:i+1])
-            donchian_low[i] = np.min(low[:i+1])
-        else:
-            donchian_high[i] = np.max(high[i-19:i+1])
-            donchian_low[i] = np.min(low[i-19:i+1])
+    # Daily RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation: 20-period average
+    # Daily volume average (20-period)
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -46,17 +44,21 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # Align daily trend to 4h
-    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
+    # Align weekly trend and daily indicators
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    rsi_aligned = align_htf_to_ltf(prices, None, rsi)  # Same timeframe, no alignment needed
+    vol_ma20_aligned = align_htf_to_ltf(prices, None, vol_ma20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)  # Need EMA50 and Donchian20
+    start_idx = max(100, 200, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if np.isnan(daily_trend_aligned[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(weekly_trend_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,28 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + daily uptrend + volume confirmation
-            if (close[i] > donchian_high[i] and 
-                daily_trend_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+            # Long: weekly uptrend + RSI oversold (<30) + volume spike
+            if (weekly_trend_aligned[i] and 
+                rsi_aligned[i] < 30 and 
+                volume[i] > 1.5 * vol_ma20_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + daily downtrend + volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  not daily_trend_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+            # Short: weekly downtrend + RSI overbought (>70) + volume spike
+            elif (not weekly_trend_aligned[i] and 
+                  rsi_aligned[i] > 70 and 
+                  volume[i] > 1.5 * vol_ma20_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend changes
-            if (close[i] < donchian_low[i] or not daily_trend_aligned[i]):
+            # Long exit: weekly trend turns down OR RSI overbought (>70)
+            if (not weekly_trend_aligned[i] or rsi_aligned[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend changes
-            if (close[i] > donchian_high[i] or daily_trend_aligned[i]):
+            # Short exit: weekly trend turns up OR RSI oversold (<30)
+            if (weekly_trend_aligned[i] or rsi_aligned[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
