@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Liquidity_Rebalance_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,48 +17,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for trend and liquidity imbalance
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12h EMA 50 for trend filter
-    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 4h EMA 20 for trend
+    ema20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
     
-    # Calculate Camarilla levels from previous day
-    # Use daily data to calculate Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 4h volume imbalance: (close - open) / (high - low) * volume
+    # Normalized to [-1, 1], positive = buying pressure
+    price_range_4h = df_4h['high'].values - df_4h['low'].values
+    price_range_4h = np.where(price_range_4h == 0, 1, price_range_4h)  # avoid div by zero
+    vol_imbalance_4h = ((df_4h['close'].values - df_4h['open'].values) / price_range_4h) * df_4h['volume'].values
+    vol_imbalance_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_imbalance_4h)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].values[:-1]  # Shift by 1 to get previous day
-    prev_high = df_1d['high'].values[:-1]
-    prev_low = df_1d['low'].values[:-1]
+    # 1h RSI(14) for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels
-    range_ = prev_high - prev_low
-    camarilla_r1 = prev_close + (range_ * 1.1 / 12)
-    camarilla_s1 = prev_close - (range_ * 1.1 / 12)
+    # 1h volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
+    vol_spike = volume > (1.5 * vol_ma)
     
-    # Align Camarilla levels to 4h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1, additional_delay_bars=1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1, additional_delay_bars=1)
-    
-    # Volume confirmation: current volume > 1.5 * average volume over last 20 periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(vol_imbalance_4h_aligned[i]) or
+            np.isnan(rsi[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Only trade during session
+        if not in_session[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,33 +77,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND volume spike AND 12h trend up (price > EMA50)
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                close[i] > ema50_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: 4h uptrend (price > EMA20) AND bullish volume imbalance AND RSI < 40 (oversold) AND volume spike
+            if (close[i] > ema20_4h_aligned[i] and 
+                vol_imbalance_4h_aligned[i] > 0.1 and 
+                rsi[i] < 40 and 
+                vol_spike[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 AND volume spike AND 12h trend down (price < EMA50)
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  close[i] < ema50_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: 4h downtrend (price < EMA20) AND bearish volume imbalance AND RSI > 60 (overbought) AND volume spike
+            elif (close[i] < ema20_4h_aligned[i] and 
+                  vol_imbalance_4h_aligned[i] < -0.1 and 
+                  rsi[i] > 60 and 
+                  vol_spike[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 OR volume drops
-            if (close[i] < camarilla_s1_aligned[i] or 
-                volume[i] < 0.5 * vol_ma[i]):
+            # Long exit: 4h trend turns down OR RSI > 70 (overbought) OR volume imbalance turns bearish
+            if (close[i] < ema20_4h_aligned[i] or 
+                rsi[i] > 70 or 
+                vol_imbalance_4h_aligned[i] < -0.1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
-            # Short exit: price breaks above R1 OR volume drops
-            if (close[i] > camarilla_r1_aligned[i] or 
-                volume[i] < 0.5 * vol_ma[i]):
+            # Short exit: 4h trend turns up OR RSI < 30 (oversold) OR volume imbalance turns bullish
+            if (close[i] > ema20_4h_aligned[i] or 
+                rsi[i] < 30 or 
+                vol_imbalance_4h_aligned[i] > 0.1):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
