@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,48 +9,52 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray calculation and trend filter
+    # Calculate daily Camarilla levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 13-period EMA of 1d close for trend filter
-    close_1d = df_1d['close'].values
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    trend_up_1d = close_1d > ema13_1d
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    
-    # Calculate Elder Ray components on 1d: Bull Power = High - EMA13, Bear Power = Low - EMA13
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    close_1d = df_1d['close'].values
     
-    # Align Elder Ray components to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Volume confirmation on 6h: current volume > 1.5x 20-period average
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Get 12h trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_12h = close_12h > ema50_12h
+    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA and Elder Ray
+    start_idx = 60  # Need enough data for daily Camarilla and EMA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(trend_up_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,24 +63,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power positive, 1d uptrend, and volume confirmation
-            if bull_power_aligned[i] > 0 and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Close above R1 + 12h uptrend + volume confirmation
+            if close[i] > camarilla_r1_aligned[i-1] and trend_up_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power negative, 1d downtrend, and volume confirmation
-            elif bear_power_aligned[i] < 0 and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Close below S1 + 12h downtrend + volume confirmation
+            elif close[i] < camarilla_s1_aligned[i-1] and not trend_up_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bear Power turns negative OR 1d trend turns down
-            if bear_power_aligned[i] < 0 or not trend_up_1d_aligned[i]:
+            # Long exit: Close below S1 OR 12h trend turns down
+            if close[i] < camarilla_s1_aligned[i-1] or not trend_up_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bull Power turns positive OR 1d trend turns up
-            if bull_power_aligned[i] > 0 or trend_up_1d_aligned[i]:
+            # Short exit: Close above R1 OR 12h trend turns up
+            if close[i] > camarilla_r1_aligned[i-1] or trend_up_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
