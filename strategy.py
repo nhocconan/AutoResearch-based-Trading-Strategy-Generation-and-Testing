@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1
-Hypothesis: Trade breakouts of daily Camarilla R1/S1 levels with volume spike confirmation and 1-day EMA34 trend filter.
-Long when price breaks above R1 with volume spike in uptrend (price > EMA34); short when price breaks below S1 with volume spike in downtrend (price < EMA34).
-Uses tight entry conditions to limit trades (<30/year) and avoid fee drag. Works in bull (breakouts) and bear (mean reversion at pivots during low volatility).
+12h_KAMA_Direction_RSI_Chop_Filter
+Hypothesis: Uses KAMA on 12h for trend direction, RSI(14) for momentum, and Choppiness Index for regime filtering.
+Trades only in trending markets (CHOP < 38.2) in the direction of KAMA when RSI confirms momentum.
+Avoids choppy markets to reduce whipsaw. Designed for low trade frequency (<20/year) to avoid fee drag.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_KAMA_Direction_RSI_Chop_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,41 +19,56 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and EMA trend filter
+    # Get 1d data for Choppiness Index (needs daily high/low/close)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    close_1d = df_1d['close']
-    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # --- KAMA on 12h for trend direction ---
+    # Calculate Efficiency Ratio (ER) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close[i] - close[i-10]|
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # Sum of |close[i] - close[i-1]| over 10 periods
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Initialize KAMA
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama = kama  # already aligned to 12h
     
-    # --- Daily Camarilla Pivot Levels (R1, S1) ---
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- Choppiness Index on 1d ---
+    # True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # ATR(14)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Sum of TR over 14 periods
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Chop = 100 * log10(sumTR / (ATR * 14)) / log10(14)
+    chop = 100 * np.log10(sum_tr / (atr * 14)) / np.log10(14)
+    chop = chop  # already aligned to 1d
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)  # R1
-    s1 = pivot - (range_1d * 1.1 / 12)  # S1
-    
-    # Align to 4h (Camarilla levels are valid for the entire day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # --- Volume Spike Detection (2x 20-period EMA) ---
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ema.values)
+    # --- RSI(14) on 12h ---
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    # Prepend first 14 values as NaN to match length
+    rsi = np.concatenate([np.full(14, np.nan), rsi])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,10 +78,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(chop_aligned[i]) or
+            np.isnan(rsi[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -76,39 +90,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend based on price vs EMA34
-        price_above_ema = close[i] > ema_34_1d_aligned[i]
-        price_below_ema = close[i] < ema_34_1d_aligned[i]
+        # Regime filter: only trade in trending markets (CHOP < 38.2)
+        trending = chop_aligned[i] < 38.2
         
-        # Breakout signals (price crosses R1/S1 with volume spike)
-        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
-        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
+        # Trend direction: price vs KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
+        
+        # RSI momentum confirmation
+        rsi_overbought = rsi[i] > 70
+        rsi_oversold = rsi[i] < 30
+        rsi_bullish = 50 < rsi[i] < 70  # rising momentum
+        rsi_bearish = 30 < rsi[i] < 50  # falling momentum
         
         if position == 0:
-            if price_above_ema:
-                # Uptrend: favor long breakouts, avoid shorts
-                if long_breakout:
+            if trending:
+                if price_above_kama and rsi_bullish:
                     signals[i] = 0.25
                     position = 1
-            elif price_below_ema:
-                # Downtrend: favor short breakouts, avoid longs
-                if short_breakout:
+                elif price_below_kama and rsi_bearish:
                     signals[i] = -0.25
                     position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price touches S1 (support) or breaks below EMA
-                exit_signal = (low[i] <= s1_aligned[i]) or (close[i] < ema_34_1d_aligned[i])
-                if exit_signal:
+                # Exit long: price crosses below KAMA or RSI overbought
+                if close[i] < kama[i] or rsi[i] > 70:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price touches R1 (resistance) or breaks above EMA
-                exit_signal = (high[i] >= r1_aligned[i]) or (close[i] > ema_34_1d_aligned[i])
-                if exit_signal:
+                # Exit short: price crosses above KAMA or RSI oversold
+                if close[i] > kama[i] or rsi[i] < 30:
                     signals[i] = 0.0
                     position = 0
                 else:
