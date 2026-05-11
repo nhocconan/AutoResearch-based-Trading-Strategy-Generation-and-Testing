@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Donchian20_VolumeSpike_1dTrend"
-timeframe = "4h"
+name = "6h_Market_Profile_Value_Area_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend using EMA34
+    # Get 1d data for daily trend and market profile
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 10:
         return np.zeros(n)
+    
+    # Daily EMA50 for trend
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1d = close_1d > ema50_1d
+    
+    # Calculate daily value area high/low (simplified market profile)
+    # Using 1-day range: value area = close +/- 0.382 * (high - low)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    range_1d = high_1d - low_1d
+    value_area_high = close_1d + 0.382 * range_1d
+    value_area_low = close_1d - 0.382 * range_1d
+    
+    # Align to 6h timeframe
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    
-    # Volume spike: 4h volume > 1.5x 20-period MA
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 1.5 * vol_ma20
-    
-    # Donchian(20) breakout
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    value_area_high_aligned = align_htf_to_ltf(prices, df_1d, value_area_high)
+    value_area_low_aligned = align_htf_to_ltf(prices, df_1d, value_area_low)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 50  # Need enough data for EMA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if np.isnan(trend_up_1d_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]):
+        if (np.isnan(value_area_high_aligned[i]) or 
+            np.isnan(value_area_low_aligned[i]) or
+            np.isnan(trend_up_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -50,24 +58,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Donchian breakout up + daily uptrend + volume spike
-            if close[i] > donch_high[i] and trend_up_1d_aligned[i] and volume_spike[i]:
+            # Long: price breaks above value area high + daily uptrend
+            if (close[i] > value_area_high_aligned[i] and 
+                trend_up_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Donchian breakout down + daily downtrend + volume spike
-            elif close[i] < donch_low[i] and not trend_up_1d_aligned[i] and volume_spike[i]:
+            # Short: price breaks below value area low + daily downtrend
+            elif (close[i] < value_area_low_aligned[i] and 
+                  not trend_up_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below Donchian low or trend changes
-            if close[i] < donch_low[i] or not trend_up_1d_aligned[i]:
+            # Long exit: price breaks below value area low or trend changes
+            if (close[i] < value_area_low_aligned[i] or 
+                not trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above Donchian high or trend changes
-            if close[i] > donch_high[i] or trend_up_1d_aligned[i]:
+            # Short exit: price breaks above value area high or trend changes
+            if (close[i] > value_area_high_aligned[i] or 
+                trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
