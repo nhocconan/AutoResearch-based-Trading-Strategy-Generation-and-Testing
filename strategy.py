@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Rolling_Regression_Trend_v1
-Hypothesis: Use 12h linear regression slope over 20 periods as primary trend filter, combined with 1-day volume spike and price position relative to VWAP for entry. Long when: regression slope > 0, price > VWAP, and volume spike. Short when: slope < 0, price < VWAP, and volume spike. Exits when slope changes sign. Designed for 12h timeframe to capture medium-term trends with low turnover (target: 15-35 trades/year). Works in bull markets via long positions in uptrends and bear markets via short positions in downtrends. Volume spike ensures institutional participation, reducing false breakouts.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Combine Camarilla pivot levels (R3/S3) from 1d with trend filter from 1d EMA50 and volume spike confirmation for breakout trades. Works in bull markets (buy R3 breakouts in uptrend) and bear markets (sell S3 breakdowns in downtrend). Volume spike confirms institutional interest. Target: 20-50 trades per year on 4h timeframe.
 """
 
-name = "12h_Rolling_Regression_Trend_v1"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Data for Volume Spike and VWAP ===
+    # === 1D Data for Camarilla Pivots and Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -30,56 +30,43 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 1D VWAP calculation (typical price * volume) / cumulative volume
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_1d = (typical_price_1d * volume_1d).cumsum() / volume_1d.cumsum()
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # First day uses same day's high
+    prev_low[0] = low_1d[0]    # First day uses same day's low
+    prev_close[0] = close_1d[0] # First day uses same day's close
     
-    # 1D Volume spike: current volume > 2x 20-period average
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_spike_1d = volume_1d > (vol_ma_1d * 2.0)
+    # Camarilla levels: R3/S3 = C ± (H-L) * 1.1/2
+    rang = prev_high - prev_low
+    r3 = prev_close + rang * 1.1 / 2
+    s3 = prev_close - rang * 1.1 / 2
     
-    # Align 1D indicators to 12h timeframe
-    vwap_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d)
+    # Trend filter: EMA50 on 1d close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === 12h Linear Regression Slope (20-period) ===
-    def rolling_regression_slope(arr, window):
-        n = len(arr)
-        slope = np.full(n, np.nan)
-        if n < window:
-            return slope
-        for i in range(window - 1, n):
-            y = arr[i - window + 1:i + 1]
-            x = np.arange(window)
-            if np.all(np.isnan(y)) or np.all(np.isnan(x)):
-                slope[i] = np.nan
-            else:
-                # Remove NaNs if any
-                valid = ~(np.isnan(y) | np.isnan(x))
-                if np.sum(valid) < 2:
-                    slope[i] = np.nan
-                else:
-                    x_valid = x[valid]
-                    y_valid = y[valid]
-                    slope[i] = np.polyfit(x_valid, y_valid, 1)[0]
-        return slope
+    # Align 1D indicators to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate 20-period rolling regression slope on 12h close
-    reg_slope = rolling_regression_slope(close, 20)
+    # Volume spike: current volume > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 bars for regression + 1d data alignment)
+    # Start after warmup
     start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(reg_slope[i]) or 
-            np.isnan(vwap_aligned[i]) or 
-            np.isnan(volume_spike_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: positive regression slope, price above VWAP, volume spike
-            if reg_slope[i] > 0 and close[i] > vwap_aligned[i] and volume_spike_aligned[i]:
+            # Long: price breaks above R3 AND uptrend (price > EMA50) AND volume spike
+            if close[i] > r3_aligned[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: negative regression slope, price below VWAP, volume spike
-            elif reg_slope[i] < 0 and close[i] < vwap_aligned[i] and volume_spike_aligned[i]:
+            # Short: price breaks below S3 AND downtrend (price < EMA50) AND volume spike
+            elif close[i] < s3_aligned[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: regression slope turns negative
-            if reg_slope[i] < 0:
+            # Long exit: price crosses below EMA50 OR reverses below R3
+            if close[i] < ema_50_aligned[i] or close[i] < r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: regression slope turns positive
-            if reg_slope[i] > 0:
+            # Short exit: price crosses above EMA50 OR reverses above S3
+            if close[i] > ema_50_aligned[i] or close[i] > s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
