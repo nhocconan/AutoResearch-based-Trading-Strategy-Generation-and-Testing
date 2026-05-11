@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
-Hypothesis: Breakout above Camarilla R3 or below S3 with 1d EMA trend filter and volume confirmation. Works in bull/bear markets by trading breakouts in trend direction. Uses 12h timeframe for low trade frequency to minimize fee drag. Targets 15-30 trades/year.
+4h_Camarilla_R3_S3_Reversal_Boundary_VolumeFilter
+Hypothesis: Camarilla pivot levels (R3/S3) act as strong support/resistance in trending markets. 
+In strong trends (12h EMA50), price often retraces to R3/S3 before continuing. 
+Enter long near S3 in uptrend, short near R3 in downtrend with volume confirmation. 
+Use 12h trend filter to avoid counter-trend trades. Target 20-40 trades/year for low friction.
+Works in bull/bear by trading with the 12h trend, using Camarilla as dynamic retracement zones.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Reversal_Boundary_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,93 +26,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d OHLC for Camarilla pivot calculation ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Camarilla Pivot Levels from Previous Day ===
+    # Use prior day's OHLC to calculate today's Camarilla levels
+    # Shift by 1 to avoid look-ahead: use previous day's data
+    prev_day_high = pd.Series(high).shift(1)
+    prev_day_low = pd.Series(low).shift(1)
+    prev_day_close = pd.Series(close).shift(1)
     
-    # Calculate Camarilla levels from previous 1d bar
-    # R3 = close + 1.1*(high-low)/2
-    # S3 = close - 1.1*(high-low)/2
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Typical price for pivot calculation
+    typical_price = (prev_day_high + prev_day_low + prev_day_close) / 3
+    range_val = prev_day_high - prev_day_low
     
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 2
-    s3 = prev_close - 1.1 * camarilla_range / 2
+    # Camarilla levels
+    R3 = typical_price + range_val * 1.1 / 2
+    S3 = typical_price - range_val * 1.1 / 2
     
-    # Align to 12h timeframe
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    # Forward fill to get levels for current day
+    R3 = R3.ffill().values
+    S3 = S3.ffill().values
     
-    # === 1d EMA34 Trend Filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === 12h EMA50 Trend Filter ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # === Volume Spike Filter (12h) ===
+    # === Volume Spike Filter ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # 2x average volume
+    volume_ok = volume > vol_ema20 * 1.5  # 1.5x average volume
     
     # === Signal Parameters ===
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    holding_bars = 0
     
-    # Start after warmup
-    start_idx = 40
+    # Start after warmup (covers shift and EMA)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(ema34_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
+            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Close breaks above R3 + above 1d EMA34 + volume spike
-            if (close[i] > r3_12h[i] and 
-                close[i] > ema34_12h[i] and volume_ok[i]):
+            # Long: Price near S3 in uptrend (above 12h EMA50) with volume
+            # Entry zone: S3 to S3*1.005 (allow small buffer)
+            if (close[i] >= S3[i] and close[i] <= S3[i] * 1.005 and
+                close[i] > ema50_12h_4h[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-                holding_bars = 0
-            # Short: Close breaks below S3 + below 1d EMA34 + volume spike
-            elif (close[i] < s3_12h[i] and 
-                  close[i] < ema34_12h[i] and volume_ok[i]):
+            # Short: Price near R3 in downtrend (below 12h EMA50) with volume
+            # Entry zone: R3*0.995 to R3
+            elif (close[i] <= R3[i] and close[i] >= R3[i] * 0.995 and
+                  close[i] < ema50_12h_4h[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
-                holding_bars = 0
         else:
-            # Enforce minimum holding period (4 bars)
-            holding_bars += 1
-            if holding_bars < 4:
-                signals[i] = position_size if position == 1 else -position_size
-                continue
-            
-            # Exit: Close returns to 1d EMA34
+            # Exit: Price crosses the opposite Camarilla level
             if position == 1:
-                if close[i] < ema34_12h[i]:
+                if close[i] >= R3[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > ema34_12h[i]:
+                if close[i] <= S3[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
