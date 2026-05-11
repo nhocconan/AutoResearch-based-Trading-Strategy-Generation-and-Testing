@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Reversal_Scalp
-Hypothesis: Camarilla pivot levels (H4/L4) act as strong intraday support/resistance. When price reaches H4 or L4 with confirmation from volume spike and RSI extreme, it signals a high-probability reversal. The 12h EMA50 filters the trend direction to avoid counter-trend trades in strong trends. Designed for 4h timeframe to capture reversals in both ranging and trending markets, with low trade frequency to minimize fee drag.
+6h_AdaptiveKAMA_Trend_Breakout
+Hypothesis: Adaptive KAMA (Kaufman Adaptive Moving Average) on 6h adapts to market noise, making it effective in both trending (bull/bear) and ranging markets. Combine with 1d trend filter (EMA34) and volume confirmation to avoid false breakouts. Entry: KAMA crosses above/below price with volume spike and 1d trend alignment. Exit: Opposite KAMA cross or volatility contraction. Designed for 60-120 total trades over 4 years.
 """
 
-name = "4h_Camarilla_Reversal_Scalp"
-timeframe = "4h"
+name = "6h_AdaptiveKAMA_Trend_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,144 +17,91 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for Camarilla pivot calculation
+    # Get 1d data for trend filter and volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 40:
         return np.zeros(n)
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # 6h price data
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- 12h EMA50 for trend filter ---
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- 1d Camarilla pivot levels (H4, L4, H3, L3) ---
-    # Calculated from previous day's OHLC
-    prev_day_high = np.roll(df_1d['high'].values, 1)
-    prev_day_low = np.roll(df_1d['low'].values, 1)
-    prev_day_close = np.roll(df_1d['close'].values, 1)
-    # First day: use same day's values
-    prev_day_high[0] = df_1d['high'].values[0]
-    prev_day_low[0] = df_1d['low'].values[0]
-    prev_day_close[0] = df_1d['close'].values[0]
+    # --- 1d Volume Average for confirmation ---
+    volume_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Camarilla formulas
-    camarilla_h4 = prev_day_close + 1.1 * (prev_day_high - prev_day_low) / 2
-    camarilla_l4 = prev_day_close - 1.1 * (prev_day_high - prev_day_low) / 2
-    camarilla_h3 = prev_day_close + 1.1 * (prev_day_high - prev_day_low) / 4
-    camarilla_l3 = prev_day_close - 1.1 * (prev_day_high - prev_day_low) / 4
-    
-    # Align daily levels to 4h
-    h4_4h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_4h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    h3_4h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_4h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    
-    # --- 4h RSI(14) for overbought/oversold ---
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # --- 4h Volume average for confirmation ---
-    vol_avg_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # --- Adaptive KAMA on 6h (10, 2, 30) ---
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    # Pad volatility to match length
+    volatility = np.concatenate([np.full(9, np.nan), volatility])
+    er = np.where(volatility > 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # KAMA
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i]):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Start after warmup period
-    start_idx = 50  # for EMA and RSI
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(h4_4h[i]) or 
-            np.isnan(l4_4h[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg_4h[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_avg_1d_aligned[i])):
             if position != 0:
-                # Simple stoploss: 1.5x ATR from entry
-                atr_est = np.abs(high_4h[i] - low_4h[i])
-                if position == 1 and close_4h[i] <= entry_price - 1.5 * atr_est:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close_4h[i] >= entry_price + 1.5 * atr_est:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                # Hold position until clear exit
+                signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Volume confirmation: current volume > 1.5x 4h average
-        vol_confirm = volume_4h[i] > 1.5 * vol_avg_4h[i]
+        # Volume confirmation: current volume > 1.5x 1d average
+        vol_confirm = volume[i] > 1.5 * vol_avg_1d_aligned[i]
         
-        # Trend filter: only trade in direction of 12h EMA50
-        uptrend = close_4h[i] > ema_50_12h_aligned[i]
-        downtrend = close_4h[i] < ema_50_12h_aligned[i]
+        # Trend filter: price above/below 1d EMA34
+        price_vs_ema = close[i] > ema34_1d_aligned[i]
         
         if position == 0:
-            # Look for reversal entries at Camarilla levels
-            # Long setup: price at L4 with RSI oversold and volume spike
-            if (close_4h[i] <= l4_4h[i] * 1.001 and  # allow small slippage
-                rsi[i] < 30 and 
-                vol_confirm and 
-                downtrend):  # only long in downtrend (mean reversion)
-                signals[i] = 0.25
-                position = 1
-                entry_price = close_4h[i]
-            # Short setup: price at H4 with RSI overbought and volume spike
-            elif (close_4h[i] >= h4_4h[i] * 0.999 and  # allow small slippage
-                  rsi[i] > 70 and 
-                  vol_confirm and 
-                  uptrend):  # only short in uptrend (mean reversion)
-                signals[i] = -0.25
-                position = -1
-                entry_price = close_4h[i]
-            # Alternative: H3/L3 breakouts with trend (for stronger moves)
-            elif vol_confirm:
-                # Long breakout above H3 in uptrend
-                if (close_4h[i] > h3_4h[i] and 
-                    uptrend and 
-                    rsi[i] > 50):  # bullish momentum
+            # Look for entries: KAMA cross with volume and trend
+            if i > 0 and not np.isnan(kama[i-1]):
+                # Bullish: price crosses above KAMA with volume and uptrend
+                if close[i-1] <= kama[i-1] and close[i] > kama[i] and vol_confirm and price_vs_ema:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = close_4h[i]
-                # Short breakdown below L3 in downtrend
-                elif (close_4h[i] < l3_4h[i] and 
-                      downtrend and 
-                      rsi[i] < 50):  # bearish momentum
+                # Bearish: price crosses below KAMA with volume and downtrend
+                elif close[i-1] >= kama[i-1] and close[i] < kama[i] and vol_confirm and not price_vs_ema:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = close_4h[i]
         else:
-            # Manage existing position
+            # Exit on opposite KAMA cross or loss of trend/volume
             if position == 1:
-                # Long position: exit at H3 (profit) or L4 (stop)
-                if close_4h[i] >= h3_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif close_4h[i] <= l4_4h[i]:
+                # Long exit: price crosses below KAMA OR trend turns down
+                if (i > 0 and not np.isnan(kama[i-1]) and 
+                    close[i-1] >= kama[i-1] and close[i] < kama[i]) or not price_vs_ema:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short position: exit at L3 (profit) or H4 (stop)
-                if close_4h[i] <= l3_4h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif close_4h[i] >= h4_4h[i]:
+                # Short exit: price crosses above KAMA OR trend turns up
+                if (i > 0 and not np.isnan(kama[i-1]) and 
+                    close[i-1] <= kama[i-1] and close[i] > kama[i]) or price_vs_ema:
                     signals[i] = 0.0
                     position = 0
                 else:
