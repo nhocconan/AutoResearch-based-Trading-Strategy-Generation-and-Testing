@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Regime_Filter
-Hypothesis: Use KAMA (Kaufman Adaptive Moving Average) on 1d to capture trend direction,
-combined with RSI(14) for momentum and Choppiness Index for regime filter.
-In trending markets (CHOP < 38.2), follow KAMA direction with RSI confirmation.
-In ranging markets (CHOP > 61.8), mean-revert at RSI extremes.
-This adapts to both bull and bear regimes by using volatility-based trend detection.
+4h_1dDonchian20_12hTrend_Volume
+Hypothesis: Daily Donchian channel breakouts with 12-hour trend filter and volume confirmation work in both bull and bear markets.
+The daily Donchian(20) captures significant breakouts, while the 12-hour EMA50 filters for trend alignment.
+Volume confirmation ensures breakouts have conviction. This approach reduces trade frequency by using higher timeframe signals
+and avoids overtrading by requiring confluence of trend, breakout, and volume.
 """
 
-name = "1d_KAMA_Trend_Regime_Filter"
-timeframe = "1d"
+name = "4h_1dDonchian20_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -25,84 +25,58 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA Calculation (trend) ===
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))  # 10-period change
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
-    er = np.zeros(n)
-    er[10:] = change[10:] / volatility[10:]
-    er[volatility == 0] = 0
+    # === Daily Donchian Channel (20-period) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    # Calculate Donchian channels from daily high/low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Upper band: highest high over past 20 days
+    upper_20 = np.full_like(high_1d, np.nan)
+    for i in range(20, len(high_1d)):
+        upper_20[i] = np.max(high_1d[i-20:i])
     
-    # === RSI(14) ===
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Lower band: lowest low over past 20 days
+    lower_20 = np.full_like(low_1d, np.nan)
+    for i in range(20, len(low_1d)):
+        lower_20[i] = np.min(low_1d[i-20:i])
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align to 4h timeframe (only available after daily candle closes)
+    upper_20_4h = align_htf_to_ltf(prices, df_1d, upper_20)
+    lower_20_4h = align_htf_to_ltf(prices, df_1d, lower_20)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # === 12-hour Trend Filter (EMA50) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
     
-    rs = np.zeros(n)
-    rsi = np.zeros(n)
-    avg_loss[avg_loss == 0] = 1e-10
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
+    close_12h = df_12h['close'].values
+    ema50_12h = np.full_like(close_12h, np.nan)
+    close_12h_series = pd.Series(close_12h)
+    ema50_values = close_12h_series.ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === Choppiness Index (14) ===
-    atr = np.zeros(n)
-    tr1 = high - low
-    tr2 = np.abs(np.roll(high, 1) - low)
-    tr3 = np.abs(np.roll(low, 1) - high)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR
+    # Align 12h EMA50 to 4h timeframe
+    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_values)
     
-    # ATR(14)
-    atr[13] = np.mean(tr[1:14])
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Highest high and lowest low over 14 periods
-    hh = np.zeros(n)
-    ll = np.zeros(n)
-    for i in range(n):
-        start = max(0, i-13)
-        hh[i] = np.max(high[start:i+1])
-        ll[i] = np.min(low[start:i+1])
-    
-    # Chop = 100 * log10(sum(ATR14) / (HH - LL)) / log10(14)
-    sum_atr14 = np.zeros(n)
-    for i in range(13, n):
-        sum_atr14[i] = np.sum(atr[i-13:i+1])
-    
-    chop = np.zeros(n)
-    hh_ll = hh - ll
-    hh_ll[hh_ll == 0] = 1e-10
-    chop[13:] = 100 * np.log10(sum_atr14[13:] / hh_ll[13:]) / np.log10(14)
+    # === Volume Filter (1.5x 20-period EMA on 4h) ===
+    vol_ema20 = np.full_like(volume, np.nan)
+    volume_series = pd.Series(volume)
+    vol_ema20_values = volume_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_ok = volume > vol_ema20_values * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 30
+    # Start after warmup (covers all indicator calculations)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(hh[i]) or np.isnan(ll[i])):
+        if (np.isnan(upper_20_4h[i]) or np.isnan(lower_20_4h[i]) or 
+            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,49 +85,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Trending market: follow KAMA direction with RSI confirmation
-            if chop[i] < 38.2:  # Trending
-                if close[i] > kama[i] and rsi[i] > 50 and rsi[i] < 70:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < kama[i] and rsi[i] < 50 and rsi[i] > 30:
-                    signals[i] = -0.25
-                    position = -1
-            # Ranging market: mean reversion at RSI extremes
-            elif chop[i] > 61.8:  # Ranging
-                if rsi[i] < 30 and close[i] > ll[i]:  # Oversold and above low
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 70 and close[i] < hh[i]:  # Overbought and below high
-                    signals[i] = -0.25
-                    position = -1
+            # Long breakout: price closes above daily upper band with uptrend and volume
+            if (close[i] > upper_20_4h[i] and 
+                close[i] > ema50_12h_4h[i] and 
+                volume_ok[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short breakdown: price closes below daily lower band with downtrend and volume
+            elif (close[i] < lower_20_4h[i] and 
+                  close[i] < ema50_12h_4h[i] and 
+                  volume_ok[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: trend change or overbought in range
-            if chop[i] < 38.2:  # Trending
-                if close[i] < kama[i] or rsi[i] >= 70:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Ranging
-                if rsi[i] > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+            # Long exit: price closes below daily lower band (mean reversion)
+            if close[i] < lower_20_4h[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: trend change or oversold in range
-            if chop[i] < 38.2:  # Trending
-                if close[i] > kama[i] or rsi[i] <= 30:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Ranging
-                if rsi[i] < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: price closes above daily upper band (mean reversion)
+            if close[i] > upper_20_4h[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25  # maintain position
     
     return signals
