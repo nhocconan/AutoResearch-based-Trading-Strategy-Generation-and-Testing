@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Breakout_1dTrend_Volume
-Hypothesis: Price breaks above Camarilla R3 or below S3 on 12h, filtered by 1d EMA34 trend and volume spike. Camarilla levels act as dynamic support/resistance derived from prior day's range, effective in ranging and trending markets. Trend filter ensures alignment with longer-term momentum. Volume confirms conviction. Designed for 15-35 trades/year per symbol to minimize fee drag while capturing strong moves in both bull and bear markets.
+4h_RSI_Stochastic_Oscillator_12hTrend
+Hypothesis: Uses RSI(14) overbought/oversold combined with Stochastic Oscillator for momentum confirmation on 4h, filtered by 12h EMA50 trend. RSI catches reversals, Stochastic confirms momentum shift, and 12h EMA ensures alignment with medium-term trend. Designed for 20-40 trades/year to minimize fee drag while capturing mean reversion in ranging markets and trend continuations in trending markets.
 """
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_RSI_Stochastic_Oscillator_12hTrend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,107 +17,95 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter and Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
     
-    # --- 1d Trend Filter: EMA34 ---
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # --- 12h Trend Filter: EMA50 ---
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # --- 1d Camarilla Levels (based on prior day's range) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
+    # --- 4h RSI(14) ---
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Calculate Camarilla levels for each day (using prior day's data)
-    # R3 = Close + 1.1*(High - Low)
-    # S3 = Close - 1.1*(High - Low)
-    hl_range = high_1d - low_1d
-    camarilla_r3 = close_1d_prev + 1.1 * hl_range
-    camarilla_s3 = close_1d_prev - 1.1 * hl_range
-    
-    # Align Camarilla levels to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # --- Volume Filter: spike above 1.5x median of last 30 periods ---
-    vol_median = pd.Series(volume_12h).rolling(window=30, min_periods=10).median().values
-    vol_threshold = vol_median * 1.5
+    # --- 4h Stochastic Oscillator (14,3,3) ---
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    k_percent = 100 * (close_4h - lowest_low) / (highest_high - lowest_low + 1e-10)
+    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 30  # for volume median and EMA34
+    start_idx = 30  # for RSI and Stochastic
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(rsi[i]) or np.isnan(d_percent[i]) or 
+            np.isnan(ema50_12h_aligned[i])):
             if position != 0:
-                # Check stoploss (using ATR approximation from 12h range)
-                atr_approx = (high_12h[i] - low_12h[i])  # simple range-based volatility
-                if position == 1 and close_12h[i] <= entry_price - 2.0 * atr_approx:
+                # Check stoploss
+                if position == 1 and close_4h[i] <= entry_price - 2.0 * (high_4h[i] - low_4h[i]):
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_12h[i] >= entry_price + 2.0 * atr_approx:
+                elif position == -1 and close_4h[i] >= entry_price + 2.0 * (high_4h[i] - low_4h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1d trend
-        trend_up = close_12h[i] > ema34_1d_aligned[i]
-        trend_down = close_12h[i] < ema34_1d_aligned[i]
-        
-        # Volume filter: spike above 1.5x median
-        vol_ok = volume_12h[i] > vol_threshold[i]
+        # Determine 12h trend
+        trend_up = close_4h[i] > ema50_12h_aligned[i]
+        trend_down = close_4h[i] < ema50_12h_aligned[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume spike
-            if close_12h[i] > camarilla_r3_aligned[i] and trend_up and vol_ok:
-                # Long: price breaks above Camarilla R3 + 1d uptrend + volume spike
+            # Look for entries: RSI reversal + Stochastic confirmation + trend alignment
+            if (rsi[i] < 30 and k_percent[i] > d_percent[i] and trend_up):
+                # Long: RSI oversold + Stochastic bullish crossover + 12h uptrend
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_12h[i]
-            elif close_12h[i] < camarilla_s3_aligned[i] and trend_down and vol_ok:
-                # Short: price breaks below Camarilla S3 + 1d downtrend + volume spike
+                entry_price = close_4h[i]
+            elif (rsi[i] > 70 and k_percent[i] < d_percent[i] and trend_down):
+                # Short: RSI overbought + Stochastic bearish crossover + 12h downtrend
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_12h[i]
+                entry_price = close_4h[i]
         else:
             # Update stoploss and check exits
             if position == 1:
-                # Stoploss (using ATR approximation)
-                atr_approx = (high_12h[i] - low_12h[i])
-                if close_12h[i] <= entry_price - 2.0 * atr_approx:
+                # Stoploss
+                if close_4h[i] <= entry_price - 2.0 * (high_4h[i] - low_4h[i]):
                     signals[i] = 0.0
                     position = 0
-                # Exit: price returns to or below Camarilla pivot point (approx. Close)
-                elif close_12h[i] <= camarilla_s3_aligned[i] + 0.5 * camarilla_r3_aligned[i] - 0.5 * camarilla_s3_aligned[i]:  # PP ≈ (H+L+C)/3, simplified as midpoint
+                # Exit: RSI returns to neutral or Stochastic turns bearish
+                elif (rsi[i] >= 50 and k_percent[i] < d_percent[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Stoploss (using ATR approximation)
-                atr_approx = (high_12h[i] - low_12h[i])
-                if close_12h[i] >= entry_price + 2.0 * atr_approx:
+                # Stoploss
+                if close_4h[i] >= entry_price + 2.0 * (high_4h[i] - low_4h[i]):
                     signals[i] = 0.0
                     position = 0
-                # Exit: price returns to or above Camarilla pivot point
-                elif close_12h[i] >= camarilla_s3_aligned[i] + 0.5 * camarilla_r3_aligned[i] - 0.5 * camarilla_s3_aligned[i]:
+                # Exit: RSI returns to neutral or Stochastic turns bullish
+                elif (rsi[i] <= 50 and k_percent[i] > d_percent[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
