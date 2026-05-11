@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -34,9 +34,9 @@ def generate_signals(prices):
     camarilla_r3 = close_1d + (range_1d * 1.1 / 2)
     camarilla_s3 = close_1d - (range_1d * 1.1 / 2)
     
-    # Align Camarilla levels to 4h timeframe (using previous 1d bar's values)
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 12h timeframe (using previous 1d bar's values)
+    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # 1d EMA34 for trend filter
     close_1d_series = pd.Series(close_1d)
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
             np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -66,23 +66,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: price breaks above R3 AND above 1d EMA34 (uptrend) AND volume spike
-            if close[i] > r3_4h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
+            if close[i] > r3_12h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 AND below 1d EMA34 (downtrend) AND volume spike
-            elif close[i] < s3_4h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
+            elif close[i] < s3_12h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price falls below S3 OR below 1d EMA34 (trend change)
-            if close[i] < s3_4h[i] or close[i] < ema_1d_aligned[i]:
+            if close[i] < s3_12h[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
             # Short exit: price rises above R3 OR above 1d EMA34 (trend change)
-            if close[i] > r3_4h[i] or close[i] > ema_1d_aligned[i]:
+            if close[i] > r3_12h[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
