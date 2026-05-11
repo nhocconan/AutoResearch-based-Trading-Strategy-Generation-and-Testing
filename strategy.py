@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R2S2_Breakout_1dTrend_Volume_Confirm
-# Hypothesis: Breakout of 1-day Camarilla R2/S2 levels with 1-day EMA34 trend filter and volume confirmation.
-# This version reduces trade frequency by requiring both price close and open to confirm breakout,
-# and adds a minimum holding period to avoid whipsaws. Targets 25-35 trades/year.
-# Designed for BTC/ETH resilience in bull/bear markets via trend alignment and volume filters.
+# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm_v4
+# Hypothesis: Breakout of 1-day Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation.
+# Uses double confirmation (open and close beyond level) to reduce whipsaws, enforces minimum holding period,
+# and targets 25-35 trades/year. Designed for BTC/ETH resilience via trend alignment and volume filters.
+# Focuses on stronger breakouts (R3/S3) to improve signal quality and reduce frequency.
 
-name = "4h_Camarilla_R2S2_Breakout_1dTrend_Volume_Confirm"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,15 +30,15 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Camarilla Pivot Levels (R2, S2) ===
+    # === 1d Camarilla Pivot Levels (R3, S3) ===
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
-    r2 = pivot + (range_1d * 1.1 / 4)
-    s2 = pivot - (range_1d * 1.1 / 4)
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
     # Align 1d levels to 4h
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
     
     # === 1d EMA34 Trend Filter ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
@@ -60,7 +60,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or 
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
             np.isnan(ema34_1d_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,14 +71,14 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R2 (both open and close) + above 1d EMA34 + volume spike
-            if (open_price[i] > r2_4h[i] and close[i] > r2_4h[i] and 
+            # Long: Break above R3 (both open and close) + above 1d EMA34 + volume spike
+            if (open_price[i] > r3_4h[i] and close[i] > r3_4h[i] and 
                 close[i] > ema34_1d_4h[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
                 holding_bars = 0
-            # Short: Break below S2 (both open and close) + below 1d EMA34 + volume spike
-            elif (open_price[i] < s2_4h[i] and close[i] < s2_4h[i] and 
+            # Short: Break below S3 (both open and close) + below 1d EMA34 + volume spike
+            elif (open_price[i] < s3_4h[i] and close[i] < s3_4h[i] and 
                   close[i] < ema34_1d_4h[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
@@ -92,14 +92,14 @@ def generate_signals(prices):
             
             # Exit: Price closes below/above opposite level
             if position == 1:
-                if close[i] < s2_4h[i]:
+                if close[i] < s3_4h[i]:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > r2_4h[i]:
+                if close[i] > r3_4h[i]:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
