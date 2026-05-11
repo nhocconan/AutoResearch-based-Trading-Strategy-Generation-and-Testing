@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Three_Strategy_Combo_v1
-Hypothesis: Combines three complementary strategies (Donchian breakout with volume, 
-RSI mean reversion with trend filter, and Bollinger Band squeeze breakout) to capture 
-different market regimes. Uses 12h trend filter to avoid counter-trend trades. 
-Designed for low frequency (20-40 trades/year) to work in both bull (breakouts) and 
-bear (mean reversion) markets by dynamically weighting strategies based on volatility regime.
+1d_Weekly_Price_Channel_Strategy_v1
+Hypothesis: Uses weekly Donchian channels to identify long-term trends and daily price action for entry timing.
+In bull markets, buys near weekly support with upward bias. In bear markets, sells near weekly resistance with downward bias.
+Uses volume confirmation and volatility filter to avoid false breaks. Designed for low frequency (10-25 trades/year) 
+to work across market regimes by aligning with weekly structure while using daily precision.
 """
 
-name = "4h_Three_Strategy_Combo_v1"
-timeframe = "4h"
+name = "1d_Weekly_Price_Channel_Strategy_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,64 +17,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get weekly data for trend context
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 20:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h EMA50 for trend filter ---
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Weekly Donchian channels (20-week lookback)
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_high_max = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
+    weekly_low_min = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
     
-    # --- Strategy 1: Donchian Breakout with Volume ---
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align weekly channels to daily
+    weekly_high_max_daily = align_htf_to_ltf(prices, df_weekly, weekly_high_max)
+    weekly_low_min_daily = align_htf_to_ltf(prices, df_weekly, weekly_low_min)
+    
+    # Weekly trend filter (50-week EMA)
+    weekly_close = df_weekly['close'].values
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_ema50_daily = align_htf_to_ltf(prices, df_weekly, weekly_ema50)
+    
+    # Daily volume confirmation (20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
+    vol_spike = volume > (1.5 * vol_ma.values)
     
-    # --- Strategy 2: RSI Mean Reversion with Trend Filter ---
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi_values = rsi.values
-    
-    # --- Strategy 3: Bollinger Band Squeeze Breakout ---
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
-    std_20 = pd.Series(close).rolling(window=20, min_periods=20).std()
-    upper_bb = sma_20 + (2 * std_20)
-    lower_bb = sma_20 - (2 * std_20)
-    bb_width = (upper_bb - lower_bb) / sma_20
-    bb_width_ma = bb_width.rolling(window=50, min_periods=50).mean()
-    squeeze = bb_width < (0.5 * bb_width_ma.values)  # Bollinger squeeze condition
+    # Daily volatility filter (ATR-based)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or 
-            np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i]) or
-            np.isnan(rsi_values[i]) or
-            np.isnan(upper_bb[i]) or
-            np.isnan(lower_bb[i]) or
-            np.isnan(squeeze[i])):
+        if (np.isnan(weekly_high_max_daily[i]) or 
+            np.isnan(weekly_low_min_daily[i]) or
+            np.isnan(weekly_ema50_daily[i]) or
+            np.isnan(atr[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -85,34 +78,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine market regime based on volatility
-        # High volatility: favor breakout strategies
-        # Low volatility: favor mean reversion
-        current_bb_width = bb_width[i]
-        bb_width_percentile = pd.Series(bb_width).rolling(window=100, min_periods=30).rank(pct=True).iloc[i] if i >= 30 else 0.5
+        # Long conditions: price near weekly support with bullish bias
+        near_weekly_support = low[i] <= weekly_low_min_daily[i] * 1.002  # Within 0.2% of weekly low
+        bullish_bias = close[i] > weekly_ema50_daily[i]  # Above weekly EMA50
+        vol_confirm = vol_spike[i]
+        volatility_ok = atr[i] > 0  # Ensure volatility exists
         
-        # Strategy signals
-        # Strategy 1: Donchian breakout
-        donchian_long = (high[i] > highest_high[i-1]) and vol_spike[i]
-        donchian_short = (low[i] < lowest_low[i-1]) and vol_spike[i]
+        long_signal = near_weekly_support and bullish_bias and vol_confirm and volatility_ok
         
-        # Strategy 2: RSI mean reversion (only in ranging markets)
-        rsi_long = (rsi_values[i] < 30) and (close[i] > ema_50_12h_aligned[i])  # Only long in uptrend
-        rsi_short = (rsi_values[i] > 70) and (close[i] < ema_50_12h_aligned[i])  # Only short in downtrend
-        
-        # Strategy 3: Bollinger Band breakout (only during/after squeeze)
-        bb_long = squeeze[i] and (close[i] > upper_bb[i])
-        bb_short = squeeze[i] and (close[i] < lower_bb[i])
-        
-        # Combine strategies based on volatility regime
-        # In low volatility (squeeze), weight mean reversion and BB breakout higher
-        # In high volatility, weight breakout strategies higher
-        if bb_width_percentile < 0.3:  # Low volatility regime
-            long_signal = rsi_long or bb_long
-            short_signal = rsi_short or bb_short
-        else:  # High volatility regime
-            long_signal = donchian_long or bb_long
-            short_signal = donchian_short or bb_short
+        # Short conditions: price near weekly resistance with bearish bias
+        near_weekly_resistance = high[i] >= weekly_high_max_daily[i] * 0.998  # Within 0.2% of weekly high
+        bearish_bias = close[i] < weekly_ema50_daily[i]  # Below weekly EMA50
+        short_signal = near_weekly_resistance and bearish_bias and vol_confirm and volatility_ok
         
         if position == 0:
             if long_signal:
@@ -124,16 +101,20 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: opposite signal or volatility extreme
+            # Exit conditions: opposite signal or price moves to middle of channel
             if position == 1:
-                exit_signal = short_signal or (rsi_values[i] > 70)  # Exit long on RSI overbought or short signal
+                # Exit long if price reaches midpoint of weekly channel or gets opposite signal
+                weekly_mid = (weekly_high_max_daily[i] + weekly_low_min_daily[i]) / 2
+                exit_signal = short_signal or (close[i] >= weekly_mid)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                exit_signal = long_signal or (rsi_values[i] < 30)  # Exit short on RSI oversold or long signal
+                # Exit short if price reaches midpoint of weekly channel or gets opposite signal
+                weekly_mid = (weekly_high_max_daily[i] + weekly_low_min_daily[i]) / 2
+                exit_signal = long_signal or (close[i] <= weekly_mid)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
