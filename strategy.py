@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Triple_Confirmation_v1
-Hypothesis: Combine 4h trend (EMA21), 1d momentum (RSI14), and 1h volatility breakout (ATR-based) 
-for high-probability entries. Uses 4h for trend direction, 1d for momentum filter, 
-and 1h for precise entry timing. Designed to work in both bull and bear markets by 
-requiring alignment across timeframes. Target: 15-35 trades/year per symbol.
+6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Camarilla R3/S3 breakout with 1d trend filter and volume spike confirmation.
+In bull markets, breakouts above R3 continue upward; in bear markets, breakdowns below S3 continue downward.
+Uses 1d EMA34 for trend and volume > 1.5x 20-period average for confirmation.
+Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
 """
 
-name = "1h_4h1d_Triple_Confirmation_v1"
-timeframe = "1h"
+name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,69 +17,61 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 4H Data for Trend Direction ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
-        return np.zeros(n)
-    
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
-    
-    # === 1D Data for Momentum Filter (RSI) ===
+    # === 1D Data for Camarilla Pivots and Trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # Calculate RSI(14) on daily
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate Camarilla levels from previous day
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
+    # S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    # Use previous day's values (shifted by 1)
+    prev_high_1d = np.roll(high_1d, 1)
+    prev_low_1d = np.roll(low_1d, 1)
+    prev_close_1d = np.roll(close_1d, 1)
+    # First day will have invalid values (from roll), but we'll handle with min_periods logic
     
-    # === 1H Data for Entry Timing (ATR-based breakout) ===
-    # Calculate ATR(14) for volatility
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr1 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], tr1])
+    # Calculate Camarilla levels
+    H_minus_L = prev_high_1d - prev_low_1d
+    R3 = prev_close_1d + (H_minus_L * 1.1 / 4)
+    S3 = prev_close_1d - (H_minus_L * 1.1 / 4)
     
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Align Camarilla levels to 6h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Donchian channel breakout (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # === Volume Spike Filter (20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma20 * 1.5)  # 1.5x average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(50, lookback)
+    start_idx = max(100, 34)  # need EMA34 warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema21_4h_aligned[i]) or 
-            np.isnan(rsi_1d_aligned[i]) or 
-            np.isnan(atr[i]) or 
-            np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i])):
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,37 +80,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long conditions:
-            # 1. 4h trend up (price > EMA21)
-            # 2. 1d momentum bullish (RSI > 50)
-            # 3. 1h breakout above Donchian high with volume expansion (using price action proxy)
-            if (close[i] > ema21_4h_aligned[i] and 
-                rsi_1d_aligned[i] > 50 and 
-                close[i] > highest_high[i]):
-                signals[i] = 0.20
+            # Long: price breaks above R3 with volume spike and price > EMA34 (uptrend)
+            if close[i] > R3_aligned[i] and volume_spike[i] and close[i] > ema34_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short conditions:
-            # 1. 4h trend down (price < EMA21)
-            # 2. 1d momentum bearish (RSI < 50)
-            # 3. 1h breakdown below Donchian low
-            elif (close[i] < ema21_4h_aligned[i] and 
-                  rsi_1d_aligned[i] < 50 and 
-                  close[i] < lowest_low[i]):
-                signals[i] = -0.20
+            # Short: price breaks below S3 with volume spike and price < EMA34 (downtrend)
+            elif close[i] < S3_aligned[i] and volume_spike[i] and close[i] < ema34_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend breaks down or momentum fades
-            if close[i] < ema21_4h_aligned[i] or rsi_1d_aligned[i] < 40:
+            # Long exit: price breaks below S3 (reversal signal)
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: trend breaks up or momentum fades
-            if close[i] > ema21_4h_aligned[i] or rsi_1d_aligned[i] > 60:
+            # Short exit: price breaks above R3 (reversal signal)
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
