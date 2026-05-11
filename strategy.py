@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "6h_Donchian_Breakout_WeeklyPivot_Direction_12hVolume"
+name = "6h_ADX_Trend_EMA_200_RSI_Filter"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,64 +17,83 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for Donchian and volume filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1d data for weekly pivot
+    # Get daily data for EMA200 and RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # 12h Donchian channels (20-period)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-    donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+    # EMA200 on daily
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 12h volume filter: current volume > 1.5x 24-period average (3 days on 12h)
-    vol_12h = df_12h['volume'].values
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=24, min_periods=24).mean().values
-    volume_filter = vol_12h > (vol_ma_12h * 1.5)
-    volume_filter_aligned = align_htf_to_ltf(prices, df_12h, volume_filter)
+    # RSI(14) on daily
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.fillna(50).values  # neutral when undefined
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
-    # Weekly pivot from 1d data (weekly high/low/close)
-    # We'll approximate weekly by using the last 5 days of 1d data
-    weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().values
+    # Get 6h data for ADX
+    df_6h = get_htf_data(prices, '6h')
+    if len(df_6h) < 14:
+        return np.zeros(n)
     
-    # Weekly pivot = (H + L + C) / 3
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_range = weekly_high - weekly_low
-    # Weekly resistance/support levels
-    weekly_r1 = weekly_pivot + (weekly_range * 1.1 / 12)  # R1
-    weekly_s1 = weekly_pivot - (weekly_range * 1.1 / 12)  # S1
-    weekly_r2 = weekly_pivot + (weekly_range * 1.1 / 6)   # R2
-    weekly_s2 = weekly_pivot - (weekly_range * 1.1 / 6)   # S2
+    high_6h = df_6h['high'].values
+    low_6h = df_6h['low'].values
+    close_6h = df_6h['close'].values
     
-    # Align weekly levels to 6h
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+    # ADX(14) calculation
+    plus_dm = np.zeros(len(high_6h))
+    minus_dm = np.zeros(len(high_6h))
+    tr = np.zeros(len(high_6h))
+    
+    for i in range(1, len(high_6h)):
+        high_diff = high_6h[i] - high_6h[i-1]
+        low_diff = low_6h[i-1] - low_6h[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+        tr[i] = max(high_6h[i] - low_6h[i], abs(high_6h[i] - close_6h[i-1]), abs(low_6h[i] - close_6h[i-1]))
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    atr_6h = np.zeros(len(high_6h))
+    plus_di_6h = np.zeros(len(high_6h))
+    minus_di_6h = np.zeros(len(high_6h))
+    
+    # Initial values
+    atr_6h[0] = tr[0]
+    plus_di_6h[0] = 0
+    minus_di_6h[0] = 0
+    
+    for i in range(1, len(high_6h)):
+        atr_6h[i] = (atr_6h[i-1] * 13 + tr[i]) / 14
+        plus_di_6h[i] = 100 * (plus_dm[i] / atr_6h[i]) if atr_6h[i] != 0 else 0
+        minus_di_6h[i] = 100 * (minus_dm[i] / atr_6h[i]) if atr_6h[i] != 0 else 0
+    
+    dx = np.zeros(len(high_6h))
+    for i in range(len(high_6h)):
+        di_sum = plus_di_6h[i] + minus_di_6h[i]
+        dx[i] = 100 * abs(plus_di_6h[i] - minus_di_6h[i]) / di_sum if di_sum != 0 else 0
+    
+    adx_6h = np.zeros(len(high_6h))
+    adx_6h[0] = dx[0]
+    for i in range(1, len(high_6h)):
+        adx_6h[i] = (adx_6h[i-1] * 13 + dx[i]) / 14
+    
+    adx_6h_aligned = align_htf_to_ltf(prices, df_6h, adx_6h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 100
+    start_idx = 200  # enough for EMA200 and ADX
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r2_aligned[i]) or
-            np.isnan(weekly_s2_aligned[i]) or np.isnan(volume_filter_aligned[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(adx_6h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,31 +102,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high AND above weekly pivot AND volume filter
-            if (close[i] > donchian_high_aligned[i] and 
-                close[i] > weekly_pivot_aligned[i] and 
-                volume_filter_aligned[i]):
+            # Long: price above EMA200, RSI > 50, ADX > 25
+            if (close[i] > ema200_1d_aligned[i] and 
+                rsi_1d_aligned[i] > 50 and 
+                adx_6h_aligned[i] > 25):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND below weekly pivot AND volume filter
-            elif (close[i] < donchian_low_aligned[i] and 
-                  close[i] < weekly_pivot_aligned[i] and 
-                  volume_filter_aligned[i]):
+            # Short: price below EMA200, RSI < 50, ADX > 25
+            elif (close[i] < ema200_1d_aligned[i] and 
+                  rsi_1d_aligned[i] < 50 and 
+                  adx_6h_aligned[i] > 25):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below Donchian low OR below weekly S1
-            if close[i] < donchian_low_aligned[i] or close[i] < weekly_s1_aligned[i]:
+            # Exit long: price below EMA200 OR RSI < 40
+            if close[i] < ema200_1d_aligned[i] or rsi_1d_aligned[i] < 40:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above Donchian high OR above weekly R1
-            if close[i] > donchian_high_aligned[i] or close[i] > weekly_r1_aligned[i]:
+            # Exit short: price above EMA200 OR RSI > 60
+            if close[i] > ema200_1d_aligned[i] or rsi_1d_aligned[i] > 60:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.25
     
     return signals
