@@ -1,6 +1,13 @@
+# 4h_Camarilla_R3_S3_Breakout_VolumeSpike_Trend
+# Hypothesis: Combines 1d Camarilla pivot levels (R3/S3) with 1d trend filter and volume confirmation
+# to capture breakouts from institutional levels during trending markets. Uses 4h timeframe to
+# balance trade frequency and capture meaningful moves. Works in both bull and bear markets
+# by requiring price > EMA34 for longs and price < EMA34 for shorts, ensuring alignment with
+# higher timeframe trend.
+
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -31,7 +38,7 @@ def generate_signals(prices):
     R3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
     S3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align to 12h
+    # Align to 4h
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
     
