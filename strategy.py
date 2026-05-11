@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_1dTrend_Volume
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Uses 13-period EMA for power calculation. Long when Bull Power > 0 in uptrend + volume spike.
-# Short when Bear Power < 0 in downtrend + volume spike. Designed for low trade frequency.
+# 4h_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: 4h breakout at Camarilla R3/S3 levels with weekly trend filter and volume confirmation.
+# Uses 1w EMA34 trend for direction, Camarilla from 1d for entry levels, and volume spike for confirmation.
+# Designed for low trade frequency (20-50/year) to minimize fee drift while capturing strong moves.
 
-name = "6h_ElderRay_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,44 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for trend filter
+    # Get daily data for Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13 ---
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # --- Camarilla levels from previous day ---
+    # Using (H-L) * multiplier + C for R levels, C - (H-L) * multiplier for S levels
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # --- 1d trend: EMA34 slope ---
-    daily_close = df_1d['close'].values
-    ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_slope_34_1d = np.diff(ema_34_1d, prepend=ema_34_1d[0])
-    ema_slope_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_34_1d)
+    # Calculate ranges
+    range_hl = prev_high - prev_low
     
-    # --- Volume confirmation (2.0x 20-period average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Camarilla R3 and S3
+    r3 = prev_close + range_hl * 1.1 / 2
+    s3 = prev_close - range_hl * 1.1 / 2
+    
+    # Align Camarilla levels to 4h (previous day's levels available at 4h open)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # --- Weekly trend: EMA34 slope ---
+    weekly_close = df_1w['close'].values
+    ema_34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_slope_34_1w = np.diff(ema_34_1w, prepend=ema_34_1w[0])
+    ema_slope_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_34_1w)
     
     # --- ATR for volatility and trailing stop ---
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -48,6 +62,9 @@ def generate_signals(prices):
     tr = np.maximum(tr1, tr2)
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # --- Volume confirmation (2.5x 20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,9 +76,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(bull_power[i]) or
-            np.isnan(bear_power[i]) or
-            np.isnan(ema_slope_34_1d_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema_slope_34_1w_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -71,21 +88,21 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from daily EMA34 slope
-        bullish_trend = ema_slope_34_1d_aligned[i] > 0
-        bearish_trend = ema_slope_34_1d_aligned[i] < 0
+        # Trend filter from weekly EMA34 slope
+        bullish_trend = ema_slope_34_1w_aligned[i] > 0
+        bearish_trend = ema_slope_34_1w_aligned[i] < 0
         
-        # Volume confirmation (2.0x average)
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        # Volume confirmation (2.5x average)
+        volume_surge = volume[i] > 2.5 * vol_ma[i]
         
         if position == 0:
-            # Long: Bull Power > 0 in bullish trend with volume surge
-            if bull_power[i] > 0 and bullish_trend and volume_surge:
+            # Long: price breaks above R3 in bullish trend with volume surge
+            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: Bear Power < 0 in bearish trend with volume surge
-            elif bear_power[i] < 0 and bearish_trend and volume_surge:
+            # Short: price breaks below S3 in bearish trend with volume surge
+            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
