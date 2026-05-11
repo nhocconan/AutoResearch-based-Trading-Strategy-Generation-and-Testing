@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_Strategy_v1
-Hypothesis: Uses Williams Alligator (Jaw, Teeth, Lips) on 12h timeframe with
-1d trend filter and volume confirmation. The Alligator identifies trends when
-its lines are separated and aligned. In bull markets: Jaw (13-period) below
-Teeth (8-period) below Lips (5-period). In bear markets: reverse.
-Trades only when Alligator is "awake" (lines separated) and price confirms
-with volume spike. Avoids whipsaw by requiring 1d EMA34 trend alignment.
-Designed for low trade frequency (<30/year) to minimize fee drag.
-Works in both bull and bear markets by following the dominant trend.
+1h_4h1d_TrendReversal_v1
+Hypothesis: Combines 4h trend direction (via EMA50) with 1d mean reversion signals
+(RSI extremes) and volume confirmation on 1h timeframe. Uses 4h for primary trend
+direction to avoid counter-trend trades, 1d RSI for overextension signals, and
+1h for precise entry timing. Session filter (08-20 UTC) reduces noise. Designed
+for low trade frequency (target: 15-35 trades/year) by requiring confluence of
+trend, mean reversion, and volume. Works in bull/bear markets by following
+4h trend while fading 1d extremes.
 """
 
-name = "12h_WilliamsAlligator_Strategy_v1"
-timeframe = "12h"
+name = "1h_4h1d_TrendReversal_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,100 +23,112 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h price data
+    # Get 1d data for RSI mean reversion
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 14:
+        return np.zeros(n)
+    
+    # 1h price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams Alligator on 12h: Smoothed Median Price (HLC/3)
-    typical_price = (high + low + close) / 3.0
-    tp_series = pd.Series(typical_price)
+    # --- 4h EMA50 for trend direction ---
+    close_4h = df_4h['close'].values
+    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Alligator lines: Smoothed with 5,8,13 periods, shifted 3,5,8 bars
-    jaw = tp_series.rolling(window=13, center=False).mean().shift(8)   # Blue line (13-period)
-    teeth = tp_series.rolling(window=8, center=False).mean().shift(5)   # Red line (8-period)
-    lips = tp_series.rolling(window=5, center=False).mean().shift(3)    # Green line (5-period)
+    # --- 1d RSI(14) for mean reversion ---
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi_14 = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
     
-    # Convert to numpy arrays
-    jaw = jaw.values
-    teeth = teeth.values
-    lips = lips.values
-    
-    # Aligator is "awake" when lines are separated (not intertwined)
-    # Bullish: Lips > Teeth > Jaw
-    # Bearish: Jaw > Teeth > Lips
-    bullish_aligned = (lips > teeth) & (teeth > jaw)
-    bearish_aligned = (jaw > teeth) & (teeth > lips)
-    
-    # Align to 12h timeframe
-    bullish_aligned = align_htf_to_ltf(prices, df_1d, bullish_aligned.astype(float))
-    bearish_aligned = align_htf_to_ltf(prices, df_1d, bearish_aligned.astype(float))
-    
-    # Volume confirmation: 20-period volume average
+    # --- 1h volume spike detection (20-period) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma!=0)
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # 1d trend filter: EMA34
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for Alligator (need 13+8=21 bars)
-    start_idx = 30
+    # Start after warmup (need enough data for indicators)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(bullish_aligned[i]) or np.isnan(bearish_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_34_aligned[i])):
+        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_14_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.20
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.20
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
+        if not in_session:
+            # Outside session: maintain current position or flat
+            if position == 1:
+                signals[i] = 0.20
+            elif position == -1:
+                signals[i] = -0.20
             else:
                 signals[i] = 0.0
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.5
+        volume_spike = vol_ratio[i] > 1.8
         
         if position == 0:
-            # Long: Bullish Alligator alignment + price above 1d EMA + volume spike
-            if (bullish_aligned[i] and 
-                close[i] > ema_34_aligned[i] and 
+            # Long: 4h uptrend (price > EMA50) + 1d oversold (RSI < 30) + volume spike
+            if (close[i] > ema_50_4h_aligned[i] and
+                rsi_14_aligned[i] < 30 and
                 volume_spike):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Bearish Alligator alignment + price below 1d EMA + volume spike
-            elif (bearish_aligned[i] and 
-                  close[i] < ema_34_aligned[i] and 
+            # Short: 4h downtrend (price < EMA50) + 1d overbought (RSI > 70) + volume spike
+            elif (close[i] < ema_50_4h_aligned[i] and
+                  rsi_14_aligned[i] > 70 and
                   volume_spike):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         else:
-            # Exit when Alligator goes to sleep (lines intertwine) or trend fails
+            # Exit conditions
             if position == 1:
-                # Exit long: Alligator not bullish OR price below 1d EMA
-                if not bullish_aligned[i] or close[i] < ema_34_aligned[i]:
+                # Exit long: 4h trend breaks down OR 1d RSI returns to neutral (>50)
+                if (close[i] < ema_50_4h_aligned[i] or
+                    rsi_14_aligned[i] > 50):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: Alligator not bearish OR price above 1d EMA
-                if not bearish_aligned[i] or close[i] > ema_34_aligned[i]:
+                # Exit short: 4h trend breaks up OR 1d RSI returns to neutral (<50)
+                if (close[i] > ema_50_4h_aligned[i] or
+                    rsi_14_aligned[i] < 50):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
