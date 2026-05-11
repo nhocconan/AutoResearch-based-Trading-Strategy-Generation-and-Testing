@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-name = "1d_TripleEMA_WeeklyTrend_Filter"
-timeframe = "1d"
+name = "6h_ElderRay_BullBear_1dTrend_WeakFilter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,45 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for Elder Ray and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 3 EMAs on weekly
-    ema8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55_1w = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Align weekly EMAs to daily
-    ema8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema8_1w)
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
-    ema55_1w_aligned = align_htf_to_ltf(prices, df_1w, ema55_1w)
+    # Align Elder Ray to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Calculate daily EMAs for entry signals
-    ema8_daily = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema55_daily = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    # 1d trend filter: EMA50
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (vol_ma20 * 1.5)
+    # Volume spike: 24-period average (6h bars = 4 per day, so 24 = 6 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 55  # Ensure EMAs are ready
+    start_idx = 50  # Ensure EMA50 is ready
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(ema8_1w_aligned[i]) or np.isnan(ema21_1w_aligned[i]) or 
-            np.isnan(ema55_1w_aligned[i]) or np.isnan(ema8_daily[i]) or 
-            np.isnan(ema21_daily[i]) or np.isnan(ema55_daily[i]) or 
-            np.isnan(vol_ma20[i])):
+        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,30 +58,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: weekly EMA8 > EMA21 > EMA55 AND daily EMA8 > EMA21 > EMA55 AND volume filter
-            if (ema8_1w_aligned[i] > ema21_1w_aligned[i] > ema55_1w_aligned[i] and
-                ema8_daily[i] > ema21_daily[i] > ema55_daily[i] and
-                vol_filter[i]):
+            # Long: Bull Power > 0, price above EMA50, volume spike
+            if (bull_power_aligned[i] > 0 and 
+                close[i] > ema50_1d_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly EMA8 < EMA21 < EMA55 AND daily EMA8 < EMA21 < EMA55 AND volume filter
-            elif (ema8_1w_aligned[i] < ema21_1w_aligned[i] < ema55_1w_aligned[i] and
-                  ema8_daily[i] < ema21_daily[i] < ema55_daily[i] and
-                  vol_filter[i]):
+            # Short: Bear Power < 0, price below EMA50, volume spike
+            elif (bear_power_aligned[i] < 0 and 
+                  close[i] < ema50_1d_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: weekly trend turns bearish OR daily EMA cross down
-            if (ema8_1w_aligned[i] < ema21_1w_aligned[i] or
-                ema8_daily[i] < ema21_daily[i]):
+            # Exit long: Bear Power < 0 or price below EMA50
+            if bear_power_aligned[i] < 0 or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: weekly trend turns bullish OR daily EMA cross up
-            if (ema8_1w_aligned[i] > ema21_1w_aligned[i] or
-                ema8_daily[i] > ema21_daily[i]):
+            # Exit short: Bull Power > 0 or price above EMA50
+            if bull_power_aligned[i] > 0 or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
