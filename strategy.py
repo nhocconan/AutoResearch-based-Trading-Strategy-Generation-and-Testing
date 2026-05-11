@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3
-Hypothesis: Combine Camarilla pivot levels (R3/S3) from 1d with trend filter from 1d EMA50 and volume spike confirmation for breakout trades. Works in bull markets (buy R3 breakouts in uptrend) and bear markets (sell S3 breakdowns in downtrend). Volume spike confirms institutional interest. Target: 20-50 trades per year on 4h timeframe.
+4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Trade breakouts at Camarilla R3/S3 levels from 1d timeframe with trend filter from 1d EMA50 and volume spike confirmation. Uses tighter volume confirmation (volume > 2.5x 20-period average) to reduce trade frequency and improve win rate. Works in bull markets (buy R3 breakouts in uptrend) and bear markets (sell S3 breakdowns in downtrend). Target: 15-30 trades per year on 4h timeframe.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v3"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,9 +52,9 @@ def generate_signals(prices):
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume spike: current volume > 2x 20-period average
+    # Volume spike: current volume > 2.5x 20-period average (tighter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    volume_spike = volume > (vol_ma * 2.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
