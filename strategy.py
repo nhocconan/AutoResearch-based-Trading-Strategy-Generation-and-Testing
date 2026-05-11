@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_SuperTrend_Breakout_v1
-Hypothesis: In trending markets, price breaking above/below the SuperTrend with volume confirmation provides high-probability entries.
-In ranging markets, the Choppiness Index filter prevents false signals. Works in both bull and bear regimes by adapting to trend strength.
-Target: 20-50 trades per year on 4h timeframe.
+1d_KAMA_RSI_Chop_Regime_v1
+Hypothesis: On daily timeframe, KAMA identifies trend direction, RSI identifies oversold/overbought conditions,
+and Chop filters for trending vs ranging markets. In trending markets (Chop < 38.2), we follow KAMA direction.
+In ranging markets (Chop > 61.8), we fade RSI extremes. This adapts to both bull and bear regimes.
+Target: 30-100 trades over 4 years (7-25/year) on 1d timeframe.
 """
 
-name = "4h_SuperTrend_Breakout_v1"
-timeframe = "4h"
+name = "1d_KAMA_RSI_Chop_Regime_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,128 +23,113 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 1D Data for Choppiness Index (Regime Filter) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # === 1D Data for Indicators (already daily timeframe) ===
+    # KAMA - Kaufman Adaptive Moving Average
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # needs correction
+    # Recalculate properly
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    
+    # Avoid division by zero
+    er = np.zeros_like(close)
+    for i in range(len(close)):
+        if volatility[i] > 0:
+            er[i] = change[i] / volatility[i]
+        else:
+            er[i] = 0
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Chop Index (14) - needs high/low
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first period
+    
+    # ATR(14)
+    atr = np.zeros_like(close)
+    atr[13] = np.mean(tr[1:14])
+    for i in range(14, len(close)):
+        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
+    
+    # Sum of ATR over 14 periods
+    atr_sum = np.zeros_like(close)
+    for i in range(13, len(close)):
+        if i == 13:
+            atr_sum[i] = np.sum(atr[1:14])
+        else:
+            atr_sum[i] = atr_sum[i-1] - atr[i-13] + atr[i]
+    
+    # Max and Min range over 14 periods
+    max_high = np.zeros_like(close)
+    min_low = np.zeros_like(close)
+    for i in range(len(close)):
+        start_idx = max(0, i-13)
+        max_high[i] = np.max(high[start_idx:i+1])
+        min_low[i] = np.min(low[start_idx:i+1])
+    
+    # Chop calculation
+    chop = np.zeros_like(close)
+    for i in range(13, len(close)):
+        if atr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
+            chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(14)
+        else:
+            chop[i] = 50  # neutral
+    
+    # === Weekly Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # ATR (14)
-    atr_1d = np.zeros_like(tr)
-    atr_1d[0] = tr[0]
-    for i in range(1, len(tr)):
-        atr_1d[i] = (atr_1d[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of True Range over 14 periods
-    tr_sum = np.zeros_like(tr)
-    for i in range(13, len(tr)):
-        tr_sum[i] = np.sum(tr[i-13:i+1])
-    
-    # Choppiness Index
-    chop = np.zeros_like(tr)
-    for i in range(13, len(tr)):
-        if tr_sum[i] > 0 and atr_1d[i] > 0:
-            chop[i] = 100 * np.log10(tr_sum[i] / (atr_1d[i] * 14)) / np.log10(14)
-        else:
-            chop[i] = 50.0
-    
-    chop_align = align_htf_to_ltf(prices, df_1d, chop)
-    
-    # === SuperTrend Calculation (4h) ===
-    atr_period = 10
-    multiplier = 3.0
-    
-    # True Range for SuperTrend
-    tr1_st = np.abs(high - low)
-    tr2_st = np.abs(high - np.roll(close, 1))
-    tr3_st = np.abs(low - np.roll(close, 1))
-    tr_st = np.maximum(tr1_st, np.maximum(tr2_st, tr3_st))
-    tr_st[0] = tr1_st[0]
-    
-    # ATR
-    atr_st = np.zeros_like(tr_st)
-    atr_st[0] = tr_st[0]
-    for i in range(1, len(tr_st)):
-        atr_st[i] = (atr_st[i-1] * (atr_period-1) + tr_st[i]) / atr_period
-    
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + multiplier * atr_st
-    basic_lb = (high + low) / 2 - multiplier * atr_st
-    
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(basic_ub)
-    final_lb = np.zeros_like(basic_lb)
-    
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
-    
-    for i in range(1, len(close)):
-        # Final Upper Band
-        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        # Final Lower Band
-        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-    
-    # SuperTrend
-    super_trend = np.zeros_like(close)
-    trend = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    super_trend[0] = final_lb[0]
-    trend[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > final_ub[i-1]:
-            super_trend[i] = final_lb[i]
-            trend[i] = 1
-        elif close[i] < final_lb[i-1]:
-            super_trend[i] = final_ub[i]
-            trend[i] = -1
-        else:
-            super_trend[i] = super_trend[i-1]
-            trend[i] = trend[i-1]
-            if trend[i] == 1 and final_lb[i] < super_trend[i-1]:
-                super_trend[i] = final_lb[i]
-            if trend[i] == -1 and final_ub[i] > super_trend[i-1]:
-                super_trend[i] = final_ub[i]
-    
-    # === Volume Filter (4h) ===
-    vol_ma = np.zeros_like(volume)
-    vol_ma[0] = volume[0]
-    for i in range(1, len(volume)):
-        vol_ma[i] = (vol_ma[i-1] * 19 + volume[i]) / 20  # 20-period MA
-    
-    volume_ratio = volume / (vol_ma + 1e-10)
-    
-    # === Signals ===
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(30, 20)  # Ensure enough data for indicators
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(chop_align[i]) or 
-            np.isnan(super_trend[i]) or 
-            np.isnan(volume_ratio[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -152,32 +138,40 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price crosses above SuperTrend in uptrend with volume confirmation and not choppy
-            if (close[i] > super_trend[i] and 
-                close[i-1] <= super_trend[i-1] and  # crossed above
-                trend[i] == 1 and 
-                volume_ratio[i] > 1.5 and 
-                chop_align[i] < 61.8):  # not choppy (trending)
-                signals[i] = 0.25
-                position = 1
-            # Short: price crosses below SuperTrend in downtrend with volume confirmation and not choppy
-            elif (close[i] < super_trend[i] and 
-                  close[i-1] >= super_trend[i-1] and  # crossed below
-                  trend[i] == -1 and 
-                  volume_ratio[i] > 1.5 and 
-                  chop_align[i] < 61.8):  # not choppy (trending)
-                signals[i] = -0.25
-                position = -1
+            # Determine market regime
+            if chop[i] > 61.8:  # Ranging market
+                # Fade RSI extremes
+                if rsi[i] < 30:  # Oversold - go long
+                    signals[i] = 0.25
+                    position = 1
+                elif rsi[i] > 70:  # Overbought - go short
+                    signals[i] = -0.25
+                    position = -1
+            elif chop[i] < 38.2:  # Trending market
+                # Follow KAMA direction with weekly filter
+                if close[i] > kama[i] and close[i] > ema50_1w_aligned[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < kama[i] and close[i] < ema50_1w_aligned[i]:
+                    signals[i] = -0.25
+                    position = -1
+            # In transition zone (38.2 <= Chop <= 61.8), stay aside
         elif position == 1:
-            # Long exit: price crosses below SuperTrend
-            if close[i] < super_trend[i]:
+            # Long exit conditions
+            if chop[i] > 61.8 and rsi[i] > 70:  # Ranging + overbought
+                signals[i] = 0.0
+                position = 0
+            elif chop[i] < 38.2 and close[i] < kama[i]:  # Trending + below KAMA
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above SuperTrend
-            if close[i] > super_trend[i]:
+            # Short exit conditions
+            if chop[i] > 61.8 and rsi[i] < 30:  # Ranging + oversold
+                signals[i] = 0.0
+                position = 0
+            elif chop[i] < 38.2 and close[i] > kama[i]:  # Trending + above KAMA
                 signals[i] = 0.0
                 position = 0
             else:
