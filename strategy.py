@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v3"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -40,13 +40,13 @@ def generate_signals(prices):
     vol_ratio = df_1d_vol / vol_ma_1d
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # Align all 1d data to 12h timeframe
+    # Align all 1d data to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
     
-    # Session filter: 8-20 UTC (aligned to 12h)
+    # Session filter: 8-20 UTC (aligned to 4h)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     in_session = (hours >= 8) & (hours <= 20)
     
