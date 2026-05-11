@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ADX_DMI_Trend_With_1d_Volume_Filter"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -12,45 +12,42 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate ADX and DMI on 6h data (period=14)
-    # +DM, -DM, TR
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
+    # Get 1w data for weekly trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1w = close_1w > ema50_1w
     
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Get 12h data for Camarilla levels (R3, S3)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
     
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    def wilder_smooth(arr):
-        res = np.zeros_like(arr)
-        res[0] = arr[0] if len(arr) > 0 else 0
-        for i in range(1, len(arr)):
-            res[i] = alpha * arr[i] + (1 - alpha) * res[i-1]
-        return res
+    # Calculate Camarilla levels (R3, S3) from previous 12h period
+    R3 = np.full(len(high_12h), np.nan)
+    S3 = np.full(len(high_12h), np.nan)
     
-    # Pad arrays to match original length
-    plus_dm_padded = np.concatenate([[0], plus_dm])
-    minus_dm_padded = np.concatenate([[0], minus_dm])
-    tr_padded = np.concatenate([[0], tr])
-    
-    atr = wilder_smooth(tr_padded)
-    plus_di = 100 * wilder_smooth(plus_dm_padded) / (atr + 1e-10)
-    minus_di = 100 * wilder_smooth(minus_dm_padded) / (atr + 1e-10)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = wilder_smooth(dx)
+    for i in range(1, len(high_12h)):
+        prev_high = high_12h[i-1]
+        prev_low = low_12h[i-1]
+        prev_close = close_12h[i-1]
+        range_val = prev_high - prev_low
+        if range_val > 0:
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
     
     # Get 1d data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
@@ -60,22 +57,22 @@ def generate_signals(prices):
     volume_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Align indicators to 6h timeframe
-    adx_aligned = align_htf_to_ltf(prices, pd.DataFrame({'index': range(len(adx))}), adx)
-    plus_di_aligned = align_htf_to_ltf(prices, pd.DataFrame({'index': range(len(plus_di))}), plus_di)
-    minus_di_aligned = align_htf_to_ltf(prices, pd.DataFrame({'index': range(len(minus_di))}), minus_di)
+    # Align indicators to 12h timeframe
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 30)  # Need enough data for indicators
+    start_idx = max(60, 50)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(adx_aligned[i]) or 
-            np.isnan(plus_di_aligned[i]) or
-            np.isnan(minus_di_aligned[i]) or
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
+            np.isnan(trend_up_1w_aligned[i]) or
             np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -84,33 +81,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # ADX > 25 indicates strong trend
-        # +DI > -DI indicates uptrend, -DI > +DI indicates downtrend
         if position == 0:
-            # Long: ADX > 25, +DI > -DI, and volume confirmation
-            if (adx_aligned[i] > 25 and 
-                plus_di_aligned[i] > minus_di_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20_1d_aligned[i]):
+            # Long: price breaks above R3 + weekly uptrend + volume confirmation
+            if (close[i] > R3_aligned[i] and 
+                trend_up_1w_aligned[i] and 
+                volume[i] > 1.2 * vol_ma20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: ADX > 25, -DI > +DI, and volume confirmation
-            elif (adx_aligned[i] > 25 and 
-                  minus_di_aligned[i] > plus_di_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20_1d_aligned[i]):
+            # Short: price breaks below S3 + weekly downtrend + volume confirmation
+            elif (close[i] < S3_aligned[i] and 
+                  not trend_up_1w_aligned[i] and 
+                  volume[i] > 1.2 * vol_ma20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: ADX < 20 (weak trend) or -DI > +DI (trend reversal)
-            if (adx_aligned[i] < 20 or 
-                minus_di_aligned[i] > plus_di_aligned[i]):
+            # Long exit: price breaks below S3 or trend changes
+            if (close[i] < S3_aligned[i] or 
+                not trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: ADX < 20 (weak trend) or +DI > -DI (trend reversal)
-            if (adx_aligned[i] < 20 or 
-                plus_di_aligned[i] > minus_di_aligned[i]):
+            # Short exit: price breaks above R3 or trend changes
+            if (close[i] > R3_aligned[i] or 
+                trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
