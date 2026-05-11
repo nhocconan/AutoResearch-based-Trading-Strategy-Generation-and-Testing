@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Daily_Pivot_Breakout_TrendFilter_v5
-Hypothesis: Price breaking above daily R1 or below daily S1 with daily trend confirmation (EMA34) and volume spike. Uses daily pivot levels as strong support/resistance. In uptrend (price > EMA34), buy breakouts above R1; in downtrend (price < EMA34), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with daily trend filter and volume confirmation to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
+4h_DailyPivot_Breakout_TrendVolume_v6
+Hypothesis: Price breaking above daily R1 or below daily S1 with 12h trend confirmation (EMA50) and volume spike. Uses daily pivot levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with 12h trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "4h_Daily_Pivot_Breakout_TrendFilter_v5"
+name = "4h_DailyPivot_Breakout_TrendVolume_v6"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,12 +23,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot points and trend
+    # Daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    # Calculate daily pivot points using previous period's OHLC
+    # Calculate daily pivot points (standard formula)
+    # Using previous period's OHLC
     d_high = df_1d['high'].values
     d_low = df_1d['low'].values
     d_close = df_1d['close'].values
@@ -52,11 +53,11 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Daily trend filter (EMA 34)
-    ema_34_1d = pd.Series(d_close).ewm(
-        span=34, adjust=False, min_periods=34
+    # 12h trend filter (EMA 50)
+    ema_50_12h = pd.Series(d_close).ewm(
+        span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_1d, ema_50_12h)
     
     # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,7 +73,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -85,30 +86,36 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if position == 0:
-            # Long: break above daily R1 + above daily EMA34 + volume spike
+            # Long: break above daily R1 + above 12h EMA50 + volume spike
             if (close[i] > r1_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
+                close[i] > ema_50_12h_aligned[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S1 + below daily EMA34 + volume spike
+            # Short: break below daily S1 + below 12h EMA50 + volume spike
             elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < ema_50_12h_aligned[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to daily EMA34 (trend reversal)
+            # Exit conditions: return to pivot or trend reversal
+            # Calculate pivot for exit (use previous period's data)
+            pivot_val = (d_high_prev + d_low_prev + d_close_prev) / 3.0
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_val)
+            
             if position == 1:
-                # Exit long: price returns to daily EMA34 (trend turns down)
-                if close[i] < ema_34_1d_aligned[i]:
+                # Exit long: price returns to daily pivot OR trend turns down
+                if (close[i] <= pivot_aligned[i]) or \
+                   (close[i] < ema_50_12h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to daily EMA34 (trend turns up)
-                if close[i] > ema_34_1d_aligned[i]:
+                # Exit short: price returns to daily pivot OR trend turns up
+                if (close[i] >= pivot_aligned[i]) or \
+                   (close[i] > ema_50_12h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
