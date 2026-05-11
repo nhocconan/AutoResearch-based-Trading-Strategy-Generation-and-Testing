@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_WVWAP_Trend_1wEMA20"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w EMA20 trend
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d trend: close above/below 1d EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    trend_up = close > ema_1w_aligned
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    trend_up = close > ema_1d_aligned
     
-    # Daily VWAP
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, close)
+    # Daily volume filter: volume > 1.5x 20-day average
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma20
+    # 12h Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    R3 = close_1d + 1.1 * range_1d / 6
+    S3 = close_1d - 1.1 * range_1d / 6
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA, VWAP, and volume
+    start_idx = 40  # Need enough data for EMA, volume, and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,24 +71,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above VWAP + weekly uptrend + volume filter
-            if close[i] > vwap[i] and trend_up[i] and volume_filter[i]:
+            # Long: Close above R3 + daily uptrend + volume filter
+            if close[i] > R3_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below VWAP + weekly downtrend + volume filter
-            elif close[i] < vwap[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Close below S3 + daily downtrend + volume filter
+            elif close[i] < S3_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below VWAP or weekly trend down
-            if close[i] < vwap[i] or not trend_up[i]:
+            # Long exit: Close below S3 or daily trend down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above VWAP or weekly trend up
-            if close[i] > vwap[i] or trend_up[i]:
+            # Short exit: Close above R3 or daily trend up
+            if close[i] > R3_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
