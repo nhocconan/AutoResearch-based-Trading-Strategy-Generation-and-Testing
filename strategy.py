@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_TRIX_Volume_Spike_Regime
-Hypothesis: TRIX (triple smoothed EMA) crossover with volume spike and chop regime filter.
-- Long when: TRIX crosses above signal line, volume > 1.5x 20-period avg, CHOP > 61.8 (range)
-- Short when: TRIX crosses below signal line, volume > 1.5x 20-period avg, CHOP > 61.8 (range)
-- Exit when: TRIX crosses back through signal line
-- Uses 1d trend filter to avoid counter-trend trades: only long when price > 1d EMA50, short when price < 1d EMA50
-- Targets 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
-- TRIX catches momentum in choppy markets; volume confirms conviction; chop filter avoids whipsaws in strong trends.
+4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2
+Hypothesis: Price breaking above R3 or below S3 with volume confirmation and 1d EMA50 trend filter.
+Exits on opposite-side touch (S1/R1) to avoid whipsaw. Targets 20-40 trades/year.
 """
 
-name = "4h_1d_TRIX_Volume_Spike_Regime"
+name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +18,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -39,84 +34,86 @@ def generate_signals(prices):
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- TRIX Indicator (12-period) ---
-    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then % change
-    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_raw = pd.Series(ema3).pct_change() * 100  # percentage change
-    trix = trix_raw.fillna(0).values
+    # --- Camarilla Pivots from 1d (previous day) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # Calculate pivots from previous day's OHLC
+    camarilla_high = np.full_like(close_1d, np.nan)
+    camarilla_low = np.full_like(close_1d, np.nan)
+    camarilla_close = np.full_like(close_1d, np.nan)
     
-    # --- Chop Index (14-period) for regime filter ---
-    tr1 = high_4h - low_4h
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    for i in range(1, len(close_1d)):
+        camarilla_high[i] = high_1d[i-1]
+        camarilla_low[i] = low_1d[i-1]
+        camarilla_close[i] = close_1d[i-1]
     
-    # Chop = log(sum(tr,14) / (highest high - lowest low,14)) * 100 / log(14)
-    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    range_hl = highest_high - lowest_low
-    # Avoid division by zero
-    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
-    chop = np.log(sum_tr / range_hl) * 100 / np.log(14)
+    # Calculate Camarilla levels
+    R4 = camarilla_close + ((camarilla_high - camarilla_low) * 1.5000)
+    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
+    R2 = camarilla_close + ((camarilla_high - camarilla_low) * 1.1666)
+    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
+    PP = camarilla_close
+    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
+    S2 = camarilla_close - ((camarilla_high - camarilla_low) * 1.1666)
+    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
+    S4 = camarilla_close - ((camarilla_high - camarilla_low) * 1.5000)
     
-    # --- Volume Confirmation: 4h volume > 1.5x 20-period average ---
+    # Align pivots to 4h timeframe
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # --- Volume Confirmation: 4h volume > 20-period average ---
     vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period (need TRIX + chop + vol + trend)
-    start_idx = 50
+    # Start after warmup period
+    start_idx = 50  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
-            np.isnan(chop[i]) or np.isnan(vol_ma_20[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
+            np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine conditions
-        trix_cross_up = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
-        trix_cross_down = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
-        
-        vol_ok = volume_4h[i] > vol_ma_20[i] * 1.5
-        chop_high = chop[i] > 61.8  # ranging market
-        
+        # Determine 1d trend
         trend_up = close_4h[i] > ema50_1d_aligned[i]
         trend_down = close_4h[i] < ema50_1d_aligned[i]
         
+        # Volume confirmation
+        vol_ok = volume_4h[i] > vol_ma_20[i]
+        
         if position == 0:
-            # Look for entries only with volume spike, in chop, and with 1d trend filter
-            if trix_cross_up and vol_ok and chop_high and trend_up:
-                # Long: TRIX bullish cross + volume spike + ranging + 1d uptrend
+            # Look for entries only in direction of 1d trend with volume
+            if close_4h[i] > R3_4h[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
-            elif trix_cross_down and vol_ok and chop_high and trend_down:
-                # Short: TRIX bearish cross + volume spike + ranging + 1d downtrend
+            elif close_4h[i] < S3_4h[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit when TRIX crosses back through signal line
+            # Exit conditions
             if position == 1:
-                if trix_cross_down:
+                # Exit long: price returns to S1 (opposite side)
+                if close_4h[i] <= S1_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if trix_cross_up:
+                # Exit short: price returns to R1 (opposite side)
+                if close_4h[i] >= R1_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
