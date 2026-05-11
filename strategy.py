@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-1d_VWAP_Mean_Reversion_v1
-Hypothesis: Price tends to revert to VWAP (Volume Weighted Average Price) calculated
-over rolling 20-day windows. In both bull and bear markets, extended deviations
-from VWAP present mean-reversion opportunities. The strategy uses VWAP deviation
-z-score as the primary signal, filtered by volatility regime (ATR ratio) to avoid
-trending markets where mean reversion fails. Weekly trend filter ensures trades
-align with higher timeframe momentum. Target: 20-50 trades over 4 years on 1d timeframe.
+12h_4h_Trend_1d_Momentum_v1
+Hypothesis: Use 4h EMA50/200 for trend direction, combined with 12h RSI(14) for momentum timing.
+Long when 12h price > 4h EMA50 AND 4h EMA50 > 4h EMA200 (uptrend) AND 12h RSI > 55.
+Short when 12h price < 4h EMA50 AND 4h EMA50 < 4h EMA200 (downtrend) AND 12h RSI < 45.
+Exit when trend condition fails or RSI reverts to neutral (45-55).
+This captures trend-following entries with momentum confirmation, avoiding whipsaws in sideways markets.
+Target: 20-50 trades over 4 years on 12h timeframe.
 """
 
-name = "1d_VWAP_Mean_Reversion_v1"
-timeframe = "1d"
+name = "12h_4h_Trend_1d_Momentum_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -25,60 +25,41 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === Daily VWAP Calculation (20-day window) ===
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
-    vwap_denominator = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    vwap = np.where(vwap_denominator != 0, vwap_numerator / vwap_denominator, np.nan)
-    
-    # VWAP deviation
-    vwap_dev = close - vwap
-    
-    # Z-score of VWAP deviation (20-day rolling)
-    vwap_dev_ma = pd.Series(vwap_dev).rolling(window=20, min_periods=20).mean().values
-    vwap_dev_std = pd.Series(vwap_dev).rolling(window=20, min_periods=20).std().values
-    vwap_zscore = np.where(vwap_dev_std != 0, (vwap_dev - vwap_dev_ma) / vwap_dev_std, 0.0)
-    
-    # === Weekly Trend Filter (Higher Timeframe) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # === 4H Data for EMA Trend ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 200:  # Need enough data for EMA200
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_ema_20 = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_ema_20_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema_20)
+    close_4h = df_4h['close'].values
+    # EMA50 and EMA200 on 4h
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    weekly_uptrend = close >= weekly_ema_20_aligned  # Price above weekly EMA20 = uptrend bias
-    weekly_downtrend = close < weekly_ema_20_aligned  # Price below weekly EMA20 = downtrend bias
+    # Align 4h EMAs to 12h timeframe
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema200_4h_aligned = align_htf_to_ltf(prices, df_4h, ema200_4h)
     
-    # === Volatility Regime Filter (Avoid trending markets) ===
-    atr_period = 14
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=atr_period, adjust=False, min_periods=atr_period).mean().values
-    
-    # ATR ratio: current ATR vs 50-period average (expanding volatility filter)
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.where(atr_ma > 0, atr / atr_ma, 1.0)
-    
-    # Range-bound market: ATR ratio < 1.2 (low volatility expansion)
-    range_market = atr_ratio < 1.2
+    # === 12H Data for RSI Momentum ===
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.fillna(50).values  # fill NaN with 50 (neutral)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need 20 days for VWAP + 50 for ATR ratio)
-    start_idx = 50
+    # Start after warmup for EMA200
+    start_idx = 200
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_zscore[i]) or 
-            np.isnan(weekly_ema_20_aligned[i]) or 
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema200_4h_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,27 +67,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        zscore = vwap_zscore[i]
+        # Trend condition: EMA50 > EMA200 = uptrend, EMA50 < EMA200 = downtrend
+        ema50 = ema50_4h_aligned[i]
+        ema200 = ema200_4h_aligned[i]
+        uptrend = ema50 > ema200
+        downtrend = ema50 < ema200
+        
+        # Price vs EMA50 condition
+        price_above_ema50 = close[i] > ema50
+        price_below_ema50 = close[i] < ema50
+        
+        # RSI momentum condition
+        rsi_val = rsi_values[i]
+        rsi_bullish = rsi_val > 55
+        rsi_bearish = rsi_val < 45
         
         if position == 0:
-            # Long: VWAP deviation significantly negative (oversold) in range market + weekly uptrend bias
-            if zscore < -1.5 and range_market[i] and weekly_uptrend[i]:
+            # Long: uptrend AND price above EMA50 AND RSI bullish
+            if uptrend and price_above_ema50 and rsi_bullish:
                 signals[i] = 0.25
                 position = 1
-            # Short: VWAP deviation significantly positive (overbought) in range market + weekly downtrend bias
-            elif zscore > 1.5 and range_market[i] and weekly_downtrend[i]:
+            # Short: downtrend AND price below EMA50 AND RSI bearish
+            elif downtrend and price_below_ema50 and rsi_bearish:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: VWAP deviation returns to neutral OR volatility expands (trending market)
-            if zscore > -0.5 or not range_market[i]:
+            # Long exit: trend fails OR RSI reverts to neutral
+            if not (uptrend and price_above_ema50) or not rsi_bullish:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: VWAP deviation returns to neutral OR volatility expands (trending market)
-            if zscore < 0.5 or not range_market[i]:
+            # Short exit: trend fails OR RSI reverts to neutral
+            if not (downtrend and price_below_ema50) or not rsi_bearish:
                 signals[i] = 0.0
                 position = 0
             else:
