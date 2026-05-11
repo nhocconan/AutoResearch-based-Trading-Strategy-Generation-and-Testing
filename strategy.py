@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_1d_ElderRay_ForceIndex_Trend"
-timeframe = "6h"
+name = "4h_HTF_1d_Camarilla_R1_S1_Breakout_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,46 +17,36 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1d Elder Ray and Force Index components
+    # 1d Camarilla pivot levels (R1, S1)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 13-period EMA for Elder Ray
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Calculate pivot and Camarilla levels
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1_1d = close_1d + (range_1d * 1.0833)
+    s1_1d = close_1d - (range_1d * 1.0833)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Align levels to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Force Index = (Close - Previous Close) * Volume
-    # Need previous close, handle first element
-    price_change_1d = np.diff(close_1d, prepend=close_1d[0])
-    force_index_1d = price_change_1d * volume_1d
-    
-    # 2-period EMA of Force Index for smoothing
-    force_ema2_1d = pd.Series(force_index_1d).ewm(span=2, adjust=False, min_periods=2).mean().values
-    
-    # Align all 1d indicators to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    force_ema2_1d_aligned = align_htf_to_ltf(prices, df_1d, force_ema2_1d)
-    
-    # 6m EMA for trend filter (13-period)
-    ema13_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # Volume confirmation (4h volume > 1.5x 20-period average)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * volume_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 13
+    start_idx = max(20)
     
     for i in range(start_idx, n):
-        if np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]) or np.isnan(force_ema2_1d_aligned[i]) or np.isnan(ema13_6h[i]):
+        if np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,24 +55,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 AND Force Index rising AND price above EMA13
-            if bull_power_1d_aligned[i] > 0 and force_ema2_1d_aligned[i] > force_ema2_1d_aligned[i-1] and close[i] > ema13_6h[i]:
+            # Long: Close breaks above R1 + volume confirmation
+            if close[i] > r1_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 AND Force Index falling AND price below EMA13
-            elif bear_power_1d_aligned[i] < 0 and force_ema2_1d_aligned[i] < force_ema2_1d_aligned[i-1] and close[i] < ema13_6h[i]:
+            # Short: Close breaks below S1 + volume confirmation
+            elif close[i] < s1_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Bear Power < 0 OR Force Index falling
-            if bear_power_1d_aligned[i] < 0 or force_ema2_1d_aligned[i] < force_ema2_1d_aligned[i-1]:
+            # Exit long: Close below S1
+            if close[i] < s1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Bull Power > 0 OR Force Index rising
-            if bull_power_1d_aligned[i] > 0 or force_ema2_1d_aligned[i] > force_ema2_1d_aligned[i-1]:
+            # Exit short: Close above R1
+            if close[i] > r1_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
