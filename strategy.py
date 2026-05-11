@@ -1,13 +1,12 @@
-# 12h_1d_Ichimoku_TenkanKijun_Cross_v1
-# Hypothesis: Uses daily Ichimoku Tenkan-Kijun cross as entry signal with weekly price relative to cloud as trend filter.
-# Long when price above weekly cloud and daily Tenkan crosses above Kijun.
-# Short when price below weekly cloud and daily Tenkan crosses below Kijun.
-# Includes volume confirmation to filter false signals.
-# Designed for low trade frequency (12-37/year) via weekly trend filter and daily entry signal.
-# Works in both bull and bear markets by following higher-timeframe trend.
+#!/usr/bin/env python3
+"""
+4h_1d_Ichimoku_Cloud_Trend_Follower
+Hypothesis: Uses daily Ichimoku Cloud to determine primary trend direction (price above/below cloud),
+with 4h Tenkan-Kijun cross as entry signal and volume confirmation. Designed to work in both bull and bear markets by following higher-timeframe trend while using lower timeframe for precise entries. Targets low trade frequency (19-50/year) via daily trend filter.
+"""
 
-name = "12h_1d_Ichimoku_TenkanKijun_Cross_v1"
-timeframe = "12h"
+name = "4h_1d_Ichimoku_Cloud_Trend_Follower"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -44,47 +43,37 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly Ichimoku for Trend Filter ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 52:
-        return np.zeros(n)
-    
-    tenkan_1w, kijun_1w, senkou_a_1w, senkou_b_1w, chikou_1w = calculate_ichimoku(
-        df_1w['high'].values, df_1w['low'].values, df_1w['close'].values
-    )
-    
-    # Align weekly Ichimoku to 12h timeframe
-    tenkan_1w_12h = align_htf_to_ltf(prices, df_1w, tenkan_1w)
-    kijun_1w_12h = align_htf_to_ltf(prices, df_1w, kijun_1w)
-    senkou_a_1w_12h = align_htf_to_ltf(prices, df_1w, senkou_a_1w)
-    senkou_b_1w_12h = align_htf_to_ltf(prices, df_1w, senkou_b_1w)
-    chikou_1w_12h = align_htf_to_ltf(prices, df_1w, chikou_1w)
-    
-    # --- Daily Ichimoku for Entry Signal ---
+    # --- Daily Ichimoku for Trend Filter ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    tenkan_1d, kijun_1d, _, _, _ = calculate_ichimoku(
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d, chikou_1d = calculate_ichimoku(
         df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
     )
     
-    # Align daily Ichimoku to 12h timeframe
-    tenkan_1d_12h = align_htf_to_ltf(prices, df_1d, tenkan_1d)
-    kijun_1d_12h = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    # Align daily Ichimoku to 4h timeframe
+    tenkan_1d_4h = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_4h = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    senkou_a_1d_4h = align_htf_to_ltf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_4h = align_htf_to_ltf(prices, df_1d, senkou_b_1d)
+    chikou_1d_4h = align_htf_to_ltf(prices, df_1d, chikou_1d)
+    
+    # --- 4h Tenkan-Kijun Cross for Entry Timing ---
+    tenkan_4h, kijun_4h, _, _, _ = calculate_ichimoku(high, low, close)
     
     # Calculate Tenkan-Kijun cross signals
-    tk_cross_above = (tenkan_1d_12h > kijun_1d_12h) & (tenkan_1d_12h <= kijun_1d_12h)
-    tk_cross_below = (tenkan_1d_12h < kijun_1d_12h) & (tenkan_1d_12h >= kijun_1d_12h)
+    tk_cross_above = (tenkan_4h > kijun_4h) & (tenkan_4h.shift(1) <= kijun_4h.shift(1))
+    tk_cross_below = (tenkan_4h < kijun_4h) & (tenkan_4h.shift(1) >= kijun_4h.shift(1))
     
-    # --- Volume Spike Detection (24-period average on 12h) ---
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # --- Volume Spike Detection (20-period average on 4h) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -96,9 +85,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(tenkan_1w_12h[i]) or np.isnan(kijun_1w_12h[i]) or 
-            np.isnan(senkou_a_1w_12h[i]) or np.isnan(senkou_b_1w_12h[i]) or
-            np.isnan(tenkan_1d_12h[i]) or np.isnan(kijun_1d_12h[i]) or
+        if (np.isnan(tenkan_1d_4h[i]) or np.isnan(kijun_1d_4h[i]) or 
+            np.isnan(senkou_a_1d_4h[i]) or np.isnan(senkou_b_1d_4h[i]) or
+            np.isnan(tenkan_4h[i]) or np.isnan(kijun_4h[i]) or
             np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
@@ -109,11 +98,11 @@ def generate_signals(prices):
             continue
         
         # Determine cloud color and position
-        green_cloud = senkou_a_1w_12h[i] > senkou_b_1w_12h[i]
-        red_cloud = senkou_a_1w_12h[i] < senkou_b_1w_12h[i]
+        green_cloud = senkou_a_1d_4h[i] > senkou_b_1d_4h[i]
+        red_cloud = senkou_a_1d_4h[i] < senkou_b_1d_4h[i]
         
-        above_cloud = close[i] > max(senkou_a_1w_12h[i], senkou_b_1w_12h[i])
-        below_cloud = close[i] < min(senkou_a_1w_12h[i], senkou_b_1w_12h[i])
+        above_cloud = close[i] > max(senkou_a_1d_4h[i], senkou_b_1d_4h[i])
+        below_cloud = close[i] < min(senkou_a_1d_4h[i], senkou_b_1d_4h[i])
         in_cloud = not above_cloud and not below_cloud
         
         # Volume confirmation threshold
