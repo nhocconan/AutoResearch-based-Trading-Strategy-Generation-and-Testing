@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 1h_4d_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Uses 1-day trend filter with 4-hour Camarilla R3/S3 breakouts and volume confirmation.
-# 1-hour timeframe for precise entry timing, with 4-hour HTF for signal direction.
-# In bull markets: daily uptrend + 4h breakout above R3 + volume surge = long.
-# In bear markets: daily downtrend + 4h breakdown below S3 + volume surge = short.
-# Volume filter reduces false signals. Target: 15-37 trades/year to avoid fee drag.
+# 6h_1d_ADX_Power_Momentum
+# Hypothesis: Uses daily ADX for regime detection (trending vs ranging) and 6h Elder Ray power (bull/bear) for entry.
+# In trending markets (ADX > 25), we take Elder Ray signals in direction of trend.
+# In ranging markets (ADX < 20), we fade extreme Elder Ray readings.
+# This adapts to market regimes and should work in both bull and bear markets.
+# Target: 15-30 trades/year to minimize fee drag while capturing regime-appropriate moves.
 
-name = "1h_4d_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "6h_1d_ADX_Power_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,98 +19,114 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 4-hour data for trend filter and Camarilla calculation (HTF)
-    df_4h = get_htf_data(prices, '4h')
+    # Get 1-day data for ADX and Elder Ray calculations
+    df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
-    # 1h OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # --- 4h EMA50 for trend filter ---
-    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # --- 1d ADX for trend strength ---
+    # Calculate True Range
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     
-    # --- 4-hour Camarilla levels (R3, S3) from previous 4h bar ---
-    prev_4h_high = df_4h['high'].values
-    prev_4h_low = df_4h['low'].values
-    prev_4h_close = df_4h['close'].values
+    # Calculate Directional Movement
+    dm_plus = df_1d['high'] - df_1d['high'].shift(1)
+    dm_minus = df_1d['low'].shift(1) - df_1d['low']
+    dm_plus = dm_plus.where((dm_plus > dm_minus) & (dm_plus > 0), 0)
+    dm_minus = dm_minus.where((dm_minus > dm_plus) & (dm_minus > 0), 0)
     
-    camarilla_width = (prev_4h_high - prev_4h_low) * 1.1 / 2.0
-    camarilla_r3 = prev_4h_close + camarilla_width
-    camarilla_s3 = prev_4h_close - camarilla_width
+    # Smooth TR and DM
+    atr = tr.rolling(window=14, min_periods=14).mean()
+    dm_plus_smooth = dm_plus.rolling(window=14, min_periods=14).mean()
+    dm_minus_smooth = dm_minus.rolling(window=14, min_periods=14).mean()
     
-    # Align 4h Camarilla levels to 1h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s3)
+    # Calculate DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / atr
+    di_minus = 100 * dm_minus_smooth / atr
     
-    # --- Volume confirmation (2x 24-period average on 1h) ---
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # Calculate DX and ADX
+    dx = 100 * abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = dx.rolling(window=14, min_periods=14).mean()
     
-    # --- Session filter: 08-20 UTC ---
-    hours = prices.index.hour
+    adx_values = adx.values
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
+    
+    # --- 1d Elder Ray Power (Bull/Bear Power) ---
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema_13 = df_1d['close'].ewm(span=13, adjust=False, min_periods=13).mean()
+    bull_power = df_1d['high'] - ema_13
+    bear_power = df_1d['low'] - ema_13
+    
+    bull_power_values = bull_power.values
+    bear_power_values = bear_power.values
+    
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_values)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for 4h EMA50 (50 periods) and 24-period volume MA
-    start_idx = 50
+    # Warmup: enough for ADX (14+14=28) and EMA (13)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(ema_50_4h_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(adx_aligned[i]) or
+            np.isnan(bull_power_aligned[i]) or
+            np.isnan(bear_power_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Volume confirmation
-        volume_surge = volume[i] > 2.0 * vol_ma[i]
+        adx_val = adx_aligned[i]
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
         
         if position == 0:
-            # Long: price breaks above R3 with volume surge and 4h uptrend
-            if (close[i] > camarilla_r3_aligned[i] and 
-                volume_surge and 
-                ema_50_4h_aligned[i] < close[i]):
-                signals[i] = 0.20
-                position = 1
-            # Short: price breaks below S3 with volume surge and 4h downtrend
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  volume_surge and 
-                  ema_50_4h_aligned[i] > close[i]):
-                signals[i] = -0.20
-                position = -1
+            # Trending market: ADX > 25
+            if adx_val > 25:
+                # Strong bull power and rising price -> long
+                if bull_power_val > 0 and close[i] > close[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+                # Strong bear power and falling price -> short
+                elif bear_power_val < 0 and close[i] < close[i-1]:
+                    signals[i] = -0.25
+                    position = -1
+            # Ranging market: ADX < 20
+            elif adx_val < 20:
+                # Extreme bull power -> fade (short)
+                if bull_power_val > np.percentile(bull_power_aligned[max(0, i-50):i+1], 80):
+                    signals[i] = -0.25
+                    position = -1
+                # Extreme bear power -> fade (long)
+                elif bear_power_val < np.percentile(bear_power_aligned[max(0, i-50):i+1], 20):
+                    signals[i] = 0.25
+                    position = 1
         else:
             if position == 1:
-                # Exit long: price drops below S3 OR 4h EMA50 turns down
-                if (close[i] < camarilla_s3_aligned[i] or 
-                    close[i] < ema_50_4h_aligned[i]):
+                # Exit long: bull power turns negative OR ADX drops below 20 (trend weakening)
+                if bull_power_val <= 0 or adx_val < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above R3 OR 4h EMA50 turns up
-                if (close[i] > camarilla_r3_aligned[i] or 
-                    close[i] > ema_50_4h_aligned[i]):
+                # Exit short: bear power turns positive OR ADX drops below 20 (trend weakening)
+                if bear_power_val >= 0 or adx_val < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
