@@ -1,6 +1,11 @@
+# 1h_Liquidity_Rebalance_4hTrend
+# Hypothesis: Price tends to revert to the 4h VWAP during low-volatility periods, creating mean-reversion opportunities.
+# Uses 4h VWAP as the mean and 1h RSI for entry timing. Works in both bull/bear markets as it fades deviations from the mean.
+# Target: 60-150 total trades over 4 years (15-37/year) with strict entry conditions.
+
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Liquidity_Rebalance_4hTrend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,55 +22,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12H data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for VWAP calculation
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # 12H EMA50 for trend
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate 4h VWAP (Volume Weighted Average Price)
+    typical_price_4h = (df_4h['high'] + df_4h['low'] + df_4h['close']) / 3
+    vwap_4h = (typical_price_4h * df_4h['volume']).cumsum() / df_4h['volume'].cumsum()
+    vwap_4h_values = vwap_4h.values
     
-    # Get 1D data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
-        return np.zeros(n)
+    # Align 4h VWAP to 1h timeframe
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h_values)
     
-    # Calculate Camarilla pivot levels from previous 1D
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H - L) * 1.1 / 12
-    # S1 = C - (H - L) * 1.1 / 12
-    # We use previous day's values
-    h_prev = df_1d['high'].shift(1).values
-    l_prev = df_1d['low'].shift(1).values
-    c_prev = df_1d['close'].shift(1).values
+    # 1h RSI for entry timing
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    pivot = (h_prev + l_prev + c_prev) / 3
-    r1 = c_prev + (h_prev - l_prev) * 1.1 / 12
-    s1 = c_prev - (h_prev - l_prev) * 1.1 / 12
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    for i in range(1, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # Align pivot levels to 4H
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma20 = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    # 1h ATR for volatility filter
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    atr_period = 14
+    atr = np.zeros(n)
+    atr[:atr_period] = np.nan
+    for i in range(atr_period, n):
+        atr[i] = np.nanmean(tr[i-atr_period+1:i+1])
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(pivot_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(vwap_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(atr[i]) or np.isnan(hours[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,32 +81,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price above/below 12H EMA50
-        uptrend = close[i] > ema50_12h_aligned[i]
-        downtrend = close[i] < ema50_12h_aligned[i]
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        # Volatility filter: avoid extremely low volatility
+        vol_filter = atr[i] > 0.5 * np.nanmedian(atr[max(0, i-50):i+1])
         
         if position == 0:
-            # Long: price breaks above R1, uptrend, volume surge
-            if close[i] > r1_aligned[i] and uptrend and volume[i] > 1.5 * vol_ma20[i]:
-                signals[i] = 0.25
+            # Long: Price below 4h VWAP, RSI oversold, in session, adequate volatility
+            if (close[i] < vwap_4h_aligned[i] and 
+                rsi[i] < 30 and 
+                in_session and 
+                vol_filter):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1, downtrend, volume surge
-            elif close[i] < s1_aligned[i] and downtrend and volume[i] > 1.5 * vol_ma20[i]:
-                signals[i] = -0.25
+            # Short: Price above 4h VWAP, RSI overbought, in session, adequate volatility
+            elif (close[i] > vwap_4h_aligned[i] and 
+                  rsi[i] > 70 and 
+                  in_session and 
+                  vol_filter):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below pivot OR trend reverses
-            if close[i] < pivot_aligned[i] or not uptrend:
+            # Long exit: Price crosses above VWAP OR RSI overbought
+            if (close[i] >= vwap_4h_aligned[i] or rsi[i] >= 70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above pivot OR trend reverses
-            if close[i] > pivot_aligned[i] or not downtrend:
+            # Short exit: Price crosses below VWAP OR RSI oversold
+            if (close[i] <= vwap_4h_aligned[i] or rsi[i] <= 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
