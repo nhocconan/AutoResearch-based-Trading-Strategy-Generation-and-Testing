@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R3S3_Breakout_Trend_Volume_v2"
-timeframe = "1d"
+name = "4h_Camarilla_R3S3_Breakout_Trend_Volume_4hTrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -44,19 +44,19 @@ def generate_signals(prices):
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Get weekly trend filter (40-period EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 40:
+    # Get 4h trend filter (4h EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema40 = pd.Series(close_1w).ewm(span=40, adjust=False, min_periods=40).mean().values
-    trend_up = close_1w > ema40
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_4h = close_4h > ema50_4h
     
-    # Align indicators to daily timeframe
+    # Align indicators to 4h timeframe (note: prices is already 4h)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
+    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
     
     # Volume moving average (20-period) for confirmation
     vol_ma20 = np.zeros(n)
@@ -69,13 +69,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(40, 20)
+    start_idx = max(20, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or
+            np.isnan(trend_up_4h_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -87,26 +87,26 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R3 + uptrend + volume confirmation
             if (close[i] > R3_aligned[i] and 
-                trend_up_aligned[i] and 
-                volume[i] > 1.8 * vol_ma20[i]):
+                trend_up_4h_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 + downtrend + volume confirmation
             elif (close[i] < S3_aligned[i] and 
-                  not trend_up_aligned[i] and 
-                  volume[i] > 1.8 * vol_ma20[i]):
+                  not trend_up_4h_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes to downtrend
-            if (close[i] < S3_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: price breaks below S3 or trend changes
+            if (close[i] < S3_aligned[i] or not trend_up_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes to uptrend
-            if (close[i] > R3_aligned[i] or trend_up_aligned[i]):
+            # Short exit: price breaks above R3 or trend changes
+            if (close[i] > R3_aligned[i] or trend_up_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
