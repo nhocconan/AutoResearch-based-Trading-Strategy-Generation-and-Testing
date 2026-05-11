@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_WeeklyPivot_Breakout_1dTrend_Volume
-Hypothesis: Trade breakouts at weekly pivot levels (R1/S1) on 4h timeframe with 1d trend filter and volume confirmation.
+1d_1wPivot_Breakout_Trend_Volume
+Hypothesis: Trade breakouts at weekly pivot levels (R4/S4) on 1d timeframe with 1d trend filter and volume confirmation.
 Weekly pivots act as strong support/resistance levels. Breakouts in direction of daily trend with volume confirmation
 should capture significant moves. Weekly pivot calculation provides fewer, more significant levels than daily pivots,
 reducing trade frequency. Works in bull/bear markets by aligning with daily trend direction.
 """
 
-name = "4h_WeeklyPivot_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_1wPivot_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -37,13 +37,13 @@ def generate_signals(prices):
     
     # Weekly Pivot Point (PP)
     pp_w = (ph_w + pl_w + pc_w) / 3.0
-    # Weekly R1 and S1 (primary breakout levels)
-    r1_w = pp_w + (ph_w - pl_w)
-    s1_w = pp_w - (ph_w - pl_w)
+    # Weekly R4 and S4 (strongest breakout levels)
+    r4_w = pp_w + 3 * (ph_w - pl_w)
+    s4_w = pp_w - 3 * (ph_w - pl_w)
     
-    # Align to 4h timeframe
-    r1_4h = align_htf_to_ltf(prices, df_1w, r1_w)
-    s1_4h = align_htf_to_ltf(prices, df_1w, s1_w)
+    # Align to 1d timeframe
+    r4_1d = align_htf_to_ltf(prices, df_1w, r4_w)
+    s4_1d = align_htf_to_ltf(prices, df_1w, s4_w)
     
     # === Daily Trend Filter (EMA34) ===
     df_1d = get_htf_data(prices, '1d')
@@ -51,9 +51,8 @@ def generate_signals(prices):
         return np.zeros(n)
     
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Volume Filter (2.0x 20-period EMA on 4h) ===
+    # === Volume Filter (2.0x 20-period EMA on 1d) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 2.0
     
@@ -65,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema34_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or np.isnan(ema34_1d[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,28 +73,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above R1 with uptrend and volume
-            if (close[i] > r1_4h[i] and 
-                close[i] > ema34_4h[i] and 
+            # Long breakout: price closes above R4 with uptrend and volume
+            if (close[i] > r4_1d[i] and 
+                close[i] > ema34_1d[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below S1 with downtrend and volume
-            elif (close[i] < s1_4h[i] and 
-                  close[i] < ema34_4h[i] and 
+            # Short breakdown: price closes below S4 with downtrend and volume
+            elif (close[i] < s4_1d[i] and 
+                  close[i] < ema34_1d[i] and 
                   volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below weekly pivot (mean reversion)
-            if close[i] < pp_w[0] if i < len(pp_w) else pp_w[-1]:  # Use weekly PP
+            # Long exit: price closes below midpoint between R4 and S4 (mean reversion)
+            if close[i] < (r4_1d[i] + s4_1d[i]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above weekly pivot (mean reversion)
-            if close[i] > pp_w[0] if i < len(pp_w) else pp_w[-1]:  # Use weekly PP
+            # Short exit: price closes above midpoint between R4 and S4 (mean reversion)
+            if close[i] > (r4_1d[i] + s4_1d[i]) / 2:
                 signals[i] = 0.0
                 position = 0
             else:
