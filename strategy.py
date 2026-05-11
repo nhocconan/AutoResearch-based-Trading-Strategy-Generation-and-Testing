@@ -1,123 +1,108 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_Filter
-Hypothesis: Uses 1-week KAMA (Kaufman Adaptive Moving Average) to determine trend direction.
-Long when price is above weekly KAMA, short when below. Entry timing uses daily RSI(14) pullbacks
-to the trend (RSI < 40 in uptrend, RSI > 60 in downtrend) with volume confirmation.
-Designed for low trade frequency (~10-25/year) by using weekly trend filter and
-daily entry signals. Works in both bull and bear markets by following higher-timeframe trend.
+6h_LongOnly_GoldenCross_Strategy
+Hypothesis: Captures long-term uptrends using a 21/55 EMA golden cross on the 6h chart,
+filtered by 12h ADX > 25 to ensure trending conditions. Exits on death cross or ADX drop.
+Designed for low trade frequency (~10-25/year) to minimize fee impact, works in bull markets
+by capturing trends and avoids losses in bear markets by staying flat when ADX < 25.
 """
 
-name = "1d_1w_KAMA_Trend_Filter"
-timeframe = "1d"
+name = "6h_LongOnly_GoldenCross_Strategy"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, er_length=10, fast_sc=2, slow_sc=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    close_s = pd.Series(close)
-    # Efficiency Ratio
-    change = abs(close_s.diff(er_length))
-    volatility = close_s.diff().abs().rolling(window=er_length, min_periods=er_length).sum()
-    er = change / volatility
-    er = er.fillna(0)
-    # Smoothing Constants
-    sc = (er * (2/(fast_sc+1) - 2/(slow_sc+1)) + 2/(slow_sc+1)) ** 2
-    # KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    # 6h price and volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # --- Weekly KAMA for Trend Filter ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # --- 12h ADX for trend filter ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 30:
         return np.zeros(n)
     
-    kama_1w = calculate_kama(df_1w['close'].values, er_length=10, fast_sc=2, slow_sc=30)
-    kama_1w_1d = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Calculate ADX components on 12h data
+    plus_dm = np.zeros(len(df_12h))
+    minus_dm = np.zeros(len(df_12h))
+    tr = np.zeros(len(df_12h))
     
-    # --- Daily RSI for Entry Timing ---
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    for i in range(1, len(df_12h)):
+        high_diff = df_12h['high'].iloc[i] - df_12h['high'].iloc[i-1]
+        low_diff = df_12h['low'].iloc[i-1] - df_12h['low'].iloc[i]
+        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
+        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
+        tr[i] = max(
+            df_12h['high'].iloc[i] - df_12h['low'].iloc[i],
+            abs(df_12h['high'].iloc[i] - df_12h['close'].iloc[i-1]),
+            abs(df_12h['low'].iloc[i] - df_12h['close'].iloc[i-1])
+        )
     
-    # --- Volume Confirmation ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # Smooth using Wilder's smoothing (alpha = 1/period)
+    def wilder_smooth(data, period):
+        result = np.zeros_like(data)
+        alpha = 1.0 / period
+        result[period-1] = np.nansum(data[:period])
+        for i in range(period, len(data)):
+            result[i] = result[i-1] + alpha * (data[i] - result[i-1])
+        return result
+    
+    period = 14
+    atr_12h = wilder_smooth(tr, period)
+    plus_di_12h = 100 * wilder_smooth(plus_dm, period) / atr_12h
+    minus_di_12h = 100 * wilder_smooth(minus_dm, period) / atr_12h
+    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h + 1e-10)
+    adx_12h = wilder_smooth(dx_12h, period)
+    
+    # Align 12h ADX to 6h
+    adx_12h_6h = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # --- 6h EMA 21 and 55 for golden cross ---
+    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
+    
+    # Golden cross: EMA21 crosses above EMA55
+    golden_cross = (ema_21 > ema_55) & (ema_21 <= ema_55)
+    # Death cross: EMA21 crosses below EMA55
+    death_cross = (ema_21 < ema_55) & (ema_21 >= ema_55)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0  # 0: flat, 1: long
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1w_1d[i]) or np.isnan(rsi[i]) or np.isnan(vol_ratio[i])):
+        if np.isnan(adx_12h_6h[i]) or np.isnan(ema_21[i]) or np.isnan(ema_55[i]):
             if position == 1:
                 signals[i] = 0.25
-            elif position == -1:
-                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to weekly KAMA
-        above_kama = close[i] > kama_1w_1d[i]
-        below_kama = close[i] < kama_1w_1d[i]
-        
-        # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.5
+        # Only go long when ADX indicates strong trend (>25)
+        strong_trend = adx_12h_6h[i] > 25
         
         if position == 0:
-            # Long: price above weekly KAMA + RSI pullback (<40) + volume
-            if (above_kama and 
-                rsi[i] < 40 and 
-                volume_spike):
+            # Enter long on golden cross during strong trend
+            if golden_cross[i] and strong_trend:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly KAMA + RSI pullback (>60) + volume
-            elif (below_kama and 
-                  rsi[i] > 60 and 
-                  volume_spike):
-                signals[i] = -0.25
-                position = -1
         else:
-            # Exit conditions: trend reversal or RSI extreme in opposite direction
-            if position == 1:
-                # Exit long: price below weekly KAMA OR RSI > 70 (overbought)
-                if below_kama or rsi[i] > 70:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Exit short: price above weekly KAMA OR RSI < 30 (oversold)
-                if above_kama or rsi[i] < 30:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Exit on death cross or when trend weakens (ADX < 20)
+            if death_cross[i] or adx_12h_6h[i] < 20:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
     
     return signals
