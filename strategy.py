@@ -1,11 +1,6 @@
-# 1h_ICHIMOKU_TENKAN_KIJUN_CROSSOVER_4HTREND_1dVOLUMEFILTER
-# Hypothesis: Ichimoku Tenkan/Kijun crossover provides reliable trend signals in both bull and bear markets.
-# Use 4h Ichimoku for trend direction and 1d volume for confirmation, with 1h only for entry timing.
-# Session filter (08-20 UTC) reduces noise. Target: 15-37 trades/year.
-
 #!/usr/bin/env python3
-name = "1h_ICHIMOKU_TENKAN_KIJUN_CROSSOVER_4HTREND_1dVOLUMEFILTER"
-timeframe = "1h"
+name = "12h_Camarilla_R3_S3_Breakout_1dEMA200_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,76 +17,77 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Ichimoku for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period9_high = pd.Series(high_4h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_4h).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period26_high = pd.Series(high_4h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_4h).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2
-    
-    # Align to 1h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_4h, tenkan_sen)
-    kijun_aligned = align_htf_to_ltf(prices, df_4h, kijun_sen)
-    
-    # 1d volume filter for confirmation
+    # 1. Load 1d data ONCE for EMA200 trend filter
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ok = volume_1d > vol_ma_1d * 1.5
-    volume_ok_aligned = align_htf_to_ltf(prices, df_1d, volume_ok)
+    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_ok = (hours >= 8) & (hours <= 20)
+    # 2. Load 1d data ONCE for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Position sizing
-    position_size = 0.20
+    # 3. Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + hl_range * 1.5000
+    s3 = close_1d - hl_range * 1.5000
+    
+    # 4. Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 5. Volume filter: 20-period EMA for spike detection
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
+    
+    # 6. Fixed position size to avoid churn
+    position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Start after warmup
     start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or 
-            np.isnan(volume_ok_aligned[i])):
-            if position != 0:
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+            if position == 1:
                 signals[i] = 0.0
-                position = 0
+            elif position == -1:
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
             continue
         
         # Conditions
-        bullish_cross = tenkan_aligned[i] > kijun_aligned[i]
-        bearish_cross = tenkan_aligned[i] < kijun_aligned[i]
+        price_above_ema1d = close[i] > ema200_1d_aligned[i]
+        price_below_ema1d = close[i] < ema200_1d_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun + 4h trend up + volume confirmation + session
-            if bullish_cross and close[i] > kijun_aligned[i] and volume_ok_aligned[i] and session_ok[i]:
+            # Long: Price breaks above R3 + above 1d EMA200 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Tenkan crosses below Kijun + 4h trend down + volume confirmation + session
-            elif bearish_cross and close[i] < kijun_aligned[i] and volume_ok_aligned[i] and session_ok[i]:
+            # Short: Price breaks below S3 + below 1d EMA200 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: Tenkan/Kijun cross reverses OR close crosses opposite line
+            # Exit conditions - simplified to reduce churn
             if position == 1:
-                if bearish_cross or close[i] < tenkan_aligned[i]:
+                # Exit: Price crosses below S3 OR trend reverses
+                if close[i] < s3_aligned[i] or close[i] < ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if bullish_cross or close[i] > tenkan_aligned[i]:
+                # Exit: Price crosses above R3 OR trend reverses
+                if close[i] > r3_aligned[i] or close[i] > ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
