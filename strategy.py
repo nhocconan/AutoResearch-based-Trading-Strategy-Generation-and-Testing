@@ -1,16 +1,21 @@
-# -*- coding: utf-8 -*-
+# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+# Hypothesis: Camarilla R1/S1 breakout with 1d trend filter and volume spike exploits
+# institutional support/resistance levels. Works in bull (breakouts) and bear (reversals)
+# due to mean-reverting nature of Camarilla levels in ranges and breakout strength
+# in trends. Volume confirmation reduces false signals.
+
 #!/usr/bin/env python3
-name = "6h_Adaptive_Kelly_Momentum"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from math import exp, log
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -18,66 +23,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend and momentum
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 1d data for Camarilla levels and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    volume_12h = df_12h['volume'].values
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 12h RSI(14) for momentum
-    delta_12h = np.diff(close_12h, prepend=close_12h[0])
-    gain_12h = np.where(delta_12h > 0, delta_12h, 0)
-    loss_12h = np.where(delta_12h < 0, -delta_12h, 0)
-    avg_gain_12h = pd.Series(gain_12h).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss_12h = pd.Series(loss_12h).ewm(alpha=1/14, adjust=False).mean().values
-    rs_12h = avg_gain_12h / (avg_loss_12h + 1e-10)
-    rsi_12h = 100 - (100 / (1 + rs_12h))
+    # Calculate Camarilla levels from previous 1d bar
+    # H, L, C from previous day
+    H = high_1d[:-1]  # previous day high
+    L = low_1d[:-1]   # previous day low
+    C = close_1d[:-1] # previous day close
     
-    # 12h ATR(14) for volatility
-    tr1_12h = np.abs(high_12h[1:] - low_12h[:-1])
-    tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
-    tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h = np.concatenate([[np.nan], tr_12h])
-    atr_12h = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False).mean().values
+    # Camarilla calculations
+    range_hl = H - L
+    R1 = C + (range_hl * 1.1 / 12)
+    R2 = C + (range_hl * 1.1 / 6)
+    R3 = C + (range_hl * 1.1 / 4)
+    S1 = C - (range_hl * 1.1 / 12)
+    S2 = C - (range_hl * 1.1 / 6)
+    S3 = C - (range_hl * 1.1 / 4)
     
-    # 12h ADX(14) for trend strength
-    plus_dm_12h = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
-                           np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
-    minus_dm_12h = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
-                            np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
-    plus_dm_12h = np.concatenate([[0], plus_dm_12h])
-    minus_dm_12h = np.concatenate([[0], minus_dm_12h])
-    atr_12h_smooth = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False).mean().values
-    plus_di_12h = 100 * pd.Series(plus_dm_12h).ewm(alpha=1/14, adjust=False).mean().values / (atr_12h_smooth + 1e-10)
-    minus_di_12h = 100 * pd.Series(minus_dm_12h).ewm(alpha=1/14, adjust=False).mean().values / (atr_12h_smooth + 1e-10)
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h + 1e-10)
-    adx_12h = pd.Series(dx_12h).ewm(alpha=1/14, adjust=False).mean().values
+    # Shift to align with current 4h bars (previous day's levels)
+    R1 = np.concatenate([[np.nan], R1])
+    R2 = np.concatenate([[np.nan], R2])
+    R3 = np.concatenate([[np.nan], R3])
+    S1 = np.concatenate([[np.nan], S1])
+    S2 = np.concatenate([[np.nan], S2])
+    S3 = np.concatenate([[np.nan], S3])
     
-    # 6h EMA(21) for entry timing
-    ema21_6h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 12h indicators to 6h
-    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Align Camarilla levels and EMA to 4h
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    R2_4h = align_htf_to_ltf(prices, df_1d, R2)
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    S2_4h = align_htf_to_ltf(prices, df_1d, S2)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Volatility regime: 6h ATR ratio
-    atr6_6h = pd.Series(close).ewm(span=6, adjust=False).mean().values
-    atr18_6h = pd.Series(close).ewm(span=18, adjust=False).mean().values
-    atr_ratio_6h = atr6_6h / (atr18_6h + 1e-10)
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
-    position = 0
-    start_idx = 30  # Ensure indicators are ready
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    start_idx = 35  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
-            np.isnan(ema21_6h[i]) or np.isnan(atr_ratio_6h[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or 
+            np.isnan(ema34_1d_4h[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -85,43 +87,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Kelly fraction estimation based on edge and volatility
-        # Edge = RSI deviation from 50 scaled by trend strength
-        rsi_dev = (rsi_12h_aligned[i] - 50) / 50  # -1 to 1
-        trend_weight = min(adx_12h_aligned[i] / 25, 1.0)  # 0 to 1, capped at ADX=25
-        edge = rsi_dev * trend_weight
-        
-        # Volatility scaling: higher vol = smaller position
-        vol_scalar = 1.0 / (1.0 + atr_ratio_6h[i])  # 0.5 to 1.0
-        
-        # Kelly fraction: f* = edge / (volatility^2) but capped
-        kelly_fraction = edge * vol_scalar * 0.3  # Conservative scaling
-        kelly_fraction = np.clip(kelly_fraction, -0.3, 0.3)
-        
         if position == 0:
-            # Enter long if positive edge and price above EMA21
-            if kelly_fraction > 0.05 and close[i] > ema21_6h[i]:
-                signals[i] = kelly_fraction
+            # Long: price breaks above R1 with volume spike and uptrend (close > EMA34)
+            if (close[i] > R1_4h[i] and vol_spike[i] and close[i] > ema34_1d_4h[i]):
+                signals[i] = 0.25
                 position = 1
-            # Enter short if negative edge and price below EMA21
-            elif kelly_fraction < -0.05 and close[i] < ema21_6h[i]:
-                signals[i] = kelly_fraction
+            # Short: price breaks below S1 with volume spike and downtrend (close < EMA34)
+            elif (close[i] < S1_4h[i] and vol_spike[i] and close[i] < ema34_1d_4h[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long if edge turns negative or price below EMA21
-            if kelly_fraction < -0.02 or close[i] < ema21_6h[i]:
+            # Exit long: price breaks below S1 (mean reversion) or loses trend
+            if (close[i] < S1_4h[i] or close[i] < ema34_1d_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = kelly_fraction
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short if edge turns positive or price above EMA21
-            if kelly_fraction > 0.02 or close[i] > ema21_6h[i]:
+            # Exit short: price breaks above R1 (mean reversion) or loses trend
+            if (close[i] > R1_4h[i] or close[i] > ema34_1d_4h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = kelly_fraction
+                signals[i] = -0.25
     
     return signals
-
-from mtf_data import get_htf_data, align_htf_to_ltf
