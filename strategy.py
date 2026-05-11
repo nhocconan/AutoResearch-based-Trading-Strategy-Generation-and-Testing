@@ -1,98 +1,125 @@
 #!/usr/bin/env python3
-# 1d_Chaikin_Money_Flow_RSI_Trend_Filter
-# Hypothesis: Daily Chaikin Money Flow (CMF) with RSI and trend filter to capture strong momentum moves.
-# Uses 1d CMF for money flow direction, 14-period RSI for overbought/oversold conditions, and 50-day EMA for trend.
-# Designed for low trade frequency (10-25/year) on 1d timeframe to minimize fee decay while capturing sustained trends in BTC/ETH/SOL.
+# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
+# Hypothesis: 12h breakout at Camarilla R3/S3 levels with daily EMA trend filter and volume confirmation.
+# Uses 1d EMA50 for trend direction, Camarilla from 1d for entry levels, and volume spike for confirmation.
+# Designed for low trade frequency (12-37/year) to minimize fee frost while capturing strong moves in BTC/ETH/SOL.
 
-name = "1d_Chaikin_Money_Flow_RSI_Trend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mta_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get daily data for Camarilla and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly trend: EMA50 ---
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # --- Camarilla levels from previous day ---
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
     
-    # --- Daily Chaikin Money Flow (CMF) over 20 periods ---
-    # Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
-    mfm = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
-    # Money Flow Volume = MFM * Volume
-    mfv = mfm * volume
-    # CMF = 20-period sum of MFV / 20-period sum of Volume
-    mfv_sum = pd.Series(mfv).rolling(window=20, min_periods=20).sum().values
-    vol_sum = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
-    cmf = np.where(vol_sum != 0, mfv_sum / vol_sum, 0)
+    range_hl = prev_high - prev_low
     
-    # --- Daily RSI(14) ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla R3 and S3
+    r3 = prev_close + range_hl * 1.1 / 2
+    s3 = prev_close - range_hl * 1.1 / 2
+    
+    # Align Camarilla levels to 12h
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # --- Daily trend: EMA50 ---
+    ema_50_1d = pd.Series(prev_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
+    # --- ATR for volatility and trailing stop ---
+    tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
+    tr2 = np.absolute(low - np.roll(close, 1))
+    tr = np.maximum(tr1, tr2)
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # --- Volume confirmation (2.5x 20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    highest_high_since_entry = 0.0
+    lowest_low_since_entry = 0.0
     
     # Warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(cmf[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(atr[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                highest_high_since_entry = 0.0
+                lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from weekly EMA50
-        bullish_trend = close[i] > ema_50_1w_aligned[i]
-        bearish_trend = close[i] < ema_50_1w_aligned[i]
+        # Trend filter from daily EMA50
+        bullish_trend = close[i] > ema_50_1d_aligned[i]
+        bearish_trend = close[i] < ema_50_1d_aligned[i]
+        
+        # Volume confirmation (2.5x average)
+        volume_surge = volume[i] > 2.5 * vol_ma[i]
         
         if position == 0:
-            # Long: CMF > 0.1 (strong buying pressure), RSI < 70 (not overbought), bullish weekly trend
-            if cmf[i] > 0.1 and rsi[i] < 70 and bullish_trend:
+            # Long: price breaks above R3 in bullish trend with volume surge
+            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
-            # Short: CMF < -0.1 (strong selling pressure), RSI > 30 (not oversold), bearish weekly trend
-            elif cmf[i] < -0.1 and rsi[i] > 30 and bearish_trend:
+                highest_high_since_entry = high[i]
+            # Short: price breaks below S3 in bearish trend with volume surge
+            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
+                lowest_low_since_entry = low[i]
         else:
             if position == 1:
-                # Exit long: CMF turns negative or RSI > 70 (overbought)
-                if cmf[i] < 0 or rsi[i] > 70:
+                # Update highest high since entry
+                if high[i] > highest_high_since_entry:
+                    highest_high_since_entry = high[i]
+                
+                # Trailing stop: exit if price drops 3.0*ATR from highest high
+                if close[i] < highest_high_since_entry - 3.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    highest_high_since_entry = 0.0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: CMF turns positive or RSI < 30 (oversold)
-                if cmf[i] > 0 or rsi[i] < 30:
+                # Update lowest low since entry
+                if low[i] < lowest_low_since_entry:
+                    lowest_low_since_entry = low[i]
+                
+                # Trailing stop: exit if price rises 3.0*ATR from lowest low
+                if close[i] > lowest_low_since_entry + 3.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
+                    lowest_low_since_entry = 0.0
                 else:
                     signals[i] = -0.25
     
