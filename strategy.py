@@ -1,5 +1,13 @@
+# 1D_1W_CAMARILLA_R3S3_BREAKOUT_TREND_VOLUME
+# Hypothesis: Using Camarilla R3/S3 levels with weekly trend filter and volume confirmation
+# targets institutional breakout points. Weekly trend ensures alignment with higher timeframe momentum,
+# reducing false breakouts. Volume surge confirms institutional participation. Designed to work in
+# both bull (breakouts with volume) and bear (breakdowns with volume) markets by being directionally
+# agnostic to trend direction. Targets 20-40 trades/year to minimize fee drag.
+# Timeframe: 1d, HTF: 1w for trend filter.
+
 #!/usr/bin/env python3
-name = "1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
+name = "1D_1W_Camarilla_R3S3_Breakout_Trend_Volume"
 timeframe = "1d"
 leverage = 1.0
 
@@ -9,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
