@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_MultiTF_Trend_With_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate pivot points from previous day (using daily data)
+    # Pre-compute hourly time for session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
+    # Get 4h data for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    close_4h = df_4h['close'].values
+    # 4h EMA50 for trend
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Get 1d data for volume context
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
+    volume_1d = df_1d['volume'].values
+    # 1d volume average
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Previous day's high, low, close
-    prev_high = df_1d['high'].shift(1).values  # Already shifted for previous day
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate Camarilla levels for R1 and S1
-    # R1 = Close + (High - Low) * 1.12
-    # S1 = Close - (High - Low) * 1.12
-    R1 = prev_close + (prev_high - prev_low) * 1.12
-    S1 = prev_close - (prev_high - prev_low) * 1.12
-    
-    # Align to 4h timeframe (these levels are valid for the entire day)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Get 12h trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # 1h volume confirmation
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and pivots
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +57,46 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)  # UTC 8-20
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Trend condition: price vs 4h EMA50
+        trend_up = close[i] > ema_4h_aligned[i]
+        
+        # Volume condition: 1h volume > 1.5x 20-ma AND 1d volume > 1.2x its average
+        vol_cond = (volume[i] > 1.5 * vol_ma20[i]) and \
+                   (volume_1d[i//24] > 1.2 * vol_avg_1d_aligned[i] if i//24 < len(volume_1d) else False)
+        
         if position == 0:
-            # Long: Price breaks above R1 + above 12h EMA50 + volume confirmation
-            if close[i] > R1_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: uptrend + volume confirmation
+            if trend_up and vol_cond:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S1 + below 12h EMA50 + volume confirmation
-            elif close[i] < S1_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: downtrend + volume confirmation
+            elif not trend_up and vol_cond:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S1 or below 12h EMA50
-            if close[i] < S1_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Long exit: trend reversal or volume drops
+            if not trend_up or not vol_cond:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Price breaks above R1 or above 12h EMA50
-            if close[i] > R1_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Short exit: trend reversal or volume drops
+            if trend_up or not vol_cond:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
