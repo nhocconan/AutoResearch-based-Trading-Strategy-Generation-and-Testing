@@ -1,6 +1,6 @@
-#/usr/bin/env python3
-name = "12h_Vortex_1dTrend_VolumeSpike"
-timeframe = "12h"
+#!/usr/bin/env python3
+name = "4h_Parabolic_SAR_1dTrend_VolumeFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,9 +17,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volume spike
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    
     if len(df_1d) < 30:
         return np.zeros(n)
     
@@ -28,26 +27,41 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d volume average for spike detection
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate Parabolic SAR (0.02 step, 0.2 max)
+    psar = np.zeros(n)
+    psar[0] = low[0]
+    psar_bull = True
+    af = 0.02
+    max_af = 0.2
+    ep = high[0] if psar_bull else low[0]
     
-    # Calculate Vortex Indicator (14 periods) on 12h data
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.abs(high[0] - low[0])
-    vm_minus[0] = np.abs(high[0] - low[0])
+    for i in range(1, n):
+        if psar_bull:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if low[i] < psar[i]:
+                psar_bull = False
+                psar[i] = ep
+                af = 0.02
+                ep = low[i]
+            else:
+                if high[i] > ep:
+                    ep = high[i]
+                    af = min(af + 0.02, max_af)
+        else:
+            psar[i] = psar[i-1] + af * (ep - psar[i-1])
+            if high[i] > psar[i]:
+                psar_bull = True
+                psar[i] = ep
+                af = 0.02
+                ep = high[i]
+            else:
+                if low[i] < ep:
+                    ep = low[i]
+                    af = min(af + 0.02, max_af)
     
-    tr1 = np.maximum(high - low, np.abs(high - np.roll(close, 1)))
-    tr2 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]
-    
-    vi_plus = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values / \
-              pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vi_minus = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values / \
-               pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,8 +71,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(vi_plus[i]) or np.isnan(vi_minus[i])):
+        if (np.isnan(psar[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,24 +81,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: VI+ > VI- (bullish trend) AND price above 1d EMA50 (uptrend) AND volume spike (>1.5x average)
-            if vi_plus[i] > vi_minus[i] and close[i] > ema_1d_aligned[i] and volume[i] > (vol_ma_1d_aligned[i] * 1.5):
+            # Long: price above SAR AND above 1d EMA50 AND volume filter
+            if close[i] > psar[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: VI- > VI+ (bearish trend) AND price below 1d EMA50 (downtrend) AND volume spike
-            elif vi_minus[i] > vi_plus[i] and close[i] < ema_1d_aligned[i] and volume[i] > (vol_ma_1d_aligned[i] * 1.5):
+            # Short: price below SAR AND below 1d EMA50 AND volume filter
+            elif close[i] < psar[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: VI- > VI+ (trend reversal) OR price below 1d EMA50
-            if vi_minus[i] > vi_plus[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price falls below SAR OR below 1d EMA50
+            if close[i] < psar[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: VI+ > VI- (trend reversal) OR price above 1d EMA50
-            if vi_plus[i] > vi_minus[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price rises above SAR OR above 1d EMA50
+            if close[i] > psar[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
