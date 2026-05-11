@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ChaikinOscillator_1dTrend_Volume"
-timeframe = "6h"
+name = "12h_Camarilla_R2_S2_Breakout_1dEMA200_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,29 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 1d data ONCE for trend and accumulation/distribution
+    # 1. Load 1d data ONCE for trend and pivot levels
     df_1d = get_htf_data(prices, '1d')
     
     # 2. 1d EMA200 for trend filter
     ema200_1d = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # 3. Calculate Accumulation/Distribution Line on 1d
-    clv = ((df_1d['close'] - df_1d['low']) - (df_1d['high'] - df_1d['close'])) / (df_1d['high'] - df_1d['low'])
-    clv = clv.replace([np.inf, -np.inf], 0).fillna(0)
-    ad_line = (clv * df_1d['volume']).cumsum().values
+    # 3. Calculate daily high/low/close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 4. Chaikin Oscillator: (3-day EMA of AD) - (10-day EMA of AD)
-    ad_series = pd.Series(ad_line)
-    ema3 = ad_series.ewm(span=3, min_periods=3, adjust=False).mean().values
-    ema10 = ad_series.ewm(span=10, min_periods=10, adjust=False).mean().values
-    chaikin_osc = ema3 - ema10
+    # 4. Camarilla levels: R2, S2 (outer levels for fewer, stronger signals)
+    hl_range = high_1d - low_1d
+    r2 = close_1d + hl_range * 1.1666
+    s2 = close_1d - hl_range * 1.1666
     
-    # 5. Align 1d indicators to 6h
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    chaikin_osc_aligned = align_htf_to_ltf(prices, df_1d, chaikin_osc)
+    # 5. Align Camarilla levels to 12h timeframe
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     
-    # 6. Volume filter: 20-period EMA for spike detection on 6h
+    # 6. Volume filter: 20-period EMA for spike detection
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
@@ -54,8 +53,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(chaikin_osc_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -67,30 +66,30 @@ def generate_signals(prices):
         # Conditions
         price_above_ema200 = close[i] > ema200_1d_aligned[i]
         price_below_ema200 = close[i] < ema200_1d_aligned[i]
-        chaikin_positive = chaikin_osc_aligned[i] > 0
-        chaikin_negative = chaikin_osc_aligned[i] < 0
+        breakout_long = close[i] > r2_aligned[i]
+        breakout_short = close[i] < s2_aligned[i]
         
         if position == 0:
-            # Long: Chaikin positive + above 1d EMA200 + volume spike
-            if chaikin_positive and price_above_ema200 and volume_ok[i]:
+            # Long: Price breaks above R2 + above 1d EMA200 + volume spike
+            if breakout_long and price_above_ema200 and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Chaikin negative + below 1d EMA200 + volume spike
-            elif chaikin_negative and price_below_ema200 and volume_ok[i]:
+            # Short: Price breaks below S2 + below 1d EMA200 + volume spike
+            elif breakout_short and price_below_ema200 and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
             # Exit conditions - simplified to reduce churn
             if position == 1:
-                # Exit: Chaikin turns negative OR price crosses below EMA200
-                if chaikin_osc_aligned[i] < 0 or close[i] < ema200_1d_aligned[i]:
+                # Exit: Price crosses below S2 OR trend reverses
+                if close[i] < s2_aligned[i] or close[i] < ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Chaikin turns positive OR price crosses above EMA200
-                if chaikin_osc_aligned[i] > 0 or close[i] > ema200_1d_aligned[i]:
+                # Exit: Price crosses above R2 OR trend reverses
+                if close[i] > r2_aligned[i] or close[i] > ema200_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
