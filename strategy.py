@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-6h_VWAP_MeanReversion_12hTrend_Filter
-Hypothesis: Price mean-reverts to VWAP in ranging markets but trends with 12h EMA.
-Long when price < VWAP and 12h EMA rising; short when price > VWAP and 12h EMA falling.
-Uses VWAP deviation bands for entry/exit to avoid whipsaws. Designed for low trade frequency.
+4h_Three_Inside_Up_Down_Trend_Confirm
+Hypothesis: Uses Three Inside Up/Down candlestick patterns for reversal signals, confirmed by 1-day EMA trend and volume spike.
+Designed for low trade frequency (<25/year) to avoid fee drag while capturing high-probability reversals in both bull and bear markets.
 """
 
-name = "6h_VWAP_MeanReversion_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_Three_Inside_Up_Down_Trend_Confirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,85 +15,54 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 6h data
+    # 4h OHLCV
+    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 12h EMA34 for trend filter ---
-    close_12h = df_12h['close']
-    ema_34_12h = close_12h.ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_rising = ema_34_12h > np.roll(ema_34_12h, 1)
-    ema_34_12h_falling = ema_34_12h < np.roll(ema_34_12h, 1)
-    ema_34_12h_rising_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h_rising)
-    ema_34_12h_falling_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h_falling)
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close']
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # --- VWAP calculation (session-based, reset daily) ---
-    # Approximate VWAP using typical price * volume
-    typical_price = (high + low + close) / 3
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
+    # --- Volume Spike Detection (2x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ema.values)
     
-    # Reset VWAP at midnight UTC (simplified: reset when hour is 0)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    vwap_reset = (hours == 0) & (np.arange(len(hours)) > 0)
-    vwap_cumsum = np.cumsum(typical_price * volume)
-    vol_cumsum = np.cumsum(volume)
-    # Reset cumulative sums at midnight
-    vwap = np.full_like(close, np.nan)
-    vwap[0] = typical_price[0]
-    for i in range(1, n):
-        if vwap_reset[i]:
-            vwap[i] = typical_price[i]
-            vwap_cumsum[i] = typical_price[i] * volume[i]
-            vol_cumsum[i] = volume[i]
-        else:
-            vwap_cumsum[i] = vwap_cumsum[i-1] + typical_price[i] * volume[i]
-            vol_cumsum[i] = vol_cumsum[i-1] + volume[i]
-            if vol_cumsum[i] != 0:
-                vwap[i] = vwap_cumsum[i] / vol_cumsum[i]
-            else:
-                vwap[i] = vwap[i-1]
+    # --- Three Inside Up/Down Pattern Detection ---
+    # Three Inside Up: Bearish candle, then bullish engulfing, then bullish confirmation
+    # Three Inside Down: Bullish candle, then bearish engulfing, then bearish confirmation
     
-    # VWAP bands (1.5 * ATR for dynamic bands)
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = np.full_like(close, np.nan)
-    atr[atr_period-1] = np.mean(tr[:atr_period])
-    for i in range(atr_period, n):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Bullish engulfing: current candle engulfs previous bearish candle
+    bullish_engulfing = (close > open_) & (open_ < close) & (close > open_[1]) & (open_ < close[1]) & (close[1] < open_[1])
+    # Bearish engulfing: current candle engulfs previous bullish candle
+    bearish_engulfing = (close < open_) & (open_ > close) & (close < open_[1]) & (open_ > close[1]) & (close[1] > open_[1])
     
-    vwap_upper = vwap + 1.5 * atr
-    vwap_lower = vwap - 1.5 * atr
+    # Three Inside Up: previous candle was bearish, then bullish engulfing, then current bullish
+    three_inside_up = (close[1] < open_[1]) & bullish_engulfing & (close > open_)
+    # Three Inside Down: previous candle was bullish, then bearish engulfing, then current bearish
+    three_inside_down = (close[1] > open_[1]) & bearish_engulfing & (close < open_)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(50, atr_period)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_34_12h_rising_aligned[i]) or 
-            np.isnan(ema_34_12h_falling_aligned[i]) or
-            np.isnan(vwap[i]) or
-            np.isnan(vwap_upper[i]) or
-            np.isnan(vwap_lower[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -104,39 +72,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend
-        uptrend = ema_34_12h_rising_aligned[i]
-        downtrend = ema_34_12h_falling_aligned[i]
-        
-        # Mean reversion signals
-        price_below_vwap = close[i] < vwap[i]
-        price_above_vwap = close[i] > vwap[i]
-        at_lower_band = low[i] <= vwap_lower[i]
-        at_upper_band = high[i] >= vwap_upper[i]
+        # Determine trend based on price vs EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
         if position == 0:
-            if uptrend and price_below_vwap and at_lower_band:
-                # Uptrend: buy dip to VWAP lower band
-                signals[i] = 0.25
-                position = 1
-            elif downtrend and price_above_vwap and at_upper_band:
-                # Downtrend: sell rally to VWAP upper band
-                signals[i] = -0.25
-                position = -1
+            if price_above_ema:
+                # Uptrend: look for Three Inside Down (bearish reversal) for short
+                if three_inside_down[i] and vol_spike[i]:
+                    signals[i] = -0.25
+                    position = -1
+            elif price_below_ema:
+                # Downtrend: look for Three Inside Up (bullish reversal) for long
+                if three_inside_up[i] and vol_spike[i]:
+                    signals[i] = 0.25
+                    position = 1
         else:
-            # Exit conditions
+            # Exit conditions: reverse signal or trend failure
             if position == 1:
-                # Exit long: price reaches VWAP or breaks above upper band
-                exit_signal = (close[i] >= vwap[i]) or (high[i] >= vwap_upper[i] * 1.05)
-                if exit_signal:
+                # Exit long: Three Inside Down forms or price breaks below EMA
+                if three_inside_down[i] or (close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price reaches VWAP or breaks below lower band
-                exit_signal = (close[i] <= vwap[i]) or (low[i] <= vwap_lower[i] * 0.95)
-                if exit_signal:
+                # Exit short: Three Inside Up forms or price breaks above EMA
+                if three_inside_up[i] or (close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
