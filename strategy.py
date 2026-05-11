@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,17 +17,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla levels
+    # Get daily data for Camarilla levels and trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 10:
         return np.zeros(n)
     
+    # Calculate daily EMA34 for trend filter
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1d > ema34_1d
+    
     # Calculate Camarilla levels (R3, S3) from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Previous day's Camarilla levels
     R3 = np.zeros(len(high_1d))
     S3 = np.zeros(len(high_1d))
     
@@ -36,7 +39,6 @@ def generate_signals(prices):
             R3[i] = np.nan
             S3[i] = np.nan
         else:
-            # Camarilla formulas using previous day's range
             prev_high = high_1d[i-1]
             prev_low = low_1d[i-1]
             prev_close = close_1d[i-1]
@@ -44,11 +46,7 @@ def generate_signals(prices):
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Get daily trend filter (EMA34)
-    ema34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up = close_1d > ema34
-    
-    # Align indicators to 12h timeframe
+    # Align indicators to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up)
