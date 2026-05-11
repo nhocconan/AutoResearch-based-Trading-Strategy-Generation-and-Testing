@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Filter"
-timeframe = "1h"
+name = "6h_Liquidity_Zone_Breakout_1wTrend_OrderFlow"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (1d EMA50)
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data for liquidity zones and trend
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 50:
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly liquidity zones: previous week's high/low
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Get 1d data for Camarilla pivots (from previous 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Align liquidity zones to 6h timeframe (previous week's values)
+    liquidity_high = align_htf_to_ltf(prices, df_1w, weekly_high)
+    liquidity_low = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # Previous 1d bar's range
-    range_1d = high_1d - low_1d
+    # Weekly trend filter: EMA50 of weekly close
+    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, min_periods=50).mean().values
+    weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     
-    # Calculate Camarilla R1 and S1 levels
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
+    # Order flow proxy: volume-weighted price change
+    # Positive when price rises on high volume, negative when falls on high volume
+    price_change = np.diff(close, prepend=close[0])
+    volume_weighted_change = price_change * volume
+    # Smooth to get order flow direction
+    order_flow = pd.Series(volume_weighted_change).ewm(span=10, min_periods=10).mean().values
     
-    # Align Camarilla levels to 1h timeframe (using previous 1d bar's values)
-    r1_1h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
-    
-    # Session filter: 08-20 UTC
-    hour = pd.DatetimeIndex(prices["open_time"]).hour
-    session_filter = (hour >= 8) & (hour <= 20)
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,9 +55,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i]) or 
-            np.isnan(session_filter[i])):
+        if (np.isnan(liquidity_high[i]) or np.isnan(liquidity_low[i]) or 
+            np.isnan(weekly_ema50_aligned[i]) or np.isnan(order_flow[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,27 +66,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 1d EMA50 (uptrend) AND volume surge AND session
-            if close[i] > r1_1h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = 0.20
+            # Long: price breaks above weekly liquidity high AND uptrend AND positive order flow AND volume surge
+            if (close[i] > liquidity_high[i] and 
+                close[i] > weekly_ema50_aligned[i] and 
+                order_flow[i] > 0 and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND below 1d EMA50 (downtrend) AND volume surge AND session
-            elif close[i] < s1_1h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i] and session_filter[i]:
-                signals[i] = -0.20
+            # Short: price breaks below weekly liquidity low AND downtrend AND negative order flow AND volume surge
+            elif (close[i] < liquidity_low[i] and 
+                  close[i] < weekly_ema50_aligned[i] and 
+                  order_flow[i] < 0 and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below 1d EMA50 (trend change)
-            if close[i] < s1_1h[i] or close[i] < ema_1d_aligned[i]:
+            # Long exit: price falls below weekly liquidity low OR trend turns down
+            if (close[i] < liquidity_low[i] or 
+                close[i] < weekly_ema50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above 1d EMA50 (trend change)
-            if close[i] > r1_1h[i] or close[i] > ema_1d_aligned[i]:
+            # Short exit: price rises above weekly liquidity high OR trend turns up
+            if (close[i] > liquidity_high[i] or 
+                close[i] > weekly_ema50_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
