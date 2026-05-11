@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_PivotPoint_Bounce_1dATR_Filter
-Hypothesis: Trades reversals at daily pivot points (S1/S2 for longs, R1/R2 for shorts) with 12h confirmation.
-Uses price rejection at key levels with ATR-based volatility filter to avoid chop. Works in both bull and bear markets
-by fading extremes at institutional support/resistance. Low trade frequency expected (<30/year) to minimize fee drag.
+4h_Keltner_Breakout_1wTrend_Volume
+Hypothesis: Enters long when 4h price breaks above upper Keltner Channel with upward 1w trend and volume spike.
+Enters short when 4h price breaks below lower Keltner Channel with downward 1w trend and volume spike.
+Uses Keltner Channel (ATR-based) for volatility-adjusted breakouts, 1w EMA for trend filter, and volume confirmation to avoid false breakouts.
+Designed for low trade frequency (20-40 trades/year) to minimize fee flood and work in both bull and bear markets.
 """
 
-name = "12h_PivotPoint_Bounce_1dATR_Filter"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_1wTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,66 +17,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D Data for Pivot Points and ATR ===
+    # === 1W Data for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    
+    # === 1D Data for ATR and Volume Average ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate daily pivot points: P = (H+L+C)/3
-    pp_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Support and resistance levels
-    s1_1d = 2 * pp_1d - high_1d
-    s2_1d = pp_1d - (high_1d - low_1d)
-    r1_1d = 2 * pp_1d - low_1d
-    r2_1d = pp_1d + (high_1d - low_1d)
-    
-    # 1d ATR(14) for volatility filter
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    # True Range for ATR
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = tr2[0]  # first bar has no previous close
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align length
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_14_aligned = align_htf_to_ltf(prices, df_1d, atr_14)
+    atr_1d = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # Align pivot levels to 12h
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    # 20-period average volume on 1d
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # === 4h Keltner Channel (20, 2.0) ===
+    tr_4h1 = np.abs(high - low)
+    tr_4h2 = np.abs(high - np.roll(close, 1))
+    tr_4h3 = np.abs(low - np.roll(close, 1))
+    tr_4h1[0] = tr_4h2[0]
+    tr_4h = np.maximum(tr_4h1, np.maximum(tr_4h2, tr_4h3))
+    atr_4h = pd.Series(tr_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    ma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    kc_upper = ma_20 + 2.0 * atr_4h
+    kc_lower = ma_20 - 2.0 * atr_4h
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers ATR calculation)
-    start_idx = 30
+    start_idx = 60  # covers 20-period MA + ATR warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(atr_14_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volatility filter: only trade when ATR is above its 50-period MA (avoid chop)
-        atr_ma = pd.Series(atr_14_aligned[:i+1]).rolling(window=50, min_periods=50).mean().iloc[-1] if i >= 50 else np.nan
-        if np.isnan(atr_ma) or atr_14_aligned[i] < 0.8 * atr_ma:
+        if (np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(atr_1d_aligned[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,38 +87,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long near S1/S2: price rejects support with bullish close
-            if ((abs(close[i] - s1_aligned[i]) < 0.5 * atr_14_aligned[i] or 
-                 abs(close[i] - s2_aligned[i]) < 0.5 * atr_14_aligned[i]) and
-                close[i] > open_prices[i]):  # bullish candle
+            # Long: price breaks above upper KC with uptrend and volume spike
+            if (close[i] > kc_upper[i] and 
+                close[i] > ema20_1w_aligned[i] and
+                volume[i] > 1.5 * vol_ma_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short near R1/R2: price rejects resistance with bearish close
-            elif ((abs(close[i] - r1_aligned[i]) < 0.5 * atr_14_aligned[i] or 
-                   abs(close[i] - r2_aligned[i]) < 0.5 * atr_14_aligned[i]) and
-                  close[i] < open_prices[i]):  # bearish candle
+            # Short: price breaks below lower KC with downtrend and volume spike
+            elif (close[i] < kc_lower[i] and 
+                  close[i] < ema20_1w_aligned[i] and
+                  volume[i] > 1.5 * vol_ma_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches pivot point or shows rejection at resistance
-            if (close[i] > pp_aligned[i] or 
-                (abs(close[i] - r1_aligned[i]) < 0.5 * atr_14_aligned[i] and close[i] < open_prices[i])):
+            # Long exit: price closes below middle line (reversion to mean)
+            if close[i] < ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price reaches pivot point or shows rejection at support
-            if (close[i] < pp_aligned[i] or 
-                (abs(close[i] - s1_aligned[i]) < 0.5 * atr_14_aligned[i] and close[i] > open_prices[i])):
+            # Short exit: price closes above middle line
+            if close[i] > ma_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25  # maintain position
     
     return signals
-
-# Ensure open_prices is defined
-open_prices = prices['open'].values if 'prices' in locals() else np.array([])  # This line will be replaced in actual context
-# Fix: move open_prices extraction to top
-# Actually, let's restructure properly:
