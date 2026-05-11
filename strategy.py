@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-12h_12H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-Hypothesis: Camarilla R1/S1 breakout with 1d EMA trend filter and volume spike confirmation.
-Works in bull markets (breakouts continue) and bear markets (mean reversion at S1/R1).
-Target: 50-150 trades over 4 years on 12h timeframe.
+4h_KAMA_Trend_Donchian_Exit_V1
+Hypothesis: KAMA (adaptive trend) on 4h determines direction, Donchian(20) breakout triggers entry with volume confirmation, opposite Donchian break exits. Works in trending and ranging markets via adaptive KAMA smoothing.
+Target: 50-150 trades over 4 years on 4h timeframe.
 """
 
-name = "12h_12H_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "4h_KAMA_Trend_Donchian_Exit_V1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -24,46 +23,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Data for Camarilla Pivots (previous day) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # === KAMA Trend Calculation (4h) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))  # 10-period change
+    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # 10-period volatility
+    er = np.zeros_like(change)
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # seed
+    for i in range(10, n):
+        if not np.isnan(sc[i-10]):
+            kama[i] = kama[i-1] + sc[i-10] * (close[i] - kama[i-1])
+        else:
+            kama[i] = kama[i-1]
     
-    # Previous day's OHLC
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # === Donchian Channels (20) ===
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Camarilla levels for previous day
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align to 12h
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # === 1D Data for Trend Filter ===
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === Volume Spike Filter (12h) ===
+    # === Volume Filter (20-period average) ===
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma20
-    vol_spike = vol_ratio > 1.5  # 50% above average
+    vol_filter = volume > vol_ma20  # above average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = max(60, 50)
+    start_idx = 30  # after KAMA and Donchian warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_spike[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(vol_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,24 +67,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume spike and 1d uptrend
-            if close[i] > R1_aligned[i] and vol_spike[i] and ema50_1d_aligned[i] < close[i]:
+            # Long: price breaks above Donchian high with volume and KAMA uptrend
+            if close[i] > high_20[i] and vol_filter[i] and kama[i] > close[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume spike and 1d downtrend
-            elif close[i] < S1_aligned[i] and vol_spike[i] and ema50_1d_aligned[i] > close[i]:
+            # Short: price breaks below Donchian low with volume and KAMA downtrend
+            elif close[i] < low_20[i] and vol_filter[i] and kama[i] < close[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or volume dries up
-            if close[i] < S1_aligned[i] or vol_ratio[i] < 0.8:
+            # Long exit: price breaks below Donchian low (trend reversal)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price breaks above R1 or volume dries up
-            if close[i] > R1_aligned[i] or vol_ratio[i] < 0.8:
+            # Short exit: price breaks above Donchian high (trend reversal)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
