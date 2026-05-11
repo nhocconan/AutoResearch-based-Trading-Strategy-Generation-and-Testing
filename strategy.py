@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-6h_OrderFlow_Imbalance_VWAP_Divergence
-Hypothesis: Uses 6h VWAP and order flow imbalance (buying vs selling pressure) to detect institutional accumulation/distribution.
-Combines with 1d trend filter (EMA50) and volume confirmation to trade in direction of higher timeframe trend.
-Works in both bull and bear markets by following institutional flow while avoiding counter-trend whipsaws.
-Target: 15-35 trades/year on 6f timeframe.
+4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+Hypothesis: 4-hour chart breakouts at daily Camarilla R1/S1 levels, filtered by 12-hour EMA trend and volume spikes.
+Trades in direction of 12-hour trend using previous day's Camarilla levels. Volume confirmation filters false breakouts.
+Designed for moderate trade frequency (~40-60/year) to balance opportunity and fee drag. Works in bull/bear by following higher timeframe trend.
 """
 
-name = "6h_OrderFlow_Imbalance_VWAP_Divergence"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +15,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 50:
         return np.zeros(n)
     
@@ -25,49 +24,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Higher Timeframe Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    # === 12-Hour Data for Trend Filter and Camarilla Levels ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # === 6h VWAP Calculation (Typical Price * Volume) / Cumulative Volume ===
-    typical_price = (high + low + close) / 3.0
-    pv = typical_price * volume
-    cum_pv = np.cumsum(pv)
-    cum_vol = np.cumsum(volume)
-    # Avoid division by zero
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
+    # 12h EMA50 for trend
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # === Order Flow Imbalance: Buying Pressure vs Selling Pressure ===
-    # Buying pressure: close in upper half of range
-    # Selling pressure: close in lower half of range
-    range_hl = high - low
-    # Avoid division by zero
-    buying_pressure = np.divide(close - low, range_hl, out=np.zeros_like(close), where=range_hl!=0)
-    selling_pressure = np.divide(high - close, range_hl, out=np.zeros_like(close), where=range_hl!=0)
+    # Previous 12h bar's OHLC for Camarilla calculation (yesterday's levels)
+    ph_12h = high_12h  # previous 12h bar's high
+    pl_12h = low_12h   # previous 12h bar's low
+    pc_12h = df_12h['close'].values  # previous 12h bar's close
     
-    # Smoothed pressure difference (3-period EMA)
-    pressure_diff = buying_pressure - selling_pressure  # -1 to +1
-    pressure_ema = pd.Series(pressure_diff).ewm(span=3, adjust=False, min_periods=3).mean().values
+    # Camarilla levels: R1, S1
+    # R1 = close + 1.1 * (high - low) / 12
+    # S1 = close - 1.1 * (high - low) / 12
+    camarilla_r1 = pc_12h + 1.1 * (ph_12h - pl_12h) / 12
+    camarilla_s1 = pc_12h - 1.1 * (ph_12h - pl_12h) / 12
     
-    # === Volume Filter: 1.8x 20-period EMA ===
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s1)
+    
+    # === Volume Filter: 1.5x 20-period EMA on 4h ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 1.8
+    volume_spike = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers EMA50 and EMA3)
-    start_idx = 50
+    # Start after warmup (covers 12h EMA50)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vwap[i]) or 
-            np.isnan(pressure_ema[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,30 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above VWAP + buying pressure + uptrend + volume spike
-            if (close[i] > vwap[i] and 
-                pressure_ema[i] > 0.15 and 
-                close[i] > ema50_1d_aligned[i] and 
+            # Long: price breaks above R1 with uptrend and volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema50_12h_aligned[i] and 
                 volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP + selling pressure + downtrend + volume spike
-            elif (close[i] < vwap[i] and 
-                  pressure_ema[i] < -0.15 and 
-                  close[i] < ema50_1d_aligned[i] and 
+            # Short: price breaks below S1 with downtrend and volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
                   volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below VWAP OR selling pressure dominates
-            if (close[i] < vwap[i] or pressure_ema[i] < -0.1):
+            # Long exit: price closes below S1 (mean reversion to midpoint)
+            if close[i] < s1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above VWAP OR buying pressure dominates
-            if (close[i] > vwap[i] or pressure_ema[i] > 0.1):
+            # Short exit: price closes above R1 (mean reversion to midpoint)
+            if close[i] > r1_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
