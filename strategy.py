@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_WeeklyTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -35,38 +35,27 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Calculate Camarilla levels from previous day's range
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Daily Keltner Channel (1d): EMA20 ± 2*ATR(10)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema20 + 2 * atr10
+    kc_lower = ema20 - 2 * atr10
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA, volume, and Camarilla
+    start_idx = 40  # Need enough data for EMA, ATR, and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(R3[i]) or np.isnan(S3[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if not session_filter[i]:
+            np.isnan(ema20[i]) or np.isnan(atr10[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,24 +64,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R3 + weekly uptrend + volume filter
-            if close[i] > R3[i] and trend_up[i] and volume_filter[i]:
+            # Long: Close above Keltner upper + weekly uptrend + volume filter
+            if close[i] > kc_upper[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S3 + weekly downtrend + volume filter
-            elif close[i] < S3[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Close below Keltner lower + weekly downtrend + volume filter
+            elif close[i] < kc_lower[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below S3 or weekly trend down
-            if close[i] < S3[i] or not trend_up[i]:
+            # Long exit: Close below Keltner lower or weekly trend down
+            if close[i] < kc_lower[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above R3 or weekly trend up
-            if close[i] > R3[i] or trend_up[i]:
+            # Short exit: Close above Keltner upper or weekly trend up
+            if close[i] > kc_upper[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
