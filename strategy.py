@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 6h_Ichimoku_Cloud_Breakout
-# Hypothesis: Uses daily Ichimoku cloud (Tenkan/Kijun + Senkou Span A/B) as trend filter and
-# 6h price breaks above/below cloud with momentum confirmation (TK cross) for entries.
-# Works in bull markets by buying cloud breakouts in uptrends, and in bear markets by
-# selling breakdowns in downtrends. The cloud acts as dynamic support/resistance.
-# Daily timeframe ensures fewer, higher-quality signals to avoid fee drag.
+# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
+# Hypothesis: Camarilla pivot level breaks (R1/S1) with 12h trend confirmation and volume surge.
+# Long when price breaks above R1 in a 12h uptrend with volume surge.
+# Short when price breaks below S1 in a 12h downtrend with volume surge.
+# Exits when price returns to the Camarilla mid-point (C) or trend reverses.
+# Designed for 4h timeframe to work in both bull and bear markets by using 12h trend filter.
+# Uses discrete position sizing (0.25) to limit turnover and fee drag.
 
-name = "6h_Ichimoku_Cloud_Breakout"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -16,62 +17,81 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Ichimoku
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get 12h data for trend
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # Previous day's OHLC for Camarilla calculation (using 12h data as proxy for daily)
+    # Since we don't have 1d data directly, we'll use the last complete 12h bar's data
+    # We need to look back to get the previous day's range
+    # For simplicity, we'll use the 12h data to approximate daily range
+    # In practice, Camarilla uses prior day's OHLC, but we approximate with 2-period 12h aggregation
+    # Alternative: get 1d data if available, but per rules we use available TFs
+    
+    # Calculate Camarilla levels from previous day's range
+    # We'll use 12h data and assume 2 bars = 1 day for approximation
+    # Better: resample 12h to daily? No, per rules: use get_htf_data for actual TF
+    # Since we can't get 1d directly in this context, we'll use the prior 12h bar's high/low
+    # This is an approximation but follows the spirit of the strategy
+    
+    # Actually, let's use the 12h data to get the prior session's range
+    # We'll shift the 12h data by 1 to get the previous period
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    
+    # Calculate Camarilla for each 12h bar using that bar's OHLC (standard approach)
+    # Camarilla levels:
+    # H = high, L = low, C = close
+    # R4 = C + (H-L)*1.5/2
+    # R3 = C + (H-L)*1.25/2
+    # R2 = C + (H-L)*1.16/2
+    # R1 = C + (H-L)*1.0833/2
+    # S1 = C - (H-L)*1.0833/2
+    # S2 = C - (H-L)*1.16/2
+    # S3 = C - (H-L)*1.25/2
+    # S4 = C - (H-L)*1.5/2
+    # We only need R1 and S1 for entry, and C (pivot) for exit
+    
+    H = high_12h
+    L = low_12h
+    C = close_12h
+    range_hl = H - L
+    
+    R1 = C + range_hl * 1.0833 / 2
+    S1 = C - range_hl * 1.0833 / 2
+    Pivot = (H + L + C) / 3  # Standard pivot, though Camarilla uses close as pivot
+    
+    # Camarilla actually uses close as the pivot point for R/S calculations
+    # But for exit we'll use the Camarilla pivot point which is (H+L+C)/3
+    
+    # Calculate the levels
+    R1 = C + (H - L) * 1.0833 / 2
+    S1 = C - (H - L) * 1.0833 / 2
+    Camarilla_Pivot = (H + L + C) / 3  # This is the actual Camarilla pivot
+    
+    # Align Camarilla levels to 4h
+    R1_4h = align_htf_to_ltf(prices, df_12h, R1)
+    S1_4h = align_htf_to_ltf(prices, df_12h, S1)
+    Pivot_4h = align_htf_to_ltf(prices, df_12h, Camarilla_Pivot)
+    
+    # 12h EMA34 for trend (smoother than EMA50 for less whipsaw)
+    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_12h_slope = ema_34_12h - np.roll(ema_34_12h, 1)
+    ema_34_12h_slope[0] = 0
+    ema_34_12h_slope = pd.Series(ema_34_12h_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    ema_34_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h_slope)
+    
+    # 4h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # --- Daily Ichimoku components ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
-    period_tenkan = 9
-    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() +
-                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
-    tenkan_sen = tenkan_sen.values
-    
-    # Kijun-sen (Base Line): (26-period high + low) / 2
-    period_kijun = 26
-    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() +
-                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
-    kijun_sen = kijun_sen.values
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + low) / 2
-    period_senkou_b = 52
-    senkou_span_b = (pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() +
-                     pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
-    senkou_span_b = senkou_span_b.values
-    
-    # Align Ichimoku components to 6h
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
-    cloud_bottom = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
-    
-    # TK Cross (6h) for momentum confirmation
-    tk_cross = (tenkan_sen_6h - kijun_sen_6h)
-    tk_cross_prev = np.roll(tk_cross, 1)
-    tk_cross_prev[0] = 0
-    tk_cross_up = (tk_cross > 0) & (tk_cross_prev <= 0)
-    tk_cross_down = (tk_cross < 0) & (tk_cross_prev >= 0)
     
     # Volume confirmation: volume > 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -80,43 +100,45 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for Ichimoku (52) and TK cross
-    start_idx = 52
+    # Warmup: enough for EMA34 (34) and smoothing (3)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
-            np.isnan(tk_cross[i]) or np.isnan(tk_cross_prev[i])):
+        if (np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or np.isnan(Pivot_4h[i]) or
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(ema_34_12h_slope_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Price relative to cloud
-        price_above_cloud = close[i] > cloud_top[i]
-        price_below_cloud = close[i] < cloud_bottom[i]
+        # Trend direction from 12h EMA34 slope
+        uptrend = ema_34_12h_slope_aligned[i] > 0
+        downtrend = ema_34_12h_slope_aligned[i] < 0
         
         if position == 0:
-            # Long: price breaks above cloud + TK cross up + volume surge
-            if price_above_cloud and tk_cross_up[i] and vol_surge[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below cloud + TK cross down + volume surge
-            elif price_below_cloud and tk_cross_down[i] and vol_surge[i]:
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout with volume surge
+            if uptrend and vol_surge[i]:
+                # Long: price breaks above R1
+                if close[i] > R1_4h[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif downtrend and vol_surge[i]:
+                # Short: price breaks below S1
+                if close[i] < S1_4h[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
             if position == 1:
-                # Exit long: price crosses below cloud OR TK cross down
-                if close[i] < cloud_top[i] or tk_cross_down[i]:
+                # Exit long: price returns to pivot OR trend reverses
+                if close[i] <= Pivot_4h[i] or downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses above cloud OR TK cross up
-                if close[i] > cloud_bottom[i] or tk_cross_up[i]:
+                # Exit short: price returns to pivot OR trend reverses
+                if close[i] >= Pivot_4h[i] or uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
