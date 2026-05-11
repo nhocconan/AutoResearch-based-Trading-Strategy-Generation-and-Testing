@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_RSI_Bollinger_Band_Squeeze"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_1wVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Bollinger Bands: middle=20, std=2
+    # 1d trend: close above/below 1d EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    bb_middle = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    bb_width_ma10 = pd.Series(bb_width).rolling(window=10, min_periods=10).mean().values
-    bb_width_ma10_aligned = align_htf_to_ltf(prices, df_1d, bb_width_ma10)
-    bb_width_threshold = 0.05  # Squeeze threshold
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    trend_up = close > ema_1d_aligned
     
-    # 6h RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # 1w volume filter: volume > 1.5x 8-week average
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 8:
+        return np.zeros(n)
+    vol_1w = df_1w['volume'].values
+    vol_ma8_1w = pd.Series(vol_1w).rolling(window=8, min_periods=8).mean().values
+    vol_ma8_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma8_1w)
+    volume_filter = volume > 1.5 * vol_ma8_1w_aligned
     
-    # 6h Bollinger Bands for entry/exit
-    bb_middle_6h = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std_6h = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper_6h = bb_middle_6h + 2 * bb_std_6h
-    bb_lower_6h = bb_middle_6h - 2 * bb_std_6h
+    # Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    # Camarilla R1, S1: close +/- 1.1/12 * range
+    r1 = close_1d + (1.1/12) * range_1d
+    s1 = close_1d - (1.1/12) * range_1d
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -53,12 +53,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for BB and RSI
+    start_idx = 34  # Need enough data for EMA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(bb_width_ma10_aligned[i]) or
-            np.isnan(bb_upper_6h[i]) or np.isnan(bb_lower_6h[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma8_1w_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,28 +74,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Bollinger Squeeze condition: low volatility
-        squeeze = bb_width_ma10_aligned[i] < bb_width_threshold
-        
         if position == 0:
-            # Long: RSI < 30 (oversold) + squeeze + price at lower band
-            if rsi[i] < 30 and squeeze and close[i] <= bb_lower_6h[i]:
+            # Long: Close above R1 + 1d uptrend + volume filter
+            if close[i] > r1_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) + squeeze + price at upper band
-            elif rsi[i] > 70 and squeeze and close[i] >= bb_upper_6h[i]:
+            # Short: Close below S1 + 1d downtrend + volume filter
+            elif close[i] < s1_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 50 or price at upper band
-            if rsi[i] > 50 or close[i] >= bb_upper_6h[i]:
+            # Long exit: Close below S1 or 1d trend down
+            if close[i] < s1_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 50 or price at lower band
-            if rsi[i] < 50 or close[i] <= bb_lower_6h[i]:
+            # Short exit: Close above R1 or 1d trend up
+            if close[i] > r1_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
