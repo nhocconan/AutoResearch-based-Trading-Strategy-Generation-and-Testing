@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ElderRay_ForceIndex_1dTrend"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,61 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Elder Ray and Force Index (Elder's system)
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 13:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # 13-period EMA for Elder Ray calculation
-    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # 1d EMA34 for trend
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
     
-    # Elder Ray components: Bull Power and Bear Power
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema13_1d
+    # Calculate Camarilla levels (R3, S3) from previous 1d period
+    R3 = np.full(len(high_1d), np.nan)
+    S3 = np.full(len(high_1d), np.nan)
     
-    # Force Index: (Close - Close_prev) * Volume
-    close_diff_1d = np.diff(close_1d, prepend=close_1d[0])
-    force_index_1d = close_diff_1d * volume_1d
+    for i in range(1, len(high_1d)):
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        if range_val > 0:
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Smooth Force Index with 2-period EMA for signal line
-    force_ema2_1d = pd.Series(force_index_1d).ewm(span=2, adjust=False, min_periods=2).mean().values
+    # Volume moving average (20-period) for confirmation
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            if i > 0:
+                vol_ma20[i] = np.mean(volume[:i+1])
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # Get 6h data for entry timing
-    close_6h = close
-    high_6h = high
-    low_6h = low
-    volume_6h = volume
-    
-    # 6h RSI(14) for overbought/oversold filter
-    delta = np.diff(close_6h, prepend=close_6h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi_6h = 100 - (100 / (1 + rs))
-    
-    # Align 1d indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    force_ema2_aligned = align_htf_to_ltf(prices, df_1d, force_ema2_1d)
+    # Align indicators to 4h timeframe
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 14)  # Need enough data for indicators
+    start_idx = 40  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or
-            np.isnan(force_ema2_aligned[i]) or
-            np.isnan(rsi_6h[i])):
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
+            np.isnan(trend_up_1d_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,30 +76,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Bull Power > 0 (bulls in control) + Force Index rising + RSI not overbought
-            if (bull_power_aligned[i] > 0 and 
-                force_ema2_aligned[i] > force_ema2_aligned[i-1] and
-                rsi_6h[i] < 70):
+            # Long: price breaks above R3 + uptrend + volume confirmation
+            if (close[i] > R3_aligned[i] and 
+                trend_up_1d_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) + Force Index falling + RSI not oversold
-            elif (bear_power_aligned[i] < 0 and 
-                  force_ema2_aligned[i] < force_ema2_aligned[i-1] and
-                  rsi_6h[i] > 30):
+            # Short: price breaks below S3 + downtrend + volume confirmation
+            elif (close[i] < S3_aligned[i] and 
+                  not trend_up_1d_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Bull Power turns negative OR Force Index turns down
-            if (bull_power_aligned[i] <= 0 or 
-                force_ema2_aligned[i] < force_ema2_aligned[i-1]):
+            # Long exit: price breaks below S3 or trend changes
+            if (close[i] < S3_aligned[i] or 
+                not trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Bear Power turns positive OR Force Index turns up
-            if (bear_power_aligned[i] >= 0 or 
-                force_ema2_aligned[i] > force_ema2_aligned[i-1]):
+            # Short exit: price breaks above R3 or trend changes
+            if (close[i] > R3_aligned[i] or 
+                trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
