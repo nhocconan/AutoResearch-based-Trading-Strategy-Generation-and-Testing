@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4H_KAMA_Trend_Plus_RSI_With_Chop_Filter
-Hypothesis: KAMA adapts to market noise, providing robust trend direction. 
-RSI(14) provides overbought/oversold signals within the trend. 
-Choppiness index (14) filters ranging markets (CHOP > 61.8) to avoid false signals.
-Trades only when KAMA trend aligns with RSI extremes and market is trending (CHOP < 61.8).
-Designed for low turnover (~25-35 trades/year) to minimize fee drag in 2025 ranging markets.
+12H_1W_Trend_Retracement_With_Volume
+Hypothesis: Strong weekly trend with 12h retracement entries. Uses 1w EMA50 for trend direction, 
+12h pullback to EMA21 for entry, and volume confirmation. Weekly trend filter reduces false signals 
+in ranging markets. Designed for low turnover (~15-25 trades/year) to minimize fee drag.
+Works in both bull and bear by following the dominant weekly trend.
 """
 
-name = "4H_KAMA_Trend_Plus_RSI_With_Chop_Filter"
-timeframe = "4h"
+name = "12H_1W_Trend_Retracement_With_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -26,51 +25,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA Calculation (ER=10, Fast=2, Slow=30) ===
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === 12h Indicators ===
+    # EMA21 for retracement entries
+    ema21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
     
-    # === RSI(14) ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === Choppiness Index (14) ===
-    atr = np.zeros_like(close)
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first TR is just high-low
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False).mean().values
-    
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = np.where(sum_atr != 0, 
-                    100 * np.log10(sum_atr / (highest_high - lowest_low)) / np.log10(14), 
-                    50)
-    
-    # === Load Daily Trend Filter (EMA 50) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === Volume Spike Filter (20-period EMA) ===
+    # Volume confirmation: 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
+    
+    # === Weekly Trend Filter (EMA50) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # === Signal Parameters ===
     position_size = 0.25
@@ -78,13 +45,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for all indicators)
-    start_idx = 50  # covers EMA50, RSI, CHOP, KAMA
+    # Start after warmup (need enough data for weekly EMA and 12h EMA)
+    start_idx = 60  # covers EMA21 and weekly EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema21[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -93,34 +60,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        trending_market = chop[i] < 61.8  # Chop < 61.8 = trending
+        # Trend direction from weekly EMA50
+        weekly_uptrend = close[i] > ema50_1w_aligned[i]
+        weekly_downtrend = close[i] < ema50_1w_aligned[i]
+        
+        # Price position relative to 12h EMA21 (retracement signals)
+        price_near_ema21_from_below = close[i] >= ema21[i] * 0.995 and close[i] <= ema21[i]  # Within 0.5% below EMA21
+        price_near_ema21_from_above = close[i] <= ema21[i] * 1.005 and close[i] >= ema21[i]  # Within 0.5% above EMA21
         
         if position == 0:
-            # Long: Price above KAMA (uptrend) + RSI oversold + trending market + volume spike
-            if price_above_kama and rsi_oversold and trending_market and volume_ok[i]:
+            # Long: Weekly uptrend + price retracing to EMA21 from below + volume
+            if weekly_uptrend and price_near_ema21_from_below and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price below KAMA (downtrend) + RSI overbought + trending market + volume spike
-            elif price_below_kama and rsi_overbought and trending_market and volume_ok[i]:
+            # Short: Weekly downtrend + price retracing to EMA21 from above + volume
+            elif weekly_downtrend and price_near_ema21_from_above and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: trend reversal or extended move
             if position == 1:
-                # Exit: Price crosses below KAMA OR RSI overbought (take profit in uptrend)
-                if close[i] < kama[i] or rsi[i] > 70:
+                # Exit: weekly trend turns down OR price moves significantly above EMA21
+                if not weekly_uptrend or close[i] > ema21[i] * 1.02:  # 2% above EMA21
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above KAMA OR RSI oversold (take profit in downtrend)
-                if close[i] > kama[i] or rsi[i] < 30:
+                # Exit: weekly trend turns up OR price moves significantly below EMA21
+                if not weekly_downtrend or close[i] < ema21[i] * 0.98:  # 2% below EMA21
                     signals[i] = 0.0
                     position = 0
                 else:
