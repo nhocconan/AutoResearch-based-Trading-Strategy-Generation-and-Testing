@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_4h_1d_Camarilla_Squeeze_Breakout"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h and 1d data
-    df_12h = get_htf_data(prices, '12h')
+    # Get 4h and 1d data for direction and regime
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_4h) < 20 or len(df_1d) < 20:
         return np.zeros(n)
     
-    # 12h EMA50 for trend
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_12h = close_12h > ema50_12h
+    # 4h Close for trend filter
+    close_4h = df_4h['close'].values
+    # 4h EMA20 for trend
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_4h = close_4h > ema20_4h
     
-    # 1d Camarilla pivot levels (using previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1d Bollinger Bands for squeeze detection (20, 2.0)
     close_1d = df_1d['close'].values
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20_1d + 2 * std20_1d
+    lower_bb = sma20_1d - 2 * std20_1d
+    bb_width = (upper_bb - lower_bb) / sma20_1d
+    # Squeeze: BB width below 20-period percentile 30%
+    bb_width_percentile = pd.Series(bb_width).rolling(window=20, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0, raw=False
+    ).values
+    squeeze = bb_width_percentile < 0.3
     
-    # Calculate pivot and levels from previous day's data
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_ = high_1d - low_1d
-    r1 = close_1d + (range_ * 1.1 / 12)
-    s1 = close_1d - (range_ * 1.1 / 12)
+    # 1h Camarilla levels (based on prior 1h bar)
+    # We'll calculate these in the loop using prior bar data
     
-    # Volume spike detection (20-period average)
+    # Align higher timeframe signals to 1h
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    squeeze_aligned = align_htf_to_ltf(prices, df_1d, squeeze)
+    
+    # Pre-calculate volume average for confirmation
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -48,21 +58,15 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # Align 12h trend and 1d Camarilla levels to 4h
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 50)
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(trend_12h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
+        if (np.isnan(trend_4h_aligned[i]) or 
+            np.isnan(squeeze_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -71,32 +75,62 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Calculate Camarilla levels for current 1h bar using prior bar
+        if i >= 1:
+            # Use prior bar's OHLC for Camarilla calculation
+            prev_high = high[i-1]
+            prev_low = low[i-1]
+            prev_close = close[i-1]
+            range_ = prev_high - prev_low
+            
+            if range_ > 0:
+                # Camarilla levels
+                camarilla_h5 = prev_close + 1.1 * range_ / 12  # Resistance 5
+                camarilla_h4 = prev_close + 1.1 * range_ / 6   # Resistance 4
+                camarilla_h3 = prev_close + 1.1 * range_ / 4   # Resistance 3
+                camarilla_l3 = prev_close - 1.1 * range_ / 4   # Support 3
+                camarilla_l4 = prev_close - 1.1 * range_ / 6   # Support 4
+                camarilla_l5 = prev_close - 1.1 * range_ / 12  # Support 5
+            else:
+                camarilla_h5 = camarilla_h4 = camarilla_h3 = prev_close
+                camarilla_l3 = camarilla_l4 = camarilla_l5 = prev_close
+        else:
+            # Not enough data, skip
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long: price breaks above R1 + 12h uptrend + volume spike
-            if (close[i] > r1_aligned[i] and 
-                trend_12h_aligned[i] and 
+            # Long: 4h uptrend + 1d squeeze + price breaks above H4 with volume
+            if (trend_4h_aligned[i] and 
+                squeeze_aligned[i] and 
+                close[i] > camarilla_h4 and 
                 volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S1 + 12h downtrend + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  not trend_12h_aligned[i] and 
+            # Short: 4h downtrend + 1d squeeze + price breaks below L4 with volume
+            elif (not trend_4h_aligned[i] and 
+                  squeeze_aligned[i] and 
+                  close[i] < camarilla_l4 and 
                   volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S1 or 12h trend turns down
-            if (close[i] < s1_aligned[i] or not trend_12h_aligned[i]):
+            # Long exit: trend breaks down or price reaches H5 (take profit)
+            if (not trend_4h_aligned[i] or close[i] >= camarilla_h5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price closes above R1 or 12h trend turns up
-            if (close[i] > r1_aligned[i] or trend_12h_aligned[i]):
+            # Short exit: trend breaks up or price reaches L5 (take profit)
+            if (trend_4h_aligned[i] or close[i] <= camarilla_l5):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
