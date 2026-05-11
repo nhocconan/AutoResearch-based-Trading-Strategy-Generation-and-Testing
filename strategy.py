@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-"""
-12h_TRIX_VolumeSpike_WeeklyTrend
-Hypothesis: Use TRIX (1-period rate-of-change of triple EMA) on weekly timeframe for trend direction, combined with volume spike on 12h for entry timing. Long when weekly TRIX > 0 and 12h price breaks above 12-period high with volume spike; short when weekly TRIX < 0 and price breaks below 12-period low with volume spike. Designed for low trade frequency (~20-40/year) to avoid fee drag, works in both bull (riding weekly uptrend) and bear (selling weekly downtrend) markets.
-"""
+# 1d_KAMA_Trend_With_VolumeSpike
+# Hypothesis: Use 1d KAMA to capture trend direction, RSI to filter overbought/oversold conditions, and volume spike for confirmation. Works in both bull and bear markets by following KAMA trend with volume confirmation. Target: 15-25 trades per year on 1d timeframe.
 
-name = "12h_TRIX_VolumeSpike_WeeklyTrend"
-timeframe = "12h"
+name = "1d_KAMA_Trend_With_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,42 +19,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Data for TRIX Trend Filter ===
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 30:
+    # === 1W Data for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    close_weekly = df_weekly['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate TRIX: 1-period ROC of triple EMA (15-period each)
-    ema1 = pd.Series(close_weekly).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    # TRIX = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix_raw = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
-    trix = trix_raw.fillna(0).values  # Handle NaN at start
+    # 1W KAMA for trend direction
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
+    volatility = np.abs(np.diff(close_1w))
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    # KAMA calculation
+    kama = np.zeros_like(close_1w)
+    kama[0] = close_1w[0]
+    for i in range(1, len(close_1w)):
+        kama[i] = kama[i-1] + sc[i] * (close_1w[i] - kama[i-1])
     
-    # Align weekly TRIX to 12h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_weekly, trix)
+    # Align 1W KAMA to 1d
+    kama_aligned = align_htf_to_ltf(prices, df_1w, kama)
     
-    # === 12h Indicators for Entry Timing ===
-    # 12-period high/low for breakout detection
-    high_12 = pd.Series(high).rolling(window=12, min_periods=12).max().values
-    low_12 = pd.Series(low).rolling(window=12, min_periods=12).min().values
+    # === 1D Indicators ===
+    # RSI(14) on 1d close
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume spike: current volume > 1.5x 20-period average
+    # Volume spike: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if np.isnan(trix_aligned[i]) or np.isnan(high_12[i]) or np.isnan(low_12[i]):
+        if (np.isnan(kama_aligned[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,24 +74,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: weekly TRIX > 0 (uptrend) AND price breaks above 12-period high AND volume spike
-            if trix_aligned[i] > 0 and close[i] > high_12[i] and volume_spike[i]:
+            # Long: price above KAMA (uptrend) AND RSI not overbought AND volume spike
+            if close[i] > kama_aligned[i] and rsi[i] < 70 and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly TRIX < 0 (downtrend) AND price breaks below 12-period low AND volume spike
-            elif trix_aligned[i] < 0 and close[i] < low_12[i] and volume_spike[i]:
+            # Short: price below KAMA (downtrend) AND RSI not oversold AND volume spike
+            elif close[i] < kama_aligned[i] and rsi[i] > 30 and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: weekly TRIX turns negative OR price breaks below 12-period low
-            if trix_aligned[i] < 0 or close[i] < low_12[i]:
+            # Long exit: price crosses below KAMA OR RSI overbought
+            if close[i] < kama_aligned[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: weekly TRIX turns positive OR price breaks above 12-period high
-            if trix_aligned[i] > 0 or close[i] > high_12[i]:
+            # Short exit: price crosses above KAMA OR RSI oversold
+            if close[i] > kama_aligned[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
