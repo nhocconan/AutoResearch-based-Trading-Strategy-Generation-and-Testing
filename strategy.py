@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_TrendReversal_v1
-Hypothesis: Combines 4h trend direction (via EMA50) with 1d mean reversion signals
-(RSI extremes) and volume confirmation on 1h timeframe. Uses 4h for primary trend
-direction to avoid counter-trend trades, 1d RSI for overextension signals, and
-1h for precise entry timing. Session filter (08-20 UTC) reduces noise. Designed
-for low trade frequency (target: 15-35 trades/year) by requiring confluence of
-trend, mean reversion, and volume. Works in bull/bear markets by following
-4h trend while fading 1d extremes.
+6h_Weekly_Pivot_MeanReversion_v1
+Hypothesis: Mean reversion at weekly pivot levels (S1/S2/R1/R2) with 1d trend filter.
+In ranging markets, price tends to revert from S1/R1 toward pivot. In trending markets,
+breakouts through S2/R2 with trend alignment continue. Works in both bull/bear by
+adapting to regime via 1d EMA filter. Targets low-frequency, high-conviction trades.
 """
-
-name = "1h_4h1d_TrendReversal_v1"
-timeframe = "1h"
+name = "6h_Weekly_Pivot_MeanReversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,75 +19,68 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
         return np.zeros(n)
     
-    # Get 1d data for RSI mean reversion
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1h price data
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 4h EMA50 for trend direction ---
-    close_4h = df_4h['close'].values
-    ema_50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # --- Weekly Pivot Calculation (using prior week) ---
+    # Prior week high, low, close
+    wh = df_1w['high'].shift(1).values  # shift to use prior week only
+    wl = df_1w['low'].shift(1).values
+    wc = df_1w['close'].shift(1).values
     
-    # --- 1d RSI(14) for mean reversion ---
+    # Pivot point and support/resistance levels
+    pivot = (wh + wl + wc) / 3.0
+    s1 = (2 * pivot) - wh
+    s2 = pivot - (wh - wl)
+    r1 = (2 * pivot) - wl
+    r2 = pivot + (wh - wl)
+    
+    # Align weekly levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    
+    # --- 1d Trend Filter (EMA34) ---
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi_14 = 100 - (100 / (1 + rs))
-    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14)
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # --- 1h volume spike detection (20-period) ---
+    # --- Volume Spike Detection (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma!=0)
+    vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for indicators)
-    start_idx = 60
+    # Start after warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or np.isnan(rsi_14_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(ema_34_aligned[i]) or
             np.isnan(vol_ratio[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
-            # Outside session: maintain current position or flat
-            if position == 1:
-                signals[i] = 0.20
-            elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
@@ -100,35 +89,38 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if position == 0:
-            # Long: 4h uptrend (price > EMA50) + 1d oversold (RSI < 30) + volume spike
-            if (close[i] > ema_50_4h_aligned[i] and
-                rsi_14_aligned[i] < 30 and
-                volume_spike):
-                signals[i] = 0.20
+            # Long setup: price near S1/S2 with bullish alignment
+            near_s1 = low[i] <= s1_aligned[i] * 1.002  # within 0.2% of S1
+            near_s2 = low[i] <= s2_aligned[i] * 1.002  # within 0.2% of S2
+            bullish = close[i] > ema_34_aligned[i]
+            
+            if (near_s1 or near_s2) and bullish and volume_spike:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend (price < EMA50) + 1d overbought (RSI > 70) + volume spike
-            elif (close[i] < ema_50_4h_aligned[i] and
-                  rsi_14_aligned[i] > 70 and
-                  volume_spike):
-                signals[i] = -0.20
+            
+            # Short setup: price near R1/R2 with bearish alignment
+            near_r1 = high[i] >= r1_aligned[i] * 0.998  # within 0.2% of R1
+            near_r2 = high[i] >= r2_aligned[i] * 0.998  # within 0.2% of R2
+            bearish = close[i] < ema_34_aligned[i]
+            
+            if (near_r1 or near_r2) and bearish and volume_spike:
+                signals[i] = -0.25
                 position = -1
-        else:
-            # Exit conditions
-            if position == 1:
-                # Exit long: 4h trend breaks down OR 1d RSI returns to neutral (>50)
-                if (close[i] < ema_50_4h_aligned[i] or
-                    rsi_14_aligned[i] > 50):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.20
-            elif position == -1:
-                # Exit short: 4h trend breaks up OR 1d RSI returns to neutral (<50)
-                if (close[i] > ema_50_4h_aligned[i] or
-                    rsi_14_aligned[i] < 50):
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.20
+        
+        elif position == 1:
+            # Exit long: price reaches pivot or shows weakness
+            if close[i] >= pivot_aligned[i] * 0.999 or close[i] < ema_34_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        
+        elif position == -1:
+            # Exit short: price reaches pivot or shows strength
+            if close[i] <= pivot_aligned[i] * 1.001 or close[i] > ema_34_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
