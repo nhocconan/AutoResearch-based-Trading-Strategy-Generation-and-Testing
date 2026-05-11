@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-6h_Ichimoku_KumoBreakout_1dTrend_MultiTF_Filter
-Hypothesis: Use Ichimoku cloud (Tenkan/Kijun/Senkou A/B) on 6h with trend filter from 1d EMA50 and volume confirmation.
-Trades only when price breaks above/below cloud with TK cross in same direction, aligned with 1d trend.
-Designed for 60-120 total trades over 4 years (15-30/year) to avoid fee drift.
-Works in bull/bear via 1d trend filter: only long when above 1d EMA50, short when below.
-"""
+# 4h_KAMA_RSI_ChopFilter_v1
+# Hypothesis: KAMA trend direction combined with RSI extremes and Choppiness Index regime filter.
+# In trending markets (CHOP < 38.2), follow KAMA direction. In ranging markets (CHOP > 61.8), 
+# use RSI for mean reversion at extremes. Volume confirmation filters weak moves.
+# Designed to work in both bull and bear markets by adapting to regime.
+# Targets 20-30 trades/year to minimize fee drag.
 
-name = "6h_Ichimoku_KumoBreakout_1dTrend_MultiTF_Filter"
-timeframe = "6h"
+name = "4h_KAMA_RSI_ChopFilter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,112 +24,137 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Data (loaded ONCE) ===
+    # === 1d Data for Regime Filter (Choppiness Index) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d EMA50 Trend Filter ===
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # === 4h KAMA Trend Indicator ===
+    def calculate_kama(close, period=10, fast=2, slow=30):
+        # Efficiency Ratio
+        change = np.abs(np.diff(close, n=period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.zeros_like(close)
+        er[period:] = change[period-1:] / volatility[period-1:]
+        # Smoothing Constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA
+        kama = np.zeros_like(close)
+        kama[0] = close[0]
+        for i in range(1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # === Ichimoku on 6h (Tenkan, Kijun, Senkou A/B) ===
-    # Tenkan-sen (Conversion Line): (9-period high + low)/2
-    period_tenkan = 9
-    highest_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
-    lowest_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
-    tenkan = (highest_tenkan + lowest_tenkan) / 2
+    kama = calculate_kama(close, period=10, fast=2, slow=30)
     
-    # Kijun-sen (Base Line): (26-period high + low)/2
-    period_kijun = 26
-    highest_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
-    lowest_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
-    kijun = (highest_kijun + lowest_kijun) / 2
+    # === 4h RSI (14) ===
+    def calculate_rsi(close, period=14):
+        delta = np.diff(close)
+        gain = np.where(delta > 0, delta, 0)
+        loss = np.where(delta < 0, -delta, 0)
+        avg_gain = np.zeros_like(close)
+        avg_loss = np.zeros_like(close)
+        avg_gain[period] = np.mean(gain[:period])
+        avg_loss[period] = np.mean(loss[:period])
+        for i in range(period+1, len(close)):
+            avg_gain[i] = (avg_gain[i-1] * (period-1) + gain[i-1]) / period
+            avg_loss[i] = (avg_loss[i-1] * (period-1) + loss[i-1]) / period
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 26 periods ahead
-    period_senkou_b = 52
-    highest_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
-    lowest_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
-    senkou_b = ((highest_senkou_b + lowest_senkou_b) / 2)
+    rsi = calculate_rsi(close, period=14)
     
-    # Shift Senkou A/B by 26 periods (cloud is plotted 26 periods ahead)
-    senkou_a_shifted = np.roll(senkou_a, 26)
-    senkou_b_shifted = np.roll(senkou_b, 26)
-    # First 26 values are invalid due to shift
-    senkou_a_shifted[:26] = np.nan
-    senkou_b_shifted[:26] = np.nan
+    # === 1d Choppiness Index (14) ===
+    def calculate_chop(high, low, close, period=14):
+        atr = np.zeros_like(close)
+        tr1 = np.abs(high[1:] - low[1:])
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr[1:] = tr
+        
+        # ATR period average
+        atr_period = np.zeros_like(close)
+        for i in range(period, len(close)):
+            atr_period[i] = np.mean(atr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        hh = np.zeros_like(close)
+        ll = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            hh[i] = np.max(high[i-period+1:i+1])
+            ll[i] = np.min(low[i-period+1:i+1])
+        
+        # Chop calculation
+        chop = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if atr_period[i] > 0 and (hh[i] - ll[i]) > 0:
+                chop[i] = 100 * np.log10(np.sum(atr[i-period+1:i+1]) / (hh[i] - ll[i])) / np.log10(period)
+            else:
+                chop[i] = 50  # Neutral when undefined
+        return chop
     
-    # Cloud top/bottom
-    cloud_top = np.maximum(senkou_a_shifted, senkou_b_shifted)
-    cloud_bottom = np.minimum(senkou_a_shifted, senkou_b_shifted)
+    chop_1d = calculate_chop(high_1d, low_1d, close_1d, period=14)
+    chop_1d_4h = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Volume spike filter (20-period EMA)
+    # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
     
-    # Signal parameters
-    position_size = 0.25
+    # === Signal Parameters ===
+    position_size = 0.25  # 25% of capital per trade
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    holding_bars = 0
     
-    # Start after warmup (covers Ichimoku calculations)
-    start_idx = 80  # covers 52 + 26 shift
+    # Start after warmup (covers KAMA, RSI, CHOP)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(ema50_1d_6h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(chop_1d_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Price above cloud + TK cross bullish + above 1d EMA50 + volume spike
-            if (close[i] > cloud_top[i] and 
-                tenkan[i] > kijun[i] and 
-                close[i] > ema50_1d_6h[i] and 
-                volume_ok[i]):
-                signals[i] = position_size
-                position = 1
-                holding_bars = 0
-            # Short: Price below cloud + TK cross bearish + below 1d EMA50 + volume spike
-            elif (close[i] < cloud_bottom[i] and 
-                  tenkan[i] < kijun[i] and 
-                  close[i] < ema50_1d_6h[i] and 
-                  volume_ok[i]):
-                signals[i] = -position_size
-                position = -1
-                holding_bars = 0
+            # Regime-based logic
+            if chop_1d_4h[i] < 38.2:  # Trending market
+                # Follow KAMA direction
+                if close[i] > kama[i]:
+                    signals[i] = position_size
+                    position = 1
+                elif close[i] < kama[i]:
+                    signals[i] = -position_size
+                    position = -1
+            elif chop_1d_4h[i] > 61.8:  # Ranging market
+                # Mean reversion with RSI extremes
+                if rsi[i] < 30 and close[i] > kama[i]:  # Oversold + price above KAMA
+                    signals[i] = position_size
+                    position = 1
+                elif rsi[i] > 70 and close[i] < kama[i]:  # Overbought + price below KAMA
+                    signals[i] = -position_size
+                    position = -1
         else:
-            # Hold for minimum 6 bars to reduce whipsaw
-            holding_bars += 1
-            if holding_bars < 6:
-                signals[i] = position_size if position == 1 else -position_size
-                continue
-            
-            # Exit: TK cross reverses OR price re-enters cloud
-            if position == 1:
-                if tenkan[i] < kijun[i] or close[i] < cloud_top[i]:
+            # Exit conditions
+            if position == 1:  # Long position
+                # Exit on opposite KAMA cross or RSI overbought in ranging market
+                if close[i] < kama[i] or (chop_1d_4h[i] > 61.8 and rsi[i] > 70):
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = position_size
-            elif position == -1:
-                if tenkan[i] > kijun[i] or close[i] > cloud_bottom[i]:
+            elif position == -1:  # Short position
+                # Exit on opposite KAMA cross or RSI oversold in ranging market
+                if close[i] > kama[i] or (chop_1d_4h[i] > 61.8 and rsi[i] < 30):
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
