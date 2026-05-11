@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Spike
-# Hypothesis: 12h timeframe with 1d Camarilla R3/S3 breakout, 1d EMA34 trend filter, and volume spike confirmation.
-# Targets 15-30 trades/year to minimize fee drag. Uses breakout logic with trend alignment to capture momentum in both bull and bear markets.
-# Volume spike reduces false breakouts. Designed for low turnover and high conviction trades.
+# 4h_KAMA_Trend_RSI_Filter
+# Hypothesis: Uses KAMA to capture trend direction and RSI(14) to avoid overbought/oversold entries.
+# Designed for low turnover (~15-25 trades/year) to minimize fee drag in 2025 ranging markets.
+# KAMA adapts to market noise, reducing false signals during sideways periods.
+# Works in both bull and bear regimes by following the trend only when momentum confirms.
 
-name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Spike"
-timeframe = "12h"
+name = "4h_KAMA_Trend_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,50 +15,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 50:
         return np.zeros(n)
     
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels (R3/S3) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === KAMA Trend (10-period ER) ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.divide(change, volatility, out=np.zeros_like(change), where=volatility!=0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
+    # === RSI(14) Filter ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align 1d levels to 12h
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # === 1d EMA34 Trend Filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === Volume Spike Filter (20-period EMA) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # Require 2x average volume for confirmation
+    # === Volume Filter (20-period average) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma * 1.5
     
     # === Signal Parameters ===
-    position_size = 0.25  # 25% position size to manage risk
+    position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers EMA34)
-    start_idx = 40
+    # Start after warmup
+    start_idx = 30  # covers KAMA and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
+            np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -67,30 +69,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R3 + above 1d EMA34 + volume spike
-            if (close[i] > r3_12h[i] and 
-                close[i] > ema34_1d_12h[i] and 
+            # Long: Price above KAMA + RSI < 70 + volume
+            if (close[i] > kama[i] and 
+                rsi[i] < 70 and 
                 volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Break below S3 + below 1d EMA34 + volume spike
-            elif (close[i] < s3_12h[i] and 
-                  close[i] < ema34_1d_12h[i] and 
+            # Short: Price below KAMA + RSI > 30 + volume
+            elif (close[i] < kama[i] and 
+                  rsi[i] > 30 and 
                   volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
         else:
-            # Hold position until opposite level is broken
+            # Exit: Price crosses KAMA in opposite direction
             if position == 1:
-                # Exit: Price closes below S3 (opposite level)
-                if close[i] < s3_12h[i]:
+                if close[i] < kama[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price closes above R3 (opposite level)
-                if close[i] > r3_12h[i]:
+                if close[i] > kama[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
