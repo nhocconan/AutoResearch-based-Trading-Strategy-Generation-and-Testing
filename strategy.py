@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KeltnerBreakout_1wTrend_Volume"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 34:
+    # 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_12h = df_12h['close'].values
     
-    # Keltner Channel (20, 2.0) on 1d
-    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    upper = ema20 + 2.0 * atr
-    lower = ema20 - 2.0 * atr
+    # 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # 1w EMA34 for trend filter
-    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # Calculate EMA50 on 12h
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Volume spike (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Align 12h EMA50 to 4h
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # Calculate Camarilla levels from previous 1d bar
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Camarilla R1, S1 (using previous day's range)
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    
+    # Volume spike (24-period average)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 34  # Ensure EMA34 and ATR are ready
+    start_idx = 50  # Ensure EMA50 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
+        if np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -53,28 +67,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above upper Keltner, above 1w EMA34, volume spike
-            if (close[i] > upper[i-1] and 
-                close[i] > ema34_1w_aligned[i] and 
+            # Long: break above R1, above 12h EMA50, volume spike
+            if (close[i] > r1_aligned[i] and 
+                close[i] > ema50_12h_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below lower Keltner, below 1w EMA34, volume spike
-            elif (close[i] < lower[i-1] and 
-                  close[i] < ema34_1w_aligned[i] and 
+            # Short: break below S1, below 12h EMA50, volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  close[i] < ema50_12h_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below lower Keltner or below 1w EMA34
-            if close[i] < lower[i] or close[i] < ema34_1w_aligned[i]:
+            # Exit long: break below S1 or below 12h EMA50
+            if close[i] < s1_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above upper Keltner or above 1w EMA34
-            if close[i] > upper[i] or close[i] > ema34_1w_aligned[i]:
+            # Exit short: break above R1 or above 12h EMA50
+            if close[i] > r1_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
