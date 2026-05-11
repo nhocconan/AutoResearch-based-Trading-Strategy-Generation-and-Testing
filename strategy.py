@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# 12h_7d_Momentum_RSI_4258
-# Hypothesis: Uses weekly RSI(7) on daily closes to detect momentum extremes. 
-# Long when weekly RSI < 40 (oversold) and price above daily EMA20; short when weekly RSI > 60 (overbought) and price below daily EMA20.
-# Weekly timeframe ensures low trade frequency (<30/year) while capturing multi-week momentum reversals.
-# Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend) by fading extremes.
-# Volume confirmation (volume > 1.5x 20-period average) reduces false signals.
+"""
+4h_Camarilla_Pivot_Breakout_Volume_v1
+Hypothesis: Use Camarilla pivot levels from daily timeframe for precise entry/exit.
+Long when price breaks above R3 with volume confirmation and price above daily EMA34.
+Short when price breaks below S3 with volume confirmation and price below daily EMA34.
+Exit when price returns to central pivot (P) or opposite S/R level is breached.
+Works in both bull and bear markets by following daily trend via EMA34 filter.
+Designed for low trade frequency (<50/year) with high win rate via confluence.
+"""
 
-name = "12h_7d_Momentum_RSI_4258"
-timeframe = "12h"
+name = "4h_Camarilla_Pivot_Breakout_Volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,51 +22,53 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for weekly RSI and EMA
+    # Get daily data for Camarilla pivots and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly RSI(7) on daily close ---
+    # --- Calculate Camarilla Pivot Levels from Daily OHLC ---
+    # Formula: P = (H+L+C)/3
+    # R3 = H + 2*(H-L)*1.1/2, S3 = L - 2*(H-L)*1.1/2
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
     
-    # Wilder's smoothing: alpha = 1/period
-    avg_gain = pd.Series(gain).ewm(alpha=1/7, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/7, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_7 = 100 - (100 / (1 + rs))
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r3 = high_1d + 2 * (high_1d - low_1d) * 1.1 / 2
+    s3 = low_1d - 2 * (high_1d - low_1d) * 1.1 / 2
     
-    # Align weekly RSI to 12h
-    rsi_7_aligned = align_htf_to_ltf(prices, df_1d, rsi_7)
-    
-    # --- Daily EMA20 for trend filter ---
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
+    # Align daily levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # --- Volume Spike Detection (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
+    # --- Daily Trend Filter (EMA34) ---
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_7_aligned[i]) or np.isnan(ema_20_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(ema_34_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -74,33 +79,33 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.5
+        volume_spike = vol_ratio[i] > 1.8
         
         if position == 0:
-            # Long: weekly RSI < 40 (oversold) and price above daily EMA20
-            if (rsi_7_aligned[i] < 40 and 
-                close[i] > ema_20_aligned[i] and 
-                volume_spike):
+            # Long: price breaks above R3 with volume, above daily EMA34
+            if (close[i] > r3_aligned[i] and 
+                volume_spike and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: weekly RSI > 60 (overbought) and price below daily EMA20
-            elif (rsi_7_aligned[i] > 60 and 
-                  close[i] < ema_20_aligned[i] and 
-                  volume_spike):
+            # Short: price breaks below S3 with volume, below daily EMA34
+            elif (close[i] < s3_aligned[i] and 
+                  volume_spike and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: RSI returns to neutral zone (40-60)
+            # Exit conditions: return to pivot or break opposite level
             if position == 1:
-                # Exit long: RSI >= 40 (no longer oversold)
-                if rsi_7_aligned[i] >= 40:
+                # Exit long: price returns to pivot or breaks below S3
+                if close[i] <= pivot_aligned[i] or close[i] < s3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI <= 60 (no longer overbought)
-                if rsi_7_aligned[i] <= 60:
+                # Exit short: price returns to pivot or breaks above R3
+                if close[i] >= pivot_aligned[i] or close[i] > r3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
