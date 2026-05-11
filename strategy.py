@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_Volume_Trend_v1
-Hypothesis: Uses 4-hour Donchian channel breakouts with volume confirmation and 1-day EMA trend filter.
-Trades breakouts in trending markets (price > EMA34) and mean-reversion at Donchian levels in ranging markets.
-Designed for low trade frequency (~20-30 trades/year) to avoid fee drag while capturing high-probability moves.
+12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume
+Hypothesis: Uses daily Camarilla pivot levels (R3/S3) with volume spike confirmation and 1-day EMA trend filter on 12h timeframe.
+Trades breakouts in trending markets (EMA34) and mean-reversion at pivot levels in ranging markets.
+Designed for low trade frequency (target: 20-40 trades/year) to avoid fee drag while capturing high-probability moves.
 Works in both bull and bear markets by adapting to trend (breakouts) and range (mean reversion) conditions.
 """
 
-name = "4h_Donchian_Breakout_Volume_Trend_v1"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,15 +17,15 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for EMA trend filter
+    # Get 1d data for Camarilla pivots and EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -36,16 +36,25 @@ def generate_signals(prices):
     ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # --- 4h Donchian Channel (20-period) ---
-    # Calculate upper and lower bands
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # --- Daily Camarilla Pivot Levels (R3, S3) ---
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # --- Volume Spike Detection (2.0x 20-period EMA) ---
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 4)  # R3
+    s3 = pivot - (range_1d * 1.1 / 4)  # S3
+    
+    # Align to 12h (Camarilla levels are valid for the entire day)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # --- Volume Spike Detection (2.5x 20-period EMA) ---
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ema.values)
+    vol_spike = volume > (2.5 * vol_ema.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,8 +66,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(ema_34_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
             np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
@@ -77,16 +86,16 @@ def generate_signals(prices):
         # Distance from EMA as percentage
         ema_distance_pct = abs(close[i] - ema_34_1d_aligned[i]) / ema_34_1d_aligned[i] * 100
         
-        # Breakout signals (price crosses Donchian bands with volume spike and sufficient EMA separation)
+        # Breakout signals (price crosses R3/S3 with volume spike and sufficient EMA separation)
         # Requires price to be >1.5% away from EMA to avoid whipsaw
-        long_breakout = (high[i] > donchian_high[i]) and vol_spike[i] and (ema_distance_pct > 1.5)
-        short_breakout = (low[i] < donchian_low[i]) and vol_spike[i] and (ema_distance_pct > 1.5)
+        long_breakout = (high[i] > r3_aligned[i]) and vol_spike[i] and (ema_distance_pct > 1.5)
+        short_breakout = (low[i] < s3_aligned[i]) and vol_spike[i] and (ema_distance_pct > 1.5)
         
-        # Mean reversion at Donchian levels (price touches bands without breakout)
+        # Mean reversion at pivot levels (price touches S3/R3 without breakout)
         # Only in non-trending conditions (price near EMA within 0.5%)
         near_ema = ema_distance_pct < 0.5
-        long_reversion = (low[i] <= donchian_low[i]) and near_ema and not vol_spike[i]
-        short_reversion = (high[i] >= donchian_high[i]) and near_ema and not vol_spike[i]
+        long_reversion = (low[i] <= s3_aligned[i]) and near_ema and not vol_spike[i]
+        short_reversion = (high[i] >= r3_aligned[i]) and near_ema and not vol_spike[i]
         
         if position == 0:
             # Enforce minimum 2-bar hold after entry (prevents immediate reversal)
@@ -107,7 +116,7 @@ def generate_signals(prices):
                     position = -1
                     bars_since_entry = 0
             else:
-                # Near EMA: allow mean reversion at Donchian levels
+                # Near EMA: allow mean reversion at pivot levels
                 if long_reversion:
                     signals[i] = 0.25
                     position = 1
@@ -119,8 +128,8 @@ def generate_signals(prices):
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price touches lower Donchian band or breaks below EMA
-                exit_signal = (low[i] <= donchian_low[i]) or (close[i] < ema_34_1d_aligned[i])
+                # Exit long: price touches S3 (support) or breaks below EMA
+                exit_signal = (low[i] <= s3_aligned[i]) or (close[i] < ema_34_1d_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
@@ -128,8 +137,8 @@ def generate_signals(prices):
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price touches upper Donchian band or breaks above EMA
-                exit_signal = (high[i] >= donchian_high[i]) or (close[i] > ema_34_1d_aligned[i])
+                # Exit short: price touches R3 (resistance) or breaks above EMA
+                exit_signal = (high[i] >= r3_aligned[i]) or (close[i] > ema_34_1d_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
