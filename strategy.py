@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume_v2"
-timeframe = "12h"
+name = "4h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -53,7 +53,7 @@ def generate_signals(prices):
     ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     trend_up = close_1w > ema20
     
-    # Align indicators to 12h timeframe
+    # Align indicators to 4h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
