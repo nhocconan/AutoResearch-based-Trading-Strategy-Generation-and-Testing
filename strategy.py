@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_VolumeBreakout_1dTrend"
-timeframe = "12h"
+name = "6h_ElderRay_BullPower_Trend_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,39 +17,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data
+    # Get 1D data for Elder Ray
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Donchian(20) on 12H
-    high_max = np.zeros(n)
-    low_min = np.zeros(n)
-    high_max[:] = np.nan
-    low_min[:] = np.nan
-    for i in range(20, n):
-        high_max[i] = np.max(high[i-20:i])
-        low_min[i] = np.min(low[i-20:i])
+    # Elder Ray on 1D: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13_1d = pd.Series(df_1d['close']).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = df_1d['high'].values - ema13_1d
+    bear_power = ema13_1d - df_1d['low'].values
     
-    # 1D EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align Elder Ray components
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # 12H Volume spike: current volume > 1.5x 20-period average
-    vol_ma20 = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    # Momentum: 6h RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=1).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(30, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(high_max[i]) or np.isnan(low_min[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,28 +58,27 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions
-        bullish_breakout = close[i] > high_max[i] and close[i] > ema50_1d_aligned[i]
-        bearish_breakout = close[i] < low_min[i] and close[i] < ema50_1d_aligned[i]
-        volume_spike = volume[i] > 1.5 * vol_ma20[i]
-        
         if position == 0:
-            if bullish_breakout and volume_spike:
+            # Long: Bull Power > 0, Bear Power < 0, RSI > 50, Volume surge
+            if (bull_power_aligned[i] > 0 and bear_power_aligned[i] > 0 and 
+                rsi[i] > 50 and volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            elif bearish_breakout and volume_spike:
+            # Short: Bull Power < 0, Bear Power > 0, RSI < 50, Volume surge
+            elif (bull_power_aligned[i] < 0 and bear_power_aligned[i] < 0 and 
+                  rsi[i] < 50 and volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit on bearish breakout or volume dry-up
-            if bearish_breakout or volume[i] < 0.7 * vol_ma20[i]:
+            # Long exit: Bull Power <= 0 or Bear Power <= 0 or RSI < 40
+            if (bull_power_aligned[i] <= 0 or bear_power_aligned[i] <= 0 or rsi[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit on bullish breakout or volume dry-up
-            if bullish_breakout or volume[i] < 0.7 * vol_ma20[i]:
+            # Short exit: Bull Power >= 0 or Bear Power >= 0 or RSI > 60
+            if (bull_power_aligned[i] >= 0 or bear_power_aligned[i] >= 0 or rsi[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
