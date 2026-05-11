@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1w_Camarilla_R1_S1_Breakout_Trend"
-timeframe = "12h"
+name = "1h_4h_1d_Camarilla_R1_S1_Breakout_Trend_Filtered"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,42 +17,49 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1w Camarilla pivot levels (R1, S1)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # 4h Camarilla pivot levels (R1, S1)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
     # Calculate pivot and Camarilla levels
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    r1_1w = close_1w + (range_1w * 1.0833)
-    s1_1w = close_1w - (range_1w * 1.0833)
+    pivot_4h = (high_4h + low_4h + close_4h) / 3
+    range_4h = high_4h - low_4h
+    r1_4h = close_4h + (range_4h * 1.0833)
+    s1_4h = close_4h - (range_4h * 1.0833)
     
-    # Align levels to 12h timeframe
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    # Align levels to 1h timeframe
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
     
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # 1d EMA34 trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Volume confirmation (12h volume > 1.5x 20-period average)
-    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * volume_ma20
+    close_1d = df_1d['close'].values
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume confirmation (1h volume > 1.8x 24-period average)
+    volume_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_filter = volume > 1.8 * volume_ma24
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 24)
     
     for i in range(start_idx, n):
-        if np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or np.isnan(ema_50_12h_aligned[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma24[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,27 +68,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R1, above EMA50, volume confirmation
-            if close[i] > r1_1w_aligned[i] and close[i] > ema_50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: Close breaks above R1, above EMA34, volume confirmation, session
+            if close[i] > r1_4h_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i] and session_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Close breaks below S1, below EMA50, volume confirmation
-            elif close[i] < s1_1w_aligned[i] and close[i] < ema_50_12h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: Close breaks below S1, below EMA34, volume confirmation, session
+            elif close[i] < s1_4h_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i] and session_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below EMA50
-            if close[i] < s1_1w_aligned[i] or close[i] < ema_50_12h_aligned[i]:
+            # Exit long: Close below S1 or below EMA34
+            if close[i] < s1_4h_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: Close above R1 or above EMA50
-            if close[i] > r1_1w_aligned[i] or close[i] > ema_50_12h_aligned[i]:
+            # Exit short: Close above R1 or above EMA34
+            if close[i] > r1_4h_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
