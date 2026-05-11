@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_1wPivot_Breakout_Trend_Volume
-Hypothesis: Trade breakouts at weekly pivot levels (R4/S4) on daily timeframe with volume confirmation.
-Weekly pivots act as strong support/resistance levels. Breakouts in direction of price action with volume
+6h_1wPivot_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts at weekly pivot levels (R4/S4) on 6h timeframe with 1d trend filter and volume confirmation.
+Weekly pivots act as strong support/resistance levels. Breakouts in direction of daily trend with volume confirmation
 should capture significant moves. Weekly pivot calculation provides fewer, more significant levels than daily pivots,
-reducing trade frequency. Works in bull/bear markets by following breakout direction.
+reducing trade frequency. Works in bull/bear markets by aligning with daily trend direction.
 """
 
-name = "1d_1wPivot_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_1wPivot_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -41,11 +41,19 @@ def generate_signals(prices):
     r4_w = pp_w + 3 * (ph_w - pl_w)
     s4_w = pp_w - 3 * (ph_w - pl_w)
     
-    # Align to daily timeframe
-    r4_1d = align_htf_to_ltf(prices, df_1w, r4_w)
-    s4_1d = align_htf_to_ltf(prices, df_1w, s4_w)
+    # Align to 6h timeframe
+    r4_6h = align_htf_to_ltf(prices, df_1w, r4_w)
+    s4_6h = align_htf_to_ltf(prices, df_1w, s4_w)
     
-    # === Volume Filter (2.0x 20-period EMA on daily) ===
+    # === Daily Trend Filter (EMA34) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_6h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Filter (2.0x 20-period EMA on 6h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 2.0
     
@@ -57,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(ema34_6h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,24 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above R4 with volume
-            if (close[i] > r4_1d[i] and volume_ok[i]):
+            # Long breakout: price closes above R4 with uptrend and volume
+            if (close[i] > r4_6h[i] and 
+                close[i] > ema34_6h[i] and 
+                volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below S4 with volume
-            elif (close[i] < s4_1d[i] and volume_ok[i]):
+            # Short breakdown: price closes below S4 with downtrend and volume
+            elif (close[i] < s4_6h[i] and 
+                  close[i] < ema34_6h[i] and 
+                  volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below midpoint between R4 and S4 (mean reversion)
-            if close[i] < (r4_1d[i] + s4_1d[i]) / 2:
+            # Long exit: price closes below weekly pivot (mean reversion)
+            if close[i] < (r4_6h[i] + s4_6h[i]) / 2:  # midpoint between R4 and S4
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above midpoint between R4 and S4 (mean reversion)
-            if close[i] > (r4_1d[i] + s4_1d[i]) / 2:
+            # Short exit: price closes above weekly pivot (mean reversion)
+            if close[i] > (r4_6h[i] + s4_6h[i]) / 2:  # midpoint between R4 and S4
                 signals[i] = 0.0
                 position = 0
             else:
