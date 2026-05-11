@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_1dVolume"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,11 +26,11 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     trend_up = close > ema_1d_aligned
     
-    # 1d volume filter: volume > 1.5x 20-day average
+    # 1d volume filter: volume > 2x 20-day average
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
-    volume_filter = volume > 1.5 * vol_ma20_1d_aligned
+    volume_filter = volume > 2.0 * vol_ma20_1d_aligned
     
     # Camarilla levels from previous day
     high_1d = df_1d['high'].values
@@ -43,10 +43,6 @@ def generate_signals(prices):
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -56,14 +52,6 @@ def generate_signals(prices):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
