@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1wTrend
-Hypothesis: On 12h chart, price breaking Camarilla R3/S3 levels with weekly trend filter (1w EMA50) and volume confirmation captures institutional breakout moves. Works in bull (buy R3 breakouts in uptrend) and bear (sell S3 breakdowns in downtrend). Weekly trend filter avoids counter-trend trades. Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+1h_4hTrend_1dPullback
+Hypothesis: In strong 4h trends, buy pullbacks to 1h EMA20 during uptrends and sell rallies during downtrends.
+Uses 4h EMA50 for trend direction and 1h EMA20 for entry timing. Volume spike filter avoids low-quality signals.
+Session filter (08-20 UTC) reduces noise. Works in bull by buying dips; in bear by selling rallies.
+Target: 15-35 trades/year (60-140 total over 4 years) to stay within fee limits.
 """
-
-name = "12h_Camarilla_R3_S3_Breakout_1wTrend"
-timeframe = "12h"
+name = "1h_4hTrend_1dPullback"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,105 +19,126 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 4h data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    
-    # 12h OHLCV
+    # 1h data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly EMA50 trend ---
-    close_1w = df_1w['close'].values
-    ema_1w = np.full(len(close_1w), np.nan)
-    for i in range(len(close_1w)):
+    # 4h EMA50 trend
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    for i in range(len(close_4h)):
         if i < 50:
-            ema_1w[i] = np.nan
+            ema_4h[i] = np.nan
         elif i == 50:
-            ema_1w[i] = np.mean(close_1w[0:50])
+            ema_4h[i] = np.mean(close_4h[0:50])
         else:
-            ema_1w[i] = (close_1w[i] * 2 / (50 + 1)) + (ema_1w[i-1] * (49 / (50 + 1)))
+            ema_4h[i] = (close_4h[i] * 2 / (50 + 1)) + (ema_4h[i-1] * (49 / (50 + 1)))
     
-    # --- Daily Camarilla levels (using previous day's OHLC) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # EMA slope
+    ema_slope_4h = np.full(len(close_4h), np.nan)
+    for i in range(51, len(close_4h)):
+        ema_slope_4h[i] = ema_4h[i] - ema_4h[i-1]
     
-    # Camarilla R3 and S3
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_s3 = np.full(len(close_1d), np.nan)
-    for i in range(1, len(close_1d)):
-        # Use previous day's OHLC
-        ph = high_1d[i-1]
-        pl = low_1d[i-1]
-        pc = close_1d[i-1]
-        rang = ph - pl
-        camarilla_r3[i] = pc + (rang * 1.1 / 4)
-        camarilla_s3[i] = pc - (rang * 1.1 / 4)
+    # 1h EMA20 for entry
+    ema_20 = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            ema_20[i] = np.nan
+        elif i == 20:
+            ema_20[i] = np.mean(close[0:20])
+        else:
+            ema_20[i] = (close[i] * 2 / (20 + 1)) + (ema_20[i-1] * (19 / (20 + 1)))
     
-    # --- 12h volume MA(20) ---
+    # 1h ATR(14) for volatility
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        if i == 14:
+            atr[i] = np.mean(tr[0:14])
+        else:
+            atr[i] = (tr[i] * 1 / 14) + (atr[i-1] * 13 / 14)
+    
+    # 1h volume MA(20)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align weekly EMA50 to 12h
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Align daily Camarilla levels to 12h
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align 4h indicators to 1h
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_slope_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_slope_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max(weekly EMA50 needs 50, daily Camarilla needs 1, vol MA20)
-    start_idx = max(50, 1, 20)
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
+    # Warmup
+    start_idx = max(50, 20, 14, 20)
     
     for i in range(start_idx, n):
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         # Skip if any critical values are NaN
-        if (np.isnan(ema_1w_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(ema_4h_aligned[i]) or
+            np.isnan(ema_slope_4h_aligned[i]) or
+            np.isnan(ema_20[i]) or
+            np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Volume confirmation
+        # Trend condition
+        uptrend = ema_slope_4h_aligned[i] > 0
+        downtrend = ema_slope_4h_aligned[i] < 0
+        
+        # Entry conditions
+        near_ema = np.abs(close[i] - ema_20[i]) < 0.3 * atr[i]
         vol_spike = volume[i] > vol_ma[i] * 1.5
         
         if position == 0:
-            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_1w_aligned[i] and vol_spike:
-                # Long: break above R3 in weekly uptrend
-                signals[i] = 0.25
+            if uptrend and close[i] > ema_20[i] and near_ema and vol_spike:
+                # Long: buy pullback in uptrend
+                signals[i] = 0.20
                 position = 1
-            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_1w_aligned[i] and vol_spike:
-                # Short: break below S3 in weekly downtrend
-                signals[i] = -0.25
+            elif downtrend and close[i] < ema_20[i] and near_ema and vol_spike:
+                # Short: sell rally in downtrend
+                signals[i] = -0.20
                 position = -1
         else:
             if position == 1:
-                # Exit long: price closes below weekly EMA50 OR re-enters Camarilla body
-                if close[i] < ema_1w_aligned[i] or (camarilla_s3_aligned[i] < close[i] < camarilla_r3_aligned[i]):
+                # Exit long: trend turns down or price breaks below EMA20
+                if not uptrend or close[i] < ema_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price closes above weekly EMA50 OR re-enters Camarilla body
-                if close[i] > ema_1w_aligned[i] or (camarilla_s3_aligned[i] < close[i] < camarilla_r3_aligned[i]):
+                # Exit short: trend turns up or price breaks above EMA20
+                if not downtrend or close[i] > ema_20[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
