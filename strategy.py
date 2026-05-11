@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Ichimoku_Tenkan_Kijun_Cross_VolumeFilter_TrendFilter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Trend_Filter_v3"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,29 +17,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate 1d EMA50 for trend filter (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot (using weekly high/low/close from 1w data)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Ichimoku on 4h data
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Weekly pivot point and key levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_4h).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_4h).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_4h).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_4h).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Align Ichimoku to 4h timeframe
-    tenkan_aligned = align_htf_to_ltf(prices, df_4h, tenkan)
-    kijun_aligned = align_htf_to_ltf(prices, df_4h, kijun)
+    # Trend filter: 6-period EMA on 6h close (fast trend)
+    ema_fast = pd.Series(close).ewm(span=6, min_periods=6, adjust=False).mean().values
+    # Slow trend: 24-period EMA on 6h close (4-day trend)
+    ema_slow = pd.Series(close).ewm(span=24, min_periods=24, adjust=False).mean().values
     
     # Volume filter: 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -49,12 +50,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(tenkan_aligned[i]) or 
-            np.isnan(kijun_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -64,32 +67,36 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema1d = close[i] > ema50_1d_aligned[i]
-        price_below_ema1d = close[i] < ema50_1d_aligned[i]
-        tenkan_above_kijun = tenkan_aligned[i] > kijun_aligned[i]
-        tenkan_below_kijun = tenkan_aligned[i] < kijun_aligned[i]
+        price_above_pivot = close[i] > pivot_1w_aligned[i]
+        price_below_pivot = close[i] < pivot_1w_aligned[i]
+        price_above_r1 = close[i] > r1_1w_aligned[i]
+        price_below_s1 = close[i] < s1_1w_aligned[i]
+        price_above_r2 = close[i] > r2_1w_aligned[i]
+        price_below_s2 = close[i] < s2_1w_aligned[i]
+        ema_fast_above_slow = ema_fast[i] > ema_slow[i]
+        ema_fast_below_slow = ema_fast[i] < ema_slow[i]
         
         if position == 0:
-            # Long: Tenkan crosses above Kijun + above 1d EMA50 + volume spike
-            if tenkan_above_kijun and price_above_ema1d and volume_ok[i]:
+            # Long: Price above weekly R1 + fast EMA above slow EMA + volume spike
+            if price_above_r1 and ema_fast_above_slow and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Tenkan crosses below Kijun + below 1d EMA50 + volume spike
-            elif tenkan_below_kijun and price_below_ema1d and volume_ok[i]:
+            # Short: Price below weekly S1 + fast EMA below slow EMA + volume spike
+            elif price_below_s1 and ema_fast_below_slow and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit: Tenkan crosses below Kijun OR trend reverses
-                if tenkan_below_kijun or close[i] < ema50_1d_aligned[i]:
+                # Exit: Price crosses below weekly pivot OR trend reverses
+                if price_below_pivot or ema_fast_below_slow:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit: Tenkan crosses above Kijun OR trend reverses
-                if tenkan_above_kijun or close[i] > ema50_1d_aligned[i]:
+                # Exit: Price crosses above weekly pivot OR trend reverses
+                if price_above_pivot or ema_fast_above_slow:
                     signals[i] = 0.0
                     position = 0
                 else:
