@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_HeikinAshi_Trend_12hTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,71 +9,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
-    # Heikin-Ashi calculation
     close = prices['close'].values
-    open_ = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Calculate Heikin-Ashi close
-    ha_close = (open_ + high + low + close) / 4
-    
-    # Calculate Heikin-Ashi open
-    ha_open = np.zeros_like(open_)
-    ha_open[0] = (open_[0] + close[0]) / 2
-    for i in range(1, n):
-        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
-    
-    # Calculate Heikin-Ashi high and low
-    ha_high = np.maximum.reduce([high, ha_open, ha_close])
-    ha_low = np.minimum.reduce([low, ha_open, ha_close])
-    
-    # Trend detection: consecutive same-color HA candles
-    ha_bullish = ha_close > ha_open
-    ha_bearish = ha_close < ha_open
-    
-    # Count consecutive bullish/bearish candles
-    consec_bull = np.zeros(n, dtype=int)
-    consec_bear = np.zeros(n, dtype=int)
-    
-    for i in range(1, n):
-        if ha_bullish[i]:
-            consec_bull[i] = consec_bull[i-1] + 1
-            consec_bear[i] = 0
-        elif ha_bearish[i]:
-            consec_bear[i] = consec_bear[i-1] + 1
-            consec_bull[i] = 0
-        else:
-            consec_bull[i] = 0
-            consec_bear[i] = 0
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 1D data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    ema_50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Previous day's OHLC (avoid look-ahead)
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    # Volume filter: 20-period average
-    volume = prices['volume'].values
+    # Roll to get previous day's values
+    prev_close = np.roll(prev_close, 1)
+    prev_high = np.roll(prev_high, 1)
+    prev_low = np.roll(prev_low, 1)
+    prev_close[0] = prev_close[1] if len(prev_close) > 1 else 0
+    prev_high[0] = prev_high[1] if len(prev_high) > 1 else 0
+    prev_low[0] = prev_low[1] if len(prev_low) > 1 else 0
+    
+    # Calculate Camarilla levels for R3, S3 (most significant)
+    # Camarilla: R3 = Close + 1.1*(High-Low)/2, S3 = Close - 1.1*(High-Low)/2
+    rang = prev_high - prev_low
+    r3 = prev_close + 1.1 * rang / 2
+    s3 = prev_close - 1.1 * rang / 2
+    
+    # Align to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 1D EMA34 for trend filter
+    ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    
+    # Volume filter: 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -82,33 +71,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Volume threshold - avoid low-volume false breakouts
         volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: 3+ consecutive bullish HA candles + price above 12h EMA50 + volume surge
-            if (consec_bull[i] >= 3 and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_surge):
+            # Long: Price breaks above R3 with volume and bullish trend
+            if (close[i] > r3_aligned[i] and 
+                volume_surge and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: 3+ consecutive bearish HA candles + price below 12h EMA50 + volume surge
-            elif (consec_bear[i] >= 3 and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_surge):
+            # Short: Price breaks below S3 with volume and bearish trend
+            elif (close[i] < s3_aligned[i] and 
+                  volume_surge and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: trend reversal or volume drops
+            # Exit: price returns to opposite Camarilla level or trend fails
             if position == 1:
-                # Exit long: bearish reversal or price below EMA
-                if (consec_bear[i] >= 2) or (close[i] < ema_50_12h_aligned[i]):
+                # Exit long: price returns below S3 or trend turns bearish
+                if (close[i] < s3_aligned[i]) or (close[i] < ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: bullish reversal or price above EMA
-                if (consec_bull[i] >= 2) or (close[i] > ema_50_12h_aligned[i]):
+                # Exit short: price returns above R3 or trend turns bullish
+                if (close[i] > r3_aligned[i]) or (close[i] > ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
