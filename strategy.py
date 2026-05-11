@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_1w_Donchian_Breakout_Momentum"
-timeframe = "1d"
+name = "12h_1D_Camarilla_R3S3_Breakout_VolumeSpike_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,53 +17,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Donchian channels and momentum
+    # Get 1D data for Camarilla pivot levels, trend filter, and volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    volume_1d = df_1d['volume'].values
     
-    # 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Calculate previous day's Camarilla pivot levels (R3, S3)
+    # Using previous day's high, low, close
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    # Set first values to NaN since no previous day
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    close_1w = df_1w['close'].values
+    # Pivot point
+    pivot = (prev_high + prev_low + prev_close) / 3
+    # Camarilla levels
+    R3 = pivot + (prev_high - prev_low) * 1.1 / 2
+    S3 = pivot - (prev_high - prev_low) * 1.1 / 2
     
-    # Donchian channels (20-day) on daily
-    high_20 = np.full(len(high_1d), np.nan)
-    low_20 = np.full(len(low_1d), np.nan)
-    for i in range(20, len(high_1d)):
-        high_20[i] = np.max(high_1d[i-20:i])
-        low_20[i] = np.min(low_1d[i-20:i])
+    # Align Camarilla levels to 12h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Momentum: 10-day ROC on daily close
-    roc10 = np.full(len(close_1d), np.nan)
-    for i in range(10, len(close_1d)):
-        roc10[i] = (close_1d[i] - close_1d[i-10]) / close_1d[i-10]
+    # Trend filter: 20-period EMA on 1D close
+    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
     
-    # Weekly EMA20 for trend filter
-    ema20_1w = np.full(len(close_1w), np.nan)
-    for i in range(20, len(close_1w)):
-        ema20_1w[i] = np.mean(close_1w[i-20:i])
-    
-    # Align indicators to 1d timeframe
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    roc10_aligned = align_htf_to_ltf(prices, df_1d, roc10)
-    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
+    # Volume filter: current volume > 1.5x 20-period average volume on 1D
+    vol_ma_20 = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    volume_filter = volume > (1.5 * vol_ma_20_aligned)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 25  # Ensure indicators are ready
+    start_idx = 20  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(high_20_aligned[i]) or np.isnan(low_20_aligned[i]) or 
-            np.isnan(roc10_aligned[i]) or np.isnan(ema20_1w_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema20_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,30 +72,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above upper Donchian + positive momentum + weekly uptrend
-            if (close[i] > high_20_aligned[i] and 
-                roc10_aligned[i] > 0.02 and
-                ema20_1w_aligned[i] > ema20_1w_aligned[i-1]):
+            # Long: price breaks above R3 with volume, in uptrend (price > EMA20)
+            if (close[i] > R3_aligned[i] and 
+                volume_filter[i] and
+                close[i] > ema20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below lower Donchian + negative momentum + weekly downtrend
-            elif (close[i] < low_20_aligned[i] and 
-                  roc10_aligned[i] < -0.02 and
-                  ema20_1w_aligned[i] < ema20_1w_aligned[i-1]):
+            # Short: price breaks below S3 with volume, in downtrend (price < EMA20)
+            elif (close[i] < S3_aligned[i] and 
+                  volume_filter[i] and
+                  close[i] < ema20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Break below lower Donchian or momentum turns negative
-            if (close[i] < low_20_aligned[i] or 
-                roc10_aligned[i] < 0):
+            # Exit long: price breaks below S3 (opposite level)
+            if close[i] < S3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Break above upper Donchian or momentum turns positive
-            if (close[i] > high_20_aligned[i] or 
-                roc10_aligned[i] > 0):
+            # Exit short: price breaks above R3 (opposite level)
+            if close[i] > R3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
