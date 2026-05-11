@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_TriangleBreakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_RSI_MeanReversion_4hTrend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,27 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # 4h trend filter: EMA50
+    df_4h = get_htf_data(prices, '4h')
+    ema50_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # 1d volume filter: volume > 1.5x 20-period average
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    # RSI(14) - only need close prices
+    close_series = pd.Series(close)
+    delta = close_series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # 12h triangle: 20-period high/low (Donchian)
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20
+    start_idx = 50  # need enough data for EMA50 and RSI
     
     for i in range(start_idx, n):
-        # Skip if 1d trend or volume data not ready
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_20_1d_aligned[i]):
+        # Skip if 4h trend data not ready
+        if np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -45,35 +51,40 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Triangle breakout: break above 20-period high or below 20-period low
+        # Session filter
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
+        if not in_session:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         if position == 0:
-            # Long: break above 20-period high with 1d uptrend and volume
-            if (high[i] > high_20[i] and 
-                close[i] > high_20[i] and
-                close[i] > ema34_1d_aligned[i] and
-                volume[i] > vol_ma_20_1d_aligned[i]):
-                signals[i] = 0.25
+            # Long: RSI oversold in uptrend
+            if rsi[i] < 30 and close[i] > ema50_4h_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below 20-period low with 1d downtrend and volume
-            elif (low[i] < low_20[i] and 
-                  close[i] < low_20[i] and
-                  close[i] < ema34_1d_aligned[i] and
-                  volume[i] > vol_ma_20_1d_aligned[i]):
-                signals[i] = -0.25
+            # Short: RSI overbought in downtrend
+            elif rsi[i] > 70 and close[i] < ema50_4h_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: break below 20-period low or trend reversal
-            if (low[i] < low_20[i] or close[i] < ema34_1d_aligned[i]):
+            # Exit long: RSI overbought or trend reversal
+            if rsi[i] > 70 or close[i] < ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: break above 20-period high or trend reversal
-            if (high[i] > high_20[i] or close[i] > ema34_1d_aligned[i]):
+            # Exit short: RSI oversold or trend reversal
+            if rsi[i] < 30 or close[i] > ema50_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
