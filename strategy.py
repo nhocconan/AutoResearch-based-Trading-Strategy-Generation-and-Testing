@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_WeeklyPivot_Trend_Filter_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,97 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate weekly trend filter (100 EMA)
-    df_1w = get_htf_data(prices, '1w')
-    ema100_1w = pd.Series(df_1w['close']).ewm(span=100, min_periods=100, adjust=False).mean().values
-    ema100_1w_aligned = align_htf_to_ltf(prices, df_1w, ema100_1w)
+    # 1d EMA34 for trend filter (HTF)
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate weekly pivot points (daily high/low/close aggregated to week)
-    # For weekly pivot, we need weekly OHLC
-    df_1w_ohlc = get_htf_data(prices, '1w')
-    weekly_high = df_1w_ohlc['high'].values
-    weekly_low = df_1w_ohlc['low'].values
-    weekly_close = df_1w_ohlc['close'].values
+    # Daily Camarilla pivot levels (R1, S1)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly pivot calculation
-    pivot_weekly = (weekly_high + weekly_low + weekly_close) / 3
-    range_weekly = weekly_high - weekly_low
-    R1_weekly = pivot_weekly + (range_weekly * 1.1 / 12)
-    S1_weekly = pivot_weekly - (range_weekly * 1.1 / 12)
-    R2_weekly = pivot_weekly + (range_weekly * 1.1 / 6)
-    S2_weekly = pivot_weekly - (range_weekly * 1.1 / 6)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    R1 = close_1d + (range_1d * 1.1 / 12)
+    S1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Align weekly data to 6h timeframe
-    pivot_weekly_aligned = align_htf_to_ltf(prices, df_1w_ohlc, pivot_weekly)
-    R1_weekly_aligned = align_htf_to_ltf(prices, df_1w_ohlc, R1_weekly)
-    S1_weekly_aligned = align_htf_to_ltf(prices, df_1w_ohlc, S1_weekly)
-    R2_weekly_aligned = align_htf_to_ltf(prices, df_1w_ohlc, R2_weekly)
-    S2_weekly_aligned = align_htf_to_ltf(prices, df_1w_ohlc, S2_weekly)
+    # Align to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # Volume filter: 24-period EMA (4 days worth)
-    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
-    volume_ok = volume > vol_ema24 * 1.5
+    # Volume filter: 20-period EMA on 12h timeframe
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema100_1w_aligned[i]) or np.isnan(pivot_weekly_aligned[i]) or 
-            np.isnan(R1_weekly_aligned[i]) or np.isnan(S1_weekly_aligned[i]) or
-            np.isnan(R2_weekly_aligned[i]) or np.isnan(S2_weekly_aligned[i]) or
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pivot_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
             np.isnan(volume_ok[i])):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
             continue
         
         # Conditions
-        price_above_weekly_ema = close[i] > ema100_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema100_1w_aligned[i]
-        breakout_long = close[i] > R2_weekly_aligned[i]
-        breakout_short = close[i] < S2_weekly_aligned[i]
-        pullback_long = close[i] > R1_weekly_aligned[i] and close[i] < R2_weekly_aligned[i]
-        pullback_short = close[i] < S1_weekly_aligned[i] and close[i] > S2_weekly_aligned[i]
+        price_above_ema1d = close[i] > ema34_1d_aligned[i]
+        price_below_ema1d = close[i] < ema34_1d_aligned[i]
+        breakout_long = close[i] > R1_aligned[i]
+        breakout_short = close[i] < S1_aligned[i]
         
         if position == 0:
-            # Long: Break above R2 with weekly uptrend + volume
-            if breakout_long and price_above_weekly_ema and volume_ok[i]:
-                signals[i] = 0.25
+            # Long: Price breaks above R1 + above 1d EMA34 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: Break below S2 with weekly downtrend + volume
-            elif breakout_short and price_below_weekly_ema and volume_ok[i]:
-                signals[i] = -0.25
-                position = -1
-            # Long pullback: Pullback to R1 in uptrend
-            elif pullback_long and price_above_weekly_ema and volume_ok[i]:
-                signals[i] = 0.20
-                position = 1
-            # Short pullback: Pullback to S1 in downtrend
-            elif pullback_short and price_below_weekly_ema and volume_ok[i]:
-                signals[i] = -0.20
+            # Short: Price breaks below S1 + below 1d EMA34 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
+                signals[i] = -0.30
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit: Price breaks below S1 OR trend reverses
-                if close[i] < S1_weekly_aligned[i] or close[i] < ema100_1w_aligned[i]:
+                # Exit: Price crosses below pivot OR trend reverses
+                if close[i] < pivot_aligned[i] or close[i] < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             elif position == -1:
-                # Exit: Price breaks above R1 OR trend reverses
-                if close[i] > R1_weekly_aligned[i] or close[i] > ema100_1w_aligned[i]:
+                # Exit: Price crosses above pivot OR trend reverses
+                if close[i] > pivot_aligned[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
