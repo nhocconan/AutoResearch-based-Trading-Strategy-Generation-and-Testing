@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeS
-Hypothesis: Daily EMA50 defines medium-term trend, daily Camarilla R3/S3 levels act as strong support/resistance.
-In bull markets, buy breakouts above R3 with daily uptrend. In bear markets, sell breakdowns below S3 with daily downtrend.
-Volume spike confirms institutional interest. Uses 4h timeframe for better trade frequency and lower fee drag vs 1d.
-Target: 20-50 trades/year, low turnover to minimize fee drag in ranging 2025 market.
+1d_PPO_Histogram_Zero_Cross_1wTrend_Filter
+Hypothesis: The Percentage Price Oscillator (PPO) histogram crossing zero indicates momentum shifts.
+Using 1d timeframe with 1w trend filter (EMA50) to capture major trend changes.
+Volume confirmation ensures institutional participation. Designed for fewer trades (10-30/year)
+to minimize fee drag in ranging 2025 market. Works in both bull (buy on bullish cross) and bear
+(sell on bearish cross) markets.
 """
 
-name = "4H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1d_PPO_Histogram_Zero_Cross_1wTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,27 +26,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for EMA trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Load daily data ONCE for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate PPO on daily data: (12 EMA - 26 EMA) / 26 EMA * 100
+    ema12 = pd.Series(close).ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema26 = pd.Series(close).ewm(span=26, min_periods=26, adjust=False).mean().values
+    ppo = (ema12 - ema26) / ema26 * 100
     
-    # Calculate Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.5000
-    s3 = close_1d - hl_range * 1.5000
+    # PPO histogram (same as PPO for simplicity, or could use signal line)
+    ppo_hist = ppo  # Using PPO directly as histogram equivalent
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Volume filter: 20-period EMA for spike detection (using 4h volume)
+    # Volume filter: 20-day EMA for spike detection
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
@@ -56,12 +51,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ppo_hist[i]) or 
+            np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -70,33 +65,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_ema1d = close[i] > ema50_1d_aligned[i]
-        price_below_ema1d = close[i] < ema50_1d_aligned[i]
-        breakout_long = close[i] > r3_aligned[i]
-        breakout_short = close[i] < s3_aligned[i]
+        # PPO histogram zero cross signals
+        ppo_hist_prev = ppo_hist[i-1] if i > 0 else 0
+        ppo_hist_cross_up = ppo_hist_prev <= 0 and ppo_hist[i] > 0
+        ppo_hist_cross_down = ppo_hist_prev >= 0 and ppo_hist[i] < 0
         
         if position == 0:
-            # Long: Price breaks above R3 + above daily EMA50 + volume spike
-            if breakout_long and price_above_ema1d and volume_ok[i]:
+            # Long: PPO crosses above zero + above weekly EMA50 + volume spike
+            if ppo_hist_cross_up and close[i] > ema50_1w_aligned[i] and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below daily EMA50 + volume spike
-            elif breakout_short and price_below_ema1d and volume_ok[i]:
+            # Short: PPO crosses below zero + below weekly EMA50 + volume spike
+            elif ppo_hist_cross_down and close[i] < ema50_1w_aligned[i] and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit conditions - reverse signal or trend failure
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses (close below daily EMA)
-                if close[i] < s3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+                # Exit: PPO crosses below zero OR trend fails (close below weekly EMA)
+                if ppo_hist_cross_down or close[i] < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses (close above daily EMA)
-                if close[i] > r3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+                # Exit: PPO crosses above zero OR trend fails (close above weekly EMA)
+                if ppo_hist_cross_up or close[i] > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
