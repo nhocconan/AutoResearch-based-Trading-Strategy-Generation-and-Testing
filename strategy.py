@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get daily data for trend filter (1d EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
@@ -44,7 +44,7 @@ def generate_signals(prices):
             R1[i] = prev_close + range_val * 1.1 / 6
             S1[i] = prev_close - range_val * 1.1 / 6
     
-    # Align indicators to 4h timeframe
+    # Align indicators to 12h timeframe
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
@@ -61,7 +61,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need enough data for indicators
+    start_idx = max(34, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
