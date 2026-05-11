@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3S3_Breakout_Trend_Volume_4hTrendFilter_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,15 +17,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 1d trend filter and Camarilla levels
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 10:
         return np.zeros(n)
-    
-    # Calculate 1d EMA34 for trend filter
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
     
     # Calculate Camarilla levels (R3, S3) from previous day
     high_1d = df_1d['high'].values
@@ -49,10 +44,19 @@ def generate_signals(prices):
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Align indicators to 12h timeframe
+    # Get 4h trend filter (4h EMA50)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
+        return np.zeros(n)
+    
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_4h = close_4h > ema50_4h
+    
+    # Align indicators to 4h timeframe (note: prices is already 4h)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
     
     # Volume moving average (20-period) for confirmation
     vol_ma20 = np.zeros(n)
@@ -65,13 +69,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA34
+    start_idx = max(20, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or
+            np.isnan(trend_up_4h_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,26 +87,26 @@ def generate_signals(prices):
         if position == 0:
             # Long: price breaks above R3 + uptrend + volume confirmation
             if (close[i] > R3_aligned[i] and 
-                trend_up_1d_aligned[i] and 
+                trend_up_4h_aligned[i] and 
                 volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
             # Short: price breaks below S3 + downtrend + volume confirmation
             elif (close[i] < S3_aligned[i] and 
-                  not trend_up_1d_aligned[i] and 
+                  not trend_up_4h_aligned[i] and 
                   volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes to down
-            if (close[i] < S3_aligned[i] or not trend_up_1d_aligned[i]):
+            # Long exit: price breaks below S3 or trend changes
+            if (close[i] < S3_aligned[i] or not trend_up_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes to up
-            if (close[i] > R3_aligned[i] or trend_up_1d_aligned[i]):
+            # Short exit: price breaks above R3 or trend changes
+            if (close[i] > R3_aligned[i] or trend_up_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
