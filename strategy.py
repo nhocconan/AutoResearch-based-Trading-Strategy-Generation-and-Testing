@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
-# Hypothesis: Uses 1-day Camarilla pivot levels (R1/S1) with 1-day trend filter and volume confirmation.
-# Long when price breaks above R1 with uptrend (price > EMA34) and volume surge.
-# Short when price breaks below S1 with downtrend (price < EMA34) and volume surge.
-# Exits on trend reversal or price retracing to EMA34.
-# Works in bull markets by riding uptrends, in bear markets by riding downtrends.
-# Volume filter reduces false breakouts; EMA34 provides dynamic support/resistance.
+# 1d_1w_KAMA_Trend_With_Weekly_Volume_Filter
+# Hypothesis: Uses daily KAMA direction with weekly volume surge filter to capture trending moves.
+# Long when daily KAMA rising and weekly volume > 1.5x average; short when daily KAMA falling and weekly volume > 1.5x average.
+# KAMA adapts to market noise, reducing whipsaws in sideways markets. Weekly volume filter ensures participation in institutional moves.
+# Works in bull markets (riding uptrends) and bear markets (riding downtrends) by following adaptive trend.
+# Weekly timeframe reduces noise and false signals, keeping trade frequency low to avoid fee drag.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
-timeframe = "4h"
+name = "1d_1w_KAMA_Trend_With_Weekly_Volume_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -20,80 +19,107 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and EMA trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for volume filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d Camarilla pivot levels (R1, S1) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    # Calculate pivot point and Camarilla levels
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.0 / 8.0)
-    s1 = pivot - (range_1d * 1.0 / 8.0)
-    # Align to 4h timeframe (wait for daily close)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # --- Daily KAMA (adaptive trend) ---
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=1))
+    change = np.insert(change, 0, 0)  # align length
     
-    # --- 1d EMA34 for trend filter ---
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # Volatility sum over 10 periods
+    vol = np.abs(np.diff(close, n=1))
+    vol = np.insert(vol, 0, 0)
+    volatility = np.zeros_like(close)
+    for i in range(len(volatility)):
+        if i < 10:
+            volatility[i] = np.nan
+        else:
+            volatility[i] = np.sum(vol[i-9:i+1])
     
-    # --- Volume confirmation (volume > 20-period EMA) ---
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > vol_ema
+    # Efficiency Ratio
+    er = np.zeros_like(close)
+    er[:] = np.nan
+    mask = volatility != 0
+    er[mask] = change[mask] / volatility[mask]
+    
+    # Smoothing constants
+    sc = np.zeros_like(close)
+    sc[:] = np.nan
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = er * (fast_sc - slow_sc) + slow_sc
+    sc = sc * sc  # square for smoothing
+    
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[:] = np.nan
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
+            kama[i] = close[i]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # KAMA direction (slope)
+    kama_slope = kama - np.roll(kama, 1)
+    kama_slope[0] = 0
+    # Smooth the slope to reduce noise
+    kama_slope_smooth = pd.Series(kama_slope).ewm(span=5, adjust=False, min_periods=1).mean().values
+    
+    # --- Weekly volume filter ---
+    vol_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(vol_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_surge_1w = vol_1w > (vol_ma_1w * 1.5)  # 1.5x average volume
+    vol_surge_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_surge_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA34 (34) and Camarilla calculation
-    start_idx = 34
+    # Warmup: enough for KAMA (need ~30 periods for stability)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i])):
+        if (np.isnan(kama_slope_smooth[i]) or
+            np.isnan(vol_surge_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 1d EMA34
-        uptrend = close[i] > ema_34_aligned[i]
-        downtrend = close[i] < ema_34_aligned[i]
+        # Trend direction from smoothed KAMA slope
+        uptrend = kama_slope_smooth[i] > 0
+        downtrend = kama_slope_smooth[i] < 0
         
         if position == 0:
-            if uptrend and vol_surge[i]:
-                # Long: price breaks above R1 with uptrend and volume surge
-                if close[i] > r1_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend and vol_surge[i]:
-                # Short: price breaks below S1 with downtrend and volume surge
-                if close[i] < s1_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            if uptrend and vol_surge_1w_aligned[i]:
+                # Long: rising KAMA + weekly volume surge
+                signals[i] = 0.25
+                position = 1
+            elif downtrend and vol_surge_1w_aligned[i]:
+                # Short: falling KAMA + weekly volume surge
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Exit long: trend turns down OR price retrace to EMA34
-                if downtrend or close[i] < ema_34_aligned[i]:
+                # Exit long: KAMA slope turns down OR weekly volume surge ends
+                if not uptrend or not vol_surge_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: trend turns up OR price retrace to EMA34
-                if uptrend or close[i] > ema_34_aligned[i]:
+                # Exit short: KAMA slope turns up OR weekly volume surge ends
+                if not downtrend or not vol_surge_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
