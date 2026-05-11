@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_12h_RSI_Trend_With_Volume
-# Hypothesis: 4h RSI extreme pullbacks in direction of 12h EMA50 trend with volume confirmation.
-# Uses RSI(14) for mean reversion entries, EMA12h for trend bias, and volume surge to avoid false signals.
+# 4h_1d_Camarilla_R1_S1_Breakout_With_Volume
+# Hypothesis: Camarilla R1/S1 levels from daily chart act as strong support/resistance.
+# Breakout above R1 or below S1 with volume confirmation and trend filter (1d EMA34) captures momentum.
 # Designed for low trade frequency (20-40/year) to minimize fee drag in bull and bear markets.
-# Works in bull via pullbacks in uptrend, and in bear via bounces in downtrend.
+# Works in bull via breakouts above R1 in uptrend, and in bear via breakdowns below S1 in downtrend.
 
-name = "4h_12h_RSI_Trend_With_Volume"
+name = "4h_1d_Camarilla_R1_S1_Breakout_With_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,14 +18,9 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get daily data for RSI calculation
+    # Get daily data for Camarilla levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
-        return np.zeros(n)
-    
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 4h OHLCV
@@ -34,28 +29,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily RSI (14-period)
+    # Calculate daily Camarilla levels (based on previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
     
-    # Shift by 1 to use previous day's data (no look-ahead)
-    rsi_prev = np.roll(rsi, 1)
-    rsi_prev[0] = 50  # neutral start
+    # Camarilla R1 and S1 levels: (H+L+C)/3 +/- (H-L)*1.1/2
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    r1_level = camarilla_pivot + (camarilla_range * 1.1 / 2)
+    s1_level = camarilla_pivot - (camarilla_range * 1.1 / 2)
     
-    # Align RSI to 4h timeframe
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_prev)
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    r1_prev = np.roll(r1_level, 1)
+    s1_prev = np.roll(s1_level, 1)
+    r1_prev[0] = r1_level[0]  # first day uses same day's level
+    s1_prev[0] = s1_level[0]
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_slope_12h = np.diff(ema_50_12h, prepend=ema_50_12h[0])  # slope = today - yesterday
-    ema_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_12h)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
+    
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_slope_1d = np.diff(ema_34_1d, prepend=ema_34_1d[0])  # slope = today - yesterday
+    ema_slope_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_1d)
     
     # ATR for volatility and trailing stop
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -77,8 +75,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi_aligned[i]) or
-            np.isnan(ema_slope_12h_aligned[i]) or
+        if (np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(ema_slope_1d_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -88,21 +87,21 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from 12h EMA50 slope
-        bullish_trend = ema_slope_12h_aligned[i] > 0
-        bearish_trend = ema_slope_12h_aligned[i] < 0
+        # Trend filter from 1d EMA34 slope
+        bullish_trend = ema_slope_1d_aligned[i] > 0
+        bearish_trend = ema_slope_1d_aligned[i] < 0
         
         # Volume confirmation (2.0x average)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: RSI oversold (<30) in bullish trend with volume surge
-            if rsi_aligned[i] < 30 and bullish_trend and volume_surge:
+            # Long: break above R1 in bullish trend with volume surge
+            if close[i] > r1_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: RSI overbought (>70) in bearish trend with volume surge
-            elif rsi_aligned[i] > 70 and bearish_trend and volume_surge:
+            # Short: break below S1 in bearish trend with volume surge
+            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
