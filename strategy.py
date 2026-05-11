@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_PhaseAccumulation_1dTrend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend filter: EMA34 (use close of daily)
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -27,58 +27,38 @@ def generate_signals(prices):
     trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Phase Accumulation indicator (Ehlers) on 6h
-    # Uses Hilbert transform via 3-bar momentum for cycle phase
-    delta = close - np.roll(close, 1)
-    delta[0] = 0
-    smooth_delta = pd.Series(delta).ewm(alpha=0.2, adjust=False).mean().values
+    # Calculate Camarilla levels from previous 1d
+    close_prev = np.roll(close_1d, 1)
+    high_prev = np.roll(high_1d, 1) if 'high_1d' in locals() else np.roll(df_1d['high'].values, 1)
+    low_prev = np.roll(low_1d, 1) if 'low_1d' in locals() else np.roll(df_1d['low'].values, 1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    in_phase = 0.33 * smooth_delta + 0.67 * np.roll(smooth_delta, 1)
-    in_phase[0] = 0
-    quadrature = smooth_delta - 0.67 * np.roll(in_phase, 1) - 0.33 * np.roll(np.roll(in_phase, 1), 1)
-    quadrature[0:2] = 0
+    # Camarilla R3, S3, R4, S4
+    R3 = close_prev + (high_prev - low_prev) * 1.1 / 6
+    S3 = close_prev - (high_prev - low_prev) * 1.1 / 6
+    R4 = close_prev + (high_prev - low_prev) * 1.1 / 2
+    S4 = close_prev - (high_prev - low_prev) * 1.1 / 2
     
-    # Compute phase (0-2π) and convert to degrees
-    # Avoid division by zero
-    denom = np.sqrt(in_phase**2 + quadrature**2) + 1e-10
-    phase = np.arctan2(quadrature, in_phase)  # -π to π
-    phase_degrees = np.degrees(phase)  # -180 to 180
+    # Align Camarilla levels to 4h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
     
-    # Normalize to 0-360
-    phase_degrees = (phase_degrees + 360) % 360
-    
-    # Rate of change of phase (angular velocity) - indicates acceleration
-    phase_roc = np.roll(phase_degrees, 1) - phase_degrees
-    phase_roc[0] = 0
-    # Handle wraparound
-    phase_roc = np.where(phase_roc > 180, phase_roc - 360, phase_roc)
-    phase_roc = np.where(phase_roc < -180, phase_roc + 360, phase_roc)
-    
-    # Smooth the ROC
-    phase_roc_smooth = pd.Series(phase_roc).ewm(span=5, adjust=False, min_periods=5).mean().values
-    
-    # Entry conditions:
-    # Long: Phase acceleration positive AND in accumulation zone (330-360 or 0-30) AND daily uptrend
-    # Short: Phase acceleration negative AND in distribution zone (150-210) AND daily downtrend
-    accumulation_zone = (phase_degrees >= 330) | (phase_degrees <= 30)
-    distribution_zone = (phase_degrees >= 150) & (phase_degrees <= 210)
-    
-    long_entry = (phase_roc_smooth > 0) & accumulation_zone & trend_up_1d_aligned
-    short_entry = (phase_roc_smooth < 0) & distribution_zone & (~trend_up_1d_aligned)
-    
-    # Exit conditions: opposite acceleration or trend change
-    long_exit = (phase_roc_smooth < 0) | (~trend_up_1d_aligned)
-    short_exit = (phase_roc_smooth > 0) | trend_up_1d_aligned
+    # Volume confirmation: current volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 10  # Need enough data for smoothing
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(phase_roc_smooth[i]) or np.isnan(phase_degrees[i]) or
-            np.isnan(trend_up_1d_aligned[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(R4_aligned[i]) or 
+            np.isnan(S4_aligned[i]) or np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -87,20 +67,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            if long_entry[i]:
+            # Long: Close > R3 + daily uptrend + volume confirmation
+            if close[i] > R3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry[i]:
+            # Short: Close < S3 + daily downtrend + volume confirmation
+            elif close[i] < S3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            if long_exit[i]:
+            # Long exit: Close < S3 or daily trend turns down
+            if close[i] < S3_aligned[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            if short_exit[i]:
+            # Short exit: Close > R3 or daily trend turns up
+            if close[i] > R3_aligned[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
