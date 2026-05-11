@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_Novel"
-timeframe = "6h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -34,13 +34,13 @@ def generate_signals(prices):
     r3 = close_1d + hl_range * 1.25
     s3 = close_1d - hl_range * 1.25
     
-    # 5. Align Camarilla levels to 6h timeframe
+    # 5. Align Camarilla levels to 12h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 6. Volume filter: 50-period EMA for higher threshold
-    vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
-    volume_ok = volume > vol_ema50 * 2.0  # Adjusted threshold for 6h
+    # 6. Volume filter: 20-period EMA for higher threshold (adjusted for 12h)
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 2.0
     
     # 7. Fixed position size to avoid churn
     position_size = 0.25
