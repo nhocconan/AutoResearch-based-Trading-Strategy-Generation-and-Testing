@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-# 4h_12h_Camarilla_R1_S1_Breakout_Trend_Volume
-# Hypothesis: 4h Camarilla R1/S1 breakout with 12h EMA50 trend filter and volume surge.
-# Uses 1d Camarilla pivot levels for support/resistance, 12h EMA50 for trend bias,
-# and volume confirmation to avoid false breakouts. Designed for low trade frequency
-# (20-40/year) to minimize fee drag. Works in bull via R1 breakout in uptrend,
-# and in bear via S1 breakdown in downtrend.
+# 1d_1w_1WeekLowBreakout_TrendFilter_Volume
+# Hypothesis: Daily breakout above the previous week's high or below the previous week's low with weekly trend filter and volume confirmation. Works in bull via weekly high breakout in uptrend, and in bear via weekly low breakdown in downtrend. Designed for low trade frequency (7-25/year) to minimize fee drag.
 
-name = "4h_12h_Camarilla_R1_S1_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "1d_1w_1WeekLowBreakout_TrendFilter_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,59 +12,45 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend and reference levels
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
-    
-    # 4h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate daily Camarilla pivot levels (R1, S1)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly high and low
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     
-    # Pivot point and range
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Shift by 1 to use previous week's data (no look-ahead)
+    weekly_high_prev = np.roll(weekly_high, 1)
+    weekly_low_prev = np.roll(weekly_low, 1)
+    weekly_high_prev[0] = weekly_high[0]
+    weekly_low_prev[0] = weekly_low[0]
     
-    # Camarilla levels: R1 = close + range * 1.1/12, S1 = close - range * 1.1/12
-    r1 = close_1d + range_1d * 1.1 / 12.0
-    s1 = close_1d - range_1d * 1.1 / 12.0
+    # Align weekly levels to daily timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, weekly_high_prev)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, weekly_low_prev)
     
-    # Shift by 1 to use previous day's data (no look-ahead)
-    r1_prev = np.roll(r1, 1)
-    s1_prev = np.roll(s1, 1)
-    r1_prev[0] = r1[0]  # neutral start
-    s1_prev[0] = s1[0]
-    
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_prev)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_prev)
-    
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_slope_12h = np.diff(ema_50_12h, prepend=ema_50_12h[0])  # slope = today - yesterday
-    ema_slope_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_slope_12h)
+    # Weekly trend: slope of 20-period EMA on weekly close
+    weekly_close = df_1w['close'].values
+    ema_20_1w = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_slope_20_1w = np.diff(ema_20_1w, prepend=ema_20_1w[0])
+    ema_slope_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_20_1w)
     
     # ATR for volatility and trailing stop
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
     tr2 = np.absolute(low - np.roll(close, 1))
     tr = np.maximum(tr1, tr2)
-    tr[0] = high[0] - low[0]  # first bar
+    tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume confirmation (2.0x 20-period average)
@@ -80,13 +62,13 @@ def generate_signals(prices):
     lowest_low_since_entry = 0.0
     
     # Warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(ema_slope_12h_aligned[i]) or
+        if (np.isnan(weekly_high_aligned[i]) or
+            np.isnan(weekly_low_aligned[i]) or
+            np.isnan(ema_slope_20_1w_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -96,21 +78,21 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from 12h EMA50 slope
-        bullish_trend = ema_slope_12h_aligned[i] > 0
-        bearish_trend = ema_slope_12h_aligned[i] < 0
+        # Trend filter from weekly EMA20 slope
+        bullish_trend = ema_slope_20_1w_aligned[i] > 0
+        bearish_trend = ema_slope_20_1w_aligned[i] < 0
         
         # Volume confirmation (2.0x average)
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R1 in bullish trend with volume surge
-            if close[i] > r1_aligned[i] and bullish_trend and volume_surge:
+            # Long: price breaks above previous week's high in bullish trend with volume surge
+            if close[i] > weekly_high_aligned[i] and bullish_trend and volume_surge:
                 signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: price breaks below S1 in bearish trend with volume surge
-            elif close[i] < s1_aligned[i] and bearish_trend and volume_surge:
+            # Short: price breaks below previous week's low in bearish trend with volume surge
+            elif close[i] < weekly_low_aligned[i] and bearish_trend and volume_surge:
                 signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
