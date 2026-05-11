@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_Equity_Volume_Pressure_v1
-Hypothesis: Combines equity curve momentum (price above/below 1d VWAP) with volume pressure 
-to identify institutional accumulation/distribution. In bull markets, buying pressure 
-above VWAP sustains uptrends; in bear markets, selling pressure below VWAP confirms 
-continuation. Uses 1d VWAP as dynamic support/resistance and volume spike for confirmation.
+4h_Momentum_Catch_v1
+Hypothesis: Captures momentum bursts with volume confirmation during trend continuations.
+Uses 4h price action: long when price breaks above recent high with rising volume and bullish trend,
+short when price breaks below recent low with rising volume and bearish trend.
+Designed to work in both bull and bear markets by following the trend.
 Target: 20-50 trades per year on 4h timeframe.
 """
 
-name = "4h_Equity_Volume_Pressure_v1"
+name = "4h_Momentum_Catch_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,36 +26,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Data for VWAP Calculation ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # === 4H Data for Trend Filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # Calculate typical price and VWAP for 1d
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    cum_tpv_1d = np.cumsum(typical_price_1d * df_1d['volume'].values)
-    cum_vol_1d = np.cumsum(df_1d['volume'].values)
-    vwap_1d = np.divide(cum_tpv_1d, cum_vol_1d, out=np.full_like(cum_tpv_1d, np.nan), where=cum_vol_1d!=0)
+    close_4h = df_4h['close'].values
+    # 4h EMA50 for trend filter
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Align VWAP to 4h
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # === Price Channels (20-period) ===
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # === Volume Spike Detection (4h) ===
-    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_ma_20[:10] = np.nan
-    vol_ma_20[-10:] = np.nan
-    vol_ratio = np.divide(volume, vol_ma_20, out=np.full_like(volume, np.nan), where=vol_ma_20!=0)
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
+    
+    # === Volume Moving Average ===
+    vol_ma = np.full(n, np.nan)
+    vol_lookback = 20
+    for i in range(vol_lookback, n):
+        vol_ma[i] = np.mean(volume[i-vol_lookback:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 20
+    start_idx = max(50, lookback, vol_lookback)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,24 +71,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above VWAP with volume accumulation (bullish pressure)
-            if close[i] > vwap_1d_aligned[i] and vol_ratio[i] > 1.5:
+            # Long: price breaks above recent high with volume confirmation in uptrend
+            if (close[i] > highest_high[i] and 
+                volume[i] > vol_ma[i] * 1.5 and 
+                ema50_4h_aligned[i] < close[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below VWAP with volume distribution (bearish pressure)
-            elif close[i] < vwap_1d_aligned[i] and vol_ratio[i] > 1.5:
+            # Short: price breaks below recent low with volume confirmation in downtrend
+            elif (close[i] < lowest_low[i] and 
+                  volume[i] > vol_ma[i] * 1.5 and 
+                  ema50_4h_aligned[i] > close[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below VWAP or volume dries up
-            if close[i] < vwap_1d_aligned[i] or vol_ratio[i] < 0.8:
+            # Long exit: price falls below recent low OR trend turns bearish
+            if (close[i] < lowest_low[i] or 
+                ema50_4h_aligned[i] > close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price breaks above VWAP or volume dries up
-            if close[i] > vwap_1d_aligned[i] or vol_ratio[i] < 0.8:
+            # Short exit: price rises above recent high OR trend turns bullish
+            if (close[i] > highest_high[i] or 
+                ema50_4h_aligned[i] < close[i]):
                 signals[i] = 0.0
                 position = 0
             else:
