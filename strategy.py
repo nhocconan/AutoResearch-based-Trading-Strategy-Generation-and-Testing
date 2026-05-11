@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_RSI_Chop_Filter"
-timeframe = "1d"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,56 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: EMA50
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d trend: EMA34
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    weekly_uptrend = close > ema_1w_aligned
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    trend_up = close > ema_1d_aligned
     
-    # Daily KAMA
-    price_series = pd.Series(close)
-    delta = price_series.diff().abs()
-    direction = abs(price_series.diff(10))
-    volatility = delta.rolling(window=10, min_periods=10).sum()
-    er = direction / volatility.replace(0, 1e-10)
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
-    kama = [0] * len(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama = np.array(kama)
-    kama_aligned = kama  # KAMA is already on daily timeframe
+    # Previous day's Camarilla levels (R3, S3)
+    df_1d_prev = df_1d.copy()
+    df_1d_prev['high_prev'] = df_1d_prev['high'].shift(1)
+    df_1d_prev['low_prev'] = df_1d_prev['low'].shift(1)
+    df_1d_prev['close_prev'] = df_1d_prev['close'].shift(1)
     
-    # Daily RSI(14)
-    delta_rsi = pd.Series(close).diff()
-    gain = delta_rsi.where(delta_rsi > 0, 0)
-    loss = -delta_rsi.where(delta_rsi < 0, 0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Calculate Camarilla levels for current day based on previous day
+    high_prev = df_1d_prev['high_prev'].values
+    low_prev = df_1d_prev['low_prev'].values
+    close_prev = df_1d_prev['close_prev'].values
     
-    # Choppiness Index (14)
-    atr1 = np.maximum(high - low, np.maximum(abs(high - np.roll(close, 1)), abs(low - np.roll(close, 1))))
-    atr1[0] = high[0] - low[0]
-    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = np.nan_to_num(chop, nan=50.0)
+    # Camarilla R3 and S3
+    R3 = close_prev + (high_prev - low_prev) * 1.1 / 4
+    S3 = close_prev - (high_prev - low_prev) * 1.1 / 4
+    
+    R3_aligned = align_htf_to_ltf(prices, df_1d_prev, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d_prev, S3)
+    
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for weekly EMA and calculations
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,24 +65,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price > KAMA + Weekly uptrend + RSI > 50 + Chop < 61.8 (trending)
-            if close[i] > kama[i] and weekly_uptrend[i] and rsi[i] > 50 and chop[i] < 61.8:
+            # Long: Close > R3 + 1d uptrend + volume spike
+            if close[i] > R3_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA + Weekly downtrend + RSI < 50 + Chop < 61.8 (trending)
-            elif close[i] < kama[i] and not weekly_uptrend[i] and rsi[i] < 50 and chop[i] < 61.8:
+            # Short: Close < S3 + 1d downtrend + volume spike
+            elif close[i] < S3_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price < KAMA or RSI < 40 or Chop > 61.8 (ranging)
-            if close[i] < kama[i] or rsi[i] < 40 or chop[i] > 61.8:
+            # Long exit: Close < S3 or 1d trend down
+            if close[i] < S3_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price > KAMA or RSI > 60 or Chop > 61.8 (ranging)
-            if close[i] > kama[i] or rsi[i] > 60 or chop[i] > 61.8:
+            # Short exit: Close > R3 or 1d trend up
+            if close[i] > R3_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
