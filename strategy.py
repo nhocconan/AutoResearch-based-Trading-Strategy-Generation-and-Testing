@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_TrixVolumeSpike_Regime"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 35:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for TRIX calculation
+    # 1d data for Camarilla pivot and EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 15:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # TRIX: triple EMA of log returns (15-period)
-    log_ret = np.diff(np.log(close_1d), prepend=np.log(close_1d[0]))
-    ema1 = pd.Series(log_ret).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean().values
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean().values
-    trix = 100 * (ema3 - np.roll(ema3, 1)) / np.roll(ema3, 1)
-    trix[0] = 0  # first value has no previous
+    # Calculate Camarilla levels from previous 1d candle
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    hl_range = high_1d - low_1d
+    camarilla_r1 = close_1d + hl_range * 1.1 / 12
+    camarilla_s1 = close_1d - hl_range * 1.1 / 12
     
-    # 1d volume for spike detection (20-period average)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1d = vol_1d > (vol_ma_1d * 1.5)
+    # EMA34 for 1d trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align TRIX and volume spike to 6h timeframe
-    trix_aligned = align_htf_to_ltf(prices, df_1d, trix)
-    vol_spike_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d.astype(float))
+    # Volume spike detection (24-period average for 4h)
+    vol_ma_4h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma_4h * 2.0)
     
-    # 6-day EMA for trend filter on 6h close
-    ema6_6h = pd.Series(close).ewm(span=6, adjust=False, min_periods=6).mean().values
+    # Align all indicators to 4h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(15, 20, 6)  # Ensure enough data for TRIX, volume MA, and EMA
+    start_idx = 35  # Ensure enough data for EMA34
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix_aligned[i]) or np.isnan(vol_spike_aligned[i]) or 
-            np.isnan(ema6_6h[i])):
+        if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,26 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX crosses above zero, price above EMA6, and volume spike
-            if (trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 and 
-                close[i] > ema6_6h[i] and vol_spike_aligned[i]):
+            # Long: Price breaks above Camarilla R1, price above 1d EMA34, and volume spike
+            if (close[i] > camarilla_r1_aligned[i-1] and 
+                close[i] > ema34_1d_aligned[i] and 
+                vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below zero, price below EMA6, and volume spike
-            elif (trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 and 
-                  close[i] < ema6_6h[i] and vol_spike_aligned[i]):
+            # Short: Price breaks below Camarilla S1, price below 1d EMA34, and volume spike
+            elif (close[i] < camarilla_s1_aligned[i-1] and 
+                  close[i] < ema34_1d_aligned[i] and 
+                  vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: TRIX crosses below zero or price below EMA6
-            if trix_aligned[i] < 0 and trix_aligned[i-1] >= 0 or close[i] < ema6_6h[i]:
+            # Exit long: Price breaks below Camarilla S1 or price below 1d EMA34
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: TRIX crosses above zero or price above EMA6
-            if trix_aligned[i] > 0 and trix_aligned[i-1] <= 0 or close[i] > ema6_6h[i]:
+            # Exit short: Price breaks above Camarilla R1 or price above 1d EMA34
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
