@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3_S3_Breakout_1dTrend
-Hypothesis: Camarilla R3/S3 breakout on 12h timeframe with 1-day trend filter and volume confirmation.
-Targets breakouts in trending markets while filtering range-bound conditions. Works in bull/bear by using 1d trend to filter direction and volume for confirmation. Designed for low trade frequency (~20-40/year) to minimize fee drag on 12h timeframe.
+1d_KAMA_Trend_Filter_with_Volume_and_Chop
+Hypothesis: KAMA identifies trend direction, volume confirms momentum, and Choppiness Index filters for trending regimes.
+Works in bull/bear by only taking trades in strong trends (Chop < 38.2) and using KAMA crossover for entry.
+Designed for low trade frequency (<20/year) on daily timeframe to minimize fee drag.
 """
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend"
-timeframe = "12h"
+name = "1d_KAMA_Trend_Filter_with_Volume_and_Chop"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -15,39 +16,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Calculate Camarilla levels from prior 1d bar ===
-    # Get daily OHLC
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # === KAMA (Kaufman Adaptive Moving Average) ===
+    # ER (Efficiency Ratio) = abs(close - close[10]) / sum(abs(close - close[-1])) over 10 periods
+    change = np.abs(np.diff(close, n=10))  # |close(t) - close(t-10)|
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # sum of |close(t) - close(t-1)| over 10
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Prior day's OHLC (shifted by 1 to avoid look-ahead)
-    prior_high = df_1d['high'].shift(1).values
-    prior_low = df_1d['low'].shift(1).values
-    prior_close = df_1d['close'].shift(1).values
+    # === Choppiness Index (14-period) ===
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Sum of TR over 14 periods
+    atr_sum = np.convolve(tr, np.ones(14), 'full')[:n]  # same as rolling sum
+    atr_sum[:13] = np.nan  # first 13 values invalid
+    # Highest high and lowest low over 14 periods
+    max_high = np.zeros_like(high)
+    min_low = np.zeros_like(low)
+    for i in range(n):
+        if i < 13:
+            max_high[i] = np.nan
+            min_low[i] = np.nan
+        else:
+            max_high[i] = np.max(high[i-13:i+1])
+            min_low[i] = np.min(low[i-13:i+1])
+    # Chop = 100 * log10(sum(tr14) / (max_high - min_low)) / log10(14)
+    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(14)
+    chop[:13] = np.nan  # first 13 values invalid
     
-    # Align to 12h timeframe
-    prior_high_12h = align_htf_to_ltf(prices, df_1d, prior_high)
-    prior_low_12h = align_htf_to_ltf(prices, df_1d, prior_low)
-    prior_close_12h = align_htf_to_ltf(prices, df_1d, prior_close)
-    
-    # Camarilla R3 and S3 levels
-    R3 = prior_close_12h + (prior_high_12h - prior_low_12h) * 1.1 / 4
-    S3 = prior_close_12h - (prior_high_12h - prior_low_12h) * 1.1 / 4
-    
-    # === 1-day EMA34 Trend Filter ===
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === Volume Spike Filter (2x 20-period EMA) ===
+    # === Volume Spike (2x 20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 2.0
     
@@ -57,13 +70,22 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers EMA and Camarilla calculation)
-    start_idx = 40
+    # Start after warmup (covers KAMA, Chop, and volume EMA)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(R3[i]) or np.isnan(S3[i]) or 
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(kama[i]) or np.isnan(chop[i]) or 
+            np.isnan(volume_ok[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Only trade in trending markets (Chop < 38.2)
+        if chop[i] >= 38.2:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,26 +94,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close crosses above R3 with uptrend (close > EMA34) and volume spike
-            if (close[i] > R3[i] and 
-                close[i] > ema34_1d_12h[i] and volume_ok[i]):
+            # Long: Close crosses above KAMA with volume spike
+            if close[i] > kama[i] and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Close crosses below S3 with downtrend (close < EMA34) and volume spike
-            elif (close[i] < S3[i] and 
-                  close[i] < ema34_1d_12h[i] and volume_ok[i]):
+            # Short: Close crosses below KAMA with volume spike
+            elif close[i] < kama[i] and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: Close crosses back through the Camarilla level in opposite direction
+            # Exit: Close crosses back through KAMA in opposite direction
             if position == 1:
-                if close[i] < S3[i]:  # Exit long if price breaks below S3
+                if close[i] < kama[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > R3[i]:  # Exit short if price breaks above R3
+                if close[i] > kama[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
