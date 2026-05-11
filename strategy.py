@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Volume_Weighted_Pullback_Strategy
-Hypothesis: In trending markets (ADX > 25), pullbacks to the VWAP on volume spikes offer high-probability entries. In ranging markets (ADX < 25), fade extreme deviations from VWAP with volume confirmation. Uses 1d trend filter and volume spike confirmation to reduce false signals. Designed for 12h timeframe to target 50-150 total trades over 4 years.
+6h_WeeklyPivot_VolatilityBreakout
+Hypothesis: Weekly pivot points (PP, R1, S1) act as key support/resistance levels. When price breaks above R1 or below S1 with volatility expansion (ATR ratio > 1.2), it signals momentum continuation in the direction of the breakout. In low volatility regimes (ATR ratio < 0.8), fade at R1/S1 for mean reversion. Uses 6h timeframe with 1w pivot calculation and 1d ATR for regime filtering. Targets 50-150 total trades over 4 years.
 """
 
-name = "12h_Volume_Weighted_Pullback_Strategy"
-timeframe = "12h"
+name = "6h_WeeklyPivot_VolatilityBreakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,18 +17,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter (ADX) and volume average
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get 1w data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # Get 1d data for ATR (volatility regime)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
     
-    # --- 1d ADX for trend detection (14 period) ---
+    # 6h OHLCV
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    volume_6h = prices['volume'].values
+    
+    # --- 1d ATR for volatility regime (14 period) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -40,147 +45,146 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
     atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # ATR ratio: current ATR / 20-period average ATR
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / (atr_ma_1d + 1e-10)
+    atr_ratio_6h_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # --- Weekly Pivot Points (using previous week's OHLC) ---
+    # Calculate from previous week's OHLC
+    prev_week_high = np.roll(df_1w['high'].values, 1)
+    prev_week_low = np.roll(df_1w['low'].values, 1)
+    prev_week_close = np.roll(df_1w['close'].values, 1)
+    prev_week_high[0] = df_1w['high'].values[0]
+    prev_week_low[0] = df_1w['low'].values[0]
+    prev_week_close[0] = df_1w['close'].values[0]
     
-    # Smoothed DM
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    # Pivot point calculation
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pivot - prev_week_low
+    s1 = 2 * pivot - prev_week_high
+    r2 = pivot + (prev_week_high - prev_week_low)
+    s2 = pivot - (prev_week_high - prev_week_low)
     
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    # Align weekly levels to 6h
+    pivot_6h = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1w, r1)
+    s1_6h = align_htf_to_ltf(prices, df_1w, s1)
+    r2_6h = align_htf_to_ltf(prices, df_1w, r2)
+    s2_6h = align_htf_to_ltf(prices, df_1w, s2)
     
-    # --- 1d Volume Average for confirmation ---
-    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    
-    # --- 12h VWAP calculation ---
-    typical_price = (high_12h + low_12h + close_12h) / 3.0
-    vwap_num = np.cumsum(typical_price * volume_12h)
-    vwap_den = np.cumsum(volume_12h)
-    vwap = vwap_num / vwap_den
-    
-    # --- 12h Standard Deviation of price from VWAP (for deviation bands) ---
-    price_dev = typical_price - vwap
-    vwap_std = pd.Series(price_dev).rolling(window=20, min_periods=20).std().values
-    
-    # --- 12h Volume Average for confirmation ---
-    vol_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # --- 6h Volume Average for confirmation ---
+    vol_avg_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 40  # for ADX and VWAP std
+    start_idx = 40  # for ATR ratio and volume average
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
-            np.isnan(vwap[i]) or np.isnan(vwap_std[i]) or np.isnan(vol_avg_12h[i])):
+        if (np.isnan(atr_ratio_6h_aligned[i]) or np.isnan(pivot_6h[i]) or 
+            np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or np.isnan(vol_avg_6h[i])):
             if position != 0:
-                # Check stoploss (2.0x ATR from entry)
-                atr_est = np.abs(high_12h[i] - low_12h[i])  # rough 12h ATR estimate
-                if position == 1 and close_12h[i] <= entry_price - 2.0 * atr_est:
+                # Simple stoploss: 2.5x ATR from entry
+                atr_est = np.abs(high_6h[i] - low_6h[i])  # rough 6h ATR estimate
+                if position == 1 and close_6h[i] <= entry_price - 2.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_12h[i] >= entry_price + 2.0 * atr_est:
+                elif position == -1 and close_6h[i] >= entry_price + 2.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.30 if position == 1 else -0.30
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine regime: ADX < 25 = range, ADX > 25 = trend
-        is_range = adx_12h_aligned[i] < 25
-        is_trend = adx_12h_aligned[i] > 25
+        # Volatility regime: high vol = breakout mode, low vol = mean reversion
+        high_vol = atr_ratio_6h_aligned[i] > 1.2
+        low_vol = atr_ratio_6h_aligned[i] < 0.8
         
-        # Volume confirmation: current volume > 1.5x 12h average
-        vol_confirm = volume_12h[i] > 1.5 * vol_avg_12h[i]
-        
-        # Price deviation from VWAP in standard deviations
-        if vwap_std[i] > 0:
-            dev_sd = (typical_price[i] - vwap[i]) / vwap_std[i]
-        else:
-            dev_sd = 0
+        # Volume confirmation: current volume > 1.3x 6h average
+        vol_confirm = volume_6h[i] > 1.3 * vol_avg_6h[i]
         
         if position == 0:
-            # Look for entries based on regime
-            if is_range and vol_confirm:
-                # Mean reversion: fade extreme deviations from VWAP
-                if dev_sd > 2.0:  # Price significantly above VWAP
-                    signals[i] = -0.30  # short
-                    position = -1
-                    entry_price = close_12h[i]
-                elif dev_sd < -2.0:  # Price significantly below VWAP
-                    signals[i] = 0.30   # long
+            # Look for entries based on volatility regime
+            if high_vol and vol_confirm:
+                # High volatility: breakout continuation
+                if close_6h[i] > r1_6h[i]:
+                    signals[i] = 0.25  # long breakout above R1
                     position = 1
-                    entry_price = close_12h[i]
-            elif is_trend and vol_confirm:
-                # Trend following: pullback to VWAP in direction of trend
-                if dev_sd < -0.5 and dev_sd > -2.0:  # Mild pullback below VWAP
-                    signals[i] = 0.30  # long
-                    position = 1
-                    entry_price = close_12h[i]
-                elif dev_sd > 0.5 and dev_sd < 2.0:  # Mild pullback above VWAP
-                    signals[i] = -0.30  # short
+                    entry_price = close_6h[i]
+                elif close_6h[i] < s1_6h[i]:
+                    signals[i] = -0.25  # short breakdown below S1
                     position = -1
-                    entry_price = close_12h[i]
+                    entry_price = close_6h[i]
+            elif low_vol and vol_confirm:
+                # Low volatility: mean reversion at pivot levels
+                if i > 0:
+                    # Rejection at R1 (failed breakout above)
+                    if close_6h[i-1] > r1_6h[i-1] and close_6h[i] < r1_6h[i]:
+                        signals[i] = -0.25  # short rejection at R1
+                        position = -1
+                        entry_price = close_6h[i]
+                    # Rejection at S1 (failed breakdown below)
+                    elif close_6h[i-1] < s1_6h[i-1] and close_6h[i] > s1_6h[i]:
+                        signals[i] = 0.25   # long rejection at S1
+                        position = 1
+                        entry_price = close_6h[i]
         else:
             # Manage existing position
             if position == 1:
                 # Long position management
-                if is_range:
-                    # In range, take profit when price returns to VWAP
-                    if dev_sd >= -0.5:  # Price back to or above VWAP
+                if high_vol:
+                    # In high vol, trail with 1d EMA20 or stop at S1
+                    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+                    if not np.isnan(ema20_1d_aligned[i]) and close_6h[i] < ema20_1d_aligned[i]:
                         signals[i] = 0.0
                         position = 0
-                    # Stoploss: price moves further away from VWAP
-                    elif dev_sd < -2.5:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = 0.30
-                else:  # is_trend
-                    # In trend, trail with VWAP or stop at extreme deviation
-                    if dev_sd > 0.5:  # Price back above VWAP
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: extreme adverse deviation
-                    elif dev_sd < -2.5:
+                    # Stoploss: close below S1
+                    elif close_6h[i] < s1_6h[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
-                        signals[i] = 0.30
+                        signals[i] = 0.25
+                else:  # low_vol or neutral
+                    # In low vol, take profit at R2 or stop at S1
+                    if close_6h[i] >= r2_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below S1
+                    elif close_6h[i] < s1_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.25
             elif position == -1:
                 # Short position management
-                if is_range:
-                    # In range, take profit when price returns to VWAP
-                    if dev_sd <= 0.5:  # Price back to or below VWAP
+                if high_vol:
+                    # In high vol, trail with 1d EMA20 or stop at R1
+                    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+                    if not np.isnan(ema20_1d_aligned[i]) and close_6h[i] > ema20_1d_aligned[i]:
                         signals[i] = 0.0
                         position = 0
-                    # Stoploss: price moves further away from VWAP
-                    elif dev_sd > 2.5:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = -0.30
-                else:  # is_trend
-                    # In trend, trail with VWAP or stop at extreme deviation
-                    if dev_sd < -0.5:  # Price back below VWAP
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: extreme adverse deviation
-                    elif dev_sd > 2.5:
+                    # Stoploss: close above R1
+                    elif close_6h[i] > r1_6h[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
-                        signals[i] = -0.30
+                        signals[i] = -0.25
+                else:  # low_vol or neutral
+                    # In low vol, take profit at S2 or stop at R1
+                    if close_6h[i] <= s2_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above R1
+                    elif close_6h[i] > r1_6h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.25
     
     return signals
