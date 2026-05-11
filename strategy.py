@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_PriceAction_CloseAboveYesterdayHigh_1dEMA50
-Hypothesis: Enters long when 4h close exceeds yesterday's high with price above 1d EMA50 (uptrend).
-Enters short when 4h close falls below yesterday's low with price below 1d EMA50 (downtrend).
-Uses pure price action with trend filter for robustness in both bull and bear markets.
-Designed for low trade frequency (20-40 trades/year) to minimize fee drag.
+1d_Camarilla_R3S3_Breakout_1wTrend_Volume
+Hypothesis: Enters long when price breaks above Camarilla R3 level with weekly uptrend and volume spike; short when breaks below S3 with weekly downtrend and volume spike. Uses daily timeframe with weekly trend filter to capture multi-day moves in both bull and bear markets. Designed for low trade frequency (7-25/year) to minimize fee drag.
 """
 
-name = "4h_PriceAction_CloseAboveYesterdayHigh_1dEMA50"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,8 +20,9 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D Data for Trend Filter and Yesterday's Levels ===
+    # === DAILY DATA FOR CAMARILLA LEVELS ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -33,28 +31,42 @@ def generate_signals(prices):
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # 1d EMA50 for trend
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Camarilla levels from previous day
+    # R3 = Close + 1.1*(High - Low)/2
+    # S3 = Close - 1.1*(High - Low)/2
+    cam_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    cam_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
     
-    # Previous day's high and low (yesterday's levels)
-    ph_1d = high_1d  # previous day high
-    pl_1d = low_1d   # previous day low
+    # Align Camarilla levels to daily bars (same index)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, cam_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, cam_s3)
     
-    # Align yesterday's levels to 4h
-    ph_aligned = align_htf_to_ltf(prices, df_1d, ph_1d)
-    pl_aligned = align_htf_to_ltf(prices, df_1d, pl_1d)
+    # === WEEKLY DATA FOR TREND FILTER ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    # Weekly EMA50 for trend
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === VOLUME SPIKE FILTER ===
+    # Volume ratio: current volume / 20-day average volume
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.where(vol_ma20 > 0, volume / vol_ma20, 1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers 1d EMA50)
-    start_idx = 50
+    # Start after warmup (covers 20-day volume MA and weekly EMA50)
+    start_idx = max(20, 50)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ph_aligned[i]) or np.isnan(pl_aligned[i]) or 
-            np.isnan(ema50_1d_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,26 +75,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: close above yesterday's high with uptrend
-            if (close[i] > ph_aligned[i] and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: price breaks above R3 with weekly uptrend and volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema50_1w_aligned[i] and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: close below yesterday's low with downtrend
-            elif (close[i] < pl_aligned[i] and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: price breaks below S3 with weekly downtrend and volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below yesterday's low (trend invalidation)
-            if close[i] < pl_aligned[i]:
+            # Long exit: price breaks below S3 (trend invalidation)
+            if close[i] < s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: close above yesterday's high (trend invalidation)
-            if close[i] > ph_aligned[i]:
+            # Short exit: price breaks above R3 (trend invalidation)
+            if close[i] > r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
