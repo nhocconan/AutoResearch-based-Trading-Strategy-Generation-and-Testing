@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Donchian20_VolumeTrend_20-30"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA34
+    # 1d EMA34 for trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    trend_up = close > ema_1d_aligned
     
-    # Previous day's Camarilla levels (R3, S3)
-    df_1d_prev = df_1d.copy()
-    df_1d_prev['high_prev'] = df_1d_prev['high'].shift(1)
-    df_1d_prev['low_prev'] = df_1d_prev['low'].shift(1)
-    df_1d_prev['close_prev'] = df_1d_prev['close'].shift(1)
-    
-    # Calculate Camarilla levels for current day based on previous day
-    high_prev = df_1d_prev['high_prev'].values
-    low_prev = df_1d_prev['low_prev'].values
-    close_prev = df_1d_prev['close_prev'].values
-    
-    # Camarilla R3 and S3
-    R3 = close_prev + (high_prev - low_prev) * 1.1 / 4
-    S3 = close_prev - (high_prev - low_prev) * 1.1 / 4
-    
-    R3_aligned = align_htf_to_ltf(prices, df_1d_prev, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d_prev, S3)
+    # Donchian(20) on 4h
+    dc_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    dc_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -51,11 +36,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(dc_high[i]) or np.isnan(dc_low[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -65,24 +50,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close > R3 + 1d uptrend + volume spike
-            if close[i] > R3_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: Close > Donchian high + 1d uptrend + volume spike
+            if close[i] > dc_high[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S3 + 1d downtrend + volume spike
-            elif close[i] < S3_aligned[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Close < Donchian low + 1d downtrend + volume spike
+            elif close[i] < dc_low[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < S3 or 1d trend down
-            if close[i] < S3_aligned[i] or not trend_up[i]:
+            # Long exit: Close < Donchian low or 1d trend down
+            if close[i] < dc_low[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > R3 or 1d trend up
-            if close[i] > R3_aligned[i] or trend_up[i]:
+            # Short exit: Close > Donchian high or 1d trend up
+            if close[i] > dc_high[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
