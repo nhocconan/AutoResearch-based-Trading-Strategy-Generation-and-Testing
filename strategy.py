@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Bias_DailyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,35 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: close above/below 1d EMA34
+    # 1w pivot levels (using weekly high/low/close)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # 1d trend: EMA50
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    trend_up = close > ema_1d_aligned
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    trend_up = close > ema50_1d_aligned
     
     # Daily volume filter: volume > 1.5x 20-day average
     vol_1d = df_1d['volume'].values
     vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
-    
-    # Camarilla pivot levels from previous day
-    # Calculate pivots using previous day's high, low, close
-    prev_high = np.roll(high, 1)  # previous bar's high
-    prev_low = np.roll(low, 1)    # previous bar's low
-    prev_close = np.roll(close, 1) # previous bar's close
-    
-    # For first bar, use first values to avoid NaN
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    # Camarilla levels
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -54,12 +53,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA, volume, and pivots
+    start_idx = 50  # Need enough data for EMA50 and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(R1[i]) or np.isnan(S1[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
+            np.isnan(s1_1w_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,24 +76,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + daily uptrend + volume filter
-            if close[i] > R1[i] and trend_up[i] and volume_filter[i]:
+            # Long: Price above weekly pivot + daily uptrend + volume filter
+            if close[i] > pivot_1w_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below S1 + daily downtrend + volume filter
-            elif close[i] < S1[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Price below weekly pivot + daily downtrend + volume filter
+            elif close[i] < pivot_1w_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below S1 or daily trend down
-            if close[i] < S1[i] or not trend_up[i]:
+            # Long exit: Price below weekly S1 or daily trend down
+            if close[i] < s1_1w_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above R1 or daily trend up
-            if close[i] > R1[i] or trend_up[i]:
+            # Short exit: Price above weekly R1 or daily trend up
+            if close[i] > r1_1w_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
