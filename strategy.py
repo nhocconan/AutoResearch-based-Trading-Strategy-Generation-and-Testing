@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS
-Hypothesis: Camarilla pivot levels (R1/S1) from daily data act as key support/resistance. 
-When price breaks above R1 or below S1 with volume confirmation (1.5x average) and 
-12h EMA50 trend alignment, it signals momentum continuation. In low volatility 
-regimes (ATR ratio < 0.8), fade at R1/S1 for mean reversion. Uses 4h timeframe 
-with 12h EMA trend filter and volume confirmation. Targets 20-50 trades/year.
+1d_Weekly_Pivot_VWAP_Bounce
+Hypothesis: On daily timeframe, price tends to bounce off weekly pivot points (R1/S1) when approaching with VWAP confirmation and low volatility (VIX-like filter). In trending markets (ADX>25), breakouts are traded; in ranging markets (ADX<20), mean reversion at pivot levels is favored. Uses weekly pivot points from 1w timeframe, VWAP from 1d, and ADX from 1d for regime filtering. Designed to work in both bull and bear markets by adapting to regime.
 """
 
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1d_Weekly_Pivot_VWAP_Bounce"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -21,192 +17,180 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and ATR
+    # Get 1w data for weekly pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    # Get 1d data for VWAP and ADX
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    # Get 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
-        return np.zeros(n)
+    # 1d OHLCV
+    close_1d = prices['close'].values
+    high_1d = prices['high'].values
+    low_1d = prices['low'].values
+    volume_1d = prices['volume'].values
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # --- VWAP calculation (typical price * volume) / cumulative volume ---
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume_1d)
+    vwap_denominator = np.cumsum(volume_1d)
+    vwap_1d = vwap_numerator / (vwap_denominator + 1e-10)
     
-    # --- 1d ATR for volatility regime (14 period) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
+    # --- ADX calculation (14 period) ---
     # True Range
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # ATR ratio: current ATR / 20-period average ATR
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
-    atr_ratio = atr_1d / (atr_ma_1d + 1e-10)
-    atr_ratio_4h_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
-    # --- Daily Camarilla Pivot Levels (using previous day's OHLC) ---
-    # Calculate from previous day's OHLC
-    prev_day_high = np.roll(df_1d['high'].values, 1)
-    prev_day_low = np.roll(df_1d['low'].values, 1)
-    prev_day_close = np.roll(df_1d['close'].values, 1)
-    prev_day_high[0] = df_1d['high'].values[0]
-    prev_day_low[0] = df_1d['low'].values[0]
-    prev_day_close[0] = df_1d['close'].values[0]
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
-    # Camarilla pivot point calculation
-    close_prev = prev_day_close
-    high_prev = prev_day_high
-    low_prev = prev_day_low
+    # Smoothed values
+    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
+    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
     
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_prev = high_prev - low_prev
+    # Directional Indicators
+    di_plus = 100 * dm_plus14 / (tr14 + 1e-10)
+    di_minus = 100 * dm_minus14 / (tr14 + 1e-10)
     
-    # Camarilla levels
-    r1 = close_prev + (range_prev * 1.1 / 12)
-    s1 = close_prev - (range_prev * 1.1 / 12)
-    r2 = close_prev + (range_prev * 1.1 / 6)
-    s2 = close_prev - (range_prev * 1.1 / 6)
-    r3 = close_prev + (range_prev * 1.1 / 4)
-    s3 = close_prev - (range_prev * 1.1 / 4)
-    r4 = close_prev + (range_prev * 1.1 / 2)
-    s4 = close_prev - (range_prev * 1.1 / 2)
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
     
-    # Align daily levels to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
-    r2_4h = align_htf_to_ltf(prices, df_1d, r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, s2)
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-    s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+    # --- Weekly Pivot Points (using previous week's OHLC) ---
+    prev_week_high = np.roll(df_1w['high'].values, 1)
+    prev_week_low = np.roll(df_1w['low'].values, 1)
+    prev_week_close = np.roll(df_1w['close'].values, 1)
+    prev_week_high[0] = df_1w['high'].values[0]
+    prev_week_low[0] = df_1w['low'].values[0]
+    prev_week_close[0] = df_1w['close'].values[0]
     
-    # --- 12h EMA50 for trend filter ---
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    r1 = 2 * pivot - prev_week_low
+    s1 = 2 * pivot - prev_week_high
+    r2 = pivot + (prev_week_high - prev_week_low)
+    s2 = pivot - (prev_week_high - prev_week_low)
     
-    # --- 4h Volume Average for confirmation ---
-    vol_avg_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Align weekly levels to 1d
+    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_1d = align_htf_to_ltf(prices, df_1w, r1)
+    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
+    r2_1d = align_htf_to_ltf(prices, df_1w, r2)
+    s2_1d = align_htf_to_ltf(prices, df_1w, s2)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA50 and ATR ratio
+    start_idx = 30  # for ADX and VWAP stability
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(atr_ratio_4h_aligned[i]) or np.isnan(r1_4h[i]) or 
-            np.isnan(s1_4h[i]) or np.isnan(ema50_12h_aligned[i]) or 
-            np.isnan(vol_avg_4h[i])):
+        if (np.isnan(adx[i]) or np.isnan(vwap_1d[i]) or 
+            np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i])):
             if position != 0:
-                # Simple stoploss: 2.0x ATR from entry
-                atr_est = np.abs(high_4h[i] - low_4h[i])  # rough 4h ATR estimate
-                if position == 1 and close_4h[i] <= entry_price - 2.0 * atr_est:
+                # Simple stoploss: 2x ATR from entry
+                atr_est = np.abs(high_1d[i] - low_1d[i])
+                if position == 1 and close_1d[i] <= entry_price - 2 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_4h[i] >= entry_price + 2.0 * atr_est:
+                elif position == -1 and close_1d[i] >= entry_price + 2 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Volatility regime: high vol = breakout mode, low vol = mean reversion
-        high_vol = atr_ratio_4h_aligned[i] > 1.2
-        low_vol = atr_ratio_4h_aligned[i] < 0.8
+        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
+        trending = adx[i] > 25
+        ranging = adx[i] < 20
         
-        # Volume confirmation: current volume > 1.5x 4h average
-        vol_confirm = volume_4h[i] > 1.5 * vol_avg_4h[i]
-        
-        # Trend filter: price above/below 12h EMA50
-        price_vs_ema = close_4h[i] - ema50_12h_aligned[i]
-        uptrend = price_vs_ema > 0
-        downtrend = price_vs_ema < 0
+        # VWAP deviation: price close to VWAP (within 0.5%)
+        vwap_dev = np.abs(close_1d[i] - vwap_1d[i]) / vwap_1d[i]
+        near_vwap = vwap_dev < 0.005
         
         if position == 0:
-            # Look for entries based on volatility regime
-            if high_vol and vol_confirm:
-                # High volatility: breakout continuation with trend filter
-                if close_4h[i] > r1_4h[i] and uptrend:
+            if trending:
+                # In trending market: breakout of R1/S1 with VWAP confirmation
+                if close_1d[i] > r1_1d[i] and close_1d[i] > vwap_1d[i]:
                     signals[i] = 0.25  # long breakout above R1
                     position = 1
-                    entry_price = close_4h[i]
-                elif close_4h[i] < s1_4h[i] and downtrend:
+                    entry_price = close_1d[i]
+                elif close_1d[i] < s1_1d[i] and close_1d[i] < vwap_1d[i]:
                     signals[i] = -0.25  # short breakdown below S1
                     position = -1
-                    entry_price = close_4h[i]
-            elif low_vol and vol_confirm:
-                # Low volatility: mean reversion at pivot levels
+                    entry_price = close_1d[i]
+            elif ranging:
+                # In ranging market: mean reversion at pivot levels with VWAP confirmation
                 if i > 0:
-                    # Rejection at R1 (failed breakout above)
-                    if close_4h[i-1] > r1_4h[i-1] and close_4h[i] < r1_4h[i]:
+                    # Rejection at R1 (failed breakout above) with VWAP support
+                    if close_1d[i-1] > r1_1d[i-1] and close_1d[i] < r1_1d[i] and close_1d[i] > vwap_1d[i]:
                         signals[i] = -0.25  # short rejection at R1
                         position = -1
-                        entry_price = close_4h[i]
-                    # Rejection at S1 (failed breakdown below)
-                    elif close_4h[i-1] < s1_4h[i-1] and close_4h[i] > s1_4h[i]:
+                        entry_price = close_1d[i]
+                    # Rejection at S1 (failed breakdown below) with VWAP resistance
+                    elif close_1d[i-1] < s1_1d[i-1] and close_1d[i] > s1_1d[i] and close_1d[i] < vwap_1d[i]:
                         signals[i] = 0.25   # long rejection at S1
                         position = 1
-                        entry_price = close_4h[i]
+                        entry_price = close_1d[i]
         else:
             # Manage existing position
             if position == 1:
                 # Long position management
-                if high_vol:
-                    # In high vol, trail with 12h EMA50 or stop at S1
-                    if close_4h[i] < ema50_12h_aligned[i]:
+                if trending:
+                    # In trend: trail with VWAP or stop at S1
+                    if close_1d[i] < vwap_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     # Stoploss: close below S1
-                    elif close_4h[i] < s1_4h[i]:
+                    elif close_1d[i] < s1_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
                         signals[i] = 0.25
-                else:  # low_vol or neutral
-                    # In low vol, take profit at R2 or stop at S1
-                    if close_4h[i] >= r2_4h[i]:
+                else:  # ranging or neutral
+                    # In range: take profit at R2 or stop at S1
+                    if close_1d[i] >= r2_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     # Stoploss: close below S1
-                    elif close_4h[i] < s1_4h[i]:
+                    elif close_1d[i] < s1_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
                         signals[i] = 0.25
             elif position == -1:
                 # Short position management
-                if high_vol:
-                    # In high vol, trail with 12h EMA50 or stop at R1
-                    if close_4h[i] > ema50_12h_aligned[i]:
+                if trending:
+                    # In trend: trail with VWAP or stop at R1
+                    if close_1d[i] > vwap_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     # Stoploss: close above R1
-                    elif close_4h[i] > r1_4h[i]:
+                    elif close_1d[i] > r1_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
                         signals[i] = -0.25
-                else:  # low_vol or neutral
-                    # In low vol, take profit at S2 or stop at R1
-                    if close_4h[i] <= s2_4h[i]:
+                else:  # ranging or neutral
+                    # In range: take profit at S2 or stop at R1
+                    if close_1d[i] <= s2_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     # Stoploss: close above R1
-                    elif close_4h[i] > r1_4h[i]:
+                    elif close_1d[i] > r1_1d[i]:
                         signals[i] = 0.0
                         position = 0
                     else:
