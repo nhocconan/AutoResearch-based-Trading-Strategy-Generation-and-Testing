@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-1D_WeeklyVWAP_Retest_4hTrend_Filter
-Hypothesis: Weekly VWAP acts as strong support/resistance on daily chart. Price retests weekly VWAP with 4h trend continuation offer high-probability entries. Weekly trend filter (price above/below weekly VWAP) avoids counter-trend trades. Designed for low frequency (10-25 trades/year) to minimize fee drag in 2025 ranging market. Works in both bull (buy VWAP support in uptrend) and bear (sell VWAP resistance in downtrend).
+12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: Daily trend (price vs EMA34) defines market regime, daily Camarilla R3/S3 levels act as strong support/resistance.
+On 12h timeframe, buy breakouts above R3 when daily trend is up, sell breakdowns below S3 when daily trend is down.
+Volume spike confirms institutional interest. Target: 12-37 trades/year to avoid fee drag.
 """
 
-name = "1D_WeeklyVWAP_Retest_4hTrend_Filter"
-timeframe = "1d"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -22,54 +24,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for VWAP and trend filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # Load daily data ONCE for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate weekly VWAP: typical price * volume / cumulative volume
-    typical_price_1w = (high_1w + low_1w + close_1w) / 3.0
-    vwap_num = np.cumsum(typical_price_1w * volume_1w)
-    vwap_den = np.cumsum(volume_1w)
-    vwap_1w = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price_1w)
+    # Load daily data ONCE for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly trend filter: price above/below VWAP
-    trend_up_1w = close_1w > vwap_1w
-    trend_down_1w = close_1w < vwap_1w
+    # Calculate Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + hl_range * 1.5000
+    s3 = close_1d - hl_range * 1.5000
     
-    # Align weekly VWAP and trend to daily timeframe
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w.astype(float))
-    trend_down_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_down_1w.astype(float))
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Load 4h data ONCE for trend confirmation
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Simple 4h trend: price above/below 20-period EMA
-    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    trend_up_4h = close_4h > ema20_4h
-    trend_down_4h = close_4h < ema20_4h
+    # Volume filter: 20-period EMA for spike detection (using 12h volume)
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
-    # Align 4h trend to daily timeframe
-    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h.astype(float))
-    trend_down_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_down_4h.astype(float))
-    
-    # Position size
+    # Fixed position size to minimize churn
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(trend_up_1w_aligned[i]) or 
-            np.isnan(trend_down_1w_aligned[i]) or np.isnan(trend_up_4h_aligned[i]) or 
-            np.isnan(trend_down_4h_aligned[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -79,31 +70,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        near_vwap = abs(close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i] < 0.005  # Within 0.5% of VWAP
-        price_above_vwap = close[i] > vwap_1w_aligned[i]
-        price_below_vwap = close[i] < vwap_1w_aligned[i]
+        price_above_ema1d = close[i] > ema34_1d_aligned[i]
+        price_below_ema1d = close[i] < ema34_1d_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Price near VWAP from above + weekly uptrend + 4h uptrend
-            if near_vwap and price_above_vwap and trend_up_1w_aligned[i] and trend_up_4h_aligned[i]:
+            # Long: Price breaks above R3 + above daily EMA34 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price near VWAP from below + weekly downtrend + 4h downtrend
-            elif near_vwap and price_below_vwap and trend_down_1w_aligned[i] and trend_down_4h_aligned[i]:
+            # Short: Price breaks below S3 + below daily EMA34 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions: price moves 1.5% away from VWAP OR trend reverses
+            # Exit conditions - simplified to reduce churn
             if position == 1:
-                vwap_distance = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i]
-                if vwap_distance > 0.015 or not trend_up_1w_aligned[i] or not trend_up_4h_aligned[i]:
+                # Exit: Price crosses below S3 OR trend reverses (close below daily EMA)
+                if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                vwap_distance = (close[i] - vwap_1w_aligned[i]) / vwap_1w_aligned[i]
-                if vwap_distance < -0.015 or not trend_down_1w_aligned[i] or not trend_down_4h_aligned[i]:
+                # Exit: Price crosses above R3 OR trend reverses (close above daily EMA)
+                if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
