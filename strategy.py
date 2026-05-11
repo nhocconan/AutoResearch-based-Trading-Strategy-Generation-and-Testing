@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h_RSI40_BullishEngulfing_1dTrend_Volume
-Hypothesis: Combine RSI < 40 (oversold) with bullish engulfing candle pattern on 4h timeframe,
-filtered by 1-day EMA50 trend direction and volume confirmation. In bear markets, oversold
-conditions with bullish reversal patterns often lead to mean-reversion bounces. In bull markets,
-these conditions signal continuation of uptrend. Volume confirms institutional participation.
+1d_1wPivot_Breakout_Trend_Volume
+Hypothesis: Trade breakouts at weekly pivot levels (R1/S1) on daily timeframe with weekly trend filter and volume confirmation.
+Weekly pivots act as strong support/resistance levels. Breakouts in direction of weekly trend with volume confirmation
+should capture significant moves. Uses fewer, more significant levels than daily pivots, reducing trade frequency.
+Works in bull/bear markets by aligning with weekly trend direction.
 """
 
-name = "4h_RSI40_BullishEngulfing_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_1wPivot_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,60 +17,51 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
-    open_price = prices['open'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === RSI(14) Calculation ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # === Bullish Engulfing Pattern ===
-    bullish_engulfing = (close > open_price) & (open_price < close) & \
-                        (close > open_price) & (open_price < close) & \
-                        (close > open_price) & (open_price < close)  # Placeholder - corrected below
-    # Actually: current candle bullish and engulfs previous bearish candle
-    bullish_engulfing = (close > open_price) & \
-                        (open_price <= close[1:] if len(close) > 1 else False) & \
-                        (close >= open_price[1:] if len(open_price) > 1 else False)
-    # Fix array alignment
-    bullish_engulfing = np.zeros(n, dtype=bool)
-    bullish_engulfing[1:] = (close[1:] > open_price[1:]) & \
-                           (open_price[1:] <= close[:-1]) & \
-                           (close[1:] >= open_price[:-1])
-    
-    # === Daily Trend Filter (EMA50) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Weekly OHLC for Pivot Points ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate Weekly Pivot Points from previous week's OHLC
+    ph_w = df_1w['high'].values
+    pl_w = df_1w['low'].values
+    pc_w = df_1w['close'].values
     
-    # === Volume Filter (1.5x 20-period EMA) ===
+    # Weekly Pivot Point (PP)
+    pp_w = (ph_w + pl_w + pc_w) / 3.0
+    # Weekly R1 and S1 (key breakout levels)
+    r1_w = 2 * pp_w - pl_w
+    s1_w = 2 * pp_w - ph_w
+    
+    # Align to daily timeframe
+    r1_d = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_d = align_htf_to_ltf(prices, df_1w, s1_w)
+    
+    # === Weekly Trend Filter (EMA34) ===
+    ema34_1w = pd.Series(pc_w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_d = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    
+    # === Volume Filter (2.0x 20-period EMA on daily) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    volume_ok = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 60
+    # Start after warmup (covers weekly calculations)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r1_d[i]) or np.isnan(s1_d[i]) or np.isnan(ema34_d[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,19 +70,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: RSI < 40 (oversold) + bullish engulfing + uptrend + volume
-            if (rsi[i] < 40 and 
-                bullish_engulfing[i] and 
-                close[i] > ema50_4h[i] and 
+            # Long breakout: price closes above R1 with uptrend and volume
+            if (close[i] > r1_d[i] and 
+                close[i] > ema34_d[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
+            # Short breakdown: price closes below S1 with downtrend and volume
+            elif (close[i] < s1_d[i] and 
+                  close[i] < ema34_d[i] and 
+                  volume_ok[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Exit: RSI > 60 (overbought) or price closes below EMA50
-            if rsi[i] > 60 or close[i] < ema50_4h[i]:
+            # Long exit: price closes below weekly pivot (mean reversion)
+            if close[i] < pp_w[-1] if not np.isnan(pp_w[-1]) else pp_w[-2]:  # use last valid weekly pivot
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
+        elif position == -1:
+            # Short exit: price closes above weekly pivot (mean reversion)
+            if close[i] > pp_w[-1] if not np.isnan(pp_w[-1]) else pp_w[-2]:  # use last valid weekly pivot
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25  # maintain position
     
     return signals
