@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_KAMA_Trend_Regime_Filter
-Hypothesis: Use Kaufman's Adaptive Moving Average (KAMA) as primary trend filter on 6h timeframe.
-Combine with Choppiness Index regime filter to distinguish trending vs ranging markets.
-Only take long signals when KAMA slope is positive and market is trending (CHOP < 45).
-Only take short signals when KAMA slope is negative and market is trending (CHOP < 45).
-This avoids whipsaws in ranging markets while capturing strong trends in both bull and bear markets.
-The strategy uses volume confirmation to ensure breakouts have institutional backing.
-Target: 20-60 trades per year on 6h timeframe.
+4h_WeeklyPivot_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts at weekly pivot levels (R1/S1) on 4h timeframe with 1d trend filter and volume confirmation.
+Weekly pivots act as strong support/resistance levels. Breakouts in direction of daily trend with volume confirmation
+should capture significant moves. Weekly pivot calculation provides fewer, more significant levels than daily pivots,
+reducing trade frequency. Works in bull/bear markets by aligning with daily trend direction.
 """
 
-name = "6h_KAMA_Trend_Regime_Filter"
-timeframe = "6h"
+name = "4h_WeeklyPivot_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,81 +25,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA Calculation (10-period ER, 2/30 SC) ===
-    # Efficiency Ratio
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)  # Will fix below
+    # === Weekly OHLC for Pivot Points ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
     
-    # Recalculate volatility properly
-    volatility = np.zeros(n)
-    for i in range(10, n):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-10:i+1])))
+    # Calculate Weekly Pivot Points from previous week's OHLC
+    ph_w = df_1w['high'].values
+    pl_w = df_1w['low'].values
+    pc_w = df_1w['close'].values
     
-    er = np.where(volatility != 0, change / volatility, 0)
+    # Weekly Pivot Point (PP)
+    pp_w = (ph_w + pl_w + pc_w) / 3.0
+    # Weekly R1 and S1 (primary breakout levels)
+    r1_w = pp_w + (ph_w - pl_w)
+    s1_w = pp_w - (ph_w - pl_w)
     
-    # Smoothing Constants
-    sc_fast = 2 / (2 + 1)   # EMA(2)
-    sc_slow = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (sc_fast - sc_slow) + sc_slow) ** 2
+    # Align to 4h timeframe
+    r1_4h = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_4h = align_htf_to_ltf(prices, df_1w, s1_w)
     
-    # KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # === Daily Trend Filter (EMA34) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # KAMA slope (trend direction)
-    kama_slope = np.diff(kama, prepend=kama[0])
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Choppiness Index (14-period) ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    
-    # ATR (14-period)
-    atr = np.zeros(n)
-    atr[13] = np.mean(tr[1:14])  # Simple average for first value
-    for i in range(14, n):
-        atr[i] = (atr[i-1] * 13 + tr[i]) / 14
-    
-    # Sum of ATR over 14 periods
-    sum_atr = np.zeros(n)
-    for i in range(13, n):
-        if i == 13:
-            sum_atr[i] = np.sum(atr[1:14])
-        else:
-            sum_atr[i] = sum_atr[i-1] - atr[i-14] + atr[i]
-    
-    # Max/Min range over 14 periods
-    max_high = np.zeros(n)
-    min_low = np.zeros(n)
-    for i in range(n):
-        if i < 13:
-            max_high[i] = np.max(high[:i+1])
-            min_low[i] = np.min(low[:i+1])
-        else:
-            max_high[i] = np.max(high[i-13:i+1])
-            min_low[i] = np.min(low[i-13:i+1])
-    
-    range_max_min = max_high - min_low
-    chop = np.where(range_max_min != 0, 100 * np.log10(sum_atr / range_max_min) / np.log10(14), 50)
-    
-    # === Volume Filter (2.0x 20-period EMA) ===
+    # === Volume Filter (2.0x 20-period EMA on 4h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers all indicators)
+    # Start after warmup (covers weekly calculations)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_slope[i]) or np.isnan(chop[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or np.isnan(ema34_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -111,28 +74,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: KAMA slope up + trending market (low chop) + volume
-            if (kama_slope[i] > 0 and 
-                chop[i] < 45 and 
+            # Long breakout: price closes above R1 with uptrend and volume
+            if (close[i] > r1_4h[i] and 
+                close[i] > ema34_4h[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: KAMA slope down + trending market (low chop) + volume
-            elif (kama_slope[i] < 0 and 
-                  chop[i] < 45 and 
+            # Short breakdown: price closes below S1 with downtrend and volume
+            elif (close[i] < s1_4h[i] and 
+                  close[i] < ema34_4h[i] and 
                   volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: KAMA slope turns down OR market becomes ranging (high chop)
-            if (kama_slope[i] <= 0) or (chop[i] >= 55):
+            # Long exit: price closes below weekly pivot (mean reversion)
+            if close[i] < pp_w[0] if i < len(pp_w) else pp_w[-1]:  # Use weekly PP
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: KAMA slope turns up OR market becomes ranging (high chop)
-            if (kama_slope[i] >= 0) or (chop[i] >= 55):
+            # Short exit: price closes above weekly pivot (mean reversion)
+            if close[i] > pp_w[0] if i < len(pp_w) else pp_w[-1]:  # Use weekly PP
                 signals[i] = 0.0
                 position = 0
             else:
