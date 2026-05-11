@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-# 6h_ElderRay_BullBearPower_1dTrend_20EMA_Filter
-# Hypothesis: Uses 1d Elder Ray (Bull/Bear Power) to capture institutional buying/selling pressure
-# combined with 20-period EMA on 6h for trend alignment. In bull markets (1d EMA50 > EMA200),
-# long when Bull Power > 0 and price > EMA20; in bear markets (1d EMA50 < EMA200), short when
-# Bear Power < 0 and price < EMA20. Volume confirmation reduces false signals.
-# Designed for low turnover (target 15-25 trades/year) with strong trend persistence in 6h timeframe.
+# 12h_1w_1d_HTF_Confluence_Trend_Filter
+# Hypothesis: Combines 1w trend (EMA50) with 1d momentum (RSI>50) and 12h volume confirmation.
+# Uses 1w EMA50 for primary trend direction, 1d RSI for momentum filter, and 12h volume spike for entry confirmation.
+# Designed for low turnover (target 15-25 trades/year) to minimize fee drag in 2025 ranging markets.
+# Long when: price > 1w EMA50 AND 1d RSI > 50 AND volume > 1.5x 20-period EMA volume.
+# Short when: price < 1w EMA50 AND 1d RSI < 50 AND volume > 1.5x 20-period EMA volume.
+# Exit when trend reverses (price crosses 1w EMA50 in opposite direction).
+# Uses 1w EMA50 as dynamic trend filter to avoid counter-trend trades in both bull and bear markets.
 
-name = "6h_ElderRay_BullBearPower_1dTrend_20EMA_Filter"
-timeframe = "6h"
+name = "12h_1w_1d_HTF_Confluence_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +18,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,29 +26,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Data for Elder Ray and Trend Filter ===
+    # === 1w EMA50 Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_12h = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # === 1d RSI(14) Momentum Filter ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # 1d EMA13 (for Elder Ray) and EMA50/EMA200 (trend filter)
-    ema13_1d = pd.Series(close_1d).ewm(span=13, min_periods=13, adjust=False).mean().values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema13_1d
-    bear_power = low_1d - ema13_1d
-    
-    # Align 1d indicators to 6h
-    bull_power_6h = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_6h = align_htf_to_ltf(prices, df_1d, bear_power)
-    ema50_1d_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema200_1d_6h = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # === 6h EMA20 for Entry Timing ===
-    ema20_6h = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_12h = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -58,14 +54,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (max of EMA200 and EMA20)
-    start_idx = 200
+    # Start after warmup (max of 1w EMA50 and 1d RSI warmup)
+    start_idx = 100  # covers EMA50 and RSI
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_6h[i]) or np.isnan(bear_power_6h[i]) or 
-            np.isnan(ema50_1d_6h[i]) or np.isnan(ema200_1d_6h[i]) or 
-            np.isnan(ema20_6h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema50_1w_12h[i]) or np.isnan(rsi_1d_12h[i]) or 
+            np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -75,36 +70,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Determine market regime from 1d EMA50 vs EMA200
-            bull_market = ema50_1d_6h[i] > ema200_1d_6h[i]
-            bear_market = ema50_1d_6h[i] < ema200_1d_6h[i]
-            
-            # Long: Bull market + Bull Power > 0 + price > EMA20 + volume spike
-            if (bull_market and 
-                bull_power_6h[i] > 0 and 
-                close[i] > ema20_6h[i] and 
+            # Long: Above 1w EMA50 + RSI > 50 + volume spike
+            if (close[i] > ema50_1w_12h[i] and 
+                rsi_1d_12h[i] > 50 and 
                 volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Bear market + Bear Power < 0 + price < EMA20 + volume spike
-            elif (bear_market and 
-                  bear_power_6h[i] < 0 and 
-                  close[i] < ema20_6h[i] and 
+            # Short: Below 1w EMA50 + RSI < 50 + volume spike
+            elif (close[i] < ema50_1w_12h[i] and 
+                  rsi_1d_12h[i] < 50 and 
                   volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: Reverse of entry conditions or EMA crossover
+            # Hold position until trend reverses
             if position == 1:
-                # Exit long: Bear power turns negative OR price < EMA20
-                if bear_power_6h[i] < 0 or close[i] < ema20_6h[i]:
+                # Exit: Price crosses below 1w EMA50
+                if close[i] < ema50_1w_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit short: Bull power turns positive OR price > EMA20
-                if bull_power_6h[i] > 0 or close[i] > ema20_6h[i]:
+                # Exit: Price crosses above 1w EMA50
+                if close[i] > ema50_1w_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
