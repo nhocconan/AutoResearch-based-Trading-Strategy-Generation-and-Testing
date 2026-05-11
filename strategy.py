@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA200_Trend_Volume"
-timeframe = "4h"
+name = "1d_TRIX_VolumeSpike_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,44 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 1d data ONCE for trend and pivot levels
+    # 1. Load 1d data ONCE for TRIX and volume
     df_1d = get_htf_data(prices, '1d')
     
-    # 2. 1d EMA200 for trend filter
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # 2. TRIX on daily close
+    ema1 = pd.Series(df_1d['close']).ewm(span=12, adjust=False).mean()
+    ema2 = ema1.ewm(span=12, adjust=False).mean()
+    ema3 = ema2.ewm(span=12, adjust=False).mean()
+    trix = 100 * (ema3 / ema3.shift(1) - 1)
+    trix_vals = trix.values
     
-    # 3. Calculate daily high/low/close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 3. Align TRIX to daily
+    trix_aligned = align_htf_to_ltf(prices, df_1d, trix_vals)
     
-    # 4. Camarilla levels: R1, S1 (inner levels for tighter entries)
-    hl_range = high_1d - low_1d
-    r1 = close_1d + hl_range * 1.09
-    s1 = close_1d - hl_range * 1.09
-    
-    # 5. Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 6. Volume filter: 20-period EMA for spike detection
+    # 4. Volume filter: 20-period EMA for spike detection
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    volume_ok = volume > vol_ema20 * 1.8
     
-    # 7. Fixed position size to avoid churn
+    # 5. Load 1w data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # 6. 1w EMA50 for trend filter
+    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # 7. Fixed position size
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(trix_aligned[i]) or np.isnan(volume_ok[i]) or 
+            np.isnan(ema50_1w_aligned[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -64,32 +63,30 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema200 = close[i] > ema200_1d_aligned[i]
-        price_below_ema200 = close[i] < ema200_1d_aligned[i]
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        trix_bullish = trix_aligned[i] > 0
+        trix_bearish = trix_aligned[i] < 0
+        price_above_ema50 = close[i] > ema50_1w_aligned[i]
+        price_below_ema50 = close[i] < ema50_1w_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R1 + above 1d EMA200 + volume spike
-            if breakout_long and price_above_ema200 and volume_ok[i]:
+            # Long: TRIX positive + price above 1w EMA50 + volume spike
+            if trix_bullish and price_above_ema50 and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S1 + below 1d EMA200 + volume spike
-            elif breakout_short and price_below_ema200 and volume_ok[i]:
+            # Short: TRIX negative + price below 1w EMA50 + volume spike
+            elif trix_bearish and price_below_ema50 and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit: TRIX reverses OR price crosses 1w EMA50
             if position == 1:
-                # Exit: Price crosses below S1 OR trend reverses
-                if close[i] < s1_aligned[i] or close[i] < ema200_1d_aligned[i]:
+                if trix_aligned[i] < 0 or close[i] < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R1 OR trend reverses
-                if close[i] > r1_aligned[i] or close[i] > ema200_1d_aligned[i]:
+                if trix_aligned[i] > 0 or close[i] > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
