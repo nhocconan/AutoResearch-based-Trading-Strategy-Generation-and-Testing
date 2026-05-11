@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_KeltnerBreakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,39 +17,42 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA50) and Keltner calculation
+    # Get 1d data for Camarilla pivot levels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1d = close_1d > ema50_1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Keltner Channel on 6h (20-period EMA, 2x ATR)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First value
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
-    keltner_upper = ema20 + 2 * atr
-    keltner_lower = ema20 - 2 * atr
+    # Calculate Camarilla pivot levels (R3, S3) from previous 1d
+    # R3 = close + 1.1*(high - low)
+    # S3 = close - 1.1*(high - low)
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d)
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d)
     
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and ATR
+    start_idx = 34  # Need enough data for EMA and pivot calculation
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
             np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -59,24 +62,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Keltner upper breakout + 1d uptrend + volume confirmation
-            if close[i] > keltner_upper[i-1] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R3 + 1d uptrend + volume confirmation
+            if close[i] > camarilla_r3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Keltner lower breakdown + 1d downtrend + volume confirmation
-            elif close[i] < keltner_lower[i-1] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S3 + 1d downtrend + volume confirmation
+            elif close[i] < camarilla_s3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Keltner lower breakdown OR 1d trend turns down
-            if close[i] < keltner_lower[i-1] or not trend_up_1d_aligned[i]:
+            # Long exit: price breaks below S3 OR 1d trend turns down
+            if close[i] < camarilla_s3_aligned[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Keltner upper breakout OR 1d trend turns up
-            if close[i] > keltner_upper[i-1] or trend_up_1d_aligned[i]:
+            # Short exit: price breaks above R3 OR 1d trend turns up
+            if close[i] > camarilla_r3_aligned[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
