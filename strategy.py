@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-6h_LarryWilliamsVolatilityBreakout_v1
-Hypothesis: Larry Williams Volatility Breakout on 6h timeframe.
-- Long: price breaks above open + K * (prev high - prev low) where K=0.6
-- Short: price breaks below open - K * (prev high - prev low)
-- Direction filter: only take longs when 1d EMA34 > 1d EMA89 (bullish), shorts when EMA34 < EMA89 (bearish)
-- Volatility filter: only trade when 6h ATR(14) > 1.5 * 6h ATR(50) (expanding volatility)
-- Uses actual price expansion in volatile markets, works in both bull/bear by following breakout direction with trend filter.
-Target: 50-150 total trades over 4 years on 6h timeframe.
+12h_12h_1w_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1
+Hypothesis: Use Camarilla R3/S3 levels from weekly timeframe as significant support/resistance.
+Price breaking above R3 with volume spike indicates bullish momentum; breaking below S3 with volume spike indicates bearish momentum.
+Weekly EMA50 trend filter ensures alignment with higher timeframe trend.
+Target: 50-150 total trades over 4 years on 12h timeframe.
 """
 
-name = "6h_LarryWilliamsVolatilityBreakout_v1"
-timeframe = "6h"
+name = "12h_12h_1w_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,59 +17,56 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === 1D Data for EMA Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 89:  # Need EMA89
+    # === WEEKLY Data for Camarilla and Trend ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    ema89_aligned = align_htf_to_ltf(prices, df_1d, ema89_1d)
+    # Calculate Camarilla levels for weekly timeframe
+    # Based on previous week's OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === 6h Indicators ===
-    # ATR for volatility filter
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(open_price, 1))
-    tr3 = np.abs(low - np.roll(open_price, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - open_price[0])
-    tr3[0] = np.abs(low[0] - open_price[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    # Camarilla levels: R3, S3
+    # R3 = close + (high - low) * 1.1/4
+    # S3 = close - (high - low) * 1.1/4
+    range_1w = high_1w - low_1w
+    r3_1w = close_1w + range_1w * 1.1 / 4
+    s3_1w = close_1w - range_1w * 1.1 / 4
     
-    # Williams Volatility Breakout levels
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_range = prev_high - prev_low
-    K = 0.6
-    long_trigger = open_price + K * prev_range
-    short_trigger = open_price - K * prev_range
+    # Weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align weekly data to 12h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    
+    # Volume spike detection: current volume > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(50, 89)  # ATR50 and EMA89
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_aligned[i]) or 
-            np.isnan(ema89_aligned[i]) or 
-            np.isnan(atr14[i]) or 
-            np.isnan(atr50[i])):
+        if (np.isnan(r3_1w_aligned[i]) or 
+            np.isnan(s3_1w_aligned[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -80,32 +74,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: bullish when EMA34 > EMA89, bearish when EMA34 < EMA89
-        bullish_trend = ema34_aligned[i] > ema89_aligned[i]
-        bearish_trend = ema34_aligned[i] < ema89_aligned[i]
-        
-        # Volatility filter: trade only when volatility is expanding
-        vol_expanding = atr14[i] > 1.5 * atr50[i]
-        
         if position == 0:
-            # Long: bullish trend + volatility expanding + price breaks above long trigger
-            if bullish_trend and vol_expanding and close[i] > long_trigger[i]:
+            # Long: price crosses above R3 with volume spike AND price above weekly EMA50 (uptrend)
+            if close[i] > r3_1w_aligned[i] and volume_spike[i] and close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish trend + volatility expanding + price breaks below short trigger
-            elif bearish_trend and vol_expanding and close[i] < short_trigger[i]:
+            # Short: price crosses below S3 with volume spike AND price below weekly EMA50 (downtrend)
+            elif close[i] < s3_1w_aligned[i] and volume_spike[i] and close[i] < ema50_1w_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: trend turns bearish OR volatility contracts OR price closes below open
-            if (not bullish_trend) or (not vol_expanding) or (close[i] < open_price[i]):
+            # Long exit: price crosses below S3 OR price crosses below weekly EMA50
+            if close[i] < s3_1w_aligned[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: trend turns bullish OR volatility contracts OR price closes above open
-            if (not bearish_trend) or (not vol_expanding) or (close[i] > open_price[i]):
+            # Short exit: price crosses above R3 OR price crosses above weekly EMA50
+            if close[i] > r3_1w_aligned[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
