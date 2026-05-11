@@ -17,18 +17,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34) and Camarilla levels
+    # Get 1d data for trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
-    # Calculate EMA34 on 1d close for trend filter
+    # Calculate 1d EMA34 for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d  # uptrend when close > EMA34
+    trend_up_1d = close_1d > ema34_1d
     
     # Calculate Camarilla levels (R3, S3) from previous day
     R3 = np.zeros(len(high_1d))
@@ -46,7 +46,7 @@ def generate_signals(prices):
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Align 1d indicators to 4h timeframe
+    # Align indicators to 4h timeframe
     R3_4h_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_4h_aligned = align_htf_to_ltf(prices, df_1d, S3)
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
@@ -62,7 +62,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34)  # Need enough data for indicators
+    start_idx = max(34, 20)  # Need enough data for EMA and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
