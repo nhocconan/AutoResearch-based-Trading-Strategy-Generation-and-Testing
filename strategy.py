@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_1w_382_Camarilla_R1S1_Retest_WeeklyTrend
-Hypothesis: Trade pullbacks to Camarilla R1/S1 levels after breakouts in the direction of the weekly trend, with volume confirmation. 1d timeframe, 1w trend filter. Target: 15-25 trades/year (60-100 total over 4 years). Works in bull by buying pullbacks in uptrends, in bear by selling rallies in downtrends.
+6h_Keltner_MeanReversion_1dTrend
+Hypothesis: Trade mean reversion at Keltner lower/upper bands with 1d trend filter and volume confirmation. 
+In trending markets, price pulls back to the 20 EMA (Keltner middle) before continuing. 
+In ranging markets, price reverts from the bands. Volume confirms momentum exhaustion.
+Targets 15-25 trades/year on 6h to minimize fee drag while capturing mean reversion edges.
 """
 
-name = "1d_1w_382_Camarilla_R1S1_Retest_WeeklyTrend"
-timeframe = "1d"
+name = "6h_Keltner_MeanReversion_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -22,41 +25,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly OHLC for Camarilla Pivots (from previous week) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 1h data for Keltner Bands (20 EMA, ATR(10)*2) ===
+    df_1h = get_htf_data(prices, '1h')
+    if len(df_1h) < 30:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous week's OHLC
-    ph_w = df_1w['high'].values
-    pl_w = df_1w['low'].values
-    pc_w = df_1w['close'].values
+    # Calculate EMA20 and ATR(10) on 1h
+    ema20_1h = pd.Series(df_1h['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr_1h = np.maximum(
+        df_1h['high'].values - df_1h['low'].values,
+        np.maximum(
+            np.abs(df_1h['high'].values - np.concatenate([[df_1h['close'][0]], df_1h['close'][:-1]])),
+            np.abs(df_1h['low'].values - np.concatenate([[df_1h['close'][0]], df_1h['close'][:-1]]))
+        )
+    )
+    atr10_1h = pd.Series(tr_1h).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Camarilla R1 and S1 (most significant levels for retest)
-    camarilla_r1_w = pc_w + (ph_w - pl_w) * 1.1 / 2
-    camarilla_s1_w = pc_w - (ph_w - pl_w) * 1.1 / 2
+    # Keltner Bands: middle = EMA20, upper/lower = EMA20 ± 2*ATR
+    keltner_middle_1h = ema20_1h
+    keltner_upper_1h = ema20_1h + 2 * atr10_1h
+    keltner_lower_1h = ema20_1h - 2 * atr10_1h
     
-    # Align to 1d timeframe (wait for weekly bar to close)
-    r1_1d = align_htf_to_ltf(prices, df_1w, camarilla_r1_w)
-    s1_1d = align_htf_to_ltf(prices, df_1w, camarilla_s1_w)
+    # Align 1h Keltner bands to 6h
+    km_6h = align_htf_to_ltf(prices, df_1h, keltner_middle_1h)
+    ku_6h = align_htf_to_ltf(prices, df_1h, keltner_upper_1h)
+    kl_6h = align_htf_to_ltf(prices, df_1h, keltner_lower_1h)
     
-    # === Weekly Trend Filter (EMA34) ===
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d = align_htf_to_ltf(prices, df_1w, ema34_1w)
+    # === Daily Trend Filter (EMA50) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
+        return np.zeros(n)
     
-    # === Volume Filter (1.5x 20-period EMA on 1d) ===
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === Volume Filter (1.3x 20-period EMA on 6h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    volume_ok = volume > vol_ema20 * 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers weekly calculations)
-    start_idx = 70
+    # Start after warmup (covers 1h and daily calculations)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(ema34_1d[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(km_6h[i]) or np.isnan(ku_6h[i]) or np.isnan(kl_6h[i]) or 
+            np.isnan(ema50_6h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,32 +81,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long retest: price pulls back to R1 in uptrend with volume
-            if (close[i] >= r1_1d[i] * 0.998 and close[i] <= r1_1d[i] * 1.002 and  # within 0.2% of R1
-                close[i] > ema34_1d[i] and 
+            # Long: price touches or crosses below lower band with uptrend and volume
+            if (close[i] <= kl_6h[i] and 
+                close[i] > ema50_6h[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short retest: price rallies to S1 in downtrend with volume
-            elif (close[i] >= s1_1d[i] * 0.998 and close[i] <= s1_1d[i] * 1.002 and  # within 0.2% of S1
-                  close[i] < ema34_1d[i] and 
+            # Short: price touches or crosses above upper band with downtrend and volume
+            elif (close[i] >= ku_6h[i] and 
+                  close[i] < ema50_6h[i] and 
                   volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks above R1 (breakout continuation) or drops below S1 (reversal)
-            if close[i] > r1_1d[i] * 1.005:  # break above R1 with buffer
-                signals[i] = 0.25  # maintain for momentum
-            elif close[i] < s1_1d[i]:
+            # Long exit: price returns to middle band (mean reversion complete) or trend breaks
+            if close[i] >= km_6h[i] or close[i] < ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price breaks below S1 (breakdown continuation) or rises above R1 (reversal)
-            if close[i] < s1_1d[i] * 0.995:  # break below S1 with buffer
-                signals[i] = -0.25  # maintain for momentum
-            elif close[i] > r1_1d[i]:
+            # Short exit: price returns to middle band or trend breaks
+            if close[i] <= km_6h[i] or close[i] >= ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
