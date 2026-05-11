@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_TripleConfirmation_Breakout
-Hypothesis: Combines 12h Donchian(20) breakout with 1d volume spike and 1w trend filter.
-This creates a high-conviction signal that works in both bull and bear markets by requiring:
-1) Price breakout from 20-period channel (momentum)
-2) Volume > 2x 20-period average (conviction)
-3) Price above/below 200-period 1w EMA (trend alignment)
-Limits trades to ~15-25/year to avoid fee drag while capturing strong moves.
+4h_HTF_Camarilla_Pivot_Breakout_Trend
+Hypothesis: In trending markets, price tends to respect Camarilla pivot levels (S1/S2/R1/R2) calculated from the prior 12h candle. A breakout above R1 with volume confirmation signals momentum continuation long; a breakdown below S1 signals continuation short. Uses 12h EMA50 as trend filter to avoid counter-trend trades. Designed for 4h timeframe with 12h HTF to reduce trade frequency and avoid fee drag. Works in both bull and bear markets by aligning trades with the higher timeframe trend.
 """
 
-name = "12h_TripleConfirmation_Breakout"
-timeframe = "12h"
+name = "4h_HTF_Camarilla_Pivot_Breakout_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,92 +14,101 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for pivot calculation and trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 200:
-        return np.zeros(n)
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # --- 12h Pivot Points (Camarilla) from previous 12h candle ---
+    # Use prior 12h bar's OHLC (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(df_12h['high'].values, 1)
+    prev_low = np.roll(df_12h['low'].values, 1)
+    prev_close = np.roll(df_12h['close'].values, 1)
+    prev_high[0] = df_12h['high'].values[0]
+    prev_low[0] = df_12h['low'].values[0]
+    prev_close[0] = df_12h['close'].values[0]
     
-    # --- 1d Volume Spike (20-period average) ---
-    vol_1d = df_1d['volume'].values
-    vol_avg_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / (vol_avg_1d + 1e-10)
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Camarilla calculations
+    range_ = prev_high - prev_low
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = pivot + (range_ * 1.1 / 12)
+    r2 = pivot + (range_ * 1.1 / 6)
+    s1 = pivot - (range_ * 1.1 / 12)
+    s2 = pivot - (range_ * 1.1 / 6)
     
-    # --- 1w EMA200 for trend filter ---
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Align 12h levels to 4h timeframe
+    pivot_4h = align_htf_to_ltf(prices, df_12h, pivot)
+    r1_4h = align_htf_to_ltf(prices, df_12h, r1)
+    r2_4h = align_htf_to_ltf(prices, df_12h, r2)
+    s1_4h = align_htf_to_ltf(prices, df_12h, s1)
+    s2_4h = align_htf_to_ltf(prices, df_12h, s2)
     
-    # --- 12h Donchian Channel (20-period) ---
-    highest_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # --- 12h EMA50 for trend filter ---
+    ema50_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # --- 4h Volume confirmation ---
+    vol_avg_4h = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 200  # for EMA200 and Donchian
+    start_idx = 50  # for EMA50 and volume average
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(ema50_4h[i]) or np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(vol_avg_4h[i])):
             if position != 0:
-                # Simple stoploss: 2.5x ATR from entry
-                atr_est = np.abs(high_12h[i] - low_12h[i])  # rough 12h ATR estimate
-                if position == 1 and close_12h[i] <= entry_price - 2.5 * atr_est:
+                # Simple stop: exit if price crosses the 12h EMA50
+                if position == 1 and close_4h[i] < ema50_4h[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_12h[i] >= entry_price + 2.5 * atr_est:
+                elif position == -1 and close_4h[i] > ema50_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Volume confirmation: current 1d volume > 2x 20-period average
-        vol_spike = vol_ratio_12h_aligned[i] > 2.0
+        # Volume confirmation: current volume > 1.5x 4h average
+        vol_confirm = volume_4h[i] > 1.5 * vol_avg_4h[i]
         
         if position == 0:
-            # Look for breakout entries with volume spike and trend alignment
-            if vol_spike:
-                # Long breakout: price above Donchian high AND above 1w EMA200
-                if close_12h[i] > highest_high[i] and close_12h[i] > ema200_1w_aligned[i]:
-                    signals[i] = 0.25  # long breakout
+            # Look for breakout entries in direction of 12h trend
+            if close_4h[i] > ema50_4h[i]:  # Uptrend
+                if vol_confirm and close_4h[i] > r1_4h[i]:
+                    signals[i] = 0.25  # long breakout above R1
                     position = 1
-                    entry_price = close_12h[i]
-                # Short breakdown: price below Donchian low AND below 1w EMA200
-                elif close_12h[i] < lowest_low[i] and close_12h[i] < ema200_1w_aligned[i]:
-                    signals[i] = -0.25  # short breakdown
+                    entry_price = close_4h[i]
+            else:  # Downtrend
+                if vol_confirm and close_4h[i] < s1_4h[i]:
+                    signals[i] = -0.25  # short breakdown below S1
                     position = -1
-                    entry_price = close_12h[i]
+                    entry_price = close_4h[i]
         else:
-            # Manage existing position: exit on opposite Donchian touch
-            if position == 1:
-                # Long: exit when price touches or crosses Donchian low
-                if close_12h[i] <= lowest_low[i]:
+            # Manage existing position: exit on trend reversal or at opposite Camarilla level
+            if position == 1:  # Long
+                # Exit if trend turns down or price reaches S1 (contrarian level)
+                if close_4h[i] < ema50_4h[i] or close_4h[i] < s1_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
-            elif position == -1:
-                # Short: exit when price touches or crosses Donchian high
-                if close_12h[i] >= highest_high[i]:
+            else:  # Short
+                # Exit if trend turns up or price reaches R1 (contrarian level)
+                if close_4h[i] > ema50_4h[i] or close_4h[i] > r1_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
