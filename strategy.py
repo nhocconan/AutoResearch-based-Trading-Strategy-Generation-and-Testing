@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "6h_WeeklyPivotBias_VolumeSpike_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,19 +25,20 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Camarilla R1/S1
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Weekly Pivot (PP, R1, S1)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    r1_4h = close_4h + (range_4h * 1.0833)
-    s1_4h = close_4h - (range_4h * 1.0833)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r1_1w = pivot_1w + (range_1w * 1.0)
+    s1_1w = pivot_1w - (range_1w * 1.0)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # Volume spike: current volume > 2.0 x 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +50,7 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,24 +59,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R1, above 1d EMA34, volume spike
-            if close[i] > r1_4h_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            # Long: Close above weekly pivot, above 1d EMA34, volume spike
+            if close[i] > pivot_1w_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1, below 1d EMA34, volume spike
-            elif close[i] < s1_4h_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            # Short: Close below weekly pivot, below 1d EMA34, volume spike
+            elif close[i] < pivot_1w_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below 1d EMA34
-            if close[i] < s1_4h_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Close below weekly pivot or below 1d EMA34
+            if close[i] < pivot_1w_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 or above 1d EMA34
-            if close[i] > r1_4h_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Close above weekly pivot or above 1d EMA34
+            if close[i] > pivot_1w_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
