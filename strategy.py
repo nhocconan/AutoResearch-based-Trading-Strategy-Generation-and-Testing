@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,27 +17,27 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend and Camarilla levels
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for previous day (H, L, C)
-    H = df_1d['high'].values
-    L = df_1d['low'].values
-    C = df_1d['close'].values
+    # Calculate 12h EMA50 for trend
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Camarilla R1, S1 for previous day (shifted by 1 to avoid look-ahead)
-    R1 = C + 1.1 * (H - L) / 12
-    S1 = C - 1.1 * (H - L) / 12
+    # Calculate Camarilla levels from previous 12h bar
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Align Camarilla levels
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    # Camarilla R1 and S1 from previous bar
+    r1 = close_12h + (high_12h - low_12h) * 1.1 / 12
+    s1 = close_12h - (high_12h - low_12h) * 1.1 / 12
     
-    # 1D EMA34 for trend filter
-    ema34_1d = pd.Series(C).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Align Camarilla levels (use previous bar's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
     
     # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = np.zeros(n)
@@ -53,8 +53,8 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isclose(r1_aligned[i], 0) or np.isclose(s1_aligned[i], 0) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,24 +63,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close > R1 and close > EMA34 and volume surge
-            if close[i] > R1_aligned[i] and close[i] > ema34_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
+            # Long: price breaks above R1, above EMA50, volume surge
+            if close[i] > r1_aligned[i] and close[i] > ema50_12h_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S1 and close < EMA34 and volume surge
-            elif close[i] < S1_aligned[i] and close[i] < ema34_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
+            # Short: price breaks below S1, below EMA50, volume surge
+            elif close[i] < s1_aligned[i] and close[i] < ema50_12h_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < S1 or close < EMA34
-            if close[i] < S1_aligned[i] or close[i] < ema34_aligned[i]:
+            # Long exit: price falls below S1 or below EMA50
+            if close[i] < s1_aligned[i] or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close > R1 or close > EMA34
-            if close[i] > R1_aligned[i] or close[i] > ema34_aligned[i]:
+            # Short exit: price rises above R1 or above EMA50
+            if close[i] > r1_aligned[i] or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
