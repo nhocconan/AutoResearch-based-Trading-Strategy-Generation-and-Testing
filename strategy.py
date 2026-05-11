@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,14 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend: close above/below 12h EMA34
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 34:
+    # 4h trend: close above/below 4h EMA50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    trend_up = close > ema_12h_aligned
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    trend_up = close > ema_4h_aligned
     
     # 1d volume filter: volume > 1.5x 20-day average
     df_1d = get_htf_data(prices, '1d')
@@ -53,11 +53,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA and Camarilla
+    start_idx = 50  # Need enough data for EMA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
             np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -75,27 +75,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close above R1 + 12h uptrend + volume filter
+            # Long: Close above R1 + 4h uptrend + volume filter
             if close[i] > r1_aligned[i] and trend_up[i] and volume_filter[i]:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
-            # Short: Close below S1 + 12h downtrend + volume filter
+            # Short: Close below S1 + 4h downtrend + volume filter
             elif close[i] < s1_aligned[i] and not trend_up[i] and volume_filter[i]:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: Close below S1 or 12h trend down
+            # Long exit: Close below S1 or 4h trend down
             if close[i] < s1_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: Close above R1 or 12h trend up
+            # Short exit: Close above R1 or 4h trend up
             if close[i] > r1_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
