@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6H_WickReversal_VolumeSpike_1wTrend
-Hypothesis: On 6h timeframe, long when price rejects lower wick (bullish engulfing) with volume spike during weekly uptrend;
-short when price rejects upper wick (bearish engulfing) with volume spike during weekly downtrend.
-Weekly trend filter avoids counter-trend trades. Volume spike confirms institutional interest.
-Targets 15-30 trades/year to minimize fee drag in 2025 ranging market.
+12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: 12h timeframe with daily (1d) trend filter using EMA50 and daily Camarilla R3/S3 levels.
+Breakouts above R3 in daily uptrend or below S3 in daily downtrend with volume confirmation.
+Designed for fewer trades (target 12-37/year) to minimize fee drag while capturing strong trends.
+Uses daily trend filter to avoid counter-trend trades in choppy markets like 2025.
 """
 
-name = "6H_WickReversal_VolumeSpike_1wTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,56 +20,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    open_price = prices['open'].values
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA21 for trend
-    ema21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    # Load daily data ONCE for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Weekly trend: above/below EMA21
-    weekly_uptrend = ema21_1w_aligned > 0  # Will be refined below
-    weekly_downtrend = ema21_1w_aligned > 0  # Placeholder, will compute properly
+    # Load daily data ONCE for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Actually compute trend direction properly
-    weekly_uptrend = close_1w > ema21_1w
-    weekly_downtrend = close_1w < ema21_1w
-    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
-    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
+    # Calculate Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
+    hl_range = high_1d - low_1d
+    r3 = close_1d + hl_range * 1.5000
+    s3 = close_1d - hl_range * 1.5000
     
-    # Volume spike filter: 24-period EMA (approx 6 days on 6h)
-    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
-    volume_ok = volume > vol_ema24 * 2.0  # Require 2x average volume
+    # Align Camarilla levels to 12h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Wick rejection detection: bullish/bearish engulfing
-    # Bullish: current close > prior open AND current open < prior close (engulfing)
-    # Bearish: current close < prior open AND current open > prior close (engulfing)
-    bullish_engulf = (close > np.roll(open_price, 1)) & (open_price < np.roll(close, 1))
-    bearish_engulf = (close < np.roll(open_price, 1)) & (open_price > np.roll(close, 1))
+    # Volume filter: 20-period EMA for spike detection (using 12h volume)
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
-    # Handle first element
-    bullish_engulf[0] = False
-    bearish_engulf[0] = False
-    
-    # Fixed position size
+    # Fixed position size to minimize churn
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 24
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -79,33 +71,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        is_bullish_engulf = bullish_engulf[i]
-        is_bearish_engulf = bearish_engulf[i]
-        vol_spike = volume_ok[i]
-        weekly_up = weekly_uptrend_aligned[i] > 0.5
-        weekly_down = weekly_downtrend_aligned[i] > 0.5
+        price_above_ema1d = close[i] > ema50_1d_aligned[i]
+        price_below_ema1d = close[i] < ema50_1d_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Bullish engulfing + volume spike + weekly uptrend
-            if is_bullish_engulf and vol_spike and weekly_up:
+            # Long: Price breaks above R3 + above daily EMA50 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Bearish engulfing + volume spike + weekly downtrend
-            elif is_bearish_engulf and vol_spike and weekly_down:
+            # Short: Price breaks below S3 + below daily EMA50 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit on opposite engulfing signal or trend change
+            # Exit conditions - simplified to reduce churn
             if position == 1:
-                # Exit: Bearish engulfing OR weekly trend turns down
-                if is_bearish_engulf or weekly_down:
+                # Exit: Price crosses below S3 OR trend reverses (close below daily EMA)
+                if close[i] < s3_aligned[i] or close[i] < ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Bullish engulfing OR weekly trend turns up
-                if is_bullish_engulf or weekly_up:
+                # Exit: Price crosses above R3 OR trend reverses (close above daily EMA)
+                if close[i] > r3_aligned[i] or close[i] > ema50_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
