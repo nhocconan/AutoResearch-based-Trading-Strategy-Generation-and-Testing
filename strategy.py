@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_WB_Signal_1wTrend_Filtered
-Hypothesis: On 12h timeframe, enter long when price breaks above the weekly Bollinger Upper Band (20, 2) and weekly ADX > 25, exit when price closes below the weekly Bollinger Middle Band (20). Reverse for shorts. Weekly trend filter ensures alignment with higher timeframe momentum. Bollinger Bands provide volatility-based breakout levels. Designed for low trade frequency (<30/year) to avoid fee drag while capturing strong trending moves. Works in bull markets via long breakouts and in bear markets via short breakdowns.
+1d_WilliamsAlligator_Follow_1wTrend
+Hypothesis: Use Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) on 1d to detect trend direction. Go long when price > Teeth and Lips > Jaw (bullish alignment), short when price < Teeth and Lips < Jaw (bearish alignment). Filter with 1w ADX > 25 to ensure strong trend. Exit when Alligator alignment breaks or price crosses Jaw. Designed for low trade frequency (<20/year) to avoid fee drag while capturing sustained trends in both bull and bear markets.
 """
 
-name = "12h_WB_Signal_1wTrend_Filtered"
-timeframe = "12h"
+name = "1d_WilliamsAlligator_Follow_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,31 +17,40 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for Bollinger Bands and ADX
+    # Get 1d data for Williams Alligator
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # Get 1w data for ADX trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 30:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # 1d OHLCV
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # --- Weekly Bollinger Bands (20, 2) ---
-    close_1w = df_1w['close'].values
-    sma_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
-    std_20 = pd.Series(close_1w).rolling(window=20, min_periods=20).std().values
-    upper = sma_20 + 2 * std_20
-    middle = sma_20
-    lower = sma_20 - 2 * std_20
+    # Williams Alligator: SMAs of median price (HL/2)
+    median_price = (high_1d + low_1d) / 2.0
     
-    # Align BB to 12h
-    upper_12h = align_htf_to_ltf(prices, df_1w, upper)
-    middle_12h = align_htf_to_ltf(prices, df_1w, middle)
-    lower_12h = align_htf_to_ltf(prices, df_1w, lower)
+    # Jaw: 13-period SMMA (smoothed with 8-period offset)
+    jaw = pd.Series(median_price).rolling(window=13, min_periods=13).mean()
+    jaw = jaw.rolling(window=8, min_periods=8).mean()  # SMMA via double smoothing
+    jaw = jaw.values
     
-    # --- Weekly ADX (14) for trend strength ---
+    # Teeth: 8-period SMMA (smoothed with 5-period offset)
+    teeth = pd.Series(median_price).rolling(window=8, min_periods=8).mean()
+    teeth = teeth.rolling(window=5, min_periods=5).mean()
+    teeth = teeth.values
+    
+    # Lips: 5-period SMMA (smoothed with 3-period offset)
+    lips = pd.Series(median_price).rolling(window=5, min_periods=5).mean()
+    lips = lips.rolling(window=3, min_periods=3).mean()
+    lips = lips.values
+    
+    # 1w ADX for trend filter (14 period)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
@@ -67,46 +76,67 @@ def generate_signals(prices):
     # DX and ADX
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_12h = align_htf_to_ltf(prices, df_1w, adx)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    
+    # Align Alligator lines to 1d
+    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    # Start after warmup
-    start_idx = 40  # for BB and ADX
+    # Start after warmup period
+    start_idx = 40  # for Alligator and ADX
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(upper_12h[i]) or np.isnan(middle_12h[i]) or 
-            np.isnan(adx_12h[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or 
+            np.isnan(lips_aligned[i]) or np.isnan(adx_1w_aligned[i])):
             if position != 0:
-                signals[i] = 0.25 if position == 1 else -0.25
+                # Exit if alignment breaks
+                if position == 1 and not (close_1d[i] > teeth_aligned[i] and lips_aligned[i] > jaw_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and not (close_1d[i] < teeth_aligned[i] and lips_aligned[i] < jaw_aligned[i]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Weekly trend filter: only trade in strong trends
-        strong_trend = adx_12h[i] > 25
+        # Trend filter: only trade when 1w ADX > 25
+        strong_trend = adx_1w_aligned[i] > 25
         
-        if position == 0 and strong_trend:
-            # Look for breakouts in direction of weekly trend
-            if close[i] > upper_12h[i]:
-                signals[i] = 0.25  # long breakout
-                position = 1
-            elif close[i] < lower_12h[i]:
-                signals[i] = -0.25  # short breakdown
-                position = -1
-        elif position == 1:
-            # Long position: exit when price closes below weekly middle band
-            if close[i] < middle_12h[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:
-            # Short position: exit when price closes above weekly middle band
-            if close[i] > middle_12h[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
+        if position == 0:
+            # Look for entries based on Alligator alignment
+            if strong_trend:
+                # Bullish alignment: price > Teeth and Lips > Jaw
+                if close_1d[i] > teeth_aligned[i] and lips_aligned[i] > jaw_aligned[i]:
+                    signals[i] = 0.25  # long
+                    position = 1
+                    entry_price = close_1d[i]
+                # Bearish alignment: price < Teeth and Lips < Jaw
+                elif close_1d[i] < teeth_aligned[i] and lips_aligned[i] < jaw_aligned[i]:
+                    signals[i] = -0.25  # short
+                    position = -1
+                    entry_price = close_1d[i]
+        else:
+            # Manage existing position: exit when alignment breaks
+            if position == 1:
+                # Long: exit when price <= Teeth or Lips <= Jaw
+                if close_1d[i] <= teeth_aligned[i] or lips_aligned[i] <= jaw_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Short: exit when price >= Teeth or Lips >= Jaw
+                if close_1d[i] >= teeth_aligned[i] or lips_aligned[i] >= jaw_aligned[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
