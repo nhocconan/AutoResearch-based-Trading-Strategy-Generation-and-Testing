@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_Pullback_Reversal_v1
-Hypothesis: Daily pullback reversals after sharp moves. After a 5% daily drop, wait for RSI oversold (<30) and reversal candle (bullish engulfing) to go long. After 5% daily rise, wait for RSI overbought (>70) and bearish engulfing to short. Uses 1w EMA50 trend filter to align with weekly trend. Designed for low frequency: only trades on extreme daily moves with confirmation. Works in bull markets by buying dips in uptrend, and in bear markets by selling rallies in downtrend.
+4h_EMA34_Trend_VolumeBreakout_1d
+Hypothesis: Uses 1-day EMA34 for trend direction and 4-hour price action with volume confirmation for entries.
+In uptrend (price > EMA34), go long on 4h breakout above 20-period high with volume spike.
+In downtrend (price < EMA34), go short on 4h breakdown below 20-period low with volume spike.
+Designed for low trade frequency by requiring trend alignment, breakout, and volume confirmation.
+Works in both bull and bear markets by following the daily trend.
 """
 
-name = "1d_Pullback_Reversal_v1"
-timeframe = "1d"
+name = "4h_EMA34_Trend_VolumeBreakout_1d"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,54 +18,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get daily data for calculations
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    open_ = prices['open'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # --- 1-day EMA34 Trend Filter ---
+    close_1d = df_1d['close'].values
+    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
     
-    # Daily returns for extreme move detection
-    daily_ret = (close / np.roll(close, 1)) - 1
-    daily_ret[0] = 0  # first bar
+    # --- 4h 20-period High/Low for breakout ---
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # RSI(14) on daily close
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Bullish/bearish engulfing patterns
-    bullish_engulf = (close > open_) & (open_ > np.roll(close, 1)) & (close > np.roll(open_, 1))
-    bearish_engulf = (close < open_) & (open_ < np.roll(close, 1)) & (close < np.roll(open_, 1))
-    
-    # Weekly EMA50 trend filter
-    weekly_close = df_1w['close'].values
-    ema_50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # --- Volume Spike Detection (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup for RSI
-    start_idx = 30
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(bullish_engulf[i]) or np.isnan(bearish_engulf[i]) or
-            np.isnan(daily_ret[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(ema_34_aligned[i]) or 
+            np.isnan(high_20[i]) or 
+            np.isnan(low_20[i]) or 
+            np.isnan(vol_ratio[i])):
+            # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -70,34 +67,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions
+        # Volume confirmation threshold
+        volume_spike = vol_ratio[i] > 1.5
+        
         if position == 0:
-            # Long: daily drop >5%, RSI oversold, bullish engulfing, above weekly EMA
-            if (daily_ret[i] < -0.05 and 
-                rsi[i] < 30 and 
-                bullish_engulf[i] and 
-                close[i] > ema_50_aligned[i]):
+            # Long: uptrend + breakout above 20-period high + volume
+            if (close[i] > ema_34_aligned[i] and 
+                close[i] > high_20[i] and 
+                volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: daily rise >5%, RSI overbought, bearish engulfing, below weekly EMA
-            elif (daily_ret[i] > 0.05 and 
-                  rsi[i] > 70 and 
-                  bearish_engulf[i] and 
-                  close[i] < ema_50_aligned[i]):
+            # Short: downtrend + breakdown below 20-period low + volume
+            elif (close[i] < ema_34_aligned[i] and 
+                  close[i] < low_20[i] and 
+                  volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: opposite extreme move or loss of trend alignment
+            # Exit conditions: trend reversal or opposite breakout
             if position == 1:
-                # Exit long: daily rise >5% or price below weekly EMA
-                if (daily_ret[i] > 0.05 or close[i] < ema_50_aligned[i]):
+                # Exit long: trend turns down OR breakdown below 20-period low
+                if (close[i] < ema_34_aligned[i] or 
+                    close[i] < low_20[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: daily drop >5% or price above weekly EMA
-                if (daily_ret[i] < -0.05 or close[i] > ema_50_aligned[i]):
+                # Exit short: trend turns up OR breakout above 20-period high
+                if (close[i] > ema_34_aligned[i] or 
+                    close[i] > high_20[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
