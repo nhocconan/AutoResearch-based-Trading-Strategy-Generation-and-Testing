@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R1S1_Breakout_12hEMA21_Trend
-Hypothesis: Breakout of 1-day Camarilla R1/S1 levels with 12-hour EMA21 trend filter and volume confirmation.
-This version uses the tighter R1/S1 levels to reduce trades and improve signal quality.
-The 12h EMA21 provides trend alignment, and volume confirmation ensures breakouts are supported.
-Designed for BTC/ETH resilience in bull/bear markets with controlled trade frequency.
+4h_PriceAction_SwingReversal_VolumeFilter
+Hypothesis: Capture swing reversals at key price levels using price action (close above/below prior swing high/low) combined with volume confirmation and 12h trend filter. Works in both bull and bear markets by trading mean reversion within the trend context. Uses swing points for dynamic support/resistance, reducing false breakouts. Targets 20-40 trades/year to minimize fee drag.
 """
 
-name = "4h_Camarilla_R1S1_Breakout_12hEMA21_Trend"
+name = "4h_PriceAction_SwingReversal_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -26,46 +23,56 @@ def generate_signals(prices):
     open_price = prices['open'].values
     volume = prices['volume'].values
     
-    # === 1d Data (loaded ONCE) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === Swing Points (5-bar lookback) ===
+    # Swing high: high[i] is highest in [i-2, i-1, i, i+1, i+2]
+    # Swing low: low[i] is lowest in [i-2, i-1, i, i+1, i+2]
+    window = 5
+    half = window // 2
     
-    # === 1d Camarilla Pivot Levels (R1, S1) ===
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 2)
-    s1 = pivot - (range_1d * 1.1 / 2)
+    # Calculate swing highs and lows using rolling window
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
     
-    # Align 1d levels to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Rolling max/min with center alignment
+    rolling_max = high_series.rolling(window=window, center=True, min_periods=window).max()
+    rolling_min = low_series.rolling(window=window, center=True, min_periods=window).min()
     
-    # === 12h EMA21 Trend Filter ===
+    # Swing points: where price equals the rolling extreme
+    is_swing_high = (high == rolling_max.values)
+    is_swing_low = (low == rolling_min.values)
+    
+    # Extract swing levels
+    swing_high = np.where(is_swing_high, high, np.nan)
+    swing_low = np.where(is_swing_low, low, np.nan)
+    
+    # Forward fill to get last swing level
+    swing_high = pd.Series(swing_high).ffill().values
+    swing_low = pd.Series(swing_low).ffill().values
+    
+    # === 12h EMA25 Trend Filter ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema21_12h_4h = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    ema25_12h = pd.Series(close_12h).ewm(span=25, min_periods=25, adjust=False).mean().values
+    ema25_12h_4h = align_htf_to_ltf(prices, df_12h, ema25_12h)
     
-    # === Volume Spike Filter (20-period EMA) ===
+    # === Volume Spike Filter ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
+    volume_ok = volume > vol_ema20 * 1.5  # 1.5x average volume
     
     # === Signal Parameters ===
-    position_size = 0.25  # 25% of capital per trade
+    position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     holding_bars = 0
     
-    # Start after warmup (covers EMA21)
-    start_idx = 60
+    # Start after warmup (covers swing calculation and EMA)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema21_12h_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(swing_high[i]) or np.isnan(swing_low[i]) or 
+            np.isnan(ema25_12h_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,35 +82,35 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 (both open and close) + above 12h EMA21 + volume spike
-            if (open_price[i] > r1_4h[i] and close[i] > r1_4h[i] and 
-                close[i] > ema21_12h_4h[i] and volume_ok[i]):
+            # Long: Close crosses above prior swing low (support bounce) + above 12h EMA + volume spike
+            if (close[i] > swing_low[i] and 
+                close[i] > ema25_12h_4h[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
                 holding_bars = 0
-            # Short: Break below S1 (both open and close) + below 12h EMA21 + volume spike
-            elif (open_price[i] < s1_4h[i] and close[i] < s1_4h[i] and 
-                  close[i] < ema21_12h_4h[i] and volume_ok[i]):
+            # Short: Close crosses below prior swing high (resistance rejection) + below 12h EMA + volume spike
+            elif (close[i] < swing_high[i] and 
+                  close[i] < ema25_12h_4h[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
                 holding_bars = 0
         else:
-            # Enforce minimum holding period (12 bars)
+            # Enforce minimum holding period (8 bars)
             holding_bars += 1
-            if holding_bars < 12:
+            if holding_bars < 8:
                 signals[i] = position_size if position == 1 else -position_size
                 continue
             
-            # Exit: Price closes below/above opposite level
+            # Exit: Close crosses back through the swing level in opposite direction
             if position == 1:
-                if close[i] < s1_4h[i]:
+                if close[i] < swing_low[i]:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > r1_4h[i]:
+                if close[i] > swing_high[i]:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
