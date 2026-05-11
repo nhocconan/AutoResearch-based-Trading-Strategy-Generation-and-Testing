@@ -1,218 +1,130 @@
 #!/usr/bin/env python3
 """
-1h_4d_RSI_Divergence_Volume
-Hypothesis: On 1h, trade RSI divergences with volume confirmation filtered by 4h trend.
-- Bullish divergence: price makes lower low, RSI makes higher low + volume spike
-- Bearish divergence: price makes higher high, RSI makes lower high + volume spike
-- 4h EMA50 as trend filter: only take long in uptrend, short in downtrend
-- Session filter: 08-20 UTC to avoid low-volume Asian session
-- Targets 15-25 trades/year (60-100 over 4 years) to minimize fee drag
+6h_1w_HeikinAshi_Trend_Momentum
+Hypothesis: Use Heikin-Ashi candles from weekly timeframe to determine major trend,
+and Heikin-Ashi from 6h for entry timing with momentum confirmation.
+- Long when: Weekly HA close > Weekly HA open (uptrend) AND 6h HA close > 6h HA open AND 6h momentum > 0
+- Short when: Weekly HA close < Weekly HA open (downtrend) AND 6h HA close < 6h HA open AND 6h momentum < 0
+- Exit when trend or momentum conditions fail
+Heikin-Ashi smooths price action to filter noise and identify true trends.
+Combining weekly trend with 6h momentum captures major moves while avoiding whipsaws.
+Targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
 """
 
-name = "1h_4d_RSI_Divergence_Volume"
-timeframe = "1h"
+name = "6h_1w_HeikinAshi_Trend_Momentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_ha(open_arr, high_arr, low_arr, close_arr):
+    """Calculate Heikin-Ashi values"""
+    ha_close = (open_arr + high_arr + low_arr + close_arr) / 4
+    ha_open = np.zeros_like(ha_close)
+    ha_open[0] = (open_arr[0] + close_arr[0]) / 2
+    for i in range(1, len(ha_open)):
+        ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    ha_high = np.maximum.reduce([high_arr, ha_open, ha_close])
+    ha_low = np.minimum.reduce([low_arr, ha_open, ha_close])
+    return ha_open, ha_high, ha_low, ha_close
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for trend determination
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 1h data
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # 6h OHLCV
+    open_6h = prices['open'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    volume_6h = prices['volume'].values
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Weekly OHLC for HA calculation
+    open_1w = df_1w['open'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # --- 4h Trend Filter: EMA50 ---
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate Heikin-Ashi for weekly trend
+    ha_open_1w, ha_high_1w, ha_low_1w, ha_close_1w = calculate_ha(
+        open_1w, high_1w, low_1w, close_1w
+    )
     
-    # --- RSI(14) on 1h ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate Heikin-Ashi for 6h entry signals
+    ha_open_6h, ha_high_6h, ha_low_6h, ha_close_6h = calculate_ha(
+        open_6h, high_6h, low_6h, close_6h
+    )
     
-    # Wilder's smoothing
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14])  # First average
-    avg_loss[13] = np.mean(loss[1:14])
+    # 6h momentum: rate of change of HA close
+    mom_period = 6
+    mom_6h = np.full_like(ha_close_6h, np.nan)
+    for i in range(mom_period, len(ha_close_6h)):
+        mom_6h[i] = (ha_close_6h[i] - ha_close_6h[i - mom_period]) / ha_close_6h[i - mom_period] * 100.0
     
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # Weekly trend: HA close vs HA open
+    weekly_uptrend = ha_close_1w > ha_open_1w
+    weekly_downtrend = ha_close_1w < ha_open_1w
     
-    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # --- Volume Spike: volume > 1.5 * 20-period average ---
-    vol_ma_20 = np.convolve(volume, np.ones(20)/20, mode='same')
-    vol_spike = volume > (1.5 * vol_ma_20)
+    # Align weekly trend to 6h timeframe
+    weekly_uptrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_uptrend.astype(float))
+    weekly_downtrend_aligned = align_htf_to_ltf(prices, df_1w, weekly_downtrend.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 50
+    # Start after warmup period
+    start_idx = max(30, mom_period)  # for HA and momentum
     
     for i in range(start_idx, n):
-        # Skip if session outside 08-20 UTC
-        if not (8 <= hours[i] <= 20):
+        # Skip if any critical values are NaN
+        if (np.isnan(weekly_uptrend_aligned[i]) or np.isnan(weekly_downtrend_aligned[i]) or
+            np.isnan(ha_open_6h[i]) or np.isnan(ha_close_6h[i]) or np.isnan(mom_6h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Skip if any critical values are invalid
-        if (np.isnan(rsi[i]) or np.isnan(ema50_4h_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            continue
-        
-        # Determine 4h trend
-        trend_up = close[i] > ema50_4h_aligned[i]
-        trend_down = close[i] < ema50_4h_aligned[i]
+        # Determine conditions
+        weekly_up = weekly_uptrend_aligned[i] > 0.5
+        weekly_down = weekly_downtrend_aligned[i] > 0.5
+        ha_bullish = ha_close_6h[i] > ha_open_6h[i]
+        ha_bearish = ha_close_6h[i] < ha_open_6h[i]
+        mom_pos = mom_6h[i] > 0
+        mom_neg = mom_6h[i] < 0
         
         if position == 0:
-            # Look for bullish divergence: price lower low, RSI higher low
-            if i >= 20:  # Need lookback for divergence
-                # Find recent swing low in price (last 10 bars)
-                lookback = 10
-                price_lows = []
-                rsi_lows = []
-                
-                for j in range(i - lookback, i + 1):
-                    if j >= 2 and j < len(low) - 2:
-                        # Check for pivot low
-                        if low[j] <= low[j-1] and low[j] <= low[j-2] and \
-                           low[j] <= low[j+1] and low[j] <= low[j+2]:
-                            price_lows.append((j, low[j]))
-                            rsi_lows.append((j, rsi[j]))
-                
-                # Need at least 2 lows for divergence
-                if len(price_lows) >= 2:
-                    last_price_low = price_lows[-1][1]
-                    prev_price_low = price_lows[-2][1]
-                    last_rsi_low = rsi_lows[-1][1]
-                    prev_rsi_low = rsi_lows[-2][1]
-                    
-                    bullish_div = (last_price_low < prev_price_low and 
-                                  last_rsi_low > prev_rsi_low)
-                    
-                    # Bearish divergence: price higher high, RSI lower high
-                    price_highs = []
-                    rsi_highs = []
-                    
-                    for j in range(i - lookback, i + 1):
-                        if j >= 2 and j < len(high) - 2:
-                            # Check for pivot high
-                            if high[j] >= high[j-1] and high[j] >= high[j-2] and \
-                               high[j] >= high[j+1] and high[j] >= high[j+2]:
-                                price_highs.append((j, high[j]))
-                                rsi_highs.append((j, rsi[j]))
-                    
-                    if len(price_highs) >= 2:
-                        last_price_high = price_highs[-1][1]
-                        prev_price_high = price_highs[-2][1]
-                        last_rsi_high = rsi_highs[-1][1]
-                        prev_rsi_high = rsi_highs[-2][1]
-                        
-                        bearish_div = (last_price_high > prev_price_high and 
-                                      last_rsi_high < prev_rsi_high)
-                    else:
-                        bearish_div = False
-                else:
-                    bullish_div = False
-                    bearish_div = False
-            else:
-                bullish_div = False
-                bearish_div = False
-            
-            # Enter long on bullish divergence with volume and uptrend
-            if bullish_div and vol_spike[i] and trend_up:
-                signals[i] = 0.20
+            # Look for entries
+            if weekly_up and ha_bullish and mom_pos:
+                # Long: weekly uptrend + 6h bullish HA + positive momentum
+                signals[i] = 0.25
                 position = 1
-            # Enter short on bearish divergence with volume and downtrend
-            elif bearish_div and vol_spike[i] and trend_down:
-                signals[i] = -0.20
+            elif weekly_down and ha_bearish and mom_neg:
+                # Short: weekly downtrend + 6h bearish HA + negative momentum
+                signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: bearish divergence OR trend breaks down
-                if i >= 20:
-                    # Quick check for bearish divergence
-                    price_highs = []
-                    rsi_highs = []
-                    lookback = 10
-                    for j in range(i - lookback, i + 1):
-                        if j >= 2 and j < len(high) - 2:
-                            if high[j] >= high[j-1] and high[j] >= high[j-2] and \
-                               high[j] >= high[j+1] and high[j] >= high[j+2]:
-                                price_highs.append((j, high[j]))
-                                rsi_highs.append((j, rsi[j]))
-                    
-                    bearish_div = False
-                    if len(price_highs) >= 2:
-                        last_price_high = price_highs[-1][1]
-                        prev_price_high = price_highs[-2][1]
-                        last_rsi_high = rsi_highs[-1][1]
-                        prev_rsi_high = rsi_highs[-2][1]
-                        bearish_div = (last_price_high > prev_price_high and 
-                                      last_rsi_high < prev_rsi_high)
-                else:
-                    bearish_div = False
-                
-                if bearish_div or not trend_up:
+                # Exit long: weekly trend turns down OR HA turns bearish OR momentum turns negative
+                if not weekly_up or not ha_bullish or not mom_pos:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: bullish divergence OR trend breaks up
-                if i >= 20:
-                    # Quick check for bullish divergence
-                    price_lows = []
-                    rsi_lows = []
-                    lookback = 10
-                    for j in range(i - lookback, i + 1):
-                        if j >= 2 and j < len(low) - 2:
-                            if low[j] <= low[j-1] and low[j] <= low[j-2] and \
-                               low[j] <= low[j+1] and low[j] <= low[j+2]:
-                                price_lows.append((j, low[j]))
-                                rsi_lows.append((j, rsi[j]))
-                    
-                    bullish_div = False
-                    if len(price_lows) >= 2:
-                        last_price_low = price_lows[-1][1]
-                        prev_price_low = price_lows[-2][1]
-                        last_rsi_low = rsi_lows[-1][1]
-                        prev_rsi_low = rsi_lows[-2][1]
-                        bullish_div = (last_price_low < prev_price_low and 
-                                      last_rsi_low > prev_rsi_low)
-                else:
-                    bullish_div = False
-                
-                if bullish_div or not trend_down:
+                # Exit short: weekly trend turns up OR HA turns bullish OR momentum turns positive
+                if not weekly_down or not ha_bearish or not mom_neg:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
