@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KC_Breakout_Volume_Trend_Filter"
-timeframe = "4h"
+name = "1d_KAMA_RSI_ChopFilter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -12,55 +12,65 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for ATR calculation (KC) and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate daily ATR(14) for Keltner Channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # KAMA on daily close
+    close_series = pd.Series(close)
+    change = abs(close_series.diff(1))
+    volatility = change.rolling(window=10, min_periods=10).sum()
+    er = change.rolling(window=10, min_periods=10).sum() / volatility.replace(0, np.nan)
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1))**2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        if np.isnan(sc.iloc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First TR is just high-low
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # 1w EMA34 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w_series = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean()
+    ema_1w = ema_1w_series.values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Keltner Channels: EMA(20) ± 2*ATR
-    ema_20 = pd.Series(close_1d).ewm(span=20, min_periods=20).mean().values
-    kc_upper = ema_20 + 2 * atr_14
-    kc_lower = ema_20 - 2 * atr_14
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Align KC levels to 4h timeframe
-    kc_upper_4h = align_htf_to_ltf(prices, df_1d, kc_upper)
-    kc_lower_4h = align_htf_to_ltf(prices, df_1d, kc_lower)
-    
-    # 1d EMA50 for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50)
-    
-    # Volume filter: current volume > 1.8x 24-period average (moderate threshold)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    # Choppiness Index (14) - regime filter
+    atr1 = pd.Series(np.maximum.reduce([
+        high[1:] - low[1:],
+        np.abs(high[1:] - close[:-1]),
+        np.abs(low[1:] - close[:-1])
+    ])).rolling(window=14, min_periods=14).sum()
+    atr1 = np.concatenate([[np.nan], atr1.values])
+    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr1 / (hh - ll)) / np.log10(14)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(kc_upper_4h[i]) or np.isnan(kc_lower_4h[i]) or 
-            np.isnan(ema_50_4h[i]) or np.isnan(volume_filter[i])):
+        if (np.isnan(kama[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,27 +79,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above KC Upper AND above EMA50 (uptrend) AND volume filter
-            if close[i] > kc_upper_4h[i] and close[i] > ema_50_4h[i] and volume_filter[i]:
+            # Long: price > KAMA (trend up) AND RSI < 40 (pullback) AND chop > 61.8 (range)
+            if close[i] > kama[i] and rsi[i] < 40 and chop[i] > 61.8:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below KC Lower AND below EMA50 (downtrend) AND volume filter
-            elif close[i] < kc_lower_4h[i] and close[i] < ema_50_4h[i] and volume_filter[i]:
+            # Short: price < KAMA (trend down) AND RSI > 60 (pullback) AND chop > 61.8 (range)
+            elif close[i] < kama[i] and rsi[i] > 60 and chop[i] > 61.8:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below KC Lower OR below EMA50 (trend change)
-            if close[i] < kc_lower_4h[i] or close[i] < ema_50_4h[i]:
+            # Long exit: price < KAMA OR RSI > 70 (overbought)
+            if close[i] < kama[i] or rsi[i] > 70:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above KC Upper OR above EMA50 (trend change)
-            if close[i] > kc_upper_4h[i] or close[i] > ema_50_4h[i]:
+            # Short exit: price > KAMA OR RSI < 30 (oversold)
+            if close[i] > kama[i] or rsi[i] < 30:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.25
     
     return signals
