@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Weekly_Pivot_Breakout_DailyTrend
-Hypothesis: Price often respects weekly pivot levels (R1/S1, R2/S2). When price breaks above weekly R1 with daily trend alignment (close > daily EMA50), it signals continuation. Similarly, breaks below weekly S1 with daily trend alignment (close < daily EMA50) signal continuation. Uses volume confirmation to avoid false breaks. Designed for low frequency (15-25 trades/year) to minimize fee drag while capturing major moves in both bull and bear markets.
+12h_Camarilla_R3S3_Reversal_1dTrend_Filter
+Hypothesis: On 12h timeframe, price tends to reverse from 1d Camarilla R3/S3 levels when the 1d trend (EMA34) is aligned, providing mean-reversion opportunities in ranging conditions and continuation in strong trends. Uses 1d EMA34 trend filter to avoid counter-trend trades, targeting 15-30 trades/year to minimize fee drag.
 """
 
-name = "6h_Weekly_Pivot_Breakout_DailyTrend"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Reversal_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,111 +17,102 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for pivot points
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 10:
+    # Get 1d data for trend filter and Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 35:
         return np.zeros(n)
     
-    # Get daily data for trend filter and volume
-    df_daily = get_htf_data(prices, '1d')
-    if len(df_daily) < 50:
-        return np.zeros(n)
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
     
-    # 6h price data
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)  # aligned to 12h
     
-    # --- Weekly Pivot Points (using previous week) ---
-    # Previous week's OHLC
-    prev_weekly_high = np.roll(df_weekly['high'].values, 1)
-    prev_weekly_low = np.roll(df_weekly['low'].values, 1)
-    prev_weekly_close = np.roll(df_weekly['close'].values, 1)
-    # First bar initialization
-    prev_weekly_high[0] = df_weekly['high'].values[0]
-    prev_weekly_low[0] = df_weekly['low'].values[0]
-    prev_weekly_close[0] = df_weekly['close'].values[0]
+    # --- 1d Camarilla Pivot Levels (using previous day) ---
+    # Calculate from previous day's OHLC
+    prev_high = np.roll(df_1d['high'].values, 1)
+    prev_low = np.roll(df_1d['low'].values, 1)
+    prev_close = np.roll(df_1d['close'].values, 1)
+    prev_high[0] = df_1d['high'].values[0]
+    prev_low[0] = df_1d['low'].values[0]
+    prev_close[0] = df_1d['close'].values[0]
     
-    # Weekly pivot calculation
-    weekly_pivot = (prev_weekly_high + prev_weekly_low + prev_weekly_close) / 3.0
-    weekly_range = prev_weekly_high - prev_weekly_low
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
     
-    # Weekly support/resistance levels
-    weekly_r1 = weekly_pivot + (weekly_range * 1.0)
-    weekly_s1 = weekly_pivot - (weekly_range * 1.0)
-    weekly_r2 = weekly_pivot + (weekly_range * 2.0)
-    weekly_s2 = weekly_pivot - (weekly_range * 2.0)
+    # Camarilla levels
+    r3 = pivot + (range_val * 1.1 / 2.0)
+    s3 = pivot - (range_val * 1.1 / 2.0)
     
-    # Align weekly levels to 6h timeframe
-    weekly_r1_6h = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s1_6h = align_htf_to_ltf(prices, df_weekly, weekly_s1)
-    weekly_r2_6h = align_htf_to_ltf(prices, df_weekly, weekly_r2)
-    weekly_s2_6h = align_htf_to_ltf(prices, df_weekly, weekly_s2)
-    
-    # --- Daily Trend Filter (EMA50) ---
-    daily_close = df_daily['close'].values
-    daily_ema50 = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    daily_ema50_6h = align_htf_to_ltf(prices, df_daily, daily_ema50)
-    
-    # --- Volume Confirmation (20-period average) ---
-    volume_ma20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # Align Camarilla levels to 12h
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after sufficient warmup for all indicators
-    start_idx = 50
+    # Start after warmup period
+    start_idx = 35  # for EMA34 calculation
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(weekly_r1_6h[i]) or np.isnan(weekly_s1_6h[i]) or 
-            np.isnan(daily_ema50_6h[i]) or np.isnan(volume_ma20[i])):
+        if (np.isnan(ema34_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i])):
             if position != 0:
-                # Simple stoploss: 2.5x ATR based on 6h range
-                atr_est = np.abs(high_6h[i] - low_6h[i])
-                if position == 1 and close_6h[i] <= entry_price - 2.5 * atr_est:
+                # Simple stoploss: 2.5% adverse move
+                adverse_pct = 0.025
+                if position == 1 and close_12h[i] <= entry_price * (1 - adverse_pct):
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] >= entry_price + 2.5 * atr_est:
+                elif position == -1 and close_12h[i] >= entry_price * (1 + adverse_pct):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_6h[i] > 1.5 * volume_ma20[i]
+        # Trend filter: price above EMA34 = uptrend, below = downtrend
+        is_uptrend = close_12h[i] > ema34_12h[i]
+        is_downtrend = close_12h[i] < ema34_12h[i]
         
         if position == 0:
-            # Look for breakout entries with trend alignment and volume
-            # Long: break above weekly R1 with close > daily EMA50 and volume
-            if (close_6h[i] > weekly_r1_6h[i] and 
-                close_6h[i] > daily_ema50_6h[i] and 
-                vol_confirm):
-                signals[i] = 0.25
-                position = 1
-                entry_price = close_6h[i]
-            # Short: break below weekly S1 with close < daily EMA50 and volume
-            elif (close_6h[i] < weekly_s1_6h[i] and 
-                  close_6h[i] < daily_ema50_6h[i] and 
-                  vol_confirm):
-                signals[i] = -0.25
-                position = -1
-                entry_price = close_6h[i]
+            # Look for mean-reversion entries at Camarilla levels
+            # Long when price touches S3 in uptrend or ranging market
+            if close_12h[i] <= s3_12h[i] * 1.001:  # slight buffer for touching
+                if is_uptrend or not is_downtrend:  # allow in uptrend or ranging
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close_12h[i]
+            # Short when price touches R3 in downtrend or ranging market
+            elif close_12h[i] >= r3_12h[i] * 0.999:  # slight buffer for touching
+                if is_downtrend or not is_uptrend:  # allow in downtrend or ranging
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close_12h[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long position: exit on break below weekly S1 or trend reversal
-                if close_6h[i] < weekly_s1_6h[i] or close_6h[i] < daily_ema50_6h[i]:
+                # Long position: exit when price reaches pivot or shows weakness
+                if close_12h[i] >= pivot[i] * 0.999:  # reached pivot level
+                    signals[i] = 0.0
+                    position = 0
+                # Stoploss: 2.5% adverse move
+                elif close_12h[i] <= entry_price * (1 - 0.025):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short position: exit on break above weekly R1 or trend reversal
-                if close_6h[i] > weekly_r1_6h[i] or close_6h[i] > daily_ema50_6h[i]:
+                # Short position: exit when price reaches pivot or shows weakness
+                if close_12h[i] <= pivot[i] * 1.001:  # reached pivot level
+                    signals[i] = 0.0
+                    position = 0
+                # Stoploss: 2.5% adverse move
+                elif close_12h[i] >= entry_price * (1 + 0.025):
                     signals[i] = 0.0
                     position = 0
                 else:
