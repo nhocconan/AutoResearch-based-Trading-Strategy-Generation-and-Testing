@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12H_1W_Trend_Retracement_With_Volume
-Hypothesis: Strong weekly trend with 12h retracement entries. Uses 1w EMA50 for trend direction, 
-12h pullback to EMA21 for entry, and volume confirmation. Weekly trend filter reduces false signals 
-in ranging markets. Designed for low turnover (~15-25 trades/year) to minimize fee drag.
-Works in both bull and bear by following the dominant weekly trend.
+4H_Bollinger_Upper_Band_Breakout_RSI_Exit
+Hypothesis: Bollinger Band upper band breakouts with RSI > 60 capture momentum in trending markets.
+Exits when RSI drops below 40. Designed for moderate frequency (~25-35 trades/year) to balance
+capture of trends and minimize fee drag. Works in bull markets via breakouts and in bear
+markets via short signals on lower band breaks with RSI < 40.
 """
 
-name = "12H_1W_Trend_Retracement_With_Volume"
-timeframe = "12h"
+name = "4H_Bollinger_Upper_Band_Breakout_RSI_Exit"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,19 +25,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 12h Indicators ===
-    # EMA21 for retracement entries
-    ema21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # === Bollinger Bands (20, 2) ===
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std)
+    lower_band = sma - (bb_std * std)
     
-    # Volume confirmation: 20-period EMA
+    # === RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
-    
-    # === Weekly Trend Filter (EMA50) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
     # === Signal Parameters ===
     position_size = 0.25
@@ -45,12 +52,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for weekly EMA and 12h EMA)
-    start_idx = 60  # covers EMA21 and weekly EMA50
+    # Start after warmup (need enough data for Bollinger Bands and RSI)
+    start_idx = bb_period  # 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema21[i]) or np.isnan(ema50_1w_aligned[i]) or 
+        if (np.isnan(sma[i]) or np.isnan(std[i]) or np.isnan(rsi[i]) or 
             np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
@@ -60,35 +67,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend direction from weekly EMA50
-        weekly_uptrend = close[i] > ema50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema50_1w_aligned[i]
-        
-        # Price position relative to 12h EMA21 (retracement signals)
-        price_near_ema21_from_below = close[i] >= ema21[i] * 0.995 and close[i] <= ema21[i]  # Within 0.5% below EMA21
-        price_near_ema21_from_above = close[i] <= ema21[i] * 1.005 and close[i] >= ema21[i]  # Within 0.5% above EMA21
+        # Conditions
+        price_above_upper = close[i] > upper_band[i]
+        price_below_lower = close[i] < lower_band[i]
+        rsi_overbought = rsi[i] > 60
+        rsi_oversold = rsi[i] < 40
         
         if position == 0:
-            # Long: Weekly uptrend + price retracing to EMA21 from below + volume
-            if weekly_uptrend and price_near_ema21_from_below and volume_ok[i]:
+            # Long: Price breaks above upper Bollinger Band + RSI > 60 + volume spike
+            if price_above_upper and rsi_overbought and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Weekly downtrend + price retracing to EMA21 from above + volume
-            elif weekly_downtrend and price_near_ema21_from_above and volume_ok[i]:
+            # Short: Price breaks below lower Bollinger Band + RSI < 40 + volume spike
+            elif price_below_lower and rsi_oversold and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions: trend reversal or extended move
+            # Exit conditions
             if position == 1:
-                # Exit: weekly trend turns down OR price moves significantly above EMA21
-                if not weekly_uptrend or close[i] > ema21[i] * 1.02:  # 2% above EMA21
+                # Exit long: RSI drops below 40
+                if rsi[i] < 40:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: weekly trend turns up OR price moves significantly below EMA21
-                if not weekly_downtrend or close[i] < ema21[i] * 0.98:  # 2% below EMA21
+                # Exit short: RSI rises above 60
+                if rsi[i] > 60:
                     signals[i] = 0.0
                     position = 0
                 else:
