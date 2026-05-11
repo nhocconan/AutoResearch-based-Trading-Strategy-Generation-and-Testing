@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_TrendFollow_4hEMA1dTrend"
-timeframe = "1h"
+name = "6h_LongTermSupportResistance_Breakout_1wTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,46 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA21 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 21:
+    # Get 1w data for long-term support/resistance and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
-    trend_up_4h = close_4h > ema21_4h
-    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Get 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Calculate 50-period high and low on weekly data (long-term SR levels)
+    high_50w = pd.Series(high_1w).rolling(window=50, min_periods=50).max().values
+    low_50w = pd.Series(low_1w).rolling(window=50, min_periods=50).min().values
     
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up_1d = close_1d > ema50_1d
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    # Calculate 20-period EMA on weekly data for trend filter
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # 1h EMA21 for entry timing
-    ema21_1h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # Align weekly levels and trend to 6h timeframe
+    high_50w_aligned = align_htf_to_ltf(prices, df_1w, high_50w)
+    low_50w_aligned = align_htf_to_ltf(prices, df_1w, low_50w)
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # Volume filter: current volume > 1.2x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.2 * vol_ma20
+    # Volume confirmation: current volume > 2.0x 50-period average
+    vol_ma50 = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > 2.0 * vol_ma50
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 50  # Need enough data for weekly calculations
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema21_1h[i]) or np.isnan(trend_up_4h_aligned[i]) or 
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(high_50w_aligned[i]) or np.isnan(low_50w_aligned[i]) or
+            np.isnan(ema20_1w_aligned[i]) or np.isnan(vol_ma50[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,18 +59,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price > 1h EMA21 + 4h uptrend + 1d uptrend + volume + session
-            if (close[i] > ema21_1h[i] and trend_up_4h_aligned[i] and 
-                trend_up_1d_aligned[i] and volume_filter[i] and in_session[i]):
-                signals[i] = 0.20
+            # Long breakout: price breaks above 50-week high + weekly uptrend + volume spike
+            if (close[i] > high_50w_aligned[i] and 
+                close[i] > ema20_1w_aligned[i] and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
+            # Short breakdown: price breaks below 50-week low + weekly downtrend + volume spike
+            elif (close[i] < low_50w_aligned[i] and 
+                  close[i] < ema20_1w_aligned[i] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: price < 1h EMA21 OR 4h trend down OR 1d trend down
-            if (close[i] < ema21_1h[i] or not trend_up_4h_aligned[i] or 
-                not trend_up_1d_aligned[i]):
+            # Long exit: price falls below 50-week EMA or breaks below 50-week low
+            if (close[i] < ema20_1w_aligned[i] or 
+                close[i] < low_50w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
+        elif position == -1:
+            # Short exit: price rises above 50-week EMA or breaks above 50-week high
+            if (close[i] > ema20_1w_aligned[i] or 
+                close[i] > high_50w_aligned[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
