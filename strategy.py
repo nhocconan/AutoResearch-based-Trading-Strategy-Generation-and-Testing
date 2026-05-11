@@ -1,6 +1,12 @@
+# 12h_Keltner_WeeklyTrend_VolumeSpike
+# Hypothesis: 12h Keltner channel breakout with weekly trend filter and daily volume spike
+# Works in bull markets via trend-following breakouts; works in bear markets via volatility expansion during downtrends
+# Uses weekly trend to avoid counter-trend trades, volume spike to confirm institutional interest
+# Target: 20-50 trades/year to avoid fee drag
+
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
-timeframe = "6h"
+name = "12h_Keltner_WeeklyTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +23,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly trend: close above/below 1w EMA20
+    # 1w trend: close above/below 1w EMA20
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
@@ -35,31 +41,39 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Camarilla pivot levels from previous day
-    # Calculate from previous day's OHLC
-    prev_close = np.roll(close, 1)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close[0] = close[0]
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
+    # Keltner Channel (12h): EMA20 ± 2*ATR(10)
+    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    kc_upper = ema20 + 2 * atr10
+    kc_lower = ema20 - 2 * atr10
     
-    range_ = prev_high - prev_low
-    # Camarilla levels
-    r3 = prev_close + range_ * 1.1 / 4
-    s3 = prev_close - range_ * 1.1 / 4
-    r4 = prev_close + range_ * 1.1 / 2
-    s4 = prev_close - range_ * 1.1 / 2
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for calculations
+    start_idx = 40  # Need enough data for EMA, ATR, and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(r4[i]) or np.isnan(s4[i])):
+            np.isnan(ema20[i]) or np.isnan(atr10[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if not session_filter[i]:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,24 +82,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R3 with weekly uptrend + volume filter
-            if close[i] > r3[i] and trend_up[i] and volume_filter[i]:
+            # Long: Close above Keltner upper + weekly uptrend + volume filter
+            if close[i] > kc_upper[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with weekly downtrend + volume filter
-            elif close[i] < s3[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Close below Keltner lower + weekly downtrend + volume filter
+            elif close[i] < kc_lower[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below S3 or weekly trend down
-            if close[i] < s3[i] or not trend_up[i]:
+            # Long exit: Close below Keltner lower or weekly trend down
+            if close[i] < kc_lower[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above R3 or weekly trend up
-            if close[i] > r3[i] or trend_up[i]:
+            # Short exit: Close above Keltner upper or weekly trend up
+            if close[i] > kc_upper[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
