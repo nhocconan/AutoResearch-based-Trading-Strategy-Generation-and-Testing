@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1d_KC_Breakout_Volume_Squeeze"
-timeframe = "1d"
+name = "12h_Donchian20_Breakout_1dTrend_Volume_Confirm"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mpt_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,57 +17,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1D data
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # EMA50 on weekly for trend filter
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # 1D EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Keltner Channel on daily
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    atr[:20] = np.nan
-    for i in range(20, n):
-        atr[i] = np.nanmean(tr[i-19:i+1])
-    
-    # EMA20 for KC middle
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    kc_upper = ema20 + 2 * atr
-    kc_lower = ema20 - 2 * atr
-    
-    # Bollinger Bands for squeeze detection (BB width < KC width)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = sma20 + 2 * std20
-    bb_lower = sma20 - 2 * std20
-    bb_width = bb_upper - bb_lower
-    kc_width = kc_upper - kc_lower
-    squeeze = bb_width < kc_width
-    
-    # Volume filter: volume > 1.5x 20-day average
-    vol_ma20 = np.zeros(n)
+    # Donchian channels on 12H
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
     for i in range(n):
         if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+            donchian_high[i] = np.max(high[:i+1])
+            donchian_low[i] = np.min(low[:i+1])
         else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+            donchian_high[i] = np.max(high[i-19:i+1])
+            donchian_low[i] = np.min(low[i-19:i+1])
+    
+    # Volume filter: volume > 1.5x 30-period average
+    vol_ma30 = np.zeros(n)
+    for i in range(n):
+        if i < 30:
+            vol_ma30[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        else:
+            vol_ma30[i] = np.mean(volume[i-29:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(50, 20)
+    start_idx = max(50, 30)
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ma30[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,35 +61,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Breakout conditions
-        long_breakout = close[i] > kc_upper[i-1]  # Previous bar's upper KC
-        short_breakout = close[i] < kc_lower[i-1]  # Previous bar's lower KC
-        
         if position == 0:
-            # Long: bullish weekly trend, KC breakout, volume surge, squeeze condition
-            if (close[i] > ema50_1w_aligned[i] and  # Price above weekly EMA50
-                long_breakout and 
-                volume[i] > 1.5 * vol_ma20[i] and
-                squeeze[i]):
+            # Long: Price breaks above Donchian high, close above 1D EMA34, volume surge
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema34_1d_aligned[i] and
+                volume[i] > 1.5 * vol_ma30[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish weekly trend, KC breakout, volume surge, squeeze condition
-            elif (close[i] < ema50_1w_aligned[i] and  # Price below weekly EMA50
-                  short_breakout and 
-                  volume[i] > 1.5 * vol_ma20[i] and
-                  squeeze[i]):
+            # Short: Price breaks below Donchian low, close below 1D EMA34, volume surge
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema34_1d_aligned[i] and
+                  volume[i] > 1.5 * vol_ma30[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KC middle OR trend changes
-            if close[i] < ema20[i] or close[i] < ema50_1w_aligned[i]:
+            # Long exit: Price breaks below Donchian low OR close below 1D EMA34
+            if (close[i] < donchian_low[i] or close[i] < ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price crosses above KC middle OR trend changes
-            if close[i] > ema20[i] or close[i] > ema50_1w_aligned[i]:
+            # Short exit: Price breaks above Donchian high OR close above 1D EMA34
+            if (close[i] > donchian_high[i] or close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
