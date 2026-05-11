@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 6h_PairsTrade_BTC_ETH_Spread_ZScore
-# Hypothesis: BTC and ETH often exhibit mean-reverting spreads. Trade the spread Z-score using 1-day closing prices.
-# Enter long when spread Z-score < -2 (ETH undervalued vs BTC), short when > 2 (ETH overvalued).
-# Exit when Z-score reverts to zero. Uses 1-day data for spread calculation, aligned to 6h.
-# Works in both bull and bear markets as it's market-neutral. Targets 15-25 trades/year.
+# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume
+# Hypothesis: Breakout of daily Camarilla R3/S3 levels on 12h chart with confirmation from 1-day EMA34 trend and volume spike.
+# Targets 15-30 trades/year to minimize fee drag. Uses trend alignment to work in both bull and bear markets.
+# Fewer trades = less fee drag = better test generalization.
 
-name = "6h_PairsTrade_BTC_ETH_Spread_ZScore"
-timeframe = "6h"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,67 +17,92 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # === 1d Data for BTC and ETH (loaded ONCE) ===
-    # Note: This assumes prices DataFrame is for ETHUSDT; we need BTCUSDT data for spread
-    # However, we only have ETH data in 'prices'. This is a limitation.
-    # Workaround: Since we cannot load external data, we use ETH's own volatility as proxy.
-    # Alternative approach: Use ETH price vs its own SMA as a mean-reversion signal.
-    # Given constraints, we'll implement a self-reverting Z-score on ETH price.
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
+    # === 1d Data (loaded ONCE) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Z-Score of ETH Price (self-reversion) ===
-    # Using 50-day mean and 20-day std for stability
-    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    std_20 = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
-    # Avoid division by zero
-    std_20 = np.where(std_20 == 0, 1e-8, std_20)
-    zscore = (close_1d - sma_50) / std_20
+    # === 1d Camarilla Pivot Levels (R3, S3) ===
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
-    # Align Z-score to 6h
-    zscore_6h = align_htf_to_ltf(prices, df_1d, zscore)
+    # Align 1d levels to 12h
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # === 1d EMA34 Trend Filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Filter (20-period EMA) ===
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
     
     # === Signal Parameters ===
     position_size = 0.25  # 25% of capital per trade
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    holding_bars = 0
     
-    # Start after warmup (covers 50-day SMA)
-    start_idx = 50
+    # Start after warmup (covers EMA34)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if np.isnan(zscore_6h[i]):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Z-score < -2 (oversold)
-            if zscore_6h[i] < -2.0:
+            # Long: Break above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_12h[i] and 
+                close[i] > ema34_1d_12h[i] and 
+                volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Z-score > 2 (overbought)
-            elif zscore_6h[i] > 2.0:
+                holding_bars = 0
+            # Short: Break below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_12h[i] and 
+                  close[i] < ema34_1d_12h[i] and 
+                  volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
+                holding_bars = 0
         else:
-            # Exit: Z-score crosses zero (mean reversion)
+            # Enforce minimum holding period (8 bars)
+            holding_bars += 1
+            if holding_bars < 8:
+                signals[i] = position_size if position == 1 else -position_size
+                continue
+            
+            # Exit: Price closes below/above opposite level
             if position == 1:
-                if zscore_6h[i] >= 0:
+                if close[i] < s3_12h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if zscore_6h[i] <= 0:
+                if close[i] > r3_12h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
