@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn
-Hypothesis: Uses 4h price breaks of 1d Camarilla R3/S3 levels filtered by 1d EMA34 trend and 4h volume spikes.
-Enters long when price breaks above R3 with uptrend (price > 1d EMA34) and volume confirmation.
-Enters short when price breaks below S3 with downtrend (price < 1d EMA34) and volume confirmation.
-Exits on reversal to opposite Camarilla level (mean reversion). Designed for moderate trade frequency
-(20-50 trades/year) to work in both bull and bear markets by following 1d trend.
+6h_OrderFlow_Imbalance_VWAP_Divergence_v3
+Hypothesis: Combines order flow imbalance with VWAP divergence and 1d trend filter.
+- Long when: VWAP below price (bullish divergence), positive order flow imbalance, and 1d close > 1d open (bullish day)
+- Short when: VWAP above price (bearish divergence), negative order flow imbalance, and 1d close < 1d open (bearish day)
+- Uses 6h VWAP and order flow imbalance (buyer vs seller volume)
+- Filters by 1d candle direction to align with higher timeframe bias
+- Designed for 60-100 trades/year to work in both trending and ranging markets
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn"
-timeframe = "4h"
+name = "6h_OrderFlow_Imbalance_VWAP_Divergence_v3"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,56 +19,50 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    taker_buy_volume = prices['taker_buy_volume'].values
     
-    # === 1D Data for Trend Filter and Camarilla Levels ===
+    # === 6h VWAP Calculation (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = np.cumsum(typical_price * volume)
+    vwap_denominator = np.cumsum(volume)
+    # Avoid division by zero
+    vwap = np.where(vwap_denominator > 0, vwap_numerator / vwap_denominator, typical_price)
+    
+    # === Order Flow Imbalance: (buyer_volume - seller_volume) / total_volume
+    # seller_volume = volume - taker_buy_volume
+    seller_volume = volume - taker_buy_volume
+    order_flow_imbalance = (taker_buy_volume - seller_volume) / volume
+    # Handle division by zero (when volume=0)
+    order_flow_imbalance = np.where(volume > 0, order_flow_imbalance, 0.0)
+    
+    # === 1d Data for Trend Filter (direction of daily candle) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
+    open_1d = df_1d['open'].values
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 1d EMA34 for trend
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Previous 1d bar's OHLC for Camarilla calculation
-    ph_1d = high_1d  # previous 1d high
-    pl_1d = low_1d   # previous 1d low
-    pc_1d = df_1d['close'].values  # previous 1d close
-    
-    # Camarilla levels: R3, S3
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_r3 = pc_1d + 1.1 * (ph_1d - pl_1d) / 2
-    camarilla_s3 = pc_1d - 1.1 * (ph_1d - pl_1d) / 2
-    
-    # Align Camarilla levels to 4h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # === Volume Filter: 2.0x 20-period EMA on 4h ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 2.0
+    # 1 = bullish day (close > open), -1 = bearish day (close < open), 0 = doji
+    daily_direction = np.where(close_1d > open_1d, 1.0, np.where(close_1d < open_1d, -1.0, 0.0))
+    daily_direction_aligned = align_htf_to_ltf(prices, df_1d, daily_direction)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers 1d EMA34)
-    start_idx = 40
+    # Start after ensuring VWAP and OFI are stable
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(vwap[i]) or np.isnan(order_flow_imbalance[i]) or 
+            np.isnan(daily_direction_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,28 +71,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with uptrend and volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long: VWAP below price (bullish divergence), positive OFI, bullish daily bias
+            if (vwap[i] < close[i] and 
+                order_flow_imbalance[i] > 0.15 and 
+                daily_direction_aligned[i] > 0):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with downtrend and volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short: VWAP above price (bearish divergence), negative OFI, bearish daily bias
+            elif (vwap[i] > close[i] and 
+                  order_flow_imbalance[i] < -0.15 and 
+                  daily_direction_aligned[i] < 0):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 (mean reversion to midpoint)
-            if close[i] < s3_aligned[i]:
+            # Long exit: VWAP crosses above price (loss of bullish divergence) OR OFI turns negative
+            if (vwap[i] > close[i] or order_flow_imbalance[i] < -0.05):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above R3 (mean reversion to midpoint)
-            if close[i] > r3_aligned[i]:
+            # Short exit: VWAP crosses below price (loss of bearish divergence) OR OFI turns positive
+            if (vwap[i] < close[i] or order_flow_imbalance[i] > 0.05):
                 signals[i] = 0.0
                 position = 0
             else:
