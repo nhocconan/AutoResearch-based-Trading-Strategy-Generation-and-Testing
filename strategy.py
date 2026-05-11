@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_Cloud_Filtered_Trend
-Hypothesis: Use Ichimoku Cloud from 1d timeframe to determine trend direction and filter entries on 6h. Enter long when price is above cloud and Tenkan-Kijun cross is bullish; enter short when price is below cloud and cross is bearish. Use volume confirmation (volume > 1.5x 20-period average) to avoid false signals. Designed for 15-30 trades/year per symbol to avoid fee drag while capturing major trends. Works in both bull and bear markets by following the 1d Ichimoku trend.
+12h_1w_HighLow_Breakout_1dTrend
+Hypothesis: Breakouts above the weekly high or below the weekly low in the direction of the 1d trend (ADX > 25) capture strong momentum moves. In ranging markets (ADX < 25), fade at weekly extremes for mean reversion. Volume confirmation filters false signals. Designed for 12h timeframe to target 50-150 total trades over 4 years.
 """
 
-name = "6h_Ichimoku_Cloud_Filtered_Trend"
-timeframe = "6h"
+name = "12h_1w_HighLow_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,112 +17,177 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Ichimoku Cloud
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 52:
+    # Get 1w data for weekly high/low
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # Get 1d data for ADX and volume
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
+        return np.zeros(n)
     
-    # --- 1d Ichimoku Cloud Components ---
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
+    
+    # --- 1d ADX for regime detection (14 period) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
-    tenkan_sen = (period9_high + period9_low) / 2.0
+    # True Range
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
-    kijun_sen = (period26_high + period26_low) / 2.0
+    # Directional Movement
+    up_move = np.diff(high_1d, prepend=high_1d[0])
+    down_move = -np.diff(low_1d, prepend=low_1d[0])
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2.0
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
-    senkou_span_b = (period52_high + period52_low) / 2.0
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Align Ichimoku components to 6h
-    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
-    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
-    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
-    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    # --- 1d Volume Average for confirmation ---
+    vol_avg_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # --- 6h Volume Average for confirmation ---
-    vol_avg_6h = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
+    # --- Weekly High/Low (using previous week) ---
+    # Calculate from previous week's OHLC
+    prev_week_high = np.roll(df_1w['high'].values, 1)
+    prev_week_low = np.roll(df_1w['low'].values, 1)
+    prev_week_high[0] = df_1w['high'].values[0]
+    prev_week_low[0] = df_1w['low'].values[0]
+    
+    # Align weekly levels to 12h
+    weekly_high_12h = align_htf_to_ltf(prices, df_1w, prev_week_high)
+    weekly_low_12h = align_htf_to_ltf(prices, df_1w, prev_week_low)
+    
+    # --- 12h Volume Average for confirmation ---
+    vol_avg_12h = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after warmup period for Ichimoku (52 periods)
-    start_idx = 52
+    # Start after warmup period
+    start_idx = 40  # for ADX and volume averages
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
-            np.isnan(senkou_span_a_6h[i]) or np.isnan(senkou_span_b_6h[i]) or
-            np.isnan(vol_avg_6h[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(vol_avg_1d_aligned[i]) or 
+            np.isnan(weekly_high_12h[i]) or np.isnan(weekly_low_12h[i])):
             if position != 0:
-                # Simple stop: exit if price crosses opposite cloud boundary
-                if position == 1 and close_6h[i] < senkou_span_b_6h[i]:
+                # Check stoploss (2.0x ATR from entry)
+                atr_est = np.abs(high_12h[i] - low_12h[i])  # rough 12h ATR estimate
+                if position == 1 and close_12h[i] <= entry_price - 2.0 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] > senkou_span_a_6h[i]:
+                elif position == -1 and close_12h[i] >= entry_price + 2.0 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                    signals[i] = 0.30 if position == 1 else -0.30
             continue
         
-        # Determine cloud boundaries (Senkou Span A and B)
-        upper_cloud = np.maximum(senkou_span_a_6h[i], senkou_span_b_6h[i])
-        lower_cloud = np.minimum(senkou_span_a_6h[i], senkou_span_b_6h[i])
+        # Determine regime: ADX < 25 = range, ADX > 25 = trend
+        is_range = adx_12h_aligned[i] < 25
+        is_trend = adx_12h_aligned[i] > 25
         
-        # Determine Tenkan-Kijun cross
-        tk_cross = tenkan_sen_6h[i] - kijun_sen_6h[i]
-        tk_cross_prev = tenkan_sen_6h[i-1] - kijun_sen_6h[i-1] if i > 0 else 0
-        
-        # Volume confirmation: current volume > 1.5x 20-period average
-        vol_confirm = volume_6h[i] > 1.5 * vol_avg_6h[i]
+        # Volume confirmation: current volume > 1.5x 12h average
+        vol_confirm = volume_12h[i] > 1.5 * vol_avg_12h[i]
         
         if position == 0:
-            # Look for entries: price outside cloud + TK cross in same direction
-            if vol_confirm:
-                # Bullish: price above cloud + TK cross bullish (Tenkan > Kijun)
-                if close_6h[i] > upper_cloud and tk_cross > 0 and tk_cross_prev <= 0:
-                    signals[i] = 0.25  # long
+            # Look for entries based on regime
+            if is_range and vol_confirm:
+                # Mean reversion: fade at weekly extremes
+                if i > 0:
+                    # Rejection at weekly high (failed breakout above)
+                    if close_12h[i-1] > weekly_high_12h[i-1] and close_12h[i] < weekly_high_12h[i]:
+                        signals[i] = -0.30  # short rejection
+                        position = -1
+                        entry_price = close_12h[i]
+                    # Rejection at weekly low (failed breakdown below)
+                    elif close_12h[i-1] < weekly_low_12h[i-1] and close_12h[i] > weekly_low_12h[i]:
+                        signals[i] = 0.30   # long rejection
+                        position = 1
+                        entry_price = close_12h[i]
+            elif is_trend and vol_confirm:
+                # Trend following: breakout at weekly extremes continues
+                if close_12h[i] > weekly_high_12h[i]:
+                    signals[i] = 0.30  # long breakout
                     position = 1
-                    entry_price = close_6h[i]
-                # Bearish: price below cloud + TK cross bearish (Tenkan < Kijun)
-                elif close_6h[i] < lower_cloud and tk_cross < 0 and tk_cross_prev >= 0:
-                    signals[i] = -0.25  # short
+                    entry_price = close_12h[i]
+                elif close_12h[i] < weekly_low_12h[i]:
+                    signals[i] = -0.30  # short breakdown
                     position = -1
-                    entry_price = close_6h[i]
+                    entry_price = close_12h[i]
         else:
-            # Manage existing position: exit when price re-enters cloud
+            # Manage existing position
             if position == 1:
-                # Long: exit if price falls below cloud
-                if close_6h[i] < lower_cloud:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
+                # Long position management
+                if is_range:
+                    # In range, take profit at weekly low or opposite extreme
+                    if close_12h[i] <= weekly_low_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below weekly low
+                    elif close_12h[i] < weekly_low_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.30
+                else:  # is_trend
+                    # In trend, trail with 1d EMA20 or stop at opposite weekly extreme
+                    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+                    if not np.isnan(ema20_1d_aligned[i]) and close_12h[i] < ema20_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close below weekly low
+                    elif close_12h[i] < weekly_low_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.30
             elif position == -1:
-                # Short: exit if price rises above cloud
-                if close_6h[i] > upper_cloud:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+                # Short position management
+                if is_range:
+                    # In range, take profit at weekly high or opposite extreme
+                    if close_12h[i] >= weekly_high_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above weekly high
+                    elif close_12h[i] > weekly_high_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.30
+                else:  # is_trend
+                    # In trend, trail with 1d EMA20 or stop at opposite weekly extreme
+                    ema20_1d = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
+                    ema20_1d_aligned = align_htf_to_ltf(prices, df_1d, ema20_1d)
+                    if not np.isnan(ema20_1d_aligned[i]) and close_12h[i] > ema20_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    # Stoploss: close above weekly high
+                    elif close_12h[i] > weekly_high_12h[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.30
     
     return signals
