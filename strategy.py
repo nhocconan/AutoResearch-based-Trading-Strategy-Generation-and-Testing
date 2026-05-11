@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation and trend filter
+    # Get 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_12h = close_12h > ema50_12h
+    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
+    
+    # Get 1d data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -27,25 +37,16 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels for previous day
-    # R4 = C + (H-L) * 1.1/2
-    # R3 = C + (H-L) * 1.1/4
-    # S3 = C - (H-L) * 1.1/4
-    # S4 = C - (H-L) * 1.1/2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 6h timeframe (use previous day's levels)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align Camarilla levels to 4h timeframe
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # 1d trend filter: EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    
-    # Volume confirmation: current volume > 1.8x 20-period average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,8 +55,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(trend_up_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,24 +65,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price breaks above R3 with daily uptrend and volume
-            if close[i] > camarilla_r3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Close breaks above R1 + 12h uptrend + volume confirmation
+            if close[i] > R1_aligned[i] and trend_up_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price breaks below S3 with daily downtrend and volume
-            elif close[i] < camarilla_s3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Close breaks below S1 + 12h downtrend + volume confirmation
+            elif close[i] < S1_aligned[i] and not trend_up_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 (reversal) or daily trend turns down
-            if close[i] < camarilla_s3_aligned[i] or not trend_up_1d_aligned[i]:
+            # Long exit: Close breaks below S1 OR 12h trend turns down
+            if close[i] < S1_aligned[i] or not trend_up_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 (reversal) or daily trend turns up
-            if close[i] > camarilla_r3_aligned[i] or trend_up_1d_aligned[i]:
+            # Short exit: Close breaks above R1 OR 12h trend turns up
+            if close[i] > R1_aligned[i] or trend_up_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
