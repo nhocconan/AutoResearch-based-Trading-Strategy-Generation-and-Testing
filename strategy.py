@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_TRIX_4hTrend_Volume"
-timeframe = "1h"
+name = "6h_RSI_14_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,56 +9,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for TRIX calculation (trend filter)
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 15:
+    # Get weekly data for trend filter (EMA50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    # TRIX(12): triple EMA of percent change
-    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    pct_change = np.diff(ema3, prepend=ema3[0]) / (ema3[:-1] + 1e-10) * 100
-    pct_change = np.append(pct_change[0], pct_change)  # align length
-    trix = pd.Series(pct_change).ewm(span=12, adjust=False, min_periods=12).mean().values
-    trix_signal = trix > 0  # positive TRIX = bullish momentum
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1w = close_1w > ema50_1w
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
     
-    trix_signal_aligned = align_htf_to_ltf(prices, df_4h, trix_signal)
+    # RSI(14) on 6h
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # Get 1d data for volume filter (volume spike)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    volume_1d = df_1d['volume'].values
-    vol_ma20 = pd.Series(volume_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume_1d > 1.5 * vol_ma20
-    volume_spike_aligned = align_htf_to_ltf(prices, df_1d, volume_spike)
-    
-    # Session filter: 08-20 UTC (active trading hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    # 1h volume confirmation
-    vol_ma20_1h = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_confirm = volume > 1.2 * vol_ma20_1h
+    # Volume filter: current volume > 2.0x 24-period average (4 days on 6h)
+    vol_ma24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    volume_spike = volume > 2.0 * vol_ma24
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for all indicators
+    start_idx = 30  # Need enough data for RSI and volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(trix_signal_aligned[i]) or np.isnan(volume_spike_aligned[i]) or
-            np.isnan(volume_confirm[i])):
+        if (np.isnan(rsi[i]) or np.isnan(trend_up_1w_aligned[i]) or 
+            np.isnan(vol_ma24[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,28 +57,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions: TRIX bullish + daily volume spike + session + 1h volume
         if position == 0:
-            if trix_signal_aligned[i] and volume_spike_aligned[i] and session_filter[i] and volume_confirm[i]:
-                signals[i] = 0.20
+            # Long: RSI < 30 (oversold) + weekly uptrend + volume spike
+            if rsi[i] < 30 and trend_up_1w_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Entry conditions: TRIX bearish + daily volume spike + session + 1h volume
-            elif not trix_signal_aligned[i] and volume_spike_aligned[i] and session_filter[i] and volume_confirm[i]:
-                signals[i] = -0.20
+            # Short: RSI > 70 (overbought) + weekly downtrend + volume spike
+            elif rsi[i] > 70 and not trend_up_1w_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit: TRIX turns bearish OR session ends
-            if not trix_signal_aligned[i] or not session_filter[i]:
+            # Long exit: RSI > 50 (mean reversion) OR weekly trend turns down
+            if rsi[i] > 50 or not trend_up_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit: TRIX turns bullish OR session ends
-            if trix_signal_aligned[i] or not session_filter[i]:
+            # Short exit: RSI < 50 (mean reversion) OR weekly trend turns up
+            if rsi[i] < 50 or trend_up_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
