@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1dTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily trend
+    # Get 1d data for daily trend and previous close
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 20:
@@ -51,7 +51,7 @@ def generate_signals(prices):
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume filter: volume > 1.5x 20-period average
-    vol_ma20 = np.full(n, np.nan)
+    vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
             vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
