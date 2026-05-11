@@ -1,16 +1,12 @@
-#!/usr/bin/env python3
-"""
-1d_KAMA_RSI_ChopRegime
-Hypothesis: Uses daily KAMA trend direction for bias, combined with RSI mean-reversion entries
-and Choppiness Index regime filter to avoid trending markets. KAMA adapts to market noise,
-providing reliable trend signals. RSI(14) < 30 for long, > 70 for short in ranging/choppy
-markets (CHOP > 50). Works in bull markets by following KAMA trend and in bear markets by
-fading extremes during range-bound periods. Designed for low trade frequency (~20-40/year)
-by requiring trend alignment and regime filter.
-"""
+# 4h_Camarilla_R1S1_Breakout_TrendFilter_Volume_1d
+# Hypothesis: Use daily pivot levels (from 1d data) for more reliable support/resistance.
+# Breakouts from daily S1/R1 with volume and trend confirmation (4h EMA50).
+# Daily pivots reduce noise and provide stronger levels than 4h pivots.
+# This should work in both bull and bear markets by following the intermediate trend.
+# Target: 20-40 trades/year to avoid fee drag.
 
-name = "1d_KAMA_RSI_ChopRegime"
-timeframe = "1d"
+name = "4h_Camarilla_R1S1_Breakout_TrendFilter_Volume_1d"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,85 +15,58 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily KAMA Trend Filter (ER=10, FA=2, SA=30) ---
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
+    # --- 1d Data for Daily Pivots ---
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate daily pivot from previous day's OHLC
+    prev_high_1d = df_1d['high'].values
+    prev_low_1d = df_1d['low'].values
+    prev_close_1d = df_1d['close'].values
     
-    # Correct efficiency ratio calculation
-    er = np.zeros(n)
-    price_change = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    volatility_sum = np.zeros(n)
-    for i in range(10, n):
-        volatility_sum[i] = np.sum(np.abs(np.diff(close[i-9:i+1])))
-    er[10:] = price_change[10:] / np.where(volatility_sum[10:] == 0, 1, volatility_sum[10:])
-    er = np.where(er > 1, 1, er)  # cap at 1
+    # Shift to get previous day's values (today's pivot uses yesterday's data)
+    prev_high_1d = np.roll(prev_high_1d, 1)
+    prev_low_1d = np.roll(prev_low_1d, 1)
+    prev_close_1d = np.roll(prev_close_1d, 1)
+    # First day will have NaN
     
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # FA=2, SA=30
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
+    range_1d = prev_high_1d - prev_low_1d
     
-    # --- Daily RSI(14) ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Daily Camarilla levels
+    R1_1d = pivot_1d + (range_1d * 1.1 / 12)
+    S1_1d = pivot_1d - (range_1d * 1.1 / 12)
     
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    avg_gain[13] = np.mean(gain[1:14])
-    avg_loss[13] = np.mean(loss[1:14])
+    # Align daily levels to 4h timeframe (wait for daily close)
+    R1_1d_aligned = align_htf_to_ltf(prices, df_1d, R1_1d)
+    S1_1d_aligned = align_htf_to_ltf(prices, df_1d, S1_1d)
     
-    for i in range(14, n):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    # --- 4h EMA50 Trend Filter ---
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # --- Daily Choppiness Index (CHOP) ---
-    atr_period = 14
-    tr1 = np.zeros(n)
-    tr1[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr1[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = np.zeros(n)
-    for i in range(atr_period, n):
-        atr[i] = np.mean(tr1[i-atr_period+1:i+1])
-    
-    # Max/min close over 14 periods
-    max_close = np.zeros(n)
-    min_close = np.zeros(n)
-    for i in range(14, n):
-        max_close[i] = np.max(close[i-13:i+1])
-        min_close[i] = np.min(close[i-13:i+1])
-    
-    chop = np.full(n, 50.0)  # default to neutral
-    for i in range(14, n):
-        if max_close[i] - min_close[i] > 0:
-            chop[i] = 100 * np.log10(np.sum(tr1[i-13:i+1]) / (max_close[i] - min_close[i])) / np.log10(14)
-        else:
-            chop[i] = 50.0
+    # --- Volume Spike Detection (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    start_idx = 30  # need enough data for all indicators
+    
+    # Start after warmup (need enough data for EMA50 and pivot calculation)
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        # Skip if any required data is NaN
+        if (np.isnan(R1_1d_aligned[i]) or np.isnan(S1_1d_aligned[i]) or 
+            np.isnan(ema_50[i]) or np.isnan(vol_ratio[i])):
+            # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -106,32 +75,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in choppy/ranging markets (CHOP > 50)
-        choppy_market = chop[i] > 50
+        # Volume confirmation threshold
+        volume_spike = vol_ratio[i] > 1.8
         
         if position == 0:
-            # Long: RSI oversold in choppy market, price above KAMA (weak trend bias)
-            if (rsi[i] < 30 and 
-                choppy_market and 
-                close[i] > kama[i]):
+            # Long: price breaks above daily R1 with volume, above EMA50
+            if (close[i] > R1_1d_aligned[i] and 
+                volume_spike and 
+                close[i] > ema_50[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought in choppy market, price below KAMA
-            elif (rsi[i] > 70 and 
-                  choppy_market and 
-                  close[i] < kama[i]):
+            # Short: price breaks below daily S1 with volume, below EMA50
+            elif (close[i] < S1_1d_aligned[i] and 
+                  volume_spike and 
+                  close[i] < ema_50[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI returns to neutral range or regime shifts to trending
+            # Exit conditions: opposite breakout or loss of momentum
             if position == 1:
-                if (rsi[i] > 50 or chop[i] <= 50):
+                # Exit long: price breaks below daily S1 (reversal signal)
+                if close[i] < S1_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (rsi[i] < 50 or chop[i] <= 50):
+                # Exit short: price breaks above daily R1 (reversal signal)
+                if close[i] > R1_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
