@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,34 +17,28 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 trend filter
+    # 1d data for EMA34 trend filter and Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 35:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 1d data for Camarilla pivot levels
-    df_1d_piv = df_1d  # reuse same 1d data
-    
-    # Calculate EMA34 on 1d
+    # Calculate EMA34 on 1d for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 12h
+    # Align 1d EMA34 to 4h
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d_piv['high'].values
-    low_1d = df_1d_piv['low'].values
-    close_1d_piv = df_1d_piv['close'].values
+    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
+    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Camarilla R1, S1 (using previous day's range)
-    camarilla_r1 = close_1d_piv + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d_piv - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align Camarilla levels to 12h
-    r1_aligned = align_htf_to_ltf(prices, df_1d_piv, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d_piv, camarilla_s1)
+    # Align Camarilla levels to 4h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike (24-period average)
     vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
