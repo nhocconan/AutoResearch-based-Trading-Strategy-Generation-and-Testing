@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_PhaseShift_Signal_With_Volume_Confirmation
-Hypothesis: Uses 1-day price momentum with phase-shift oscillator (using Hilbert transform concept via SMA crossover timing) 
-combined with weekly trend filter and volume confirmation. Designed for low trade frequency (<25/year) to avoid fee drag
-while capturing directional moves in both bull and bear markets. The phase-shift signal helps identify momentum shifts
-before they become extreme, reducing whipsaw.
+6h_Ichimoku_Cloud_Twist_1dTrend
+Hypothesis: Uses Ichimoku cloud twist (Tenkan/Kijun cross) with cloud thickness filter and 1-day trend filter.
+Trades in direction of daily trend only when cloud twist occurs and cloud is thin (low volatility).
+Designed for low trade frequency (<25/year) to avoid fee drift while capturing high-probability trend continuations.
 """
 
-name = "1d_PhaseShift_Signal_With_Volume_Confirmation"
-timeframe = "1d"
+name = "6h_Ichimoku_Cloud_Twist_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,46 +19,69 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # 1d OHLCV
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # --- Weekly EMA50 for trend filter ---
-    close_1w = df_1w['close']
-    ema_50_1w = close_1w.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # --- 1d EMA50 for trend filter ---
+    close_1d = df_1d['close']
+    ema_50_1d = close_1d.ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # --- Phase-shift signal: Fast SMA (5) vs Slow SMA (20) crossover with delay ---
-    # This creates a momentum signal that anticipates turns
-    sma_fast = pd.Series(close).rolling(window=5, min_periods=5).mean().values
-    sma_slow = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    # --- Ichimoku Components (9, 26, 52) ---
+    # Tenkan-sen (Conversion Line): (9-period high + low)/2
+    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
+    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan = (high_9 + low_9) / 2
     
-    # Phase signal: 1 when fast > slow, -1 when fast < smooth
-    phase_signal = np.where(sma_fast > sma_slow, 1, -1)
+    # Kijun-sen (Base Line): (26-period high + low)/2
+    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
+    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun = (high_26 + low_26) / 2
     
-    # --- Volume confirmation: 1.5x 20-period volume SMA ---
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirm = volume > (1.5 * vol_sma)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods
+    senkou_a = ((tenkan + kijun) / 2).shift(26)
+    
+    # Senkou Span B (Leading Span B): (52-period high + low)/2 shifted 52 periods
+    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
+    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
+    senkou_b = ((high_52 + low_52) / 2).shift(52)
+    
+    # Chikou Span (Lagging Span): close shifted -22 periods (not used for signals)
+    
+    # Cloud thickness: absolute difference between Senkou spans
+    cloud_thickness = np.abs(senkou_a - senkou_b)
+    
+    # Cloud twist signals: Tenkan/Kijun cross
+    # Bullish twist: Tenkan crosses above Kijun
+    # Bearish twist: Tenkan crosses below Kijun
+    bullish_twist = (tenkan.shift(1) <= kijun.shift(1)) & (tenkan > kijun)
+    bearish_twist = (tenkan.shift(1) >= kijun.shift(1)) & (tenkan < kijun)
+    
+    # Cloud is thin (low volatility) - using 20-period average of thickness
+    cloud_thick_ma = pd.Series(cloud_thickness).rolling(window=20, min_periods=20).mean()
+    thin_cloud = cloud_thickness < cloud_thick_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 50
+    # Start after warmup (max lookback is 52 for Senkou B)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or 
-            np.isnan(sma_fast[i]) or
-            np.isnan(sma_slow[i]) or
-            np.isnan(vol_sma[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or 
+            np.isnan(tenkan.iloc[i]) or
+            np.isnan(kijun.iloc[i]) or
+            np.isnan(senkou_a.iloc[i]) or
+            np.isnan(senkou_b.iloc[i]) or
+            np.isnan(thin_cloud.iloc[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -69,34 +91,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = close[i] > ema_50_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_50_1w_aligned[i]
-        
-        # Entry conditions: phase shift aligned with weekly trend + volume confirmation
-        long_entry = (phase_signal[i] == 1) and weekly_uptrend and volume_confirm[i]
-        short_entry = (phase_signal[i] == -1) and weekly_downtrend and volume_confirm[i]
-        
-        # Exit conditions: phase reversal or loss of weekly trend
-        long_exit = (phase_signal[i] == -1) or (close[i] < ema_50_1w_aligned[i])
-        short_exit = (phase_signal[i] == 1) or (close[i] > ema_50_1w_aligned[i])
+        # Determine trend based on price vs EMA50
+        price_above_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_ema = close[i] < ema_50_1d_aligned[i]
         
         if position == 0:
-            if long_entry:
-                signals[i] = 0.25
-                position = 1
-            elif short_entry:
-                signals[i] = -0.25
-                position = -1
+            if price_above_ema:
+                # Uptrend: look for bullish twist with thin cloud
+                if bullish_twist.iloc[i] and thin_cloud.iloc[i]:
+                    signals[i] = 0.25
+                    position = 1
+            elif price_below_ema:
+                # Downtrend: look for bearish twist with thin cloud
+                if bearish_twist.iloc[i] and thin_cloud.iloc[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
+            # Exit conditions
             if position == 1:
-                if long_exit:
+                # Exit long: bearish twist or price closes below Kijun
+                exit_signal = bearish_twist.iloc[i] or (close[i] < kijun.iloc[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if short_exit:
+                # Exit short: bullish twist or price closes above Kijun
+                exit_signal = bullish_twist.iloc[i] or (close[i] > kijun.iloc[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
