@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_RSI_Filter"
-timeframe = "1d"
+name = "12h_RSI_Correction_with_Volume_and_Trend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,70 +17,102 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA calculation parameters
-    er_period = 10
-    fast_ema = 2
-    slow_ema = 30
-    
-    # Calculate Efficiency Ratio (ER)
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder for correct calculation
-    
-    # Correct ER calculation: need rolling volatility
-    er = np.zeros(n)
-    for i in range(n):
-        if i < er_period:
-            er[i] = np.nan
-        else:
-            price_change = np.abs(close[i] - close[i-er_period])
-            volatility_sum = np.sum(np.abs(np.diff(close[i-er_period+1:i+1])))
-            er[i] = price_change / (volatility_sum + 1e-10)
-    
-    # Smoothing constants
-    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
-    
-    # KAMA calculation
-    kama = np.full(n, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # Weekly trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for trend filter and RSI calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up_1w = close_1w > ema20_1w
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # RSI(14) for overbought/oversold
-    delta = np.diff(close, prepend=close[0])
+    # Calculate 1d RSI(14)
+    delta = np.diff(close_1d, prepend=close_1d[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])
+    avg_loss[13] = np.mean(loss[1:14])
     
-    # Volume confirmation
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    for i in range(14, len(delta)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d[:13] = np.nan  # Not enough data for first 13 periods
+    
+    # Calculate 1d EMA(50) for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_1d = close_1d > ema50_1d
+    
+    # Get 12h data for entry signals
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
+        return np.zeros(n)
+    
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    
+    # Calculate 12h RSI(14) for mean reversion signals
+    delta_12h = np.diff(close_12h, prepend=close_12h[0])
+    gain_12h = np.where(delta_12h > 0, delta_12h, 0)
+    loss_12h = np.where(delta_12h < 0, -delta_12h, 0)
+    
+    avg_gain_12h = np.zeros_like(gain_12h)
+    avg_loss_12h = np.zeros_like(loss_12h)
+    avg_gain_12h[13] = np.mean(gain_12h[1:14])
+    avg_loss_12h[13] = np.mean(loss_12h[1:14])
+    
+    for i in range(14, len(delta_12h)):
+        avg_gain_12h[i] = (avg_gain_12h[i-1] * 13 + gain_12h[i]) / 14
+        avg_loss_12h[i] = (avg_loss_12h[i-1] * 13 + loss_12h[i]) / 14
+    
+    rs_12h = np.divide(avg_gain_12h, avg_loss_12h, out=np.full_like(avg_gain_12h, np.nan), where=avg_loss_12h!=0)
+    rsi_12h = 100 - (100 / (1 + rs_12h))
+    rsi_12h[:13] = np.nan
+    
+    # Calculate 12h ATR(14) for volatility filter
+    tr_12h = np.zeros(len(df_12h))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    for i in range(1, len(df_12h)):
+        tr = high_12h[i] - low_12h[i]
+        tr2 = abs(high_12h[i] - close_12h[i-1])
+        tr3 = abs(low_12h[i] - close_12h[i-1])
+        tr_12h[i] = max(tr, tr2, tr3)
+    
+    atr14_12h = pd.Series(tr_12h).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Align indicators to 12h timeframe
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
+    atr14_12h_aligned = align_htf_to_ltf(prices, df_12h, atr14_12h)
+    
+    # Volume moving average (20-period) for confirmation
+    vol_ma20 = np.full(n, np.nan)
+    for i in range(n):
+        if i < 20:
+            if i > 0:
+                vol_ma20[i] = np.mean(volume[:i+1])
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20, 14)  # Ensure enough data
+    start_idx = max(50, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(trend_up_1w_aligned[i]) or
-            np.isnan(rsi[i]) or
+        if (np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(trend_up_1d_aligned[i]) or
+            np.isnan(rsi_12h_aligned[i]) or
+            np.isnan(atr14_12h_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -90,32 +122,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA (uptrend) + RSI < 50 (not overbought) + volume confirmation
-            if (close[i] > kama[i] and 
-                trend_up_1w_aligned[i] and 
-                rsi[i] < 50 and
-                volume[i] > 1.2 * vol_ma20[i]):
+            # Long: 1d uptrend + 12h RSI oversold + volume confirmation
+            if (trend_up_1d_aligned[i] and 
+                rsi_12h_aligned[i] < 30 and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA (downtrend) + RSI > 50 (not oversold) + volume confirmation
-            elif (close[i] < kama[i] and 
-                  not trend_up_1w_aligned[i] and 
-                  rsi[i] > 50 and
-                  volume[i] > 1.2 * vol_ma20[i]):
+            # Short: 1d downtrend + 12h RSI overbought + volume confirmation
+            elif (not trend_up_1d_aligned[i] and 
+                  rsi_12h_aligned[i] > 70 and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price below KAMA or RSI > 70 (overbought)
-            if (close[i] < kama[i] or 
-                rsi[i] > 70):
+            # Long exit: RSI overbought or trend change
+            if (rsi_12h_aligned[i] > 70 or 
+                not trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price above KAMA or RSI < 30 (oversold)
-            if (close[i] > kama[i] or 
-                rsi[i] < 30):
+            # Short exit: RSI oversold or trend change
+            if (rsi_12h_aligned[i] < 30 or 
+                trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
