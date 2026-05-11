@@ -1,108 +1,123 @@
 #!/usr/bin/env python3
 """
-6h_LongOnly_GoldenCross_Strategy
-Hypothesis: Captures long-term uptrends using a 21/55 EMA golden cross on the 6h chart,
-filtered by 12h ADX > 25 to ensure trending conditions. Exits on death cross or ADX drop.
-Designed for low trade frequency (~10-25/year) to minimize fee impact, works in bull markets
-by capturing trends and avoids losses in bear markets by staying flat when ADX < 25.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike
+Hypothesis: Combines Camarilla pivot levels (R1/S1) from 1d timeframe with 1d trend filter (EMA34) and volume confirmation to breakout on 4h chart. 
+Long when price breaks above R1 in uptrend (close > EMA34) with volume spike, short when breaks below S1 in downtrend (close < EMA34) with volume spike. 
+Uses 1d timeframe for structure and trend, 4h for execution. Designed for low trade frequency (20-50/year) to minimize fee drag in both bull and bear markets.
 """
 
-name = "6h_LongOnly_GoldenCross_Strategy"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    # Typical price
+    typical = (high + low + close) / 3
+    # Pivot point
+    pivot = typical
+    # Range
+    range_val = high - low
+    
+    # Camarilla levels
+    r1 = close + (range_val * 1.1 / 12)
+    s1 = close - (range_val * 1.1 / 12)
+    r2 = close + (range_val * 1.1 / 6)
+    s2 = close - (range_val * 1.1 / 6)
+    r3 = close + (range_val * 1.1 / 4)
+    s3 = close - (range_val * 1.1 / 4)
+    r4 = close + (range_val * 1.1 / 2)
+    s4 = close - (range_val * 1.1 / 2)
+    
+    return r1, s1, r2, s2, r3, s3, r4, s4, pivot
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # 6h price and volume
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- 12h ADX for trend filter ---
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # --- 1d Camarilla Pivot Levels (from previous day) ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate ADX components on 12h data
-    plus_dm = np.zeros(len(df_12h))
-    minus_dm = np.zeros(len(df_12h))
-    tr = np.zeros(len(df_12h))
+    # Calculate Camarilla levels from previous day's data
+    r1_1d, s1_1d, _, _, _, _, _, _, _ = calculate_camarilla(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
     
-    for i in range(1, len(df_12h)):
-        high_diff = df_12h['high'].iloc[i] - df_12h['high'].iloc[i-1]
-        low_diff = df_12h['low'].iloc[i-1] - df_12h['low'].iloc[i]
-        plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-        minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-        tr[i] = max(
-            df_12h['high'].iloc[i] - df_12h['low'].iloc[i],
-            abs(df_12h['high'].iloc[i] - df_12h['close'].iloc[i-1]),
-            abs(df_12h['low'].iloc[i] - df_12h['close'].iloc[i-1])
-        )
+    # Align 1d Camarilla levels to 4h timeframe (using previous day's levels)
+    r1_1d_4h = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_4h = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.zeros_like(data)
-        alpha = 1.0 / period
-        result[period-1] = np.nansum(data[:period])
-        for i in range(period, len(data)):
-            result[i] = result[i-1] + alpha * (data[i] - result[i-1])
-        return result
+    # --- 1d Trend Filter (EMA34) ---
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_4h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    period = 14
-    atr_12h = wilder_smooth(tr, period)
-    plus_di_12h = 100 * wilder_smooth(plus_dm, period) / atr_12h
-    minus_di_12h = 100 * wilder_smooth(minus_dm, period) / atr_12h
-    dx_12h = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h + 1e-10)
-    adx_12h = wilder_smooth(dx_12h, period)
-    
-    # Align 12h ADX to 6h
-    adx_12h_6h = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # --- 6h EMA 21 and 55 for golden cross ---
-    ema_21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_55 = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
-    
-    # Golden cross: EMA21 crosses above EMA55
-    golden_cross = (ema_21 > ema_55) & (ema_21 <= ema_55)
-    # Death cross: EMA21 crosses below EMA55
-    death_cross = (ema_21 < ema_55) & (ema_21 >= ema_55)
+    # --- Volume Spike Detection (20-period average on 4h) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 40  # enough for EMA34 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(adx_12h_6h[i]) or np.isnan(ema_21[i]) or np.isnan(ema_55[i]):
+        if (np.isnan(r1_1d_4h[i]) or np.isnan(s1_1d_4h[i]) or 
+            np.isnan(ema_34_1d_4h[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Only go long when ADX indicates strong trend (>25)
-        strong_trend = adx_12h_6h[i] > 25
+        # Volume confirmation threshold
+        volume_spike = vol_ratio[i] > 2.0
+        
+        # Trend direction: above EMA34 = uptrend, below EMA34 = downtrend
+        uptrend = close[i] > ema_34_1d_4h[i]
+        downtrend = close[i] < ema_34_1d_4h[i]
         
         if position == 0:
-            # Enter long on golden cross during strong trend
-            if golden_cross[i] and strong_trend:
+            # Long: price breaks above R1 in uptrend with volume spike
+            if (close[i] > r1_1d_4h[i] and uptrend and volume_spike):
                 signals[i] = 0.25
                 position = 1
+            # Short: price breaks below S1 in downtrend with volume spike
+            elif (close[i] < s1_1d_4h[i] and downtrend and volume_spike):
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit on death cross or when trend weakens (ADX < 20)
-            if death_cross[i] or adx_12h_6h[i] < 20:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit conditions: opposite break or trend reversal
+            if position == 1:
+                # Exit long: price breaks below S1 OR trend turns down
+                if close[i] < s1_1d_4h[i] or (close[i] < ema_34_1d_4h[i] and ema_34_1d_4h[i] > ema_34_1d_4h[i-1]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
+            elif position == -1:
+                # Exit short: price breaks above R1 OR trend turns up
+                if close[i] > r1_1d_4h[i] or (close[i] > ema_34_1d_4h[i] and ema_34_1d_4h[i] < ema_34_1d_4h[i-1]):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
