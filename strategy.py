@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_RSI_MeanReversion_1dTrend_Filter"
-timeframe = "4h"
+name = "12h_DonchianBreakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -27,29 +27,23 @@ def generate_signals(prices):
     trend_up_1d = close_1d > ema34_1d
     trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # RSI(14) on 4h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Donchian channel on 12h (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: current volume > 2.0x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma20
+    volume_filter = volume > 2.0 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for RSI and 1d EMA
+    start_idx = 50  # Need enough data for EMA and Donchian
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(trend_up_1d_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,24 +52,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: RSI oversold + 1d uptrend + volume confirmation
-            if rsi[i] < 30 and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: Donchian breakout + 1d uptrend + volume confirmation
+            if close[i] > donchian_high[i-1] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI overbought + 1d downtrend + volume confirmation
-            elif rsi[i] > 70 and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: Donchian breakdown + 1d downtrend + volume confirmation
+            elif close[i] < donchian_low[i-1] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI overbought OR 1d trend turns down
-            if rsi[i] > 70 or not trend_up_1d_aligned[i]:
+            # Long exit: Donchian breakdown OR 1d trend turns down
+            if close[i] < donchian_low[i-1] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI oversold OR 1d trend turns up
-            if rsi[i] < 30 or trend_up_1d_aligned[i]:
+            # Short exit: Donchian breakout OR 1d trend turns up
+            if close[i] > donchian_high[i-1] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
