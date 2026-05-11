@@ -1,11 +1,6 @@
 #!/usr/bin/env python3
-# Hypothesis: 12h Camarilla R3/S3 breakout with 1d trend filter and volume spike.
-# Uses 1d timeframe for trend and pivot levels to reduce noise and avoid overtrading.
-# Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation.
-# Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
-
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Trend"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,9 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla R3 and S3 levels and trend filter
+    # 1d data for Camarilla R3 and S3 levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:  # Need enough for EMA34
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
@@ -36,7 +31,7 @@ def generate_signals(prices):
     R3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
     S3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
     
-    # Align to 12h
+    # Align to 4h
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
     
