@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Combines Camarilla pivot breakouts from the 1d timeframe with 1d trend filter and volume spikes.
-In bull markets, upward breakouts from R3 with trend alignment and volume surge continue higher.
-In bear markets, downward breakdowns from S3 with trend alignment and volume surge continue lower.
-Volume spikes filter out false breakouts. Target: 50-150 trades over 4 years (12-37/year) on 6h timeframe.
+1h_Range_Breakout_Filtered_v1
+Hypothesis: In ranging markets, price breaks out of consolidation with volume;
+in trending markets, pullbacks to value areas offer entries. Uses 4h Donchian
+channels for trend direction and 1d VWAP for value area, with 1h for precise
+entry timing. Volume filter ensures breakouts have conviction.
+Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
 """
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "6h"
+name = "1h_Range_Breakout_Filtered_v1"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -25,54 +26,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Data for Camarilla Pivots and Trend ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === 4H Data for Trend Direction (Donchian Channel) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
     
-    # Camarilla levels: R3, R4, S3, S4
-    # R4 = Close + 1.5 * (High - Low)
-    # R3 = Close + 1.1 * (High - Low)
-    # S3 = Close - 1.1 * (High - Low)
-    # S4 = Close - 1.5 * (High - Low)
-    rng = prev_high - prev_low
-    r3 = prev_close + 1.1 * rng
-    r4 = prev_close + 1.5 * rng
-    s3 = prev_close - 1.1 * rng
-    s4 = prev_close - 1.5 * rng
+    # Donchian Channel (20-period)
+    upper_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lower_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Align Camarilla levels to 6h
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to 1h
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === 1D Data for Value Area (VWAP) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
     
-    # === Volume Spike Filter ===
-    # Volume MA(20) on 6h
+    # Calculate VWAP for each day
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d = vwap_1d.values
+    
+    # Align VWAP to 1h
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    
+    # === 1H Volume Filter ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)  # volume / avg volume
-    vol_spike = vol_ratio > 2.0  # at least 2x average volume
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    
     # Start after warmup
-    start_idx = max(100, 34)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
+        # Session filter
+        if not (8 <= hours[i] <= 20):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         # Skip if any required data is invalid
-        if (np.isnan(r3_6h[i]) or np.isnan(r4_6h[i]) or 
-            np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_4h_aligned[i]) or 
+            np.isnan(lower_4h_aligned[i]) or 
+            np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -81,31 +90,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3 with uptrend and volume spike
-            if (close[i] > r3_6h[i] and 
-                ema34_1d_aligned[i] < close[i] and 
-                vol_spike[i]):
-                signals[i] = 0.25
+            # Long: break above 4h upper Donchian with volume, above 1d VWAP (uptrend continuation or range breakout)
+            if (close[i] > upper_4h_aligned[i] and 
+                volume[i] > vol_ma[i] * 1.5 and 
+                close[i] > vwap_1d_aligned[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S3 with downtrend and volume spike
-            elif (close[i] < s3_6h[i] and 
-                  ema34_1d_aligned[i] > close[i] and 
-                  vol_spike[i]):
-                signals[i] = -0.25
+            # Short: break below 4h lower Donchian with volume, below 1d VWAP (downtrend continuation or range breakdown)
+            elif (close[i] < lower_4h_aligned[i] and 
+                  volume[i] > vol_ma[i] * 1.5 and 
+                  close[i] < vwap_1d_aligned[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price falls back below R3 or trend reverses
-            if close[i] < r3_6h[i] or ema34_1d_aligned[i] > close[i]:
+            # Long exit: price falls below 4h lower Donchian or below 1d VWAP with volume
+            if close[i] < lower_4h_aligned[i] or (close[i] < vwap_1d_aligned[i] and volume[i] > vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
-            # Short exit: price rises back above S3 or trend reverses
-            if close[i] > s3_6h[i] or ema34_1d_aligned[i] < close[i]:
+            # Short exit: price rises above 4h upper Donchian or above 1d VWAP with volume
+            if close[i] > upper_4h_aligned[i] or (close[i] > vwap_1d_aligned[i] and volume[i] > vol_ma[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
