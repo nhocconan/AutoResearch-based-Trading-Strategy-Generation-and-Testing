@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Pivot_Breakout_Trend_v2"
-timeframe = "1d"
+name = "6h_ElderRay_RayPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,44 +17,35 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data from daily prices
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get 1d data for Elder Ray and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    # Weekly pivot: use previous week's OHLC
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Elder Ray components on 1d
+    ema13_1d = pd.Series(df_1d['close'].values).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power_1d = df_1d['high'].values - ema13_1d
+    bear_power_1d = df_1d['low'].values - ema13_1d
     
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_range = weekly_high - weekly_low
-    # Key levels: S1, R1
-    weekly_s1 = weekly_pivot - (weekly_range * 0.382)  # Fibonacci 0.382
-    weekly_r1 = weekly_pivot + (weekly_range * 0.382)
+    # Align Elder Ray components to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
     
-    # Align weekly levels to daily
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    
-    # Daily trend filter: EMA 50
-    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Volume filter: above average volume
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_filter = volume > vol_ma
+    # 1d trend: EMA 34
+    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
-            np.isnan(weekly_r1_aligned[i]) or np.isnan(ema_50[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(ema13_aligned[i]) or np.isnan(ema34_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,28 +54,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly pivot AND above EMA50 with volume
-            if (close[i] > weekly_pivot_aligned[i] and 
-                close[i] > ema_50[i] and
-                vol_filter[i]):
+            # Long: Bull Power > 0 AND price > EMA13 AND price > EMA34
+            if (bull_power_aligned[i] > 0 and 
+                close[i] > ema13_aligned[i] and 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly pivot AND below EMA50 with volume
-            elif (close[i] < weekly_pivot_aligned[i] and 
-                  close[i] < ema_50[i] and
-                  vol_filter[i]):
+            # Short: Bear Power < 0 AND price < EMA13 AND price < EMA34
+            elif (bear_power_aligned[i] < 0 and 
+                  close[i] < ema13_aligned[i] and 
+                  close[i] < ema34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below weekly S1 OR below EMA50
-            if close[i] < weekly_s1_aligned[i] or close[i] < ema_50[i]:
+            # Long exit: Bull Power <= 0 OR price < EMA13 OR price < EMA34
+            if (bull_power_aligned[i] <= 0 or 
+                close[i] < ema13_aligned[i] or 
+                close[i] < ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above weekly R1 OR above EMA50
-            if close[i] > weekly_r1_aligned[i] or close[i] > ema_50[i]:
+            # Short exit: Bear Power >= 0 OR price > EMA13 OR price > EMA34
+            if (bear_power_aligned[i] >= 0 or 
+                close[i] > ema13_aligned[i] or 
+                close[i] > ema34_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
