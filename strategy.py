@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_VolumeTrend"
-timeframe = "4h"
+name = "12h_1d_1w_KAMA_Trend_RSI_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,64 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot calculation
+    # Get daily and weekly data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # Calculate Camarilla pivot levels from previous day
-    # Using previous day's OHLC (shifted by 1 to avoid look-ahead)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
-    
-    # Calculate pivot and support/resistance levels
-    pivot = (prev_high + prev_low + prev_close) / 3
-    range_val = prev_high - prev_low
-    
-    # Camarilla levels
-    R1 = pivot + (range_val * 1.1 / 12)
-    R2 = pivot + (range_val * 1.1 / 6)
-    R3 = pivot + (range_val * 1.1 / 4)
-    R4 = pivot + (range_val * 1.1 / 2)
-    S1 = pivot - (range_val * 1.1 / 12)
-    S2 = pivot - (range_val * 1.1 / 6)
-    S3 = pivot - (range_val * 1.1 / 4)
-    S4 = pivot - (range_val * 1.1 / 2)
-    
-    # Align levels to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    
-    # Weekly trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    
+    if len(df_1d) < 50 or len(df_1w) < 50:
         return np.zeros(n)
     
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    weekly_trend = weekly_close > weekly_ema
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    # Daily KAMA for trend
+    daily_close = df_1d['close'].values
+    change = np.abs(np.diff(daily_close, prepend=daily_close[0]))
+    volatility = np.sum(np.abs(np.diff(daily_close, prepend=daily_close[0])), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = np.power(er * (2/2 - 2/30) + 2/30, 2)
+    kama = np.zeros_like(daily_close)
+    kama[0] = daily_close[0]
+    for i in range(1, len(daily_close)):
+        kama[i] = kama[i-1] + sc[i] * (daily_close[i] - kama[i-1])
+    kama_trend = daily_close > kama
     
-    # Volume confirmation - 20-period average
-    vol_ma = np.zeros(n)
+    # Weekly RSI(14) for momentum
+    weekly_close = df_1w['close'].values
+    delta = np.diff(weekly_close, prepend=weekly_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 20-period volume average for confirmation
+    vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
-            vol_ma[i] = np.mean(volume[:i+1]) if i > 0 else 0
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    
+    # Align daily KAMA trend and weekly RSI to 12h
+    kama_trend_aligned = align_htf_to_ltf(prices, df_1d, kama_trend)
+    rsi_aligned = align_htf_to_ltf(prices, df_1w, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = max(100, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
-            np.isnan(weekly_trend_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(kama_trend_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 with volume and weekly uptrend
-            if (close[i] > R1_aligned[i] and 
-                volume[i] > 1.5 * vol_ma[i] and 
-                weekly_trend_aligned[i]):
+            # Long: daily KAMA uptrend + RSI > 55 + volume confirmation
+            if (kama_trend_aligned[i] and 
+                rsi_aligned[i] > 55 and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume and weekly downtrend
-            elif (close[i] < S1_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma[i] and 
-                  not weekly_trend_aligned[i]):
+            # Short: daily KAMA downtrend + RSI < 45 + volume confirmation
+            elif (not kama_trend_aligned[i] and 
+                  rsi_aligned[i] < 45 and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or weekly trend changes
-            if (close[i] < S1_aligned[i] or not weekly_trend_aligned[i]):
+            # Long exit: daily KAMA trend changes or RSI < 40
+            if (not kama_trend_aligned[i] or rsi_aligned[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 or weekly trend changes
-            if (close[i] > R1_aligned[i] or weekly_trend_aligned[i]):
+            # Short exit: daily KAMA trend changes or RSI > 60
+            if (kama_trend_aligned[i] or rsi_aligned[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
