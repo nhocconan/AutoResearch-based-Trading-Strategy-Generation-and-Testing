@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R3_S3_Breakout_Trend_Volume
-Hypothesis: Breakouts at Camarilla R3/S3 levels on 4h, filtered by 1d EMA34 trend and volume above 50th percentile. Exit on opposite Camarilla level or ATR stop. Designed for low trade frequency (<50/year) to minimize fee drag and work in both bull/bear regimes via trend filter.
+4h_1d_Camarilla_R1_S1_Breakout_Trend_Volume
+Hypothesis: Price breaking above/below Camarilla R1/S1 on 4h, filtered by 1d EMA50 trend and volume above 75th percentile (to avoid chop). Exit on opposite touch or ATR stop. Targets 25-35 trades/year.
+Works in bull (trend breakouts) and bear (counter-trend reversals at extremes).
 """
 
-name = "4h_1d_Camarilla_R3_S3_Breakout_Trend_Volume"
+name = "4h_1d_Camarilla_R1_S1_Breakout_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,28 +29,26 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA34 ---
+    # --- 1d Trend Filter: EMA50 ---
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- Camarilla Levels (based on previous day's OHLC) ---
-    # Calculate daily OHLC from 1d data
-    daily_open = df_1d['open'].values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
+    # --- Camarilla Levels from Previous Day ---
+    high_prev = df_1d['high'].shift(1).values
+    low_prev = df_1d['low'].shift(1).values
+    close_prev = df_1d['close'].shift(1).values
     
-    # Camarilla R3 and S3: H/L from previous day
-    R3 = daily_close + (daily_high - daily_low) * 1.1 / 4
-    S3 = daily_close - (daily_high - daily_low) * 1.1 / 4
+    # Calculate Camarilla levels
+    R1 = close_prev + 1.1 * (high_prev - low_prev) / 12
+    S1 = close_prev - 1.1 * (high_prev - low_prev) / 12
     
-    # Align to 4h: each 1d bar maps to 6*4h bars (since 24h/4h=6)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Align to 4h
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
-    # --- Volume Filter: above median of last 50 periods ---
-    vol_median = pd.Series(volume_4h).rolling(window=50, min_periods=20).median().values
+    # --- Volume Filter: above 75th percentile of last 50 periods ---
+    vol_75 = pd.Series(volume_4h).rolling(window=50, min_periods=20).quantile(0.75).values
     
     # --- ATR for stoploss (14-period) ---
     tr1 = np.abs(high_4h - low_4h)
@@ -64,12 +63,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA34, volume median, ATR
+    start_idx = 50  # for EMA50, volume quantile, ATR
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or np.isnan(vol_median[i]) or np.isnan(atr[i])):
+        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_75[i]) or np.isnan(atr[i])):
             if position != 0:
                 # Check stoploss
                 if position == 1 and close_4h[i] <= entry_price - 1.5 * atr[i]:
@@ -83,21 +82,21 @@ def generate_signals(prices):
             continue
         
         # Determine 1d trend
-        trend_up = close_4h[i] > ema34_1d_aligned[i]
-        trend_down = close_4h[i] < ema34_1d_aligned[i]
+        trend_up = close_4h[i] > ema50_1d_aligned[i]
+        trend_down = close_4h[i] < ema50_1d_aligned[i]
         
-        # Volume filter: above median
-        vol_ok = volume_4h[i] > vol_median[i]
+        # Volume filter: above 75th percentile
+        vol_ok = volume_4h[i] > vol_75[i]
         
         if position == 0:
             # Look for entries only in direction of 1d trend with volume
-            if close_4h[i] > R3_aligned[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + 1d uptrend + volume
+            if close_4h[i] > R1_aligned[i] and trend_up and vol_ok:
+                # Long: price breaks above R1 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_4h[i]
-            elif close_4h[i] < S3_aligned[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + 1d downtrend + volume
+            elif close_4h[i] < S1_aligned[i] and trend_down and vol_ok:
+                # Short: price breaks below S1 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_4h[i]
@@ -108,8 +107,8 @@ def generate_signals(prices):
                 if close_4h[i] <= entry_price - 1.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses below S3
-                elif close_4h[i] < S3_aligned[i]:
+                # Exit: price touches or crosses below S1
+                elif close_4h[i] <= S1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -119,8 +118,8 @@ def generate_signals(prices):
                 if close_4h[i] >= entry_price + 1.5 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses above R3
-                elif close_4h[i] > R3_aligned[i]:
+                # Exit: price touches or crosses above R1
+                elif close_4h[i] >= R1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
