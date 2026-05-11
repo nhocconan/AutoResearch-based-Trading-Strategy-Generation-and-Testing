@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-12h_1w_Camarilla_Pivot_Breakout_Trend_Volume
-Hypothesis: On 12h timeframe, breakouts of weekly Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
-Uses 1d EMA50 for trend and weekly Camarilla pivots for structure. Targets 15-30 trades/year (60-120 over 4 years).
-Designed to work in both bull and bear markets by only trading in direction of higher timeframe trend.
+4h_1d_TRIX_Volume_Spike_Regime
+Hypothesis: TRIX (triple smoothed EMA) crossover with volume spike and chop regime filter.
+- Long when: TRIX crosses above signal line, volume > 1.5x 20-period avg, CHOP > 61.8 (range)
+- Short when: TRIX crosses below signal line, volume > 1.5x 20-period avg, CHOP > 61.8 (range)
+- Exit when: TRIX crosses back through signal line
+- Uses 1d trend filter to avoid counter-trend trades: only long when price > 1d EMA50, short when price < 1d EMA50
+- Targets 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
+- TRIX catches momentum in choppy markets; volume confirms conviction; chop filter avoids whipsaws in strong trends.
 """
 
-name = "12h_1w_Camarilla_Pivot_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "4h_1d_TRIX_Volume_Spike_Regime"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -19,99 +23,100 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d and 1w data
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 2 or len(df_1w) < 2:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
     # --- 1d Trend Filter: EMA50 ---
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- Weekly Camarilla Pivots (from previous week) ---
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # --- TRIX Indicator (12-period) ---
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - then % change
+    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
+    trix_raw = pd.Series(ema3).pct_change() * 100  # percentage change
+    trix = trix_raw.fillna(0).values
     
-    # Use previous week's OHLC to calculate current week's pivots
-    camarilla_high = np.full_like(close_1w, np.nan)
-    camarilla_low = np.full_like(close_1w, np.nan)
-    camarilla_close = np.full_like(close_1w, np.nan)
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    for i in range(1, len(close_1w)):
-        camarilla_high[i] = high_1w[i-1]
-        camarilla_low[i] = low_1w[i-1]
-        camarilla_close[i] = close_1w[i-1]
+    # --- Chop Index (14-period) for regime filter ---
+    tr1 = high_4h - low_4h
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Calculate weekly Camarilla levels
-    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
-    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
-    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
-    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
+    # Chop = log(sum(tr,14) / (highest high - lowest low,14)) * 100 / log(14)
+    highest_high = pd.Series(high_4h).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=14, min_periods=14).min().values
+    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    range_hl = highest_high - lowest_low
+    # Avoid division by zero
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)
+    chop = np.log(sum_tr / range_hl) * 100 / np.log(14)
     
-    # Align weekly pivots to 12h timeframe
-    R3_12h = align_htf_to_ltf(prices, df_1w, R3)
-    S3_12h = align_htf_to_ltf(prices, df_1w, S3)
-    R1_12h = align_htf_to_ltf(prices, df_1w, R1)
-    S1_12h = align_htf_to_ltf(prices, df_1w, S1)
-    
-    # --- Volume Confirmation: 12h volume > 20-period average ---
-    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    # --- Volume Confirmation: 4h volume > 1.5x 20-period average ---
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period
-    start_idx = 50  # for EMA50 and volume MA
+    # Start after warmup period (need TRIX + chop + vol + trend)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
-            np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(chop[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close_12h[i] > ema50_1d_aligned[i]
-        trend_down = close_12h[i] < ema50_1d_aligned[i]
+        # Determine conditions
+        trix_cross_up = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
+        trix_cross_down = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
         
-        # Volume confirmation
-        vol_ok = volume_12h[i] > vol_ma_20[i]
+        vol_ok = volume_4h[i] > vol_ma_20[i] * 1.5
+        chop_high = chop[i] > 61.8  # ranging market
+        
+        trend_up = close_4h[i] > ema50_1d_aligned[i]
+        trend_down = close_4h[i] < ema50_1d_aligned[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume
-            if close_12h[i] > R3_12h[i] and trend_up and vol_ok:
-                # Long: price breaks above weekly R3 + 1d uptrend + volume
+            # Look for entries only with volume spike, in chop, and with 1d trend filter
+            if trix_cross_up and vol_ok and chop_high and trend_up:
+                # Long: TRIX bullish cross + volume spike + ranging + 1d uptrend
                 signals[i] = 0.25
                 position = 1
-            elif close_12h[i] < S3_12h[i] and trend_down and vol_ok:
-                # Short: price breaks below weekly S3 + 1d downtrend + volume
+            elif trix_cross_down and vol_ok and chop_high and trend_down:
+                # Short: TRIX bearish cross + volume spike + ranging + 1d downtrend
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit when TRIX crosses back through signal line
             if position == 1:
-                # Exit long: price returns to S1 (opposite side)
-                if close_12h[i] <= S1_12h[i]:
+                if trix_cross_down:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to R1 (opposite side)
-                if close_12h[i] >= R1_12h[i]:
+                if trix_cross_up:
                     signals[i] = 0.0
                     position = 0
                 else:
