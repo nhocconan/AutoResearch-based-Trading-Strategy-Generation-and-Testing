@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-1D_KAMA_RSI_CHOP_v1
-Hypothesis: On daily timeframe, KAMA trend direction combined with RSI extremes and
-Choppiness Index regime filter provides robust entries in both bull and bear markets.
-KAMA adapts to market noise, RSI identifies overbought/oversold conditions, and
-Choppiness Index filters for trending markets (avoiding range-bound whipsaws).
-Designed for low frequency (10-25 trades/year) to minimize fee drag.
+6h_Pivot_R3S3_Breakout_1dTrend_Volume
+Hypothesis: Breakouts from daily Camarilla R3/S3 levels with 1d trend filter and volume confirmation.
+In strong trends, price breaking above R3 or below S3 with volume confirms institutional participation.
+Trades only in direction of higher timeframe trend to avoid counter-trend whipsaws.
+Designed for low frequency (15-35 trades/year) to minimize fee drag in both bull and bear markets.
 """
 
-name = "1D_KAMA_RSI_CHOP_v1"
-timeframe = "1d"
+name = "6h_Pivot_R3S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -21,86 +20,51 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter (optional, can be removed if not needed)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 1d data for Camarilla pivot and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # Daily OHLCV
-    close = prices['close'].values
+    # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- KAMA (14, 2, 30) ---
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, k=10))  # 10-period change
-    abs_change = np.abs(np.diff(close, k=1))
-    abs_sum = np.zeros_like(close)
-    for i in range(1, len(abs_change)+1):
-        abs_sum[i] = np.sum(abs_change[i-10:i]) if i >= 10 else np.sum(abs_change[:i])
-    abs_sum[0] = 1e-10  # avoid division by zero
-    er = np.zeros_like(close)
-    er[10:] = change[10:] / abs_sum[10:]
-    er[:10] = 0
+    # --- 1d Camarilla pivot levels (R3, S3) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
+    # Calculate pivot point
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate Camarilla levels: R3/S3
+    r3 = pp + (high_1d - low_1d) * 1.1 / 4.0
+    s3 = pp - (high_1d - low_1d) * 1.1 / 4.0
     
-    # KAMA calculation
-    kama = np.full_like(close, np.nan)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Align R3/S3 to 6s timeframe (using previous day's levels for breakout)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # --- RSI (14) ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # --- 1d EMA34 for trend filter ---
+    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
+    # --- Volume Spike (6h) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
     
-    # --- Choppiness Index (14) ---
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = high[0] - low[0]
-    tr2[0] = np.abs(high[0] - close[0])
-    tr3[0] = np.abs(low[0] - close[0])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Sum of true ranges over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chi = np.zeros_like(close)
-    for i in range(14, n):
-        if tr_sum[i] > 0 and hh[i] > ll[i]:
-            chi[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(14)
-        else:
-            chi[i] = 50  # neutral
-    
-    # Signals
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(rsi[i]) or 
-            np.isnan(chi[i])):
+        if (np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -110,9 +74,9 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions: KAMA direction + RSI extreme + trending market (low chop)
-        long_entry = (close[i] > kama[i]) and (rsi[i] < 30) and (chi[i] < 38.2)
-        short_entry = (close[i] < kama[i]) and (rsi[i] > 70) and (chi[i] < 38.2)
+        # Entry conditions: Breakout of R3/S3 with volume and trend alignment
+        long_entry = (close[i] > r3_aligned[i]) and vol_spike[i] and (close[i] > ema_34_1d_aligned[i])
+        short_entry = (close[i] < s3_aligned[i]) and vol_spike[i] and (close[i] < ema_34_1d_aligned[i])
         
         if position == 0:
             if long_entry:
@@ -124,17 +88,19 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: Opposite signal or choppy market
+            # Exit conditions: Price returns to pivot level or trend reversal
             if position == 1:
-                # Exit if RSI > 50 (momentum fading) or choppy market
-                if (rsi[i] > 50) or (chi[i] > 61.8):
+                # Exit if price crosses below pivot or trend turns down
+                pp_aligned = align_htf_to_ltf(prices, df_1d, (high_1d + low_1d + close_1d) / 3.0)
+                if (close[i] < pp_aligned[i]) or (close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit if RSI < 50 or choppy market
-                if (rsi[i] < 50) or (chi[i] > 61.8):
+                # Exit if price crosses above pivot or trend turns up
+                pp_aligned = align_htf_to_ltf(prices, df_1d, (high_1d + low_1d + close_1d) / 3.0)
+                if (close[i] > pp_aligned[i]) or (close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
