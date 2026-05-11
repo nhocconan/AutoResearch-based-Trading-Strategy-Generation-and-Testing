@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_TrendVolume_Stable"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Trend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,30 +17,35 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA34 for trend filter (HTF) - computed ONCE before loop
+    # Calculate 1d EMA34 for trend filter (HTF) - ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Daily high/low/close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly high/low/close for Weekly Pivot levels
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Camarilla R3 and S3 levels
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.25
-    s3 = close_1d - hl_range * 1.25
+    # Weekly Pivot calculation
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Align Weekly Pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Volume filter: 50-period EMA with higher threshold to reduce trades
-    vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
-    volume_ok = volume > vol_ema50 * 3.0  # Increased threshold for fewer, higher-quality trades
+    # Volume filter: 20-period EMA for threshold
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
-    # Fixed position size to minimize churn
+    # Fixed position size to avoid churn
     position_size = 0.25
     
     signals = np.zeros(n)
@@ -68,11 +73,11 @@ def generate_signals(prices):
         breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
+            # Long: Price breaks above weekly R3 + above 1d EMA34 + volume spike
             if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below 1d EMA34 + volume spike
+            # Short: Price breaks below weekly S3 + below 1d EMA34 + volume spike
             elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
