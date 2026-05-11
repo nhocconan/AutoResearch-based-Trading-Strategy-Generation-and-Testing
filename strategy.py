@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Ichimoku_TK_Cross_CloudFilter_1dTrend
-Hypothesis: Trade Ichimoku Tenkan/Kijun cross with cloud filter from 1d timeframe. 
-In bull markets: long when price above cloud and TK cross bullish. 
-In bear markets: short when price below cloud and TK cross bearish.
-Uses 1d trend filter to align with higher timeframe direction, reducing whipsaws.
-Target: 15-30 trades/year on 6f (60-120 total over 4 years).
+4h_ThreeBarReversal_1dTrend_VolumeConfirm
+Hypothesis: Trade three-bar reversal patterns (bullish/bearish) aligned with daily trend and volume confirmation. Works in both bull/bear by filtering with daily EMA trend. Target: 20-40 trades/year on 4h.
 """
 
-name = "6h_Ichimoku_TK_Cross_CloudFilter_1dTrend"
-timeframe = "6h"
+name = "4h_ThreeBarReversal_1dTrend_VolumeConfirm"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,63 +14,35 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 30:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # === Ichimoku Components (9, 26, 52 periods) on 6h data ===
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
-    # For cloud at time t, we use Senkou values from t-26
-    senkou_a_shifted = np.roll(senkou_a, 26)
-    senkou_b_shifted = np.roll(senkou_b, 26)
-    # First 26 values are invalid due to shift
-    senkou_a_shifted[:26] = np.nan
-    senkou_b_shifted[:26] = np.nan
-    
-    # Cloud top and bottom
-    cloud_top = np.maximum(senkou_a_shifted, senkou_b_shifted)
-    cloud_bottom = np.minimum(senkou_a_shifted, senkou_b_shifted)
-    
-    # === 1d Trend Filter (EMA 50) ===
+    # === Daily Trend Filter (EMA34) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Filter (1.5x 20-period EMA on 4h) ===
+    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    volume_ok = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers Ichimoku calculations)
-    start_idx = 80
+    # Start after warmup
+    start_idx = 35
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
-            np.isnan(ema50_6h[i])):
+        if (np.isnan(ema34_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -82,36 +50,44 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Bullish conditions: price above cloud, TK cross bullish, 1d uptrend
-        bullish = (close[i] > cloud_top[i] and 
-                   tenkan[i] > kijun[i] and 
-                   close[i] > ema50_6h[i])
-        
-        # Bearish conditions: price below cloud, TK cross bearish, 1d downtrend
-        bearish = (close[i] < cloud_bottom[i] and 
-                   tenkan[i] < kijun[i] and 
-                   close[i] < ema50_6h[i])
-        
         if position == 0:
-            if bullish:
-                signals[i] = 0.25
+            # Bullish 3-bar reversal: low > previous low for 3 consecutive bars
+            bullish_reversal = (low[i] > low[i-1] and 
+                               low[i-1] > low[i-2] and 
+                               low[i-2] > low[i-3])
+            
+            # Bearish 3-bar reversal: high < previous high for 3 consecutive bars
+            bearish_reversal = (high[i] < high[i-1] and 
+                               high[i-1] < high[i-2] and 
+                               high[i-2] < high[i-3])
+            
+            # Long: bullish reversal with uptrend and volume
+            if bullish_reversal and close[i] > ema34_4h[i] and volume_ok[i]:
+                signals[i] = 0.30
                 position = 1
-            elif bearish:
-                signals[i] = -0.25
+            # Short: bearish reversal with downtrend and volume
+            elif bearish_reversal and close[i] < ema34_4h[i] and volume_ok[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Exit long: price drops below cloud or TK cross turns bearish
-            if close[i] < cloud_bottom[i] or tenkan[i] < kijun[i]:
+            # Long exit: bearish reversal or price below EMA
+            bearish_reversal = (high[i] < high[i-1] and 
+                               high[i-1] < high[i-2] and 
+                               high[i-2] < high[i-3])
+            if bearish_reversal or close[i] < ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30  # maintain position
         elif position == -1:
-            # Exit short: price rises above cloud or TK cross turns bullish
-            if close[i] > cloud_top[i] or tenkan[i] > kijun[i]:
+            # Short exit: bullish reversal or price above EMA
+            bullish_reversal = (low[i] > low[i-1] and 
+                               low[i-1] > low[i-2] and 
+                               low[i-2] > low[i-3])
+            if bullish_reversal or close[i] > ema34_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30  # maintain position
     
     return signals
