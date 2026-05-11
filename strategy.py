@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Momentum
+# 4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Momentum_v2
 # Hypothesis: Combines 1d Camarilla R3/S3 breakout with 1d EMA34 trend and 4h RSI momentum filter.
-# Trades only when breakout aligns with higher timeframe trend and momentum confirms direction.
+# Adds minimum holding period of 10 bars to reduce trade frequency and avoid whipsaw.
 # Designed for low turnover (target 20-30 trades/year) to minimize fee drag in 2025 ranging markets.
 # Uses momentum to avoid false breakouts and improve win rate in both bull and bear regimes.
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Momentum"
+name = "4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Momentum_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -60,6 +60,7 @@ def generate_signals(prices):
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    holding_bars = 0
     
     # Start after warmup
     start_idx = 60  # covers EMA34 and RSI
@@ -75,6 +76,7 @@ def generate_signals(prices):
                 signals[i] = 0.0
             else:
                 signals[i] = 0.0
+            holding_bars = 0
             continue
         
         if position == 0:
@@ -85,6 +87,7 @@ def generate_signals(prices):
                 volume_ok[i]):
                 signals[i] = position_size
                 position = 1
+                holding_bars = 0
             # Short: Break below S3 + below 1d EMA34 + RSI < 50 + volume spike
             elif (close[i] < s3_4h[i] and 
                   close[i] < ema34_1d_4h[i] and 
@@ -92,13 +95,21 @@ def generate_signals(prices):
                   volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
+                holding_bars = 0
         else:
+            # Enforce minimum holding period
+            holding_bars += 1
+            if holding_bars < 10:
+                signals[i] = position_size if position == 1 else -position_size
+                continue
+            
             # Exit conditions: close below/above opposite level
             if position == 1:
                 # Exit: Price closes below S3 (opposite level)
                 if close[i] < s3_4h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
@@ -106,6 +117,7 @@ def generate_signals(prices):
                 if close[i] > r3_4h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
