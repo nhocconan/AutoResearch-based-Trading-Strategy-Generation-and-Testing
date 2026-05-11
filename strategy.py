@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 1h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: Price breaking above/below R3/S3 Camarilla levels on 1h, filtered by 1d EMA50 trend and volume above 1.5x median. Exit on opposite Camarilla touch or ATR stop.
-# Designed for 1h timeframe with 1d trend filter to reduce whipsaw in both bull and bear markets.
-# Target: 60-150 total trades over 4 years (15-37/year).
+# 6h_WeeklyTrend_DailyPullback
+# Hypothesis: On 6h chart, go long when price pulls back to 1d VWAP during a 1w uptrend (price > weekly VWAP), short when price rallies to 1d VWAP during a 1w downtrend. Uses volume confirmation to avoid false signals.
+# Designed for 6h timeframe with 1w trend filter and 1d VWAP mean reversion. Works in both bull and bear markets by trading with the weekly trend.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "1h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "1h"
+name = "6h_WeeklyTrend_DailyPullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,112 +17,93 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1w and 1d data for trend and VWAP
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1w) < 1 or len(df_1d) < 1:
         return np.zeros(n)
     
-    # 1h OHLCV
-    close_1h = prices['close'].values
-    high_1h = prices['high'].values
-    low_1h = prices['low'].values
-    volume_1h = prices['volume'].values
+    # 6h OHLCV
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    volume_6h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # --- 1w VWAP for trend filter ---
+    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
+    vwap_num_1w = np.cumsum(typical_price_1w * df_1w['volume'].values)
+    vwap_den_1w = np.cumsum(df_1w['volume'].values)
+    vwap_1w = vwap_num_1w / vwap_den_1w
+    vwap_1w[vwap_den_1w == 0] = np.nan
+    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
     
-    # --- 1h Camarilla Levels (based on previous day) ---
-    # Calculate from previous 1h bar (shifted by 1 to avoid lookahead)
-    prev_close = np.roll(close_1h, 1)
-    prev_high = np.roll(high_1h, 1)
-    prev_low = np.roll(low_1h, 1)
-    prev_close[0] = close_1h[0]
-    prev_high[0] = high_1h[0]
-    prev_low[0] = low_1h[0]
-    
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
+    # --- 1d VWAP for entry signal ---
+    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    vwap_num_1d = np.cumsum(typical_price_1d * df_1d['volume'].values)
+    vwap_den_1d = np.cumsum(df_1d['volume'].values)
+    vwap_1d = vwap_num_1d / vwap_den_1d
+    vwap_1d[vwap_den_1d == 0] = np.nan
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
     # --- Volume Filter: above 1.5x median of last 20 periods ---
-    vol_median = pd.Series(volume_1h).rolling(window=20, min_periods=10).median().values
+    vol_median = pd.Series(volume_6h).rolling(window=20, min_periods=10).median().values
     vol_threshold = vol_median * 1.5
-    
-    # --- ATR for stoploss (14-period) ---
-    tr1 = np.abs(high_1h - low_1h)
-    tr2 = np.abs(high_1h - np.roll(close_1h, 1))
-    tr3 = np.abs(low_1h - np.roll(close_1h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after warmup period
-    start_idx = 50  # for EMA50
+    # Start after enough data for volume median
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
+        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
+            np.isnan(vol_threshold[i])):
             if position != 0:
-                # Check stoploss
-                if position == 1 and close_1h[i] <= entry_price - 2.0 * atr[i]:
+                # Exit on opposite VWAP touch
+                if position == 1 and close_6h[i] <= vwap_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_1h[i] >= entry_price + 2.0 * atr[i]:
+                elif position == -1 and close_6h[i] >= vwap_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20 if position == 1 else -0.20
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1d trend
-        trend_up = close_1h[i] > ema50_1d_aligned[i]
-        trend_down = close_1h[i] < ema50_1d_aligned[i]
+        # Determine 1w trend
+        trend_up = close_6h[i] > vwap_1w_aligned[i]
+        trend_down = close_6h[i] < vwap_1w_aligned[i]
         
-        # Volume filter: above 1.5x median
-        vol_ok = volume_1h[i] > vol_threshold[i]
+        # Volume filter
+        vol_ok = volume_6h[i] > vol_threshold[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume
-            if close_1h[i] > camarilla_r3[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + 1d uptrend + volume
-                signals[i] = 0.20
+            # Look for entries: pullback to 1d VWAP in direction of 1w trend
+            if trend_up and vol_ok and close_6h[i] <= vwap_1d_aligned[i] * 1.005:  # Allow small buffer
+                # Long: price at or below 1d VWAP during 1w uptrend
+                signals[i] = 0.25
                 position = 1
-                entry_price = close_1h[i]
-            elif close_1h[i] < camarilla_s3[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + 1d downtrend + volume
-                signals[i] = -0.20
+                entry_price = close_6h[i]
+            elif trend_down and vol_ok and close_6h[i] >= vwap_1d_aligned[i] * 0.995:  # Allow small buffer
+                # Short: price at or above 1d VWAP during 1w downtrend
+                signals[i] = -0.25
                 position = -1
-                entry_price = close_1h[i]
+                entry_price = close_6h[i]
         else:
-            # Update stoploss and check exits
+            # Exit when price crosses 1d VWAP in opposite direction
             if position == 1:
-                # Stoploss
-                if close_1h[i] <= entry_price - 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: price touches or crosses below S3
-                elif close_1h[i] <= camarilla_s3[i]:
+                if close_6h[i] <= vwap_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Stoploss
-                if close_1h[i] >= entry_price + 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: price touches or crosses above R3
-                elif close_1h[i] >= camarilla_r3[i]:
+                if close_6h[i] >= vwap_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
