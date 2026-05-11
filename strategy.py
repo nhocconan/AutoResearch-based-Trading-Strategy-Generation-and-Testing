@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_KAMA_Trend_RSI_Volume"
-timeframe = "12h"
+name = "4h_Donchian20_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,55 +17,66 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for KAMA and RSI
+    # Get daily data for trend and weekly data for regime
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_1d) < 30:
+    if len(df_1d) < 20 or len(df_1w) < 20:
         return np.zeros(n)
     
-    # Daily KAMA (Kaufman Adaptive Moving Average) for trend
+    # Daily EMA200 for trend filter (bull/bear)
     daily_close = df_1d['close'].values
-    change = np.abs(np.diff(daily_close, prepend=daily_close[0]))
-    volatility = np.sum(np.abs(np.diff(daily_close))[:len(change)])
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # fast=2, slow=30
-    kama = np.zeros_like(daily_close)
-    kama[0] = daily_close[0]
-    for i in range(1, len(daily_close)):
-        kama[i] = kama[i-1] + sc[i] * (daily_close[i] - kama[i-1])
+    ema200_d = pd.Series(daily_close).ewm(span=200, adjust=False, min_periods=200).mean().values
+    daily_trend = daily_close > ema200_d  # True for uptrend
     
-    # Daily RSI(14) for momentum
-    delta = np.diff(daily_close, prepend=daily_close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Weekly ATR for regime filter (trending vs ranging)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    tr = np.maximum(
+        weekly_high[1:] - weekly_low[1:],
+        np.maximum(
+            np.abs(weekly_high[1:] - weekly_close[:-1]),
+            np.abs(weekly_low[1:] - weekly_close[:-1])
+        )
+    )
+    tr = np.concatenate([[0], tr])
+    atr_w = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    weekly_range = weekly_high - weekly_low
+    atr_ratio = weekly_range / (atr_w + 1e-10)
+    # Trending when ATR ratio > 1.2 (strong weekly moves)
+    weekly_trending = atr_ratio > 1.2
     
-    # 20-period volume average for confirmation
-    vol_ma20 = np.zeros(n)
+    # 4h Donchian channel (20-period)
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
     for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+        start_idx = max(0, i - 19)
+        donchian_high[i] = np.max(high[start_idx:i+1])
+        donchian_low[i] = np.min(low[start_idx:i+1])
     
-    # Align KAMA trend and RSI to 12h
-    kama_trend = daily_close > kama  # price above KAMA = uptrend
-    kama_trend_aligned = align_htf_to_ltf(prices, df_1d, kama_trend)
-    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    # 40-period volume average for confirmation
+    vol_ma40 = np.zeros(n)
+    for i in range(n):
+        if i < 40:
+            vol_ma40[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        else:
+            vol_ma40[i] = np.mean(volume[i-39:i+1])
+    
+    # Align daily trend and weekly regime to 4h
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
+    weekly_trending_aligned = align_htf_to_ltf(prices, df_1w, weekly_trending)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)
+    start_idx = max(100, 40)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(kama_trend_aligned[i]) or 
-            np.isnan(rsi_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(daily_trend_aligned[i]) or 
+            np.isnan(weekly_trending_aligned[i]) or
+            np.isnan(vol_ma40[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,28 +85,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: daily uptrend (price > KAMA) + RSI > 55 + volume confirmation
-            if (kama_trend_aligned[i] and 
-                rsi_aligned[i] > 55 and 
-                volume[i] > 1.5 * vol_ma20[i]):
+            # Long: uptrend + trending regime + price breaks above Donchian high + volume
+            if (daily_trend_aligned[i] and 
+                weekly_trending_aligned[i] and 
+                close[i] > donchian_high[i] and 
+                volume[i] > 1.5 * vol_ma40[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: daily downtrend (price < KAMA) + RSI < 45 + volume confirmation
-            elif (not kama_trend_aligned[i] and 
-                  rsi_aligned[i] < 45 and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+            # Short: downtrend + trending regime + price breaks below Donchian low + volume
+            elif (not daily_trend_aligned[i] and 
+                  weekly_trending_aligned[i] and 
+                  close[i] < donchian_low[i] and 
+                  volume[i] > 1.5 * vol_ma40[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: daily trend changes or RSI < 40
-            if (not kama_trend_aligned[i] or rsi_aligned[i] < 40):
+            # Long exit: trend changes or price re-enters Donchian channel
+            if (not daily_trend_aligned[i] or 
+                not weekly_trending_aligned[i] or 
+                close[i] < donchian_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: daily trend changes or RSI > 60
-            if (kama_trend_aligned[i] or rsi_aligned[i] > 60):
+            # Short exit: trend changes or price re-enters Donchian channel
+            if (daily_trend_aligned[i] or 
+                not weekly_trending_aligned[i] or 
+                close[i] > donchian_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
