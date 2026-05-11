@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_Donchian20_Breakout_1wTrend_Volume"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -17,6 +17,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Get daily data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate Camarilla levels (R3, S3) from previous day
+    # R3 = close + 1.1 * (high - low) / 2
+    # S3 = close - 1.1 * (high - low) / 2
+    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 2
+    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 2
+    
+    # Align to 12h timeframe
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    
     # Get weekly data for trend filter
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
@@ -27,10 +46,6 @@ def generate_signals(prices):
     # Weekly EMA20 for trend filter
     ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # 12h Donchian channel (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,26 +68,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Look for Donchian breakout in direction of weekly trend with volume confirmation
+            # Look for Camarilla breakout in direction of weekly trend with volume confirmation
             if volume_filter[i]:
-                if high[i] > high_max[i] and close[i] > ema20_1w_aligned[i]:
-                    # Break above upper Donchian + uptrend = long
+                if high[i] > camarilla_r3_aligned[i] and close[i] > ema20_1w_aligned[i]:
+                    # Break above R3 + uptrend = long
                     signals[i] = 0.25
                     position = 1
-                elif low[i] < low_min[i] and close[i] < ema20_1w_aligned[i]:
-                    # Break below lower Donchian + downtrend = short
+                elif low[i] < camarilla_s3_aligned[i] and close[i] < ema20_1w_aligned[i]:
+                    # Break below S3 + downtrend = short
                     signals[i] = -0.25
                     position = -1
         elif position == 1:
-            # Exit long when price breaks below lower Donchian
-            if low[i] < low_min[i]:
+            # Exit long when price breaks below S3
+            if low[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short when price breaks above upper Donchian
-            if high[i] > high_max[i]:
+            # Exit short when price breaks above R3
+            if high[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
