@@ -1,61 +1,77 @@
 #!/usr/bin/env python3
 """
-1d_1w_KAMA_Trend_Filter_v2
-Hypothesis: Uses weekly KAMA (Kaufman Adaptive Moving Average) to determine trend direction,
-with daily price crossing above/below KAMA as entry signal, filtered by volume spike and
-ATR-based volatility filter. Designed to work in both bull and bear markets by following
-higher-timeframe trend while using daily timeframe for precise entries. Targets low trade
-frequency (7-25/year) via weekly trend filter and daily entry signal.
+6h_1d_Williams_Alligator_ADX_Filter
+Hypothesis: Uses Williams Alligator (3 SMAs) from daily timeframe to determine trend,
+with price above/below all three lines as long/short signal. ADX(14) from 1d filters
+for trending markets (ADX > 25). Entry requires price to cross the Jaw line (13-period
+SMMA) in direction of trend with volume confirmation. Designed to work in both bull
+and bear markets by following daily trend while using 6h for precise entries. Targets
+low trade frequency (12-37/year) via trend filter and entry conditions.
 """
 
-name = "1d_1w_KAMA_Trend_Filter_v2"
-timeframe = "1d"
+name = "6h_1d_Williams_Alligator_ADX_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_kama(close, period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = abs(np.diff(close, n=period))
-    volatility = np.abs(np.diff(close)).rolling(window=period, min_periods=1).sum()
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
+def smma(series, period):
+    """Smoothed Moving Average (used in Williams Alligator)"""
+    s = pd.Series(series)
+    return s.ewm(alpha=1/period, adjust=False).mean()
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # 1d OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly KAMA for Trend Filter ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # --- Daily Williams Alligator for Trend ---
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
         return np.zeros(n)
     
-    kama_1w = calculate_kama(df_1w['close'].values, period=10, fast=2, slow=30)
-    kama_1w_1d = align_htf_to_ltf(prices, df_1w, kama_1w)
+    # Williams Alligator lines: Jaw(13), Teeth(8), Lips(5) - all SMMA
+    jaw = smma(df_1d['close'].values, 13)
+    teeth = smma(df_1d['close'].values, 8)
+    lips = smma(df_1d['close'].values, 5)
     
-    # --- Daily ATR for Volatility Filter ---
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Align Alligator lines to 6h timeframe
+    jaw_6h = align_htf_to_ltf(prices, df_1d, jaw)
+    teeth_6h = align_htf_to_ltf(prices, df_1d, teeth)
+    lips_6h = align_htf_to_ltf(prices, df_1d, lips)
     
-    # --- Daily Volume Spike Detection (20-period average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # --- Daily ADX for Trend Strength Filter ---
+    # Calculate ADX components
+    plus_dm = np.diff(df_1d['high'].values, prepend=df_1d['high'].values[0])
+    minus_dm = np.diff(df_1d['low'].values, prepend=df_1d['low'].values[0])
+    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
+    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
+    
+    tr1 = np.abs(np.diff(df_1d['high'].values, prepend=df_1d['high'].values[0]))
+    tr2 = np.abs(np.diff(df_1d['low'].values, prepend=df_1d['low'].values[0]))
+    tr3 = np.abs(np.diff(df_1d['close'].values, prepend=df_1d['close'].values[0]))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Smoothed values
+    atr = smma(tr, 14)
+    plus_di = 100 * smma(plus_dm, 14) / atr
+    minus_di = 100 * smma(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = smma(dx, 14)
+    
+    # Align ADX to 6h timeframe
+    adx_6h = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # --- Volume Spike Detection (24-period average on 6h) ---
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -63,11 +79,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1w_1d[i]) or np.isnan(atr[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(jaw_6h[i]) or np.isnan(teeth_6h[i]) or np.isnan(lips_6h[i]) or
+            np.isnan(adx_6h[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -76,37 +93,43 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: price relative to weekly KAMA
-        price_above_kama = close[i] > kama_1w_1d[i]
-        price_below_kama = close[i] < kama_1w_1d[i]
+        # Determine trend direction based on Alligator alignment
+        # Bullish: Lips > Teeth > Jaw (all aligned upward)
+        bullish_alignment = lips_6h[i] > teeth_6h[i] and teeth_6h[i] > jaw_6h[i]
+        # Bearish: Lips < Teeth < Jaw (all aligned downward)
+        bearish_alignment = lips_6h[i] < teeth_6h[i] and teeth_6h[i] < jaw_6h[i]
         
-        # Volume confirmation threshold
+        # Price position relative to Alligator
+        price_above_all = close[i] > lips_6h[i] and close[i] > teeth_6h[i] and close[i] > jaw_6h[i]
+        price_below_all = close[i] < lips_6h[i] and close[i] < teeth_6h[i] and close[i] < jaw_6h[i]
+        
+        # ADX trend filter
+        trending = adx_6h[i] > 25
+        
+        # Volume confirmation
         volume_spike = vol_ratio[i] > 1.5
         
-        # Volatility filter: avoid extremely high volatility periods
-        vol_filter = atr[i] < np.percentile(atr[:i+1], 80) if i >= 20 else True
-        
         if position == 0:
-            # Long: price above weekly KAMA + volume spike + volatility filter
-            if price_above_kama and volume_spike and vol_filter:
+            # Long: bullish alignment + price above Alligator + ADX > 25 + volume
+            if bullish_alignment and price_above_all and trending and volume_spike:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below weekly KAMA + volume spike + volatility filter
-            elif price_below_kama and volume_spike and vol_filter:
+            # Short: bearish alignment + price below Alligator + ADX > 25 + volume
+            elif bearish_alignment and price_below_all and trending and volume_spike:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price crosses back across weekly KAMA
+            # Exit conditions: trend reversal or ADX weak
             if position == 1:
-                # Exit long: price crosses below weekly KAMA
-                if price_below_kama:
+                # Exit long: bearish alignment OR ADX < 20
+                if bearish_alignment or adx_6h[i] < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses above weekly KAMA
-                if price_above_kama:
+                # Exit short: bullish alignment OR ADX < 20
+                if bullish_alignment or adx_6h[i] < 20:
                     signals[i] = 0.0
                     position = 0
                 else:
