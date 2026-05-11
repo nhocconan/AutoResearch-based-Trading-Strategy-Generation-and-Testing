@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeS"
-timeframe = "12h"
+name = "1d_Weekly_Pivot_Range_Reversion"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,11 +17,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
-    df_1d = get_htf_data(prices, '1d')
+    # Get weekly data
     df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 20 or len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # Weekly pivot points (using previous week)
@@ -33,37 +31,43 @@ def generate_signals(prices):
     s1 = 2 * pivot - prev_week_high
     r2 = pivot + (prev_week_high - prev_week_low)
     s2 = pivot - (prev_week_high - prev_week_low)
-    r3 = r2 + (r1 - s1)
-    s3 = s2 - (r1 - s1)
     
-    # Daily trend filter (EMA34 > EMA89)
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1d = pd.Series(close_1d).ewm(span=89, adjust=False, min_periods=89).mean().values
-    trend_up_1d = ema34_1d > ema89_1d
-    trend_down_1d = ema34_1d < ema89_1d
+    # Weekly ATR for volatility filter
+    tr1 = np.abs(df_1w['high'].values - df_1w['low'].values)
+    tr2 = np.abs(df_1w['high'].values - np.roll(df_1w['close'].values, 1))
+    tr3 = np.abs(df_1w['low'].values - np.roll(df_1w['close'].values, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1w = np.zeros(len(tr))
+    for i in range(len(tr)):
+        if i < 14:
+            atr_1w[i] = np.mean(tr[:i+1]) if i > 0 else 0
+        else:
+            atr_1w[i] = np.mean(tr[i-13:i+1])
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
-    # Align all to 12h
+    # Align pivot levels to daily
     pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
     s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
     
-    # Volume filter: current volume > 2.0x 50-period average
-    vol_ma50 = np.zeros(n)
-    vol_sum = 0.0
+    # Daily range position (where price is within weekly range)
+    range_width = r2_aligned - s2_aligned
+    range_position = np.zeros(n)
     for i in range(n):
-        vol_sum += volume[i]
-        if i < 50:
-            vol_ma50[i] = vol_sum / (i + 1)
+        if range_width[i] > 0:
+            range_position[i] = (close[i] - s2_aligned[i]) / range_width[i]
         else:
-            vol_sum -= volume[i - 50]
-            vol_ma50[i] = vol_sum / 50
+            range_position[i] = 0.5
+    
+    # Volume filter: current volume > 1.3x 20-day average
+    vol_ma20 = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,9 +77,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
-            np.isnan(vol_ma50[i])):
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(atr_1w_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,31 +87,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 in weekly uptrend with volume surge
-            if (close[i] > r3_aligned[i] and 
-                trend_up_aligned[i] and 
-                volume[i] > 2.0 * vol_ma50[i]):
-                signals[i] = 0.30
+            # Mean reversion at extremes with volume confirmation
+            # Long near support in weekly range
+            if (range_position[i] < 0.2 and 
+                close[i] > s1_aligned[i] and 
+                volume[i] > 1.3 * vol_ma20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in weekly downtrend with volume surge
-            elif (close[i] < s3_aligned[i] and 
-                  trend_down_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma50[i]):
-                signals[i] = -0.30
+            # Short near resistance in weekly range
+            elif (range_position[i] > 0.8 and 
+                  close[i] < r1_aligned[i] and 
+                  volume[i] > 1.3 * vol_ma20[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below R1 or weekly trend changes
-            if (close[i] < r1_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: return to middle of range or break above resistance
+            if (range_position[i] > 0.6 or close[i] > r2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above S1 or weekly trend changes
-            if (close[i] > s1_aligned[i] or not trend_down_aligned[i]):
+            # Short exit: return to middle of range or break below support
+            if (range_position[i] < 0.4 or close[i] < s2_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
