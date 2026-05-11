@@ -1,15 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_SuperTrend_RSI_Filter
-Hypothesis: Uses SuperTrend(10,3) for trend direction and RSI(14) for overbought/oversold conditions. 
-Enters long in uptrend when RSI < 40, exits when RSI > 60. Enters short in downtrend when RSI > 60, 
-exits when RSI < 40. Includes volume confirmation (volume > 1.5x 20-period average) to filter false signals.
-Designed for low trade frequency with clear signals in both bull and bear markets by following the higher 
-timeframe trend and avoiding choppy markets.
+6h_WeeklyPivot_R3_S3_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above weekly R3 or below weekly S3 with 1d trend confirmation and volume spike. Uses weekly pivot levels as strong support/resistance. In uptrend, buy breakouts above R3; in downtrend, sell breakdowns below S3. Volume confirms institutional interest. Designed for low frequency (15-30 trades/year) with high win rate in trending markets.
 """
 
-name = "4h_SuperTrend_RSI_Filter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_R3_S3_Breakout_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -18,80 +14,57 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # SuperTrend calculation (ATR=10, multiplier=3)
-    atr_period = 10
-    multiplier = 3
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 5:
+        return np.zeros(n)
     
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
-                         np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Calculate weekly pivot points (standard formula)
+    # Using previous week's OHLC
+    w_high = df_1w['high'].values
+    w_low = df_1w['low'].values
+    w_close = df_1w['close'].values
     
-    # ATR
-    atr = np.zeros_like(close)
-    atr[atr_period] = np.mean(tr[:atr_period+1])
-    for i in range(atr_period+1, len(tr)):
-        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    # Shift to use previous week's data (avoid look-ahead)
+    w_high_prev = np.roll(w_high, 1)
+    w_low_prev = np.roll(w_low, 1)
+    w_close_prev = np.roll(w_close, 1)
+    # First week: use current values to avoid NaN
+    w_high_prev[0] = w_high[0]
+    w_low_prev[0] = w_low[0]
+    w_close_prev[0] = w_close[0]
     
-    # Basic Upper and Lower Bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + multiplier * atr
-    lower_band = hl2 - multiplier * atr
+    # Pivot point calculation
+    pivot = (w_high_prev + w_low_prev + w_close_prev) / 3.0
+    # R3 and S3 levels
+    r3 = pivot + 2 * (w_high_prev - w_low_prev)
+    s3 = pivot - 2 * (w_high_prev - w_low_prev)
     
-    # SuperTrend
-    super_trend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+    # Align weekly R3/S3 to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    super_trend[0] = upper_band[0]
-    direction[0] = 1
+    # 1d trend filter (EMA 34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    for i in range(1, len(close)):
-        if close[i] > super_trend[i-1]:
-            direction[i] = 1
-        elif close[i] < super_trend[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            super_trend[i] = max(lower_band[i], super_trend[i-1])
-        else:
-            super_trend[i] = min(upper_band[i], super_trend[i-1])
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
+        span=34, adjust=False, min_periods=34
+    ).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # RSI calculation
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
-    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
-    
-    for i in range(rsi_period+1, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
-        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.where(avg_loss == 0, 100, rsi)
-    rsi = np.where(avg_gain == 0, 0, rsi)
-    
-    # Volume confirmation (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation (24-period average on 6s = ~4 days)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -99,12 +72,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = max(atr_period, rsi_period, 20) + 5
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(super_trend[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -113,34 +86,41 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume threshold
+        volume_spike = vol_ratio[i] > 2.0
         
         if position == 0:
-            # Long: uptrend + RSI oversold + volume confirmation
-            if (direction[i] == 1 and 
-                rsi[i] < 40 and 
+            # Long: break above weekly R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: downtrend + RSI overbought + volume confirmation
-            elif (direction[i] == -1 and 
-                  rsi[i] > 60 and 
+            # Short: break below weekly S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: return to pivot or trend reversal
+            # Calculate aligned pivot for exit
+            pivot_val = (w_high_prev + w_low_prev + w_close_prev) / 3.0
+            # Need to align pivot as well
+            pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+            
             if position == 1:
-                # Exit long: RSI overbought OR trend reversal
-                if (rsi[i] > 60) or (direction[i] == -1):
+                # Exit long: price returns to weekly pivot OR trend turns down
+                if (close[i] <= pivot_aligned[i]) or \
+                   (close[i] < ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI oversold OR trend reversal
-                if (rsi[i] < 40) or (direction[i] == 1):
+                # Exit short: price returns to weekly pivot OR trend turns up
+                if (close[i] >= pivot_aligned[i]) or \
+                   (close[i] > ema_34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
