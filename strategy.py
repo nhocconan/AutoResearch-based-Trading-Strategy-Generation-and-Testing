@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Pivot_VWAP_Bounce
-Hypothesis: On daily timeframe, price tends to bounce off weekly pivot points (R1/S1) when approaching with VWAP confirmation and low volatility (VIX-like filter). In trending markets (ADX>25), breakouts are traded; in ranging markets (ADX<20), mean reversion at pivot levels is favored. Uses weekly pivot points from 1w timeframe, VWAP from 1d, and ADX from 1d for regime filtering. Designed to work in both bull and bear markets by adapting to regime.
+12h_MultiTF_Confluence_Strategy
+Hypothesis: Combine weekly trend bias (price above/below weekly EMA20) with daily momentum (RSI > 50 for long, < 50 for short) and 12h price action (close >/open for long, < for short) to capture medium-term moves. Volatility filter (ATR ratio > 0.8) avoids choppy markets. Designed to work in both bull and bear markets by following the weekly trend. Targets 50-150 total trades over 4 years.
 """
 
-name = "1d_Weekly_Pivot_VWAP_Bounce"
-timeframe = "1d"
+name = "12h_MultiTF_Confluence_Strategy"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,183 +17,118 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for weekly pivot points
+    # Get weekly data for trend bias
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Get 1d data for VWAP and ADX
+    # Get daily data for RSI and ATR
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 1d OHLCV
-    close_1d = prices['close'].values
-    high_1d = prices['high'].values
-    low_1d = prices['low'].values
-    volume_1d = prices['volume'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    open_12h = prices['open'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- VWAP calculation (typical price * volume) / cumulative volume ---
-    typical_price = (high_1d + low_1d + close_1d) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume_1d)
-    vwap_denominator = np.cumsum(volume_1d)
-    vwap_1d = vwap_numerator / (vwap_denominator + 1e-10)
+    # --- Weekly EMA20 for trend bias ---
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
     
-    # --- ADX calculation (14 period) ---
-    # True Range
+    # --- Daily RSI(14) for momentum ---
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    
+    # --- Daily ATR(14) for volatility regime ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     tr1 = np.abs(high_1d - low_1d)
     tr2 = np.abs(high_1d - np.roll(close_1d, 1))
     tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
-    
-    # Smoothed values
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    dm_plus14 = pd.Series(dm_plus).rolling(window=14, min_periods=14).sum().values
-    dm_minus14 = pd.Series(dm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus14 / (tr14 + 1e-10)
-    di_minus = 100 * dm_minus14 / (tr14 + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # --- Weekly Pivot Points (using previous week's OHLC) ---
-    prev_week_high = np.roll(df_1w['high'].values, 1)
-    prev_week_low = np.roll(df_1w['low'].values, 1)
-    prev_week_close = np.roll(df_1w['close'].values, 1)
-    prev_week_high[0] = df_1w['high'].values[0]
-    prev_week_low[0] = df_1w['low'].values[0]
-    prev_week_close[0] = df_1w['close'].values[0]
-    
-    pivot = (prev_week_high + prev_week_low + prev_week_close) / 3.0
-    r1 = 2 * pivot - prev_week_low
-    s1 = 2 * pivot - prev_week_high
-    r2 = pivot + (prev_week_high - prev_week_low)
-    s2 = pivot - (prev_week_high - prev_week_low)
-    
-    # Align weekly levels to 1d
-    pivot_1d = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_1d = align_htf_to_ltf(prices, df_1w, r1)
-    s1_1d = align_htf_to_ltf(prices, df_1w, s1)
-    r2_1d = align_htf_to_ltf(prices, df_1w, r2)
-    s2_1d = align_htf_to_ltf(prices, df_1w, s2)
+    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_1d / (atr_ma_1d + 1e-10)
+    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 30  # for ADX and VWAP stability
+    start_idx = 40  # for ATR ratio and other indicators
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(adx[i]) or np.isnan(vwap_1d[i]) or 
-            np.isnan(pivot_1d[i]) or np.isnan(r1_1d[i]) or np.isnan(s1_1d[i])):
+        if (np.isnan(ema20_1w_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or 
+            np.isnan(atr_ratio_12h_aligned[i])):
             if position != 0:
-                # Simple stoploss: 2x ATR from entry
-                atr_est = np.abs(high_1d[i] - low_1d[i])
-                if position == 1 and close_1d[i] <= entry_price - 2 * atr_est:
+                # Simple stoploss: 2.5x ATR from entry
+                atr_est = np.abs(high_12h[i] - low_12h[i])  # rough 12h ATR estimate
+                if position == 1 and close_12h[i] <= entry_price - 2.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_1d[i] >= entry_price + 2 * atr_est:
+                elif position == -1 and close_12h[i] >= entry_price + 2.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
-        trending = adx[i] > 25
-        ranging = adx[i] < 20
-        
-        # VWAP deviation: price close to VWAP (within 0.5%)
-        vwap_dev = np.abs(close_1d[i] - vwap_1d[i]) / vwap_1d[i]
-        near_vwap = vwap_dev < 0.005
+        # Volatility filter: avoid choppy markets (ATR ratio > 0.8)
+        vol_filter = atr_ratio_12h_aligned[i] > 0.8
         
         if position == 0:
-            if trending:
-                # In trending market: breakout of R1/S1 with VWAP confirmation
-                if close_1d[i] > r1_1d[i] and close_1d[i] > vwap_1d[i]:
-                    signals[i] = 0.25  # long breakout above R1
+            # Look for entries based on multi-timeframe confluence
+            if vol_filter:
+                # Long conditions: weekly uptrend + daily bullish momentum + 12h bullish candle
+                weekly_uptrend = close_12h[i] > ema20_1w_aligned[i]
+                daily_bullish = rsi_1d_aligned[i] > 50
+                candle_bullish = close_12h[i] > open_12h[i]
+                
+                if weekly_uptrend and daily_bullish and candle_bullish:
+                    signals[i] = 0.25  # long
                     position = 1
-                    entry_price = close_1d[i]
-                elif close_1d[i] < s1_1d[i] and close_1d[i] < vwap_1d[i]:
-                    signals[i] = -0.25  # short breakdown below S1
+                    entry_price = close_12h[i]
+                
+                # Short conditions: weekly downtrend + daily bearish momentum + 12h bearish candle
+                elif (not weekly_uptrend) and (rsi_1d_aligned[i] < 50) and (close_12h[i] < open_12h[i]):
+                    signals[i] = -0.25  # short
                     position = -1
-                    entry_price = close_1d[i]
-            elif ranging:
-                # In ranging market: mean reversion at pivot levels with VWAP confirmation
-                if i > 0:
-                    # Rejection at R1 (failed breakout above) with VWAP support
-                    if close_1d[i-1] > r1_1d[i-1] and close_1d[i] < r1_1d[i] and close_1d[i] > vwap_1d[i]:
-                        signals[i] = -0.25  # short rejection at R1
-                        position = -1
-                        entry_price = close_1d[i]
-                    # Rejection at S1 (failed breakdown below) with VWAP resistance
-                    elif close_1d[i-1] < s1_1d[i-1] and close_1d[i] > s1_1d[i] and close_1d[i] < vwap_1d[i]:
-                        signals[i] = 0.25   # long rejection at S1
-                        position = 1
-                        entry_price = close_1d[i]
+                    entry_price = close_12h[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long position management
-                if trending:
-                    # In trend: trail with VWAP or stop at S1
-                    if close_1d[i] < vwap_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close below S1
-                    elif close_1d[i] < s1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = 0.25
-                else:  # ranging or neutral
-                    # In range: take profit at R2 or stop at S1
-                    if close_1d[i] >= r2_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close below S1
-                    elif close_1d[i] < s1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = 0.25
+                # Long position: exit on weekly trend reversal or bearish momentum
+                weekly_uptrend = close_12h[i] > ema20_1w_aligned[i]
+                daily_bullish = rsi_1d_aligned[i] > 50
+                
+                if not weekly_uptrend or not daily_bullish:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25
             elif position == -1:
-                # Short position management
-                if trending:
-                    # In trend: trail with VWAP or stop at R1
-                    if close_1d[i] > vwap_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close above R1
-                    elif close_1d[i] > r1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = -0.25
-                else:  # ranging or neutral
-                    # In range: take profit at S2 or stop at R1
-                    if close_1d[i] <= s2_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    # Stoploss: close above R1
-                    elif close_1d[i] > r1_1d[i]:
-                        signals[i] = 0.0
-                        position = 0
-                    else:
-                        signals[i] = -0.25
+                # Short position: exit on weekly trend reversal or bullish momentum
+                weekly_downtrend = close_12h[i] < ema20_1w_aligned[i]
+                daily_bearish = rsi_1d_aligned[i] < 50
+                
+                if not weekly_downtrend or not daily_bearish:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.25
     
     return signals
