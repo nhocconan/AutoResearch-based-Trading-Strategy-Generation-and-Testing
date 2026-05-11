@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3S3_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "6h_1w_1d_WickReversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,50 +17,52 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    
-    # 1d data for Camarilla pivot levels
+    # Get 1d and 1w data (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 20 or len(df_1w) < 4:
         return np.zeros(n)
     
+    # 1d High/Low for Wick Reversal detection
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # Calculate 1d upper and lower wick percentages
+    body_size = np.abs(close_1d - np.roll(close_1d, 1))
+    upper_wick = high_1d - np.maximum(close_1d, np.roll(close_1d, 1))
+    lower_wick = np.minimum(close_1d, np.roll(close_1d, 1)) - low_1d
     
-    # Camarilla levels
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    # Avoid division by zero
+    body_size_safe = np.where(body_size == 0, 1, body_size)
+    upper_wick_pct = upper_wick / body_size_safe
+    lower_wick_pct = lower_wick / body_size_safe
     
-    R3 = pivot + (range_val * 1.1 / 2.0)
-    R1 = pivot + (range_val * 1.1 / 6.0)
-    S1 = pivot - (range_val * 1.1 / 6.0)
-    S3 = pivot - (range_val * 1.1 / 2.0)
+    # Wick reversal signals: long when lower wick > 2x body, short when upper wick > 2x body
+    bullish_wick = lower_wick_pct > 2.0
+    bearish_wick = upper_wick_pct > 2.0
     
-    # Align Camarilla levels to 4h
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    # Shift to get previous day's signal (avoid look-ahead)
+    bullish_wick_prev = np.roll(bullish_wick, 1)
+    bearish_wick_prev = np.roll(bearish_wick, 1)
+    bullish_wick_prev[0] = False
+    bearish_wick_prev[0] = False
     
-    # Volume ratio (20-period average)
+    # Align wick reversal signals to 6h timeframe
+    bullish_wick_aligned = align_htf_to_ltf(prices, df_1d, bullish_wick_prev.astype(float))
+    bearish_wick_aligned = align_htf_to_ltf(prices, df_1d, bearish_wick_prev.astype(float))
+    
+    # 1w trend filter: price above/below 20-period EMA
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Volume filter: 20-period volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma, out=np.ones_like(volume), where=vol_ma!=0)
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    volume_filter = vol_ratio > 1.3
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,9 +72,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(bullish_wick_aligned[i]) or np.isnan(bearish_wick_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(volume_filter[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -81,32 +82,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        volume_surge = vol_ratio[i] > 1.8
-        
         if position == 0:
-            # Long: Break above R3 with volume surge and above 12h EMA34 (bullish trend)
-            if (close[i] > R3_aligned[i] and 
-                volume_surge and 
-                close[i] > ema_34_12h_aligned[i]):
+            # Long: Bullish wick reversal on 1d + price above 1w EMA20 + volume filter
+            if (bullish_wick_aligned[i] > 0.5 and 
+                close[i] > ema_20_aligned[i] and 
+                volume_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume surge and below 12h EMA34 (bearish trend)
-            elif (close[i] < S3_aligned[i] and 
-                  volume_surge and 
-                  close[i] < ema_34_12h_aligned[i]):
+            # Short: Bearish wick reversal on 1d + price below 1w EMA20 + volume filter
+            elif (bearish_wick_aligned[i] > 0.5 and 
+                  close[i] < ema_20_aligned[i] and 
+                  volume_filter[i]):
                 signals[i] = -0.25
                 position = -1
         else:
+            # Exit conditions: opposite wick signal or trend change
             if position == 1:
-                # Exit long: Price returns below R1 or trend turns bearish
-                if (close[i] < R1_aligned[i]) or (close[i] < ema_34_12h_aligned[i]):
+                # Exit long: bearish wick reversal or price below 1w EMA20
+                if (bearish_wick_aligned[i] > 0.5) or (close[i] < ema_20_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: Price returns above S1 or trend turns bullish
-                if (close[i] > S1_aligned[i]) or (close[i] > ema_34_12h_aligned[i]):
+                # Exit short: bullish wick reversal or price above 1w EMA20
+                if (bullish_wick_aligned[i] > 0.5) or (close[i] > ema_20_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
