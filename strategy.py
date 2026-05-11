@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_1w_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "4h"
+name = "6h_Fisher_Transform_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,46 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
+    # Fisher Transform on 6h close (period=9)
+    lookback = 9
+    highest = pd.Series(close).rolling(window=lookback, min_periods=lookback).max().values
+    lowest = pd.Series(close).rolling(window=lookback, min_periods=lookback).min().values
+    range_hl = highest - lowest
+    range_hl = np.where(range_hl == 0, 1e-10, range_hl)  # avoid division by zero
     
-    close_1w = df_1w['close'].values
-    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up_1w = close_1w > ema20_1w
+    # Normalize price to [-1, 1]
+    value = 2 * ((close - lowest) / range_hl - 0.5)
+    value = np.clip(value, -0.999, 0.999)
     
-    # Get 1d data for Camarilla levels (R3, S3)
+    # Fisher Transform
+    fish = np.zeros(n)
+    fish[0] = 0
+    for i in range(1, n):
+        fish[i] = 0.5 * np.log((1 + value[i]) / (1 - value[i])) + 0.5 * fish[i-1]
+    
+    # Get 1d data for trend filter (EMA34)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
     
-    # Calculate Camarilla levels (R3, S3) from previous day
-    R3 = np.zeros(len(high_1d))
-    S3 = np.zeros(len(high_1d))
+    # Align 1d trend to 6h timeframe
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    for i in range(len(high_1d)):
-        if i < 1:
-            R3[i] = np.nan
-            S3[i] = np.nan
-        else:
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            prev_close = close_1d[i-1]
-            range_val = prev_high - prev_low
-            R3[i] = prev_close + range_val * 1.1 / 4
-            S3[i] = prev_close - range_val * 1.1 / 4
-    
-    # Align indicators to 4h timeframe
-    R3_4h_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    
-    # Volume moving average (20-period) for confirmation
+    # Volume confirmation (20-period MA on 6h)
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -67,13 +57,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)  # Need enough data for indicators
+    start_idx = max(lookback, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_4h_aligned[i]) or 
-            np.isnan(S3_4h_aligned[i]) or
-            np.isnan(trend_up_1w_aligned[i]) or
+        if (np.isnan(fish[i]) or 
+            np.isnan(trend_up_1d_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,31 +72,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + uptrend + volume confirmation
-            if (close[i] > R3_4h_aligned[i] and 
-                trend_up_1w_aligned[i] and 
+            # Long: Fisher crosses above -1.5 + uptrend + volume confirmation
+            if (fish[i] > -1.5 and fish[i-1] <= -1.5 and 
+                trend_up_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + downtrend + volume confirmation
-            elif (close[i] < S3_4h_aligned[i] and 
-                  not trend_up_1w_aligned[i] and 
+            # Short: Fisher crosses below +1.5 + downtrend + volume confirmation
+            elif (fish[i] < 1.5 and fish[i-1] >= 1.5 and 
+                  not trend_up_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes
-            if (close[i] < S3_4h_aligned[i] or not trend_up_1w_aligned[i]):
+            # Long exit: Fisher crosses below -1.5 or trend changes
+            if (fish[i] < -1.5 and fish[i-1] >= -1.5) or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes
-            if (close[i] > R3_4h_aligned[i] or trend_up_1w_aligned[i]):
+            # Short exit: Fisher crosses above +1.5 or trend changes
+            if (fish[i] > 1.5 and fish[i-1] <= 1.5) or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
