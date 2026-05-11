@@ -1,8 +1,11 @@
-# 1d_Camarilla_R3_S3_Breakout_1wEMA34_Trend_Volume
-# Hypothesis: Weekly EMA34 defines long-term trend, daily Camarilla R3/S3 levels act as strong support/resistance.
-# In bull markets, buy breakouts above R3 with weekly uptrend. In bear markets, sell breakdowns below S3 with weekly downtrend.
-# Volume spike confirms institutional interest. Weekly timeframe reduces noise, daily provides timely entries.
-# Target: 10-25 trades/year, low turnover to minimize fee drag in ranging 2025 market.
+#!/usr/bin/env python3
+"""
+1d_Camarilla_R3_S3_Breakout_1wEMA34_Trend_Volume
+Hypothesis: Weekly EMA34 defines long-term trend, daily Camarilla R3/S3 levels act as strong support/resistance.
+In bull markets, buy breakouts above R3 with weekly uptrend. In bear markets, sell breakdowns below S3 with weekly downtrend.
+Volume spike confirms institutional interest. Weekly timeframe reduces noise, daily provides timely entries.
+Target: 10-25 trades/year, low turnover to minimize fee drag in ranging 2025 market.
+"""
 
 name = "1d_Camarilla_R3_S3_Breakout_1wEMA34_Trend_Volume"
 timeframe = "1d"
