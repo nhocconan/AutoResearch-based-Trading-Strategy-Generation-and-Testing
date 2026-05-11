@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_Chop_Filter_v2"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,60 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA parameters
-    er_len = 10
-    fast = 2
-    slow = 30
+    # Get 1d data for trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
     
-    # Direction (change) for ER
-    change = np.abs(np.diff(close, prepend=close[0]))
-    vol = np.sum(np.abs(np.diff(close, prepend=close[0])), axis=0)
-    # Avoid division by zero
-    er = np.where(vol != 0, change / vol, 0)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    close_1d = df_1d['close'].values
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up_1d = close_1d > ema34_1d
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    kama_up = close > kama
+    # Calculate Camarilla levels from previous day (H, L, C)
+    # We'll calculate daily H, L, C from 1d data
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Camarilla levels: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
+    camarilla_range = daily_high - daily_low
+    r1 = daily_close + camarilla_range * 1.1 / 12
+    s1 = daily_close - camarilla_range * 1.1 / 12
     
-    # Choppy market filter: Chop > 61.8 = range (mean revert)
-    atr_period = 14
-    tr1 = high - low
-    tr2 = np.abs(np.roll(high, 1) - np.roll(close, 1))
-    tr3 = np.abs(np.roll(low, 1) - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(alpha=1/atr_period, min_periods=atr_period).mean().values
+    # Align R1 and S1 to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    chop = np.where(atr_sum != 0, 100 * np.log10((highest_high - lowest_low) / atr_sum) / np.log10(14), 50)
-    chop_filter = chop > 61.8  # Range regime
-    
-    # Volume confirmation: volume > 1.2x 20-day average
+    # Volume confirmation: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.2 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,24 +63,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: KAMA up + RSI < 40 (oversold) + chop filter + volume
-            if kama_up[i] and rsi[i] < 40 and chop_filter[i] and volume_filter[i]:
+            # Long: Price breaks above R1 + daily uptrend + volume confirmation
+            if close[i] > r1_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down + RSI > 60 (overbought) + chop filter + volume
-            elif not kama_up[i] and rsi[i] > 60 and chop_filter[i] and volume_filter[i]:
+            # Short: Price breaks below S1 + daily downtrend + volume confirmation
+            elif close[i] < s1_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: KAMA down OR RSI > 70
-            if not kama_up[i] or rsi[i] > 70:
+            # Long exit: Price breaks below S1 OR daily trend turns down
+            if close[i] < s1_aligned[i] or not trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: KAMA up OR RSI < 30
-            if kama_up[i] or rsi[i] < 30:
+            # Short exit: Price breaks above R1 OR daily trend turns up
+            if close[i] > r1_aligned[i] or trend_up_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
