@@ -1,43 +1,18 @@
 #!/usr/bin/env python3
 """
-12h_1d_KAMA_RSI_Chop_Filter
-Hypothesis: Uses KAMA direction from daily timeframe for trend, RSI for momentum, and Choppiness Index for regime filtering.
-Enters long when daily KAMA is up, RSI < 30 (oversold), and market is choppy (CHOP > 61.8). Enters short when daily KAMA is down,
-RSI > 70 (overbought), and market is choppy. Uses 12h timeframe for execution with tight entry conditions to limit trades to 12-37/year.
-Designed to work in both bull and bear markets by fading extremes in choppy regimes while following higher-timeframe trend.
+6h_1w_Momentum_Reversal_With_Volume
+Hypothesis: Uses weekly momentum divergence and volume exhaustion to capture reversals in both bull and bear markets. 
+The strategy looks for price making new highs/lows while momentum (RSI) fails to confirm, combined with declining volume 
+to signal exhaustion. Works in ranging and trending markets by fading overextended moves. Targets 15-35 trades/year.
 """
 
-name = "12h_1d_KAMA_RSI_Chop_Filter"
-timeframe = "12h"
+name = "6h_1w_Momentum_Reversal_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_kama(close, er_period=10, fast=2, slow=30):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, prepend=close[0]))
-    
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < er_period:
-            er[i] = 0
-        else:
-            volatility_sum = np.sum(volatility[i-er_period+1:i+1])
-            if volatility_sum > 0:
-                er[i] = np.abs(close[i] - close[i-er_period]) / volatility_sum
-            else:
-                er[i] = 0
-    
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    return kama
 
 def calculate_rsi(close, period=14):
     """Calculate Relative Strength Index"""
@@ -52,58 +27,51 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_chop(high, low, close, period=14):
-    """Calculate Choppiness Index"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    chop = 100 * np.log10(atr_sum / (max_high - min_low)) / np.log10(period)
-    return chop
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- Daily KAMA for Trend Filter ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # --- Weekly RSI for Momentum Divergence ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    kama_1d = calculate_kama(df_1d['close'].values, er_period=10, fast=2, slow=30)
-    kama_1d_dir = np.where(kama_1d > np.roll(kama_1d, 1), 1, -1)
-    kama_1d_dir[0] = 1
+    rsi_1w = calculate_rsi(df_1w['close'].values, period=14)
+    rsi_1w_6h = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Align daily KAMA direction to 12h timeframe
-    kama_1d_dir_12h = align_htf_to_ltf(prices, df_1d, kama_1d_dir)
+    # --- Weekly High/Low for Price Extremes ---
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_high_6h = align_htf_to_ltf(prices, df_1w, weekly_high)
+    weekly_low_6h = align_htf_to_ltf(prices, df_1w, weekly_low)
     
-    # --- 12h RSI ---
-    rsi = calculate_rsi(close, period=14)
+    # --- Volume Exhaustion (declining volume on new price extremes) ---
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_ratio = volume / vol_ma
+    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # --- 12h Choppiness Index ---
-    chop = calculate_chop(high, low, close, period=14)
+    # --- Price Position Relative to Weekly Range ---
+    weekly_range = weekly_high_6h - weekly_low_6h
+    weekly_range = np.where(weekly_range == 0, 1, weekly_range)  # avoid div by zero
+    price_position = (close - weekly_low_6h) / weekly_range  # 0 = at weekly low, 1 = at weekly high
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama_1d_dir_12h[i]) or np.isnan(rsi[i]) or np.isnan(chop[i])):
+        if (np.isnan(rsi_1w_6h[i]) or np.isnan(weekly_high_6h[i]) or 
+            np.isnan(weekly_low_6h[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -112,34 +80,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Regime filter: choppy market (CHOP > 61.8)
-        is_choppy = chop[i] > 61.8
+        # Volume exhaustion: volume declining on new extremes
+        vol_exhaustion = vol_ratio[i] < 0.7  # volume below 70% of average
         
         if position == 0:
-            # Long: daily KAMA up + RSI oversold + choppy market
-            if (kama_1d_dir_12h[i] == 1 and 
-                rsi[i] < 30 and 
-                is_choppy):
-                signals[i] = 0.25
-                position = 1
-            # Short: daily KAMA down + RSI overbought + choppy market
-            elif (kama_1d_dir_12h[i] == -1 and 
-                  rsi[i] > 70 and 
-                  is_choppy):
+            # Bearish divergence: price at/near weekly high, RSI not confirming, volume exhausted
+            if (price_position[i] > 0.85 and  # near weekly high
+                rsi_1w_6h[i] < 60 and        # RSI not overbought (divergence)
+                vol_exhaustion):
                 signals[i] = -0.25
                 position = -1
+            # Bullish divergence: price at/near weekly low, RSI not confirming, volume exhausted
+            elif (price_position[i] < 0.15 and   # near weekly low
+                  rsi_1w_6h[i] > 40 and         # RSI not oversold (divergence)
+                  vol_exhaustion):
+                signals[i] = 0.25
+                position = 1
         else:
-            # Exit conditions: RSI returns to neutral or trend changes
+            # Exit conditions: mean reversion back to middle of range or RSI normalization
             if position == 1:
-                # Exit long: RSI > 50 or daily KAMA turns down
-                if rsi[i] > 50 or kama_1d_dir_12h[i] == -1:
+                # Exit long: price returns to middle OR RSI becomes oversold
+                if price_position[i] > 0.6 or rsi_1w_6h[i] < 30:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI < 50 or daily KAMA turns up
-                if rsi[i] < 50 or kama_1d_dir_12h[i] == 1:
+                # Exit short: price returns to middle OR RSI becomes overbought
+                if price_position[i] < 0.4 or rsi_1w_6h[i] > 70:
                     signals[i] = 0.0
                     position = 0
                 else:
