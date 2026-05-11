@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_TRIX_Volume_Trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: EMA34
+    # 1-day EMA34 for trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
@@ -26,33 +26,26 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     trend_up = close > ema_1d_aligned
     
-    # Previous day's OHLC for Camarilla levels (using 1d data)
-    # Need at least 2 days for previous day's data
-    if len(df_1d) < 2:
-        return np.zeros(n)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # TRIX on 4h close
+    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = 100 * (ema3 - ema3.shift(1)) / ema3.shift(1)
+    trix = trix.fillna(0).values
     
-    # Calculate Camarilla levels for each 12h bar using previous day's data
-    R1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    S1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 34  # Need enough data for EMA and TRIX
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(trix[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +54,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + 1d uptrend + volume spike
-            if close[i] > R1_aligned[i] and trend_up[i] and volume_filter[i]:
+            # Long: TRIX crosses above zero + uptrend + volume spike
+            if trix[i] > 0 and trix[i-1] <= 0 and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + 1d downtrend + volume spike
-            elif close[i] < S1_aligned[i] and not trend_up[i] and volume_filter[i]:
+            # Short: TRIX crosses below zero + downtrend + volume spike
+            elif trix[i] < 0 and trix[i-1] >= 0 and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below S1 or 1d trend down
-            if close[i] < S1_aligned[i] or not trend_up[i]:
+            # Long exit: TRIX crosses below zero or trend down
+            if trix[i] < 0 and trix[i-1] >= 0 or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: close above R1 or 1d trend up
-            if close[i] > R1_aligned[i] or trend_up[i]:
+            # Short exit: TRIX crosses above zero or trend up
+            if trix[i] > 0 and trix[i-1] <= 0 or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
