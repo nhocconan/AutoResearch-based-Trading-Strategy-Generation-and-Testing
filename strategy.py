@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_1w_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "6h_Liquidity_Sweep_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,37 +17,22 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily and weekly data
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
-    
-    if len(df_1d) < 30 or len(df_1w) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's data for Camarilla levels
-    prev_day_high = df_1d['high'].shift(1).values
-    prev_day_low = df_1d['low'].shift(1).values
-    prev_day_close = df_1d['close'].shift(1).values
+    # Daily EMA trend filter
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_up_1d = ema50_1d > ema200_1d
+    trend_down_1d = ema50_1d < ema200_1d
     
-    # Calculate Camarilla levels (R3, S3)
-    pivot = (prev_day_high + prev_day_low + prev_day_close) / 3
-    range_hl = prev_day_high - prev_day_low
-    r3 = prev_day_close + range_hl * 1.1 / 2
-    s3 = prev_day_close - range_hl * 1.1 / 2
+    # Align trend to 6h
+    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
     
-    # Weekly trend filter (EMA34 > EMA89)
-    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema89_1w = pd.Series(df_1w['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
-    trend_up_1w = ema34_1w > ema89_1w
-    trend_down_1w = ema34_1w < ema89_1w
-    
-    # Align all to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1w, trend_down_1w)
-    
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: volume spike > 2x 20-period average
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -55,16 +40,26 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
+    # Liquidity sweep detection: price breaks recent swing high/low then reverses
+    lookback = 10  # bars to look back for swing points
+    swing_high = np.full(n, np.nan)
+    swing_low = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        # Recent swing high (max high in lookback window)
+        swing_high[i] = np.max(high[i-lookback:i])
+        # Recent swing low (min low in lookback window)
+        swing_low[i] = np.min(low[i-lookback:i])
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 30)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(vol_ma20[i]) or np.isnan(swing_high[i]) or np.isnan(swing_low[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,28 +68,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 in weekly uptrend with volume surge
-            if (close[i] > r3_aligned[i] and 
-                trend_up_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
+            # Long setup: price sweeps below recent swing low (liquidity grab) then reverses up
+            # with volume spike in daily uptrend
+            if (low[i] < swing_low[i] and  # broke swing low (liquidity sweep)
+                close[i] > swing_low[i] and  # closed back above it (reversal)
+                volume[i] > 2.0 * vol_ma20[i] and  # volume spike
+                trend_up_aligned[i]):  # daily uptrend filter
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in weekly downtrend with volume surge
-            elif (close[i] < s3_aligned[i] and 
-                  trend_down_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
+            # Short setup: price sweeps above recent swing high then reverses down
+            elif (high[i] > swing_high[i] and  # broke swing high (liquidity sweep)
+                  close[i] < swing_high[i] and  # closed back below it (reversal)
+                  volume[i] > 2.0 * vol_ma20[i] and  # volume spike
+                  trend_down_aligned[i]):  # daily downtrend filter
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S3 or weekly trend changes
-            if (close[i] < s3_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: price breaks below swing low or trend changes
+            if (low[i] < swing_low[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R3 or weekly trend changes
-            if (close[i] > r3_aligned[i] or not trend_down_aligned[i]):
+            # Short exit: price breaks above swing high or trend changes
+            if (high[i] > swing_high[i] or not trend_down_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
