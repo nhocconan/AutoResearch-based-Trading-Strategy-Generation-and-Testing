@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm_v3
-# Hypothesis: Breakout of 1-day Camarilla R3/S3 levels on 4h chart with confirmation from 1-day EMA34 trend and volume spike. 
-# Uses a dynamic position sizing based on volatility (ATR-based) to reduce risk in volatile markets and increase in stable conditions.
-# Designed to work in both bull and bear markets by requiring trend alignment and volume confirmation. 
-# Includes a minimum holding period of 12 bars to reduce trade frequency and avoid overtrading.
-# Targets 20-30 trades/year to minimize fee drag.
+"""
+1d_Williams_Alligator_1wTrend_Momentum
+Hypothesis: Use Williams Alligator (13/8/5 SMAs) on daily to determine trend,
+with 1-week EMA50 as higher timeframe trend filter, and momentum (ROC>0) for entry.
+Designed for low trade frequency (<20/year) to minimize fee drag.
+Works in bull markets (trend following) and bear markets (mean reversion via Alligator jaws).
+"""
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm_v3"
-timeframe = "4h"
+name = "1d_Williams_Alligator_1wTrend_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -24,111 +25,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Data (loaded ONCE) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === 1d Williams Alligator ===
+    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().shift(8).values  # 13-period SMMA shifted 8
+    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().shift(5).values   # 8-period SMMA shifted 5
+    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().shift(3).values    # 5-period SMMA shifted 3
     
-    # === 1d Camarilla Pivot Levels (R3, S3) ===
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
+    # === 1w EMA50 Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Align 1d levels to 4h
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    # === Momentum Filter (ROC 5-period) ===
+    roc = (close - np.roll(close, 5)) / np.roll(close, 5) * 100
+    roc[0:5] = np.nan  # First 5 values invalid
     
-    # === 1d EMA34 Trend Filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === Volume Filter (20-period average) ===
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ok = volume > vol_ma20 * 1.3  # Require 1.3x average volume
     
-    # === ATR for Volatility-Based Position Sizing ===
-    tr1 = np.abs(high[1:] - low[1:])
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === Volume Spike Filter (20-period EMA) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
-    
-    # === Signal Parameters ===
-    base_position_size = 0.25  # Base 25% of capital per trade
+    # === Position Sizing ===
+    position_size = 0.25  # 25% of capital
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    holding_bars = 0
     
-    # Start after warmup (covers EMA34 and ATR)
-    start_idx = 60
+    # Start after warmup (covers Alligator and ROC)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema34_1d_4h[i]) or np.isnan(volume_ok[i]) or np.isnan(atr[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(roc[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
-                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
-        # Dynamic position sizing: reduce size in high volatility, increase in low volatility
-        # Normalize ATR relative to its 50-period median to avoid extreme values
-        if i >= 50:
-            atr_median = np.nanmedian(atr[i-50:i])
-            if atr_median > 0:
-                atr_ratio = atr[i] / atr_median
-                # Invert ratio: low volatility -> higher size, high volatility -> lower size
-                vol_factor = np.clip(1.0 / (atr_ratio + 0.5), 0.5, 2.0)
-            else:
-                vol_factor = 1.0
-        else:
-            vol_factor = 1.0
-        
-        position_size = base_position_size * vol_factor
-        # Cap position size at 0.40 as per risk management rules
-        position_size = min(position_size, 0.40)
+        # Alligator conditions: jaws, teeth, lips alignment
+        # Bullish: lips > teeth > jaws (green alignment)
+        # Bearish: lips < teeth < jaws (red alignment)
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
         if position == 0:
-            # Long: Break above R3 + above 1d EMA34 + volume spike
-            if (close[i] > r3_4h[i] and 
-                close[i] > ema34_1d_4h[i] and 
+            # Long: Bullish Alligator + price above 1w EMA50 + positive momentum + volume
+            if (bullish_alignment and 
+                close[i] > ema50_1w_aligned[i] and 
+                roc[i] > 0 and 
                 volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-                holding_bars = 0
-            # Short: Break below S3 + below 1d EMA34 + volume spike
-            elif (close[i] < s3_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and 
+            # Short: Bearish Alligator + price below 1w EMA50 + negative momentum + volume
+            elif (bearish_alignment and 
+                  close[i] < ema50_1w_aligned[i] and 
+                  roc[i] < 0 and 
                   volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
-                holding_bars = 0
         else:
-            # Enforce minimum holding period (12 bars)
-            holding_bars += 1
-            if holding_bars < 12:
-                signals[i] = position_size if position == 1 else -position_size
-                continue
-            
-            # Exit: Price closes below/above opposite level
+            # Exit conditions
             if position == 1:
-                if close[i] < s3_4h[i]:
+                # Exit long: Alligator turns bearish OR price crosses below 1w EMA50
+                if not bullish_alignment or close[i] < ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > r3_4h[i]:
+                # Exit short: Alligator turns bullish OR price crosses above 1w EMA50
+                if not bearish_alignment or close[i] > ema50_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
