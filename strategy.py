@@ -1,6 +1,6 @@
-#/usr/bin/env python3
-name = "1d_Camarilla_R3S3_Breakout_WeeklyTrend_Filter"
-timeframe = "1d"
+#!/usr/bin/env python3
+name = "6h_ChaikinMoneyFlow_1dTrend_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load weekly data ONCE for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # 2. Weekly EMA50 for trend filter (weekly close EMA)
-    ema50_1w = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    
-    # 3. Load daily data for Camarilla levels
+    # Load 1d data ONCE
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # 4. Daily ATR for volatility filter
-    tr = np.maximum(high_1d - low_1d, np.maximum(np.abs(high_1d - np.roll(close_1d, 1)), np.abs(low_1d - np.roll(close_1d, 1))))
-    tr[0] = high_1d[0] - low_1d[0]
-    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 5. Calculate Camarilla levels: R3, S3
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.11
-    s3 = close_1d - hl_range * 1.11
+    # Chaikin Money Flow (CMF) on 6h: 20-period
+    mf_multiplier = ((close - low) - (high - close)) / (high - low)
+    mf_multiplier = np.where(high == low, 0, mf_multiplier)
+    mf_volume = mf_multiplier * volume
+    cmf = np.nancumsum(mf_volume) / np.nancumsum(volume)
+    cmf = pd.Series(cmf).rolling(window=20, min_periods=20).mean().values
     
-    # 6. Align weekly EMA50 to daily timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align CMF (no additional delay needed)
+    # Note: We align the CMF values to 6b timeframe
+    # But CMF is already calculated on 6h, so we can use directly
+    # Actually, we need to align nothing since it's LTF
     
-    # 7. Volume filter: 20-period EMA for higher threshold
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
-    
-    # 8. Fixed position size
+    # Position sizing
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 50
+    # Start after warmup for CMF (20)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(r3[i]) or np.isnan(s3[i]) or 
-            np.isnan(atr[i]) or np.isnan(volume_ok[i])):
+        # Skip if EMA data invalid
+        if np.isnan(ema34_1d_aligned[i]):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -68,34 +56,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_weekly_ema = close[i] > ema50_1w_aligned[i]
-        price_below_weekly_ema = close[i] < ema50_1w_aligned[i]
-        breakout_long = close[i] > r3[i]
-        breakout_short = close[i] < s3[i]
-        volatility_ok = atr[i] > np.nanpercentile(atr[max(0, i-50):i+1], 20) if i >= 50 else True
+        # CMF value at current bar
+        cmf_val = cmf[i]
+        
+        # Trend filter: price vs 1d EMA34
+        price_above_ema1d = close[i] > ema34_1d_aligned[i]
+        price_below_ema1d = close[i] < ema34_1d_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above weekly EMA50 + volume spike + volatility filter
-            if breakout_long and price_above_weekly_ema and volume_ok[i] and volatility_ok:
+            # Long: CMF turns positive (>0.1) AND price above 1d EMA (uptrend)
+            if cmf_val > 0.1 and price_above_ema1d:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below weekly EMA50 + volume spike + volatility filter
-            elif breakout_short and price_below_weekly_ema and volume_ok[i] and volatility_ok:
+            # Short: CMF turns negative (<-0.1) AND price below 1d EMA (downtrend)
+            elif cmf_val < -0.1 and price_below_ema1d:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit: CMF crosses back towards zero (loss of momentum)
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses
-                if close[i] < s3[i] or close[i] < ema50_1w_aligned[i]:
+                if cmf_val < 0.0:  # CMF crossed below zero
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses
-                if close[i] > r3[i] or close[i] > ema50_1w_aligned[i]:
+                if cmf_val > 0.0:  # CMF crossed above zero
                     signals[i] = 0.0
                     position = 0
                 else:
