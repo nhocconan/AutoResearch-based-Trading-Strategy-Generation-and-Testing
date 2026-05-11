@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_KAMA_Direction_RSI_ChopFilter_v3"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,35 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily trend: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # KAMA direction (10-day ER)
+    price_diff = np.abs(np.diff(close, prepend=close[0]))
+    price_diff_series = pd.Series(price_diff)
+    volatility_series = pd.Series(np.abs(np.diff(close, prepend=close[0])))
+    er = price_diff_series.rolling(window=10, min_periods=10).sum() / volatility_series.rolling(window=10, min_periods=10).sum()
+    er = er.fillna(0).values
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smooth constant
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    kama_dir = kama > np.roll(kama, 1)  # today's KAMA > yesterday's
+    
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_series = pd.Series(gain)
+    loss_series = pd.Series(loss)
+    avg_gain = gain_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # Chopiness index (14-day)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_series = pd.Series(tr)
+    atr = atr_series.rolling(window=14, min_periods=14).sum().values
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr / (highest_high - lowest_low + 1e-10)) / np.log10(14)
+    chop = np.nan_to_num(chop, nan=50.0)
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    daily_uptrend = close > ema_34_1d_aligned
+    close_1w = df_1w['close'].values
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_50_1w)
+    weekly_uptrend = close > sma_50_1w_aligned
     
-    # Daily Camarilla levels: use previous day's OHLC
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    range_ = daily_high - daily_low
-    R3 = daily_close + 1.1 * range_ / 12
-    S3 = daily_close - 1.1 * range_ / 12
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    
-    # Volume spike: 2x 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > 2.0 * volume_ma20
+    volume_filter = volume > 1.5 * volume_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 34  # EMA34 needs 34 periods
+    start_idx = max(20, 14, 10)  # ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(daily_uptrend[i]) or np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(weekly_uptrend[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -54,27 +81,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3, daily uptrend, volume spike
-            if close[i] > R3_aligned[i] and daily_uptrend[i] and volume_spike[i]:
-                signals[i] = 0.30
+            # Long: KAMA up, RSI > 50, chop < 61.8 (trending), weekly uptrend, volume
+            if kama_dir[i] and rsi[i] > 50 and chop[i] < 61.8 and weekly_uptrend[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3, daily downtrend, volume spike
-            elif close[i] < S3_aligned[i] and not daily_uptrend[i] and volume_spike[i]:
-                signals[i] = -0.30
+            # Short: KAMA down, RSI < 50, chop < 61.8, weekly downtrend, volume
+            elif not kama_dir[i] and rsi[i] < 50 and chop[i] < 61.8 and not weekly_uptrend[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price re-enters below R3 or daily trend flips
-            if close[i] < R3_aligned[i] or not daily_uptrend[i]:
+            # Exit long: KAMA down or chop > 61.8 (range) or weekly downtrend
+            if not kama_dir[i] or chop[i] > 61.8 or not weekly_uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price re-enters above S3 or daily trend flips
-            if close[i] > S3_aligned[i] or daily_uptrend[i]:
+            # Exit short: KAMA up or chop > 61.8 (range) or weekly uptrend
+            if kama_dir[i] or chop[i] > 61.8 or weekly_uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
