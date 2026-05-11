@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_HTF_Structure_Aligned_Trend
-Hypothesis: Align with daily trend only when 6h price structure shows higher highs/lows (uptrend) or lower highs/lows (downtrend). Uses swing points from 6h swings filtered by 1d trend. Avoids chop by requiring clear structure. Designed for 15-35 trades/year per symbol to minimize fee drag while capturing real trends.
+12h_Donchian_20_Volume_Trend
+Hypothesis: On 12h timeframe, enter long when price breaks above 20-period Donchian high with volume confirmation and 1d trend alignment. Enter short on breakdown below 20-period Donchian low with volume confirmation and 1d trend alignment. Uses volume spike (>1.5x 20-period average) and 1d EMA50 trend filter to avoid false breakouts. Designed for 15-30 trades/year per symbol to minimize fee drag while capturing significant trends in both bull and bear markets.
 """
 
-name = "6h_HTF_Structure_Aligned_Trend"
-timeframe = "6h"
+name = "12h_Donchian_20_Volume_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -22,116 +22,74 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # --- 1d EMA50 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- 6h Swing Points (3-bar lookback/forward) ---
-    # Swing High: higher high than 3 bars before and after
-    # Swing Low: lower low than 3 bars before and after
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
+    # --- 12h Donchian Channels (20 period) ---
+    # Highest high of last 20 periods
+    donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+    # Lowest low of last 20 periods
+    donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
     
-    for i in range(3, n-3):
-        if (high_6h[i] > high_6h[i-3] and high_6h[i] > high_6h[i-2] and 
-            high_6h[i] > high_6h[i-1] and high_6h[i] > high_6h[i+1] and 
-            high_6h[i] > high_6h[i+2] and high_6h[i] > high_6h[i+3]):
-            swing_high[i] = True
-        if (low_6h[i] < low_6h[i-3] and low_6h[i] < low_6h[i-2] and 
-            low_6h[i] < low_6h[i-1] and low_6h[i] < low_6h[i+1] and 
-            low_6h[i] < low_6h[i+2] and low_6h[i] < low_6h[i+3]):
-            swing_low[i] = True
+    # --- 12h Volume Spike Filter ---
+    # Average volume of last 20 periods
+    avg_volume = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume_12h > (1.5 * avg_volume)
     
-    # --- Trend Structure Detection ---
-    # Uptrend: higher highs and higher lows
-    # Downtrend: lower highs and lower lows
-    # We'll track last swing high/low
-    last_swing_high = np.full(n, np.nan)
-    last_swing_low = np.full(n, np.nan)
-    
-    last_high_val = np.nan
-    last_low_val = np.nan
-    
-    for i in range(n):
-        if swing_high[i]:
-            last_high_val = high_6h[i]
-        if swing_low[i]:
-            last_low_val = low_6h[i]
-        last_swing_high[i] = last_high_val
-        last_swing_low[i] = last_low_val
-    
-    # --- Signal Generation ---
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    # Start after enough data for swings
-    start_idx = 10
+    # Start after warmup period
+    start_idx = 50  # for Donchian and EMA calculation
     
     for i in range(start_idx, n):
-        # Skip if EMA not ready
-        if np.isnan(ema34_1d_aligned[i]):
+        # Skip if any critical values are NaN
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_volume[i])):
             if position != 0:
-                # Simple stop: 2% adverse move
-                if position == 1 and close_6h[i] <= entry_price * 0.98:
+                # Exit on opposite Donchian breach
+                if position == 1 and close_12h[i] < donchian_low[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] >= entry_price * 1.02:
+                elif position == -1 and close_12h[i] > donchian_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1d trend
-        is_uptrend = close_6h[i] > ema34_1d_aligned[i]
-        is_downtrend = close_6h[i] < ema34_1d_aligned[i]
-        
         if position == 0:
-            # Look for structure-based entries
-            if is_uptrend:
-                # Long when we make a higher low and close above prior swing high
-                if (not np.isnan(last_swing_low[i]) and not np.isnan(last_swing_high[i]) and
-                    low_6h[i] > last_swing_low[i] and  # higher low
-                    high_6h[i] > last_swing_high[i]):  # higher high
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close_6h[i]
-            elif is_downtrend:
-                # Short when we make a lower high and close below prior swing low
-                if (not np.isnan(last_swing_high[i]) and not np.isnan(last_swing_low[i]) and
-                    high_6h[i] < last_swing_high[i] and  # lower high
-                    low_6h[i] < last_swing_low[i]):     # lower low
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close_6h[i]
+            # Look for breakout/breakdown with volume confirmation and trend alignment
+            # Long: price breaks above Donchian high with volume spike and above 1d EMA50
+            if (close_12h[i] > donchian_high[i] and 
+                volume_spike[i] and 
+                close_12h[i] > ema50_1d_aligned[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below Donchian low with volume spike and below 1d EMA50
+            elif (close_12h[i] < donchian_low[i] and 
+                  volume_spike[i] and 
+                  close_12h[i] < ema50_1d_aligned[i]):
+                signals[i] = -0.25
+                position = -1
         else:
-            # Manage position: exit on structure break
+            # Manage existing position: exit on opposite Donchian breach
             if position == 1:
-                # Long: exit if we make a lower high (trend break)
-                if (not np.isnan(last_swing_high[i]) and 
-                    high_6h[i] < last_swing_high[i]):
-                    signals[i] = 0.0
-                    position = 0
-                # Time-based exit: max 10 bars
-                elif i >= 10 and entry_price > 0:  # rough check
-                    # Simplified: exit after 5 periods if no clear signal
+                if close_12h[i] < donchian_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short: exit if we make a higher low (trend break)
-                if (not np.isnan(last_swing_low[i]) and 
-                    low_6h[i] > last_swing_low[i]):
-                    signals[i] = 0.0
-                    position = 0
-                # Time-based exit
-                elif i >= 10 and entry_price > 0:
+                if close_12h[i] > donchian_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
