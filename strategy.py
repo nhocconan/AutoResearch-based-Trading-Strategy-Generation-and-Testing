@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "6h_ElderRay_BullBear_Power_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,46 +15,33 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    volume = volumes = prices['volume'].values
     
-    # Get daily data for Camarilla levels (HTF)
+    # Get daily data for EMA13 (used in Elder Ray)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 15:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # Calculate previous day's Camarilla R3 and S3 levels
-    R3 = np.zeros(len(high_1d))
-    S3 = np.zeros(len(high_1d))
+    # Calculate Bull Power and Bear Power (daily)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    for i in range(len(high_1d)):
-        if i < 1:
-            R3[i] = np.nan
-            S3[i] = np.nan
-        else:
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            prev_close = close_1d[i-1]
-            range_val = prev_high - prev_low
-            R3[i] = prev_close + range_val * 1.1 / 4
-            S3[i] = prev_close - range_val * 1.1 / 4
-    
-    # Get 4h trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get weekly trend filter (EMA34)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 35:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
-    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up_4h = close_4h > ema20_4h
+    close_1w = df_1w['close'].values
+    ema34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    trend_up = close_1w > ema34
     
-    # Align indicators to 1h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
+    # Align indicators to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
     
     # Volume moving average (20-period) for confirmation
     vol_ma20 = np.zeros(n)
@@ -67,13 +54,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 20)
+    start_idx = max(35, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_4h_aligned[i]) or
+        if (np.isnan(bull_power_aligned[i]) or 
+            np.isnan(bear_power_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -83,31 +70,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + 4h uptrend + volume confirmation
-            if (close[i] > R3_aligned[i] and 
-                trend_up_4h_aligned[i] and 
+            # Long: Bull Power > 0 (strength) + Uptrend + Volume confirmation
+            if (bull_power_aligned[i] > 0 and 
+                trend_up_aligned[i] and 
                 volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + 4h downtrend + volume confirmation
-            elif (close[i] < S3_aligned[i] and 
-                  not trend_up_4h_aligned[i] and 
+            # Short: Bear Power < 0 (weakness) + Downtrend + Volume confirmation
+            elif (bear_power_aligned[i] < 0 and 
+                  not trend_up_aligned[i] and 
                   volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or 4h trend changes to down
-            if (close[i] < S3_aligned[i] or not trend_up_4h_aligned[i]):
+            # Long exit: Bull Power <= 0 (loss of strength) or trend changes
+            if (bull_power_aligned[i] <= 0 or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or 4h trend changes to up
-            if (close[i] > R3_aligned[i] or trend_up_4h_aligned[i]):
+            # Short exit: Bear Power >= 0 (loss of weakness) or trend changes
+            if (bear_power_aligned[i] >= 0 or trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
