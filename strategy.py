@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Momentum_v2
-# Hypothesis: Combines 1d Camarilla R3/S3 breakout with 1d EMA34 trend and 4h RSI momentum filter.
-# Adds minimum holding period of 10 bars to reduce trade frequency and avoid whipsaw.
-# Designed for low turnover (target 20-30 trades/year) to minimize fee drag in 2025 ranging markets.
-# Uses momentum to avoid false breakouts and improve win rate in both bull and bear regimes.
+# 12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Spike
+# Hypothesis: 12h timeframe with 1d Camarilla R3/S3 breakout, 1d EMA34 trend filter, and volume spike confirmation.
+# Targets 15-30 trades/year to minimize fee drag. Uses breakout logic with trend alignment to capture momentum in both bull and bear markets.
+# Volume spike reduces false breakouts. Designed for low turnover and high conviction trades.
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Momentum_v2"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -15,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 40:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -23,7 +22,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels ===
+    # === 1d Camarilla Pivot Levels (R3/S3) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
@@ -34,90 +33,66 @@ def generate_signals(prices):
     r3 = pivot + (range_1d * 1.1 / 2)
     s3 = pivot - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 4h
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
+    # Align 1d levels to 12h
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
     # === 1d EMA34 Trend Filter ===
     ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # === 4h RSI(14) Momentum Filter ===
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
+    volume_ok = volume > vol_ema20 * 2.0  # Require 2x average volume for confirmation
     
     # === Signal Parameters ===
-    position_size = 0.25
+    position_size = 0.25  # 25% position size to manage risk
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    holding_bars = 0
     
-    # Start after warmup
-    start_idx = 60  # covers EMA34 and RSI
+    # Start after warmup (covers EMA34)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema34_1d_4h[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
                 signals[i] = 0.0
             else:
                 signals[i] = 0.0
-            holding_bars = 0
             continue
         
         if position == 0:
-            # Long: Break above R3 + above 1d EMA34 + RSI > 50 + volume spike
-            if (close[i] > r3_4h[i] and 
-                close[i] > ema34_1d_4h[i] and 
-                rsi[i] > 50 and 
+            # Long: Break above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_12h[i] and 
+                close[i] > ema34_1d_12h[i] and 
                 volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-                holding_bars = 0
-            # Short: Break below S3 + below 1d EMA34 + RSI < 50 + volume spike
-            elif (close[i] < s3_4h[i] and 
-                  close[i] < ema34_1d_4h[i] and 
-                  rsi[i] < 50 and 
+            # Short: Break below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_12h[i] and 
+                  close[i] < ema34_1d_12h[i] and 
                   volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
-                holding_bars = 0
         else:
-            # Enforce minimum holding period
-            holding_bars += 1
-            if holding_bars < 10:
-                signals[i] = position_size if position == 1 else -position_size
-                continue
-            
-            # Exit conditions: close below/above opposite level
+            # Hold position until opposite level is broken
             if position == 1:
                 # Exit: Price closes below S3 (opposite level)
-                if close[i] < s3_4h[i]:
+                if close[i] < s3_12h[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
                 # Exit: Price closes above R3 (opposite level)
-                if close[i] > r3_4h[i]:
+                if close[i] > r3_12h[i]:
                     signals[i] = 0.0
                     position = 0
-                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
