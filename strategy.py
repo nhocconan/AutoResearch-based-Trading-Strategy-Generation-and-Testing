@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R3_S3_Breakout_Volume
-Hypothesis: Uses daily (1d) Camarilla pivot levels (R3/S3) for breakout entries on 4h chart,
-confirmed by volume spikes and EMA50 trend. Designed for low trade frequency by requiring
-confluence of price breaking key daily pivot levels, volume confirmation, and trend alignment.
-Works in both bull and bear markets by following the daily trend via EMA50.
+4h_12h_Camarilla_R3_S3_Breakout_TrendFilter_Volume
+Hypothesis: Uses Camarilla pivot levels from 12h timeframe (R3/S3) for breakout entries on 4h chart,
+confirmed by 12h EMA50 trend and volume spikes. Designed for low trade frequency by requiring confluence of
+price breaking key 12h pivot levels, trend alignment, and volume confirmation. Works in bull and bear
+markets by following intermediate-term trend from 12h timeframe.
 """
 
-name = "4h_1d_Camarilla_R3_S3_Breakout_Volume"
+name = "4h_12h_Camarilla_R3_S3_Breakout_TrendFilter_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,30 +26,30 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d OHLCV for Camarilla Pivot Levels ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # --- 12h OHLCV for Camarilla Pivot Levels ---
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # Calculate pivot points using previous 1d's OHLC
-    prev_high_1d = df_1d['high'].values
-    prev_low_1d = df_1d['low'].values
-    prev_close_1d = df_1d['close'].values
+    # Calculate pivot points using previous 12h's OHLC
+    prev_high_12h = df_12h['high'].values
+    prev_low_12h = df_12h['low'].values
+    prev_close_12h = df_12h['close'].values
     
-    pivot_1d = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_val_1d = prev_high_1d - prev_low_1d
+    pivot_12h = (prev_high_12h + prev_low_12h + prev_close_12h) / 3.0
+    range_val_12h = prev_high_12h - prev_low_12h
     
     # Camarilla levels (R3 and S3)
-    R3_1d = pivot_1d + (range_val_1d * 1.1 / 4)
-    S3_1d = pivot_1d - (range_val_1d * 1.1 / 4)
+    R3_12h = pivot_12h + (range_val_12h * 1.1 / 4)
+    S3_12h = pivot_12h - (range_val_12h * 1.1 / 4)
     
     # Align to 4h timeframe
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3_1d)
+    R3_4h = align_htf_to_ltf(prices, df_12h, R3_12h)
+    S3_4h = align_htf_to_ltf(prices, df_12h, S3_12h)
     
-    # --- 1d EMA50 Trend Filter ---
-    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # --- 12h EMA50 Trend Filter ---
+    ema_50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_4h = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
     # --- Volume Spike Detection (20-period average on 4h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
