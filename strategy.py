@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "1d_Weekly_Donchian_Breakout_Volume"
+name = "1d_Weekly_Donchian_Breakout_Volume_v2"
 timeframe = "1d"
 leverage = 1.0
 
@@ -22,19 +22,14 @@ def generate_signals(prices):
     if len(df_1w) < 20:
         return np.zeros(n)
     
-    # Weekly Donchian channel (20-period)
+    # Weekly Donchian channel (20-period) - vectorized
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    donchian_high = np.zeros(len(high_1w))
-    donchian_low = np.zeros(len(low_1w))
-    
-    for i in range(len(high_1w)):
-        if i < 20:
-            donchian_high[i] = np.max(high_1w[:i+1])
-            donchian_low[i] = np.min(low_1w[:i+1])
-        else:
-            donchian_high[i] = np.max(high_1w[i-19:i+1])
-            donchian_low[i] = np.min(low_1w[i-19:i+1])
+    # Use pandas rolling for efficiency
+    high_series = pd.Series(high_1w)
+    low_series = pd.Series(low_1w)
+    donchian_high = high_series.rolling(window=20, min_periods=1).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=1).min().values
     
     # Weekly EMA50 for trend filter
     close_1w = df_1w['close'].values
@@ -47,17 +42,13 @@ def generate_signals(prices):
     trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
     
     # Volume moving average (20-period) for confirmation
-    vol_ma20 = np.zeros(n)
-    for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    vol_series = pd.Series(volume)
+    vol_ma20 = vol_series.rolling(window=20, min_periods=1).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 20)
+    start_idx = 30  # Ensure sufficient warmup
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
