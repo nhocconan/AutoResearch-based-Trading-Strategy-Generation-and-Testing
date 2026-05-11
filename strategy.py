@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_Keltner_Breakout_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,36 +17,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend (primary filter)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
-        return np.zeros(n)
-    
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # Get daily data for Camarilla pivot levels
+    # Get daily data for Keltner channels and trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close_1d = df_1d['close'].shift(1).values
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    # 20-period EMA for Keltner middle
+    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # True Range for ATR
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = close_1d[0]
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - prev_close_1d)
+    tr3 = np.abs(low_1d - prev_close_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
+    # Keltner bands
+    upper_keltner = ema_20_1d + 2.0 * atr_10_1d
+    lower_keltner = ema_20_1d - 2.0 * atr_10_1d
     
-    # Camarilla levels: R1 and S1
-    # R1 = Close + (High - Low) * 1.1 / 12
-    # S1 = Close - (High - Low) * 1.1 / 12
-    camarilla_r1 = prev_close_1d + (prev_high_1d - prev_low_1d) * 1.1 / 12
-    camarilla_s1 = prev_close_1d - (prev_high_1d - prev_low_1d) * 1.1 / 12
+    # Align to 4h
+    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
+    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
     
-    # Align Camarilla levels to 12h
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Daily RSI for trend filter (avoid overbought/oversold extremes)
+    delta = pd.Series(close_1d).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi_14_1d = 100 - (100 / (1 + rs))
+    rsi_14_aligned = align_htf_to_ltf(prices, df_1d, rsi_14_1d)
     
-    # Volume filter: 20-period average on 12h
+    # Volume filter: 20-period average on 4h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -59,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_keltner_aligned[i]) or np.isnan(lower_keltner_aligned[i]) or 
+            np.isnan(ema_20_aligned[i]) or np.isnan(rsi_14_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -73,30 +81,32 @@ def generate_signals(prices):
         volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above R1 with volume and weekly uptrend
-            if (close[i] > camarilla_r1_aligned[i] and 
+            # Long: Price breaks above upper Keltner band with volume
+            # AND RSI not overbought (< 70) to avoid chasing tops
+            if (close[i] > upper_keltner_aligned[i] and 
                 volume_surge and 
-                close[i] > ema_50_1w_aligned[i]):
+                rsi_14_aligned[i] < 70):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume and weekly downtrend
-            elif (close[i] < camarilla_s1_aligned[i] and 
+            # Short: Price breaks below lower Keltner band with volume
+            # AND RSI not oversold (> 30) to avoid catching falling knives
+            elif (close[i] < lower_keltner_aligned[i] and 
                   volume_surge and 
-                  close[i] < ema_50_1w_aligned[i]):
+                  rsi_14_aligned[i] > 30):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to opposite Camarilla level or weekly trend reverses
+            # Exit: price returns to middle EMA or opposite band touch
             if position == 1:
-                # Exit long: price breaks below S1 or weekly trend turns down
-                if (close[i] < camarilla_s1_aligned[i]) or (close[i] < ema_50_1w_aligned[i]):
+                # Exit long: price returns to EMA20 or touches lower band
+                if (close[i] < ema_20_aligned[i]) or (close[i] < lower_keltner_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price breaks above R1 or weekly trend turns up
-                if (close[i] > camarilla_r1_aligned[i]) or (close[i] > ema_50_1w_aligned[i]):
+                # Exit short: price returns to EMA20 or touches upper band
+                if (close[i] > ema_20_aligned[i]) or (close[i] > upper_keltner_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
