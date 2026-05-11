@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# 1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume
-# Hypothesis: Weekly trend (1w EMA50) + Daily Camarilla R3/S3 breakout with volume confirmation
-# In bull markets: 1w uptrend + daily breakout above R3 captures momentum.
-# In bear markets: 1w downtrend + daily breakdown below S3 captures accelerated moves.
-# Volume filter ensures breakouts have conviction. Target: 15-25 trades/year.
+# 12h_1d_RSI_Divergence_Confluence_Trend
+# Hypothesis: Combining RSI divergence on 1d with trend following on 12h creates high-probability entries.
+# In bull markets: bullish RSI divergence (higher low in RSI, lower low in price) + 12h price above EMA50 = long.
+# In bear markets: bearish RSI divergence (lower high in RSI, higher high in price) + 12h price below EMA50 = short.
+# Volume confirmation filters low-momentum signals. Designed for 20-30 trades/year to minimize fee drag.
 
-name = "1d_1w_Camarilla_R3_S3_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "12h_1d_RSI_Divergence_Confluence_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,56 +18,48 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # Get multi-timeframe data
+    df_1d = get_htf_data(prices, '1d')
+    
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly EMA50 for trend filter ---
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # --- 1d RSI(14) for divergence detection ---
+    rsi_period = 14
+    delta = pd.Series(df_1d['close']).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    avg_loss = loss.ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    # --- Daily Camarilla levels (R3, S3) from previous daily bar ---
-    prev_daily_high = df_1w['high'].values  # Wait, using wrong df - fix below
+    # Align 1d RSI to 12h
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi_values)
     
-    # Fix: Need daily data for Camarilla calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # --- 12h EMA50 for trend filter ---
+    ema_50 = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    prev_daily_high = df_1d['high'].values
-    prev_daily_low = df_1d['low'].values
-    prev_daily_close = df_1d['close'].values
-    
-    camarilla_width = (prev_daily_high - prev_daily_low) * 1.1 / 2.0
-    camarilla_r3 = prev_daily_close + camarilla_width
-    camarilla_s3 = prev_daily_close - camarilla_width
-    
-    # Align daily Camarilla levels to daily timeframe (identity since same TF)
-    camarilla_r3_aligned = camarilla_r3  # Already at daily frequency
-    camarilla_s3_aligned = camarilla_s3
-    
-    # --- Volume confirmation (2.0x 20-period average on daily) ---
+    # --- Volume confirmation (2.0x 20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for weekly EMA50 (50) and volume MA (20)
-    start_idx = 50
+    # Warmup: enough for RSI calculation
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_1w_aligned[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or
+        if (np.isnan(rsi_aligned[i]) or
+            np.isnan(ema_50[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -77,32 +69,52 @@ def generate_signals(prices):
         # Volume confirmation
         volume_surge = volume[i] > 2.0 * vol_ma[i]
         
+        # Need at least 3 points for divergence check
+        if i < start_idx + 2:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            continue
+        
         if position == 0:
-            # Long: price breaks above R3 with volume surge and weekly uptrend
-            if (close[i] > camarilla_r3_aligned[i] and 
-                volume_surge and 
-                ema_50_1w_aligned[i] < close[i]):
+            # Bullish RSI divergence: price makes lower low, RSI makes higher low
+            # Check last 3 points for swing low
+            if (low[i-2] > low[i] and 
+                low[i-1] > low[i] and
+                rsi_aligned[i-2] < rsi_aligned[i] and
+                rsi_aligned[i-1] < rsi_aligned[i] and
+                ema_50[i] < close[i] and  # 12h uptrend
+                volume_surge):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with volume surge and weekly downtrend
-            elif (close[i] < camarilla_s3_aligned[i] and 
-                  volume_surge and 
-                  ema_50_1w_aligned[i] > close[i]):
+            # Bearish RSI divergence: price makes higher high, RSI makes lower high
+            elif (high[i-2] < high[i] and 
+                  high[i-1] < high[i] and
+                  rsi_aligned[i-2] > rsi_aligned[i] and
+                  rsi_aligned[i-1] > rsi_aligned[i] and
+                  ema_50[i] > close[i] and  # 12h downtrend
+                  volume_surge):
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: price drops below S3 OR weekly EMA50 turns down
-                if (close[i] < camarilla_s3_aligned[i] or 
-                    close[i] < ema_50_1w_aligned[i]):
+                # Exit long: price breaks below EMA50 OR RSI shows bearish divergence
+                if (close[i] < ema_50[i] or
+                    (high[i-2] < high[i] and 
+                     high[i-1] < high[i] and
+                     rsi_aligned[i-2] > rsi_aligned[i] and
+                     rsi_aligned[i-1] > rsi_aligned[i])):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price rises above R3 OR weekly EMA50 turns up
-                if (close[i] > camarilla_r3_aligned[i] or 
-                    close[i] > ema_50_1w_aligned[i]):
+                # Exit short: price breaks above EMA50 OR RSI shows bullish divergence
+                if (close[i] > ema_50[i] or
+                    (low[i-2] > low[i] and 
+                     low[i-1] > low[i] and
+                     rsi_aligned[i-2] < rsi_aligned[i] and
+                     rsi_aligned[i-1] < rsi_aligned[i])):
                     signals[i] = 0.0
                     position = 0
                 else:
