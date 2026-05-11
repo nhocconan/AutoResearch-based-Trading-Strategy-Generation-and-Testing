@@ -1,59 +1,44 @@
-#!/usr/bin/env python3
-"""
-4h_Aroon_MeanReversion_TrendFilter
-Hypothesis: Uses Aroon oscillator (25-period) to detect trend exhaustion and mean-reversion opportunities, filtered by 1d EMA50 trend direction and volume confirmation. Enters long when Aroon down crosses above Aroon up (downtrend exhaustion) with price below 1d EMA50, and short when Aroon up crosses above Aroon down (uptrend exhaustion) with price above 1d EMA50. Exits on Aroon crossover reversal or trend reversal. Designed to capture mean-reversion in ranging markets while avoiding trend-following losses in strong trends. Targets 20-40 trades/year via Aroon crossover signals with trend and volume filters.
-"""
+# [Experiment #152770] 1d Donchian Breakout + 1w Trend + Volume Confirmation
+# Hypothesis: Daily Donchian(20) breakouts in direction of weekly EMA50 trend with volume spike capture trends in both bull and bear markets.
+# Uses 1d timeframe with 1h trend filter for regime context. Targets 10-25 trades/year via strict breakout + volume + trend conditions.
+# Weekly trend filter avoids counter-trend trades in choppy markets. Volume confirmation ensures institutional participation.
+# Exit on opposite Donchian break or trend reversal to capture full moves while limiting whipsaw.
 
-name = "4h_Aroon_MeanReversion_TrendFilter"
-timeframe = "4h"
+name = "1d_Donchian_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_aroon(high, low, period=25):
-    """Calculate Aroon Up and Aroon Down"""
-    n = len(high)
-    aroon_up = np.full(n, np.nan)
-    aroon_down = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Periods since highest high
-        highest_high_idx = i - np.argmax(high[i-period:i+1])
-        aroon_up[i] = ((period - (i - highest_high_idx)) / period) * 100
-        
-        # Periods since lowest low
-        lowest_low_idx = i - np.argmin(low[i-period:i+1])
-        aroon_down[i] = ((period - (i - lowest_low_idx)) / period) * 100
-    
-    return aroon_up, aroon_down
-
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1d OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily EMA50 Trend Filter ---
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # --- Weekly EMA50 Trend Filter (HTF: 1w) ---
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(
         span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_1d = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # --- Aroon Oscillator (25-period) ---
-    aroon_up, aroon_down = calculate_aroon(high, low, 25)
+    # --- Daily Donchian Channels (20-period) ---
+    # Calculate highest high and lowest low of past 20 days (excluding current)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # --- Volume Spike Detection (20-period average) ---
+    # --- Volume Spike Detection (20-day average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -61,13 +46,14 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
+    # Start after warmup (need 20 days for Donchian + 50 for EMA)
     start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h[i]) or np.isnan(aroon_up[i]) or 
-            np.isnan(aroon_down[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_50_1d[i]) or np.isnan(vol_ratio[i])):
+            # Maintain current position
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -77,37 +63,33 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.5
-        
-        # Aroon crossover signals
-        aroon_up_cross = (aroon_up[i] > aroon_down[i]) and (aroon_up[i-1] <= aroon_down[i-1])
-        aroon_down_cross = (aroon_down[i] > aroon_up[i]) and (aroon_down[i-1] <= aroon_up[i-1])
+        volume_spike = vol_ratio[i] > 2.0
         
         if position == 0:
-            # Long: Aroon down crosses above Aroon up (downtrend exhaustion) + price below 1d EMA50 + volume
-            if (aroon_down_cross and 
-                close[i] < ema_50_4h[i] and 
+            # Long: price breaks above 20-day high + above weekly EMA50 + volume spike
+            if (close[i] > high_20[i] and 
+                close[i] > ema_50_1d[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: Aroon up crosses above Aroon down (uptrend exhaustion) + price above 1d EMA50 + volume
-            elif (aroon_up_cross and 
-                  close[i] > ema_50_4h[i] and 
+            # Short: price breaks below 20-day low + below weekly EMA50 + volume spike
+            elif (close[i] < low_20[i] and 
+                  close[i] < ema_50_1d[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: Aroon up crosses above Aroon down OR trend turns up
-                if aroon_up_cross or (close[i] > ema_50_4h[i]):
+                # Exit long: price breaks below 20-day low OR trend turns down
+                if (close[i] < low_20[i]) or (close[i] < ema_50_1d[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: Aroon down crosses above Aroon up OR trend turns down
-                if aroon_down_cross or (close[i] < ema_50_4h[i]):
+                # Exit short: price breaks above 20-day high OR trend turns up
+                if (close[i] > high_20[i]) or (close[i] > ema_50_1d[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
