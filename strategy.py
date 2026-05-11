@@ -1,132 +1,120 @@
 #!/usr/bin/env python3
 """
-4h_1d_KAMA_Trend_Volume_Momentum_v2
-Hypothesis: KAMA direction (trend) from 1d timeframe combined with 4h RSI momentum and volume confirmation.
-- Long when: 1d KAMA rising (bullish trend), 4h RSI > 50 (momentum), and volume > 20-period average
-- Short when: 1d KAMA falling (bearish trend), 4h RSI < 50 (momentum), and volume > 20-period average
-- Exit when: RSI crosses back to neutral (50) or trend changes
-Designed to work in both bull (trend following) and bear (mean reversion via RSI) regimes.
-Targets ~25 trades/year (100 over 4 years) to minimize fee drag.
-Uses 1d trend filter to avoid counter-trend trades.
+12h_1d_Camarilla_Pivot_Breakout_Volume
+Hypothesis: 12h timeframe with 1d Camarilla pivot breakouts, volume confirmation, and 1d trend filter.
+Designed for lower trade frequency (12-37/year) to minimize fee drag while capturing sustained trends.
+Works in bull markets via breakout momentum and in bear markets via trend-filtered mean reversion to opposite pivot.
 """
 
-name = "4h_1d_KAMA_Trend_Volume_Momentum_v2"
-timeframe = "4h"
+name = "12h_1d_Camarilla_Pivot_Breakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def kama(close, er_period=10, fast=2, slow=30):
-    """Kaufman's Adaptive Moving Average"""
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close))
-    
-    # Efficiency Ratio
-    er = np.zeros_like(close)
-    for i in range(len(close)):
-        if i >= er_period:
-            price_change = np.abs(close[i] - close[i-er_period])
-            sum_volatility = np.sum(volatility[i-er_period+1:i+1])
-            if sum_volatility > 0:
-                er[i] = price_change / sum_volatility
-            else:
-                er[i] = 0
-    
-    # Smoothing constants
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    
-    # KAMA calculation
-    kama_vals = np.zeros_like(close)
-    kama_vals[0] = close[0]
-    for i in range(1, len(close)):
-        kama_vals[i] = kama_vals[i-1] + sc[i] * (close[i] - kama_vals[i-1])
-    
-    return kama_vals
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Get 1d data for KAMA trend filter
+    # Get 1d data for pivot calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:  # Need enough for KAMA calculation
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 1d Trend Filter: KAMA ---
+    # --- 1d Trend Filter: EMA50 ---
     close_1d = df_1d['close'].values
-    kama_1d = kama(close_1d, er_period=10, fast=2, slow=30)
-    kama_1d_prev = np.roll(kama_1d, 1)
-    kama_1d_prev[0] = kama_1d[0]
-    kama_rising = kama_1d > kama_1d_prev
-    kama_falling = kama_1d < kama_1d_prev
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align KAMA direction to 4h timeframe
-    kama_rising_4h = align_htf_to_ltf(prices, df_1d, kama_rising)
-    kama_falling_4h = align_htf_to_ltf(prices, df_1d, kama_falling)
+    # --- Camarilla Pivots from 1d (previous day) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # --- 4h RSI Momentum (14-period) ---
-    delta = np.diff(close_4h, prepend=close_4h[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Calculate pivots from previous day's OHLC
+    camarilla_high = np.full_like(close_1d, np.nan)
+    camarilla_low = np.full_like(close_1d, np.nan)
+    camarilla_close = np.full_like(close_1d, np.nan)
     
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
+    for i in range(1, len(close_1d)):
+        camarilla_high[i] = high_1d[i-1]
+        camarilla_low[i] = low_1d[i-1]
+        camarilla_close[i] = close_1d[i-1]
     
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # Calculate Camarilla levels
+    R4 = camarilla_close + ((camarilla_high - camarilla_low) * 1.5000)
+    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
+    R2 = camarilla_close + ((camarilla_high - camarilla_low) * 1.1666)
+    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
+    PP = camarilla_close
+    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
+    S2 = camarilla_close - ((camarilla_high - camarilla_low) * 1.1666)
+    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
+    S4 = camarilla_close - ((camarilla_high - camarilla_low) * 1.5000)
     
-    # --- Volume Confirmation: 4h volume > 20-period average ---
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # Align pivots to 12h timeframe
+    R3_12h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1d, S3)
+    R1_12h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # --- Volume Confirmation: 12h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup period (max of KAMA and RSI periods)
-    start_idx = max(30, 20)  # KAMA needs ~30, RSI needs 14, VOL needs 20
+    # Start after warmup period
+    start_idx = 60  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_rising_4h[i]) or np.isnan(kama_falling_4h[i]) or 
-            np.isnan(rsi[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+            np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
+        # Determine 1d trend
+        trend_up = close_12h[i] > ema50_1d_aligned[i]
+        trend_down = close_12h[i] < ema50_1d_aligned[i]
+        
         # Volume confirmation
-        vol_ok = volume_4h[i] > vol_ma_20[i]
+        vol_ok = volume_12h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for entries with volume confirmation
-            if kama_rising_4h[i] and rsi[i] > 50 and vol_ok:
-                # Long: bullish KAMA + bullish RSI momentum + volume
+            # Look for entries only in direction of 1d trend with volume
+            if close_12h[i] > R3_12h[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + 1d uptrend + volume
                 signals[i] = 0.25
                 position = 1
-            elif kama_falling_4h[i] and rsi[i] < 50 and vol_ok:
-                # Short: bearish KAMA + bearish RSI momentum + volume
+            elif close_12h[i] < S3_12h[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + 1d downtrend + volume
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: RSI returns to neutral (50) or trend changes
-                if rsi[i] <= 50 or not kama_rising_4h[i]:
+                # Exit long: price returns to S1 (opposite side)
+                if close_12h[i] <= S1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI returns to neutral (50) or trend changes
-                if rsi[i] >= 50 or not kama_falling_4h[i]:
+                # Exit short: price returns to R1 (opposite side)
+                if close_12h[i] >= R1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
