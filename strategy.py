@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,33 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h trend filter (EMA 50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h trend filter: EMA 50
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1d volume filter: 20-period average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    vol_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d)
     
     # 1d Camarilla pivot levels (previous day)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.083
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.083
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Volume filter (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > vol_ma
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
@@ -51,7 +52,16 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
+        if not session_mask[i]:
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(vol_1d_aligned[i]) or \
+           np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,27 +70,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + above 12h EMA + volume
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_12h_aligned[i] and vol_filter[i]:
-                signals[i] = 0.25
+            # Long: break above R1 + above 4h EMA + volume above 1d average
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_4h_aligned[i] and volume[i] > vol_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: break below S1 + below 12h EMA + volume
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_12h_aligned[i] and vol_filter[i]:
-                signals[i] = -0.25
+            # Short: break below S1 + below 4h EMA + volume above 1d average
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_4h_aligned[i] and volume[i] > vol_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below 12h EMA
-            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_12h_aligned[i]:
+            # Exit long: break below S1 or below 4h EMA
+            if close[i] < camarilla_s1_aligned[i] or close[i] < ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: break above R1 or above 12h EMA
-            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_12h_aligned[i]:
+            # Exit short: break above R1 or above 4h EMA
+            if close[i] > camarilla_r1_aligned[i] or close[i] > ema_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
