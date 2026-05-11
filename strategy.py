@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Touch_Reversal
-Hypothesis: Mean reversion at extreme Camarilla levels (R4/S4) with 1d trend filter.
-- Long when: price touches or crosses S4 AND 1d EMA50 is rising (bullish bias)
-- Short when: price touches or crosses R4 AND 1d EMA50 is falling (bearish bias)
-- Exit when price returns to the 1d close (pivot point) or opposite extreme
-Uses 1d trend to avoid counter-trend trades. Targets 15-30 trades/year.
+12h_1w_Camarilla_R3S3_Breakout_Trend
+Hypothesis: Weekly trend + 12h breakout of weekly Camarilla R3/S3 with volume confirmation.
+- Long: Price breaks above weekly R3, weekly EMA50 uptrend, volume > 20-period average
+- Short: Price breaks below weekly S3, weekly EMA50 downtrend, volume > 20-period average
+- Exit: Price returns to opposite weekly pivot (S1 for longs, R1 for shorts)
+- Weekly trend filter prevents counter-trend trades, reducing whipsaw in ranging markets.
+- Targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
+- Works in bull (breaksout continuation) and bear (mean reversion to weekly value).
 """
 
-name = "4h_1d_Camarilla_Pivot_Touch_Reversal"
-timeframe = "4h"
+name = "12h_1w_Camarilla_R3S3_Breakout_Trend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -18,111 +20,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Get 1d data for pivot calculation and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for trend and pivots
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # --- Weekly Trend Filter: EMA50 ---
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # --- 1d Close for Exit ---
-    close_1d_arr = df_1d['close'].values
-    close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d_arr)
+    # --- Weekly Camarilla Pivots (from previous week) ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # --- Camarilla Pivots from 1d (previous day) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Use previous week's OHLC to calculate current week's pivots
+    camarilla_high = np.full_like(close_1w, np.nan)
+    camarilla_low = np.full_like(close_1w, np.nan)
+    camarilla_close = np.full_like(close_1w, np.nan)
     
-    # Calculate pivots from previous day's OHLC
-    camarilla_high = np.full_like(close_1d, np.nan)
-    camarilla_low = np.full_like(close_1d, np.nan)
-    camarilla_close = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        camarilla_high[i] = high_1d[i-1]
-        camarilla_low[i] = low_1d[i-1]
-        camarilla_close[i] = close_1d[i-1]
+    for i in range(1, len(close_1w)):
+        camarilla_high[i] = high_1w[i-1]
+        camarilla_low[i] = low_1w[i-1]
+        camarilla_close[i] = close_1w[i-1]
     
     # Calculate Camarilla levels
-    H_L = camarilla_high - camarilla_low
-    C = camarilla_close
+    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
+    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
+    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
+    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
     
-    R4 = C + (H_L * 1.5000)
-    R3 = C + (H_L * 1.2500)
-    R2 = C + (H_L * 1.1666)
-    R1 = C + (H_L * 1.0833)
-    PP = C
-    S1 = C - (H_L * 1.0833)
-    S2 = C - (H_L * 1.1666)
-    S3 = C - (H_L * 1.2500)
-    S4 = C - (H_L * 1.5000)
+    # Align pivots to 12h timeframe
+    R3_12h = align_htf_to_ltf(prices, df_1w, R3)
+    S3_12h = align_htf_to_ltf(prices, df_1w, S3)
+    R1_12h = align_htf_to_ltf(prices, df_1w, R1)
+    S1_12h = align_htf_to_ltf(prices, df_1w, S1)
     
-    # Align pivots to 4h timeframe
-    R4_4h = align_htf_to_ltf(prices, df_1d, R4)
-    S4_4h = align_htf_to_ltf(prices, df_1d, S4)
-    PP_4h = align_htf_to_ltf(prices, df_1d, PP)
-    
-    # Volume filter: avoid low-volume false signals
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # --- Volume Confirmation: 12h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50  # for EMA50 and volume MA
+    start_idx = 60  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(R4_4h[i]) or np.isnan(S4_4h[i]) or 
-            np.isnan(PP_4h[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
+            np.isnan(R1_12h[i]) or np.isnan(S1_12h[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend (using price vs EMA50)
-        trend_up = close_4h[i] > ema50_1d_aligned[i]
-        trend_down = close_4h[i] < ema50_1d_aligned[i]
+        # Determine weekly trend
+        trend_up = close_12h[i] > ema50_1w_aligned[i]
+        trend_down = close_12h[i] < ema50_1w_aligned[i]
         
-        # Volume confirmation: avoid low-volume noise
-        vol_ok = volume_4h[i] > vol_ma_20[i]
+        # Volume confirmation
+        vol_ok = volume_12h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for reversals at extreme levels WITH trend alignment
-            if low_4h[i] <= S4_4h[i] and trend_up and vol_ok:
-                # Long: price touches S4 (extreme support) in 1d uptrend
+            # Look for entries only in direction of weekly trend with volume
+            if close_12h[i] > R3_12h[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + weekly uptrend + volume
                 signals[i] = 0.25
                 position = 1
-            elif high_4h[i] >= R4_4h[i] and trend_down and vol_ok:
-                # Short: price touches R4 (extreme resistance) in 1d downtrend
+            elif close_12h[i] < S3_12h[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + weekly downtrend + volume
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price returns to 1d close (pivot point)
-                if close_4h[i] >= PP_4h[i]:
+                # Exit long: price returns to S1 (opposite side)
+                if close_12h[i] <= S1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to 1d close (pivot point)
-                if close_4h[i] <= PP_4h[i]:
+                # Exit short: price returns to R1 (opposite side)
+                if close_12h[i] >= R1_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
