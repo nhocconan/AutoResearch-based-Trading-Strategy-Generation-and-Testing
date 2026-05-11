@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,14 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d trend: close above/below 1d EMA50
+    # 1d trend: close above/below 1d EMA34
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 34:
         return np.zeros(n)
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    trend_up = close > ema_1d_aligned  # Note: 'close' is 4h close, but we're using 1d trend - this is intentional for alignment
+    trend_up = close > ema_1d_aligned
     
     # 1d volume filter: volume > 1.5x 20-day average
     vol_1d = df_1d['volume'].values
@@ -32,14 +32,15 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # 4h Camarilla levels from previous 4h bar
-    high_4h = high
-    low_4h = low
-    close_4h = close
-    range_4h = high_4h - low_4h
-    # Camarilla R1, S1: close +/- 1.1/12 * range
-    r1 = close_4h + (1.1/12) * range_4h
-    s1 = close_4h - (1.1/12) * range_4h
+    # Camarilla levels from previous day (R1, S1)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    range_1d = high_1d - low_1d
+    r1 = close_1d + (1.1/12) * range_1d
+    s1 = close_1d - (1.1/12) * range_1d
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -48,12 +49,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 20  # Need enough data for volume MA
+    start_idx = 34  # Need enough data for EMA and Camarilla
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(r1[i]) or np.isnan(s1[i])):
+            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -71,23 +72,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Close above R1 + 1d uptrend + volume filter
-            if close[i] > r1[i] and trend_up[i] and volume_filter[i]:
+            if close[i] > r1_aligned[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Close below S1 + 1d downtrend + volume filter
-            elif close[i] < s1[i] and not trend_up[i] and volume_filter[i]:
+            elif close[i] < s1_aligned[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: Close below S1 or 1d trend down
-            if close[i] < s1[i] or not trend_up[i]:
+            if close[i] < s1_aligned[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: Close above R1 or 1d trend up
-            if close[i] > r1[i] or trend_up[i]:
+            if close[i] > r1_aligned[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
