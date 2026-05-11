@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Price_Channel_Strategy_v1
-Hypothesis: Uses weekly Donchian channels to identify long-term trends and daily price action for entry timing.
-In bull markets, buys near weekly support with upward bias. In bear markets, sells near weekly resistance with downward bias.
-Uses volume confirmation and volatility filter to avoid false breaks. Designed for low frequency (10-25 trades/year) 
-to work across market regimes by aligning with weekly structure while using daily precision.
+12h_Donchian_Breakout_1DTrend_Volume
+Hypothesis: Uses daily trend filter (EMA34) to determine direction, then takes Donchian(20) breakouts on 12h with volume confirmation.
+Works in bull markets (breakouts with trend) and bear markets (mean reversion during trend reversals) by filtering counter-trend trades.
+Target: 15-25 trades/year to minimize fee drag.
 """
 
-name = "1d_Weekly_Price_Channel_Strategy_v1"
-timeframe = "1d"
+name = "12h_Donchian_Breakout_1DTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,42 +19,28 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend context
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 20:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channels (20-week lookback)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_high_max = pd.Series(weekly_high).rolling(window=20, min_periods=20).max().values
-    weekly_low_min = pd.Series(weekly_low).rolling(window=20, min_periods=20).min().values
+    # --- 1d EMA34 for trend filter ---
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Align weekly channels to daily
-    weekly_high_max_daily = align_htf_to_ltf(prices, df_weekly, weekly_high_max)
-    weekly_low_min_daily = align_htf_to_ltf(prices, df_weekly, weekly_low_min)
+    # --- Donchian(20) channels ---
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter (50-week EMA)
-    weekly_close = df_weekly['close'].values
-    weekly_ema50 = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema50_daily = align_htf_to_ltf(prices, df_weekly, weekly_ema50)
-    
-    # Daily volume confirmation (20-day average)
+    # --- Volume confirmation (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (1.5 * vol_ma.values)
-    
-    # Daily volatility filter (ATR-based)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,10 +50,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_high_max_daily[i]) or 
-            np.isnan(weekly_low_min_daily[i]) or
-            np.isnan(weekly_ema50_daily[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i]) or
+            np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -78,43 +63,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long conditions: price near weekly support with bullish bias
-        near_weekly_support = low[i] <= weekly_low_min_daily[i] * 1.002  # Within 0.2% of weekly low
-        bullish_bias = close[i] > weekly_ema50_daily[i]  # Above weekly EMA50
-        vol_confirm = vol_spike[i]
-        volatility_ok = atr[i] > 0  # Ensure volatility exists
+        # Determine trend direction from 1d EMA34
+        uptrend = close[i] > ema_34_1d_aligned[i]
+        downtrend = close[i] < ema_34_1d_aligned[i]
         
-        long_signal = near_weekly_support and bullish_bias and vol_confirm and volatility_ok
-        
-        # Short conditions: price near weekly resistance with bearish bias
-        near_weekly_resistance = high[i] >= weekly_high_max_daily[i] * 0.998  # Within 0.2% of weekly high
-        bearish_bias = close[i] < weekly_ema50_daily[i]  # Below weekly EMA50
-        short_signal = near_weekly_resistance and bearish_bias and vol_confirm and volatility_ok
+        # Donchian breakout signals
+        breakout_long = (high[i] > highest_high[i-1]) and vol_spike[i]
+        breakout_short = (low[i] < lowest_low[i-1]) and vol_spike[i]
         
         if position == 0:
-            if long_signal:
+            # Only take trades in direction of trend
+            if breakout_long and uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif short_signal:
+            elif breakout_short and downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: opposite signal or price moves to middle of channel
+            # Exit on opposite breakout or trend reversal
             if position == 1:
-                # Exit long if price reaches midpoint of weekly channel or gets opposite signal
-                weekly_mid = (weekly_high_max_daily[i] + weekly_low_min_daily[i]) / 2
-                exit_signal = short_signal or (close[i] >= weekly_mid)
+                exit_signal = breakout_short or (not uptrend)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short if price reaches midpoint of weekly channel or gets opposite signal
-                weekly_mid = (weekly_high_max_daily[i] + weekly_low_min_daily[i]) / 2
-                exit_signal = long_signal or (close[i] <= weekly_mid)
+                exit_signal = breakout_long or (not downtrend)
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
