@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Donchian20_1dTrend_Volume
-Hypothesis: Trade Donchian(20) channel breakouts on 12h timeframe with 1d trend filter and volume confirmation.
-In trending markets, price tends to extend beyond recent highs/lows. The Donchian channel captures breakout
-moments, while the 1d EMA34 ensures alignment with the daily trend and volume confirms institutional interest.
-This combination should work in both bull and bear markets by capturing strong directional moves.
+4h_12hCamarilla_R3S3_Breakout_1dTrend_Volume
+Hypothesis: Trade breakouts at daily Camarilla R3/S3 levels on 4h timeframe with 1d trend filter and volume confirmation.
+Daily Camarilla levels provide reliable support/resistance. Breakouts aligned with daily trend and volume
+should capture meaningful moves while avoiding noise. Works in bull/bear markets by following daily trend.
 """
 
-name = "12h_Donchian20_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_12hCamarilla_R3S3_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,33 +24,44 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Donchian Channel (20-period) on 12h ===
-    # Highest high and lowest low over last 20 periods
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Daily Trend Filter (EMA34) ===
+    # === Daily Camarilla Levels (R3, S3) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ph_d = df_1d['high'].values
+    pl_d = df_1d['low'].values
+    pc_d = df_1d['close'].values
     
-    # === Volume Filter (2.0x 20-period EMA on 12h) ===
+    # Daily Camarilla levels
+    r3_d = pc_d + 1.1 * (ph_d - pl_d)  # R3 level
+    s3_d = pc_d - 1.1 * (ph_d - pl_d)  # S3 level
+    
+    # Align to 4h timeframe
+    r3_4h = align_htf_to_ltf(prices, df_1d, r3_d)
+    s3_4h = align_htf_to_ltf(prices, df_1d, s3_d)
+    
+    # === 12h Trend Filter (EMA50) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
+        return np.zeros(n)
+    
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # === Volume Filter (1.5x 20-period EMA on 4h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 2.0
+    volume_ok = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers Donchian and EMA calculations)
+    # Start after warmup (covers daily and 12h calculations)
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema34_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(ema50_4h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,28 +70,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above Donchian upper band with uptrend and volume
-            if (close[i] > highest_high[i] and 
-                close[i] > ema34_12h[i] and 
+            # Long breakout: price closes above R3 with uptrend and volume
+            if (close[i] > r3_4h[i] and 
+                close[i] > ema50_4h[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below Donchian lower band with downtrend and volume
-            elif (close[i] < lowest_low[i] and 
-                  close[i] < ema34_12h[i] and 
+            # Short breakdown: price closes below S3 with downtrend and volume
+            elif (close[i] < s3_4h[i] and 
+                  close[i] < ema50_4h[i] and 
                   volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian lower band (mean reversion)
-            if close[i] < lowest_low[i]:
+            # Long exit: price closes below S3 (mean reversion to support)
+            if close[i] < s3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above Donchian upper band (mean reversion)
-            if close[i] > highest_high[i]:
+            # Short exit: price closes above R3 (mean reversion to resistance)
+            if close[i] > r3_4h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
