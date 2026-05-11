@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_WilliamsAlligator_JawTeeth_1wTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,28 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla and trend
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for Williams Alligator
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 13:
         return np.zeros(n)
     
-    # Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # Williams Alligator components on 1w
+    close_1w = df_1w['close'].values
+    jaw = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    teeth = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    lips = pd.Series(close_1w).ewm(span=5, adjust=False, min_periods=5).mean().values
     
-    # Avoid look-ahead: use previous day's data
-    pp = (high_prev + low_prev + close_prev) / 3
-    r1 = pp + (high_prev - low_prev) * 1.0833
-    s1 = pp - (high_prev - low_prev) * 1.0833
+    # Align to 1d
+    jaw_aligned = align_htf_to_ltf(prices, df_1w, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_1w, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_1w, lips)
     
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # 1w trend: EMA 34
+    ema34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # 1d trend: EMA 34
-    ema34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: 4h volume > 1.5 * 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)
+    # Volume filter: 20-period SMA > 0
+    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,8 +48,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema34_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or
+            np.isnan(lips_aligned[i]) or np.isnan(ema34_1w_aligned[i]) or
+            np.isnan(vol_sma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,30 +59,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close > R1 AND price > EMA34 AND volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema34_aligned[i] and 
-                vol_spike[i]):
+            # Long: Lips > Teeth > Jaw AND price > EMA34 AND volume > SMA
+            if (lips_aligned[i] > teeth_aligned[i] and 
+                teeth_aligned[i] > jaw_aligned[i] and 
+                close[i] > ema34_1w_aligned[i] and
+                volume[i] > vol_sma[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close < S1 AND price < EMA34 AND volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema34_aligned[i] and 
-                  vol_spike[i]):
+            # Short: Lips < Teeth < Jaw AND price < EMA34 AND volume > SMA
+            elif (lips_aligned[i] < teeth_aligned[i] and 
+                  teeth_aligned[i] < jaw_aligned[i] and 
+                  close[i] < ema34_1w_aligned[i] and
+                  volume[i] > vol_sma[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close < S1 OR price < EMA34
-            if (close[i] < s1_aligned[i] or 
-                close[i] < ema34_aligned[i]):
+            # Long exit: Lips <= Teeth OR Teeth <= Jaw OR price < EMA34
+            if (lips_aligned[i] <= teeth_aligned[i] or 
+                teeth_aligned[i] <= jaw_aligned[i] or 
+                close[i] < ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: Close > R1 OR price > EMA34
-            if (close[i] > r1_aligned[i] or 
-                close[i] > ema34_aligned[i]):
+            # Short exit: Lips >= Teeth OR Teeth >= Jaw OR price > EMA34
+            if (lips_aligned[i] >= teeth_aligned[i] or 
+                teeth_aligned[i] >= jaw_aligned[i] or 
+                close[i] > ema34_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
