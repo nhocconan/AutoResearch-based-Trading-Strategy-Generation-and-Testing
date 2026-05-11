@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_12h_Camarilla_Pivot_Volume_Trend
-Hypothesis: Camarilla pivot levels on 12h combined with volume confirmation and trend filter.
-Long when: price breaks above R3 with volume > 20-period average and 12h trend up.
-Short when: price breaks below S3 with volume > 20-period average and 12h trend down.
-Exit when: price returns to mean (central pivot) or trend reverses.
-Camarilla levels work in both bull and bear markets as they adapt to volatility.
-Using 12h pivots on 4h chart reduces noise and improves signal quality.
-Targets 20-40 trades/year (80-160 over 4 years) to minimize fee drag.
+1h_4d_PriceAction_Trend
+Hypothesis: Price action with 4h trend filter and daily volume confirmation.
+- Long when: Price > 4h EMA50, daily volume > 20-day average, and bullish engulfing candle
+- Short when: Price < 4h EMA50, daily volume > 20-day average, and bearish engulfing candle
+- Exit when price crosses 4h EMA50 or volume condition fails
+Uses 4h for trend direction, 1h for precise entry timing, and daily volume for conviction.
+Targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
 """
 
-name = "4h_12h_Camarilla_Pivot_Volume_Trend"
-timeframe = "4h"
+name = "1h_4d_PriceAction_Trend"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -23,96 +22,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # Get 1d data for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
     
-    # --- 12h Camarilla Pivot Levels ---
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # 1h OHLCV
+    close_1h = prices['close'].values
+    open_1h = prices['open'].values
+    high_1h = prices['high'].values
+    low_1h = prices['low'].values
+    volume_1h = prices['volume'].values
     
-    # Calculate pivots for each 12h bar
-    pivot = (high_12h + low_12h + close_12h) / 3.0
-    range_12h = high_12h - low_12h
+    # --- 4h Trend Filter: EMA50 ---
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Camarilla levels
-    R4 = close_12h + range_12h * 1.1 / 2
-    R3 = close_12h + range_12h * 1.1 / 4
-    R2 = close_12h + range_12h * 1.1 / 6
-    R1 = close_12h + range_12h * 1.1 / 12
-    S1 = close_12h - range_12h * 1.1 / 12
-    S2 = close_12h - range_12h * 1.1 / 6
-    S3 = close_12h - range_12h * 1.1 / 4
-    S4 = close_12h - range_12h * 1.1 / 2
+    # --- Daily Volume Filter: 20-day average ---
+    volume_1d = df_1d['volume'].values
+    vol_ma_20_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # Align pivots to 4h timeframe
-    R3_12h = align_htf_to_ltf(prices, df_12h, R3)
-    S3_12h = align_htf_to_ltf(prices, df_12h, S3)
-    pivot_12h = align_htf_to_ltf(prices, df_12h, pivot)
-    
-    # --- 12h Trend Filter: EMA50 ---
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # --- Volume Confirmation: 4h volume > 20-period average ---
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # --- Bullish/Bearish Engulfing Detection ---
+    bullish_engulf = np.zeros(n, dtype=bool)
+    bearish_engulf = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        # Bullish engulf: current green candle engulfs previous red candle
+        if close_1h[i] > open_1h[i] and close_1h[i-1] < open_1h[i-1]:
+            if close_1h[i] >= open_1h[i-1] and open_1h[i] <= close_1h[i-1]:
+                bullish_engulf[i] = True
+        # Bearish engulf: current red candle engulfs previous green candle
+        if close_1h[i] < open_1h[i] and close_1h[i-1] > open_1h[i-1]:
+            if open_1h[i] >= close_1h[i-1] and close_1h[i] <= open_1h[i-1]:
+                bearish_engulf[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50  # for EMA50
+    start_idx = 50  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or 
-            np.isnan(pivot_12h[i]) or np.isnan(ema50_12h_aligned[i]) or
-            np.isnan(vol_ma_20[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 12h trend
-        trend_up = close_4h[i] > ema50_12h_aligned[i]
-        trend_down = close_4h[i] < ema50_12h_aligned[i]
+        # Determine 4h trend
+        trend_up = close_1h[i] > ema50_4h_aligned[i]
+        trend_down = close_1h[i] < ema50_4h_aligned[i]
         
-        # Volume confirmation
-        vol_ok = volume_4h[i] > vol_ma_20[i]
+        # Volume confirmation: current 1h volume > daily 20-day average volume
+        # Scale daily volume to hourly approximation (divide by 24 for 24h in a day)
+        vol_ok = volume_1h[i] > (vol_ma_20_1d_aligned[i] / 24.0)
         
         if position == 0:
-            # Look for entries only in direction of 12h trend with volume
-            if close_4h[i] > R3_12h[i] and trend_up and vol_ok:
-                # Long: price above R3 + 12h uptrend + volume
-                signals[i] = 0.25
+            # Look for entries only in direction of 4h trend with volume and price action
+            if bullish_engulf[i] and trend_up and vol_ok:
+                # Long: bullish engulfing + 4h uptrend + volume
+                signals[i] = 0.20
                 position = 1
-            elif close_4h[i] < S3_12h[i] and trend_down and vol_ok:
-                # Short: price below S3 + 12h downtrend + volume
-                signals[i] = -0.25
+            elif bearish_engulf[i] and trend_down and vol_ok:
+                # Short: bearish engulfing + 4h downtrend + volume
+                signals[i] = -0.20
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price returns to pivot OR trend turns down
-                if close_4h[i] <= pivot_12h[i] or not trend_up:
+                # Exit long: price crosses below 4h EMA50 OR volume fails
+                if not trend_up or not vol_ok:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: price returns to pivot OR trend turns up
-                if close_4h[i] >= pivot_12h[i] or not trend_down:
+                # Exit short: price crosses above 4h EMA50 OR volume fails
+                if not trend_down or not vol_ok:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
