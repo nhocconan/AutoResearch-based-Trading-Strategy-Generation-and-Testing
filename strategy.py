@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_1dTrend_Volume
-Hypothesis: Trade breakouts at daily Camarilla R1/S1 levels on 12h timeframe with 1d trend filter and volume confirmation.
+12h_Camarilla_R1_S1_1wTrend_Volume
+Hypothesis: Trade breakouts at weekly Camarilla R1/S1 levels on 12h timeframe with weekly trend filter and volume confirmation.
 This strategy targets 12-37 trades per year per symbol (50-150 total over 4 years) by using tight entry conditions:
-- Breakout above/below daily Camarilla R1/S1 levels
-- Aligned with daily EMA34 trend
-- Confirmed by volume spike (>1.5x 20-period EMA on 12h)
-Works in bull/bear markets by aligning with the daily trend direction.
+- Breakout above/below weekly Camarilla R1/S1 levels
+- Aligned with weekly EMA34 trend
+- Confirmed by volume spike (>1.8x 20-period EMA on 12h)
+Designed to work in both bull and bear markets by following the weekly trend direction.
 """
 
-name = "12h_Camarilla_R1_S1_1dTrend_Volume"
+name = "12h_Camarilla_R1_S1_1wTrend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,7 +19,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,37 +27,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily OHLC for Camarilla Pivots ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # === Weekly OHLC for Camarilla Pivots ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous day's OHLC
-    ph = df_1d['high'].values
-    pl = df_1d['low'].values
-    pc = df_1d['close'].values
+    # Calculate Camarilla levels from previous week's OHLC
+    pw = df_1w['high'].values
+    pl = df_1w['low'].values
+    pc = df_1w['close'].values
     
     # Camarilla R1/S1 (most significant levels for breakout)
-    camarilla_r1 = pc + (ph - pl) * 1.1 / 2
-    camarilla_s1 = pc - (ph - pl) * 1.1 / 2
+    camarilla_r1 = pc + (pw - pl) * 1.1 / 2
+    camarilla_s1 = pc - (pw - pl) * 1.1 / 2
     
     # Align to 12h timeframe
-    r1_12h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_12h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    r1_12h = align_htf_to_ltf(prices, df_1w, camarilla_r1)
+    s1_12h = align_htf_to_ltf(prices, df_1w, camarilla_s1)
     
-    # === Daily Trend Filter (EMA34) ===
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === Weekly Trend Filter (EMA34) ===
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # === Volume Filter (1.5x 20-period EMA on 12h) ===
+    # === Volume Filter (1.8x 20-period EMA on 12h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    volume_ok = volume > vol_ema20 * 1.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers daily calculations)
-    start_idx = 40
+    # Start after warmup (covers weekly calculations)
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
