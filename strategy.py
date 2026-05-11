@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2
-Hypothesis: Price breaking above R3 or below S3 with volume confirmation and 1d EMA50 trend filter.
-Exits on opposite-side touch (S1/R1) to avoid whipsaw. Targets 20-40 trades/year.
+6h_1d_Pivot_Zone_Fade_With_Volume
+Hypothesis: Fade price rejection at daily pivot zones (R1/S1, R2/S2) with volume confirmation.
+- Long when: price rejects below S1 (drops then closes back above S1) with volume > 20-period average
+- Short when: price rejects above R1 (rises then closes back below R1) with volume > 20-period average
+- Uses 1d trend filter (EMA50) to avoid counter-trend trades in strong trends
+- Targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag
+- Works in both bull/bear: mean reversion in ranges, avoids strong trends via filter
 """
 
-name = "4h_1d_Camarilla_Pivot_Breakout_Volume_Trend_v2"
-timeframe = "4h"
+name = "6h_1d_Pivot_Zone_Fade_With_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,51 +27,48 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
-    close_4h = prices['close'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
-    volume_4h = prices['volume'].values
+    # 6h OHLCV
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    volume_6h = prices['volume'].values
     
     # --- 1d Trend Filter: EMA50 ---
     close_1d = df_1d['close'].values
     ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- Camarilla Pivots from 1d (previous day) ---
+    # --- Daily Pivot Levels (Standard) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivots from previous day's OHLC
-    camarilla_high = np.full_like(close_1d, np.nan)
-    camarilla_low = np.full_like(close_1d, np.nan)
-    camarilla_close = np.full_like(close_1d, np.nan)
+    # Calculate pivots from previous day's data
+    pivot_high = np.full_like(close_1d, np.nan)
+    pivot_low = np.full_like(close_1d, np.nan)
+    pivot_close = np.full_like(close_1d, np.nan)
     
     for i in range(1, len(close_1d)):
-        camarilla_high[i] = high_1d[i-1]
-        camarilla_low[i] = low_1d[i-1]
-        camarilla_close[i] = close_1d[i-1]
+        # Use previous day's OHLC to calculate today's pivots
+        pivot_high[i] = high_1d[i-1]
+        pivot_low[i] = low_1d[i-1]
+        pivot_close[i] = close_1d[i-1]
     
-    # Calculate Camarilla levels
-    R4 = camarilla_close + ((camarilla_high - camarilla_low) * 1.5000)
-    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
-    R2 = camarilla_close + ((camarilla_high - camarilla_low) * 1.1666)
-    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
-    PP = camarilla_close
-    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
-    S2 = camarilla_close - ((camarilla_high - camarilla_low) * 1.1666)
-    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
-    S4 = camarilla_close - ((camarilla_high - camarilla_low) * 1.5000)
+    # Standard pivot point calculation
+    PP = (pivot_high + pivot_low + pivot_close) / 3.0
+    R1 = 2 * PP - pivot_low
+    S1 = 2 * PP - pivot_high
+    R2 = PP + (pivot_high - pivot_low)
+    S2 = PP - (pivot_high - pivot_low)
     
-    # Align pivots to 4h timeframe
-    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
-    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
-    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
-    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    # Align pivot levels to 6h timeframe
+    R1_6h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_6h = align_htf_to_ltf(prices, df_1d, S1)
+    R2_6h = align_htf_to_ltf(prices, df_1d, R2)
+    S2_6h = align_htf_to_ltf(prices, df_1d, S2)
     
-    # --- Volume Confirmation: 4h volume > 20-period average ---
-    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
+    # --- Volume Confirmation: 6h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,43 +78,59 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
-            np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or
+        if (np.isnan(R1_6h[i]) or np.isnan(S1_6h[i]) or 
+            np.isnan(R2_6h[i]) or np.isnan(S2_6h[i]) or
             np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1d trend
-        trend_up = close_4h[i] > ema50_1d_aligned[i]
-        trend_down = close_4h[i] < ema50_1d_aligned[i]
+        # Determine 1d trend (avoid counter-trend trades in strong trends)
+        trend_up = close_6h[i] > ema50_1d_aligned[i]
+        trend_down = close_6h[i] < ema50_1d_aligned[i]
         
         # Volume confirmation
-        vol_ok = volume_4h[i] > vol_ma_20[i]
+        vol_ok = volume_6h[i] > vol_ma_20[i]
         
+        # Rejection signals: price moves to level then closes back inside
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume
-            if close_4h[i] > R3_4h[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + 1d uptrend + volume
-                signals[i] = 0.25
-                position = 1
-            elif close_4h[i] < S3_4h[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + 1d downtrend + volume
-                signals[i] = -0.25
-                position = -1
+            # Long setup: price tested S1 support and bounced
+            # Condition: low touched or went below S1, but close is back above S1
+            tested_S1 = low_6h[i] <= S1_6h[i]
+            closed_above_S1 = close_6h[i] > S1_6h[i]
+            rejection_long = tested_S1 and closed_above_S1
+            
+            # Short setup: price tested R1 resistance and rejected
+            # Condition: high touched or went above R1, but close is back below R1
+            tested_R1 = high_6h[i] >= R1_6h[i]
+            closed_below_R1 = close_6h[i] < R1_6h[i]
+            rejection_short = tested_R1 and closed_below_R1
+            
+            # Only take rejection trades in direction of 1d trend (or if ranging)
+            # In strong uptrend: only take long rejections at S1
+            # In strong downtrend: only take short rejections at R1
+            # In ranging (no clear trend): take both
+            if rejection_long and vol_ok:
+                if trend_up or not (trend_up or trend_down):  # uptrend or ranging
+                    signals[i] = 0.25
+                    position = 1
+            elif rejection_short and vol_ok:
+                if trend_down or not (trend_up or trend_down):  # downtrend or ranging
+                    signals[i] = -0.25
+                    position = -1
         else:
-            # Exit conditions
+            # Exit conditions: return to opposite S2/R2 level or trend reversal
             if position == 1:
-                # Exit long: price returns to S1 (opposite side)
-                if close_4h[i] <= S1_4h[i]:
+                # Exit long: price reaches S2 support or trend turns down
+                if close_6h[i] <= S2_6h[i] or (not trend_up and close_6h[i] < ema50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to R1 (opposite side)
-                if close_4h[i] >= R1_4h[i]:
+                # Exit short: price reaches R2 resistance or trend turns up
+                if close_6h[i] >= R2_6h[i] or (not trend_down and close_6h[i] > ema50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
