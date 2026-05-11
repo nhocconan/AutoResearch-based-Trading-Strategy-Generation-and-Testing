@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "6h_ElderRay_BullBearPower_1dTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels and trend
+    # Get 1D data for Elder Ray calculation and trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -26,23 +26,18 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels
-    # R3 = Close + (High - Low) * 1.1 / 4
-    # S3 = Close - (High - Low) * 1.1 / 4
-    R3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
-    S3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # Elder Ray components: Bull Power = High - EMA, Bear Power = Low - EMA
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
+    bull_power = high_1d - ema13_1d
+    bear_power = low_1d - ema13_1d
     
-    # Align to 12h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
+    # Align Elder Ray to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
-    # Daily EMA34 for trend filter
+    # 1D trend filter: EMA34
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 2.0 x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,8 +47,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,28 +57,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3, uptrend (price > EMA34), volume spike
-            if (close[i] > R3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume_spike[i]):
+            # Long entry: Bull Power > 0 (bulls in control) and price above EMA34 (uptrend)
+            if bull_power_aligned[i] > 0 and close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3, downtrend (price < EMA34), volume spike
-            elif (close[i] < S3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume_spike[i]):
+            # Short entry: Bear Power < 0 (bears in control) and price below EMA34 (downtrend)
+            elif bear_power_aligned[i] < 0 and close[i] < ema34_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S3 (opposite level)
-            if close[i] < S3_aligned[i]:
+            # Exit long: Bear Power turns negative (bears take over)
+            if bear_power_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R3 (opposite level)
-            if close[i] > R3_aligned[i]:
+            # Exit short: Bull Power turns positive (bulls take over)
+            if bull_power_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
