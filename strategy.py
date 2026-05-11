@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_MonthlyVWAP_Deviation_1dTrend_Volume
-Hypothesis: Price deviating from monthly VWAP (1-month rolling VWAP) indicates overextension, with mean reversion trades taken when price returns toward VWAP, filtered by 1d EMA34 trend and volume spike. Monthly VWAP adapts to longer-term value area, providing dynamic support/resistance. Works in bull (buy dips to VWAP in uptrend) and bear (sell rallies to VWAP in downtrend). Target: 15-30 trades/year to minimize fee drag.
+6h_VolatilityBreakout_1dTrend_Volume
+Hypothesis: Price breaks beyond ATR-based volatility bands (mean ± 2*ATR) on 6h, filtered by 1d EMA34 trend and volume spike. Unlike fixed-percentage bands, ATR adapts to volatility, capturing breakouts in both low and high vol regimes. Trend filter ensures alignment with longer-term momentum. Volume confirms conviction. Designed for 6-12 trades/year per symbol to minimize fee drag while capturing strong moves.
 """
 
-name = "6h_MonthlyVWAP_Deviation_1dTrend_Volume"
+name = "6h_VolatilityBreakout_1dTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -33,22 +33,23 @@ def generate_signals(prices):
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- Monthly VWAP (approx 20 days * 4 periods per day = 80 periods for 6h) ---
-    # Typical price
-    typical_price = (high_6h + low_6h + close_6h) / 3.0
-    # VWAP components
-    pv = typical_price * volume_6h
-    # Cumulative sums for VWAP
-    cum_pv = np.nancumsum(pv)
-    cum_vol = np.nancumsum(volume_6h)
-    # Avoid division by zero
-    vwap = np.divide(cum_pv, cum_vol, out=np.full_like(cum_pv, np.nan), where=cum_vol!=0)
-    # Reset VWAP every ~80 periods (approx 1 month of 6h data) to keep it rolling
-    # Use rolling window of 80 for practical monthly VWAP
-    vwap_80 = pd.Series(vwap).rolling(window=80, min_periods=20).mean().values
+    # --- 6h Volatility Bands (mean ± 2*ATR) ---
+    # Use EMA20 as mean for smoother baseline
+    ema20_6h = pd.Series(close_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # --- Volume Filter: spike above 1.5x median of last 30 periods ---
-    vol_median = pd.Series(volume_6h).rolling(window=30, min_processes=10).median().values
+    # True Range for ATR
+    tr1 = np.abs(high_6h - low_6h)
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr_6h = pd.Series(tr).rolling(window=10, min_periods=10).mean().values  # ATR(10)
+    
+    upper_band = ema20_6h + 2.0 * atr_6h
+    lower_band = ema20_6h - 2.0 * atr_6h
+    
+    # --- Volume Filter: spike above 1.5x median of last 50 periods ---
+    vol_median = pd.Series(volume_6h).rolling(window=50, min_periods=20).median().values
     vol_threshold = vol_median * 1.5
     
     signals = np.zeros(n)
@@ -56,18 +57,18 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 80  # for VWAP calculation
+    start_idx = 50  # for EMA20 and EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vwap_80[i]) or np.isnan(ema34_1d_aligned[i]) or 
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr_6h[i])):
             if position != 0:
                 # Check stoploss
-                if position == 1 and close_6h[i] <= entry_price - 1.5 * (vwap_80[i] - low_6h[i]):
+                if position == 1 and close_6h[i] <= entry_price - 2.0 * atr_6h[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] >= entry_price + 1.5 * (high_6h[i] - vwap_80[i]):
+                elif position == -1 and close_6h[i] >= entry_price + 2.0 * atr_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -81,41 +82,38 @@ def generate_signals(prices):
         # Volume filter: spike above 1.5x median
         vol_ok = volume_6h[i] > vol_threshold[i]
         
-        # Distance from VWAP as percentage
-        vwap_dist_pct = (close_6h[i] - vwap_80[i]) / vwap_80[i]
-        
         if position == 0:
-            # Look for mean reversion entries: price extended beyond VWAP, counter to trend
-            # Long when price significantly below VWAP in uptrend with volume
-            if vwap_dist_pct < -0.015 and trend_up and vol_ok:  # 1.5% below VWAP
+            # Look for entries only in direction of 1d trend with volume spike
+            if close_6h[i] > upper_band[i] and trend_up and vol_ok:
+                # Long: price breaks above upper band + 1d uptrend + volume spike
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_6h[i]
-            # Short when price significantly above VWAP in downtrend with volume
-            elif vwap_dist_pct > 0.015 and trend_down and vol_ok:  # 1.5% above VWAP
+            elif close_6h[i] < lower_band[i] and trend_down and vol_ok:
+                # Short: price breaks below lower band + 1d downtrend + volume spike
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_6h[i]
         else:
-            # Exit when price returns to VWAP or stoploss
+            # Update stoploss and check exits
             if position == 1:
-                # Stoploss: 1.5x the deviation that triggered entry
-                if close_6h[i] <= entry_price - 1.5 * (vwap_80[i] - low_6h[i]):
+                # Stoploss
+                if close_6h[i] <= entry_price - 2.0 * atr_6h[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price returns to VWAP (within 0.5%)
-                elif abs(close_6h[i] - vwap_80[i]) / vwap_80[i] < 0.005:
+                # Exit: price returns to or below mean (EMA20)
+                elif close_6h[i] <= ema20_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Stoploss: 1.5x the deviation that triggered entry
-                if close_6h[i] >= entry_price + 1.5 * (high_6h[i] - vwap_80[i]):
+                # Stoploss
+                if close_6h[i] >= entry_price + 2.0 * atr_6h[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price returns to VWAP (within 0.5%)
-                elif abs(close_6h[i] - vwap_80[i]) / vwap_80[i] < 0.005:
+                # Exit: price returns to or above mean (EMA20)
+                elif close_6h[i] >= ema20_6h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
