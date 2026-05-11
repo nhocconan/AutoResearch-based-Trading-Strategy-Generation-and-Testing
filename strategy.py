@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-4H_Keltner_Breakout_1dATRTrend_Volume
-Hypothesis: Keltner Channels (20,2.0) on 4h capture volatility breakouts.
-Trend filter: 1d ATR(14) normalized by price - rising ATR indicates strengthening trend.
-Volume confirmation: 20-period volume EMA spike.
-In bull markets, buy upper band breakouts with rising ATR trend.
-In bear markets, sell lower band breakouts with rising ATR trend.
-Keltner adapts to volatility better than fixed bands, reducing false breakouts in ranging markets.
-Target: 20-40 trades/year, low turnover to minimize fee drag.
+4H_RSI_Extremes_12hTrend_VolumeFilter
+Hypothesis: RSI extremes (overbought/oversold) combined with 12h trend filter and volume confirmation work in both bull and bear markets.
+In bull markets, buy when RSI < 30 (oversold) with 12h uptrend and volume spike.
+In bear markets, sell when RSI > 70 (overbought) with 12h downtrend and volume spike.
+Volume filter ensures institutional participation. 4h timeframe balances trade frequency and cost.
+Target: 25-40 trades/year to stay under 100 total trades over 4 years, minimizing fee drag.
 """
 
-name = "4H_Keltner_Breakout_1dATRTrend_Volume"
+name = "4H_RSI_Extremes_12hTrend_VolumeFilter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,38 +26,25 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for ATR trend filter
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 12h data ONCE for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend - using close prices
+    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
     
-    # Calculate ATR(14) on daily
-    tr1 = np.maximum(high_1d[1:], close_1d[:-1]) - np.minimum(low_1d[1:], close_1d[:-1])
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # align with original index
-    atr14 = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
+    # RSI calculation on 4h closes
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    # Wilder's smoothing: alpha = 1/period
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Normalize ATR by price to get trend strength (rising ATR% = strengthening trend)
-    atr_pct = atr14 / close_1d
-    atr_pct_ma = pd.Series(atr_pct).ewm(span=10, adjust=False, min_periods=10).mean().values
-    atr_trend_up = atr_pct_ma > np.roll(atr_pct_ma, 1)  # rising ATR%
-    atr_trend_down = atr_pct_ma < np.roll(atr_pct_ma, 1)  # falling ATR%
-    
-    # Align ATR trend to 4h
-    atr_trend_up_4h = align_htf_to_ltf(prices, df_1d, atr_trend_up)
-    atr_trend_down_4h = align_htf_to_ltf(prices, df_1d, atr_trend_down)
-    
-    # Keltner Channel (20,2.0) on 4h
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    atr_4h = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))).ewm(span=10, adjust=False, min_periods=10).mean().values
-    upper_keltner = ema20 + 2.0 * atr_4h
-    lower_keltner = ema20 - 2.0 * atr_4h
-    
-    # Volume filter: 20-period EMA spike
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Volume filter: 20-period EMA for spike detection
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
     # Fixed position size
@@ -73,9 +58,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema20[i]) or np.isnan(upper_keltner[i]) or 
-            np.isnan(lower_keltner[i]) or np.isnan(atr_trend_up_4h[i]) or 
-            np.isnan(atr_trend_down_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -85,28 +68,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        breakout_up = close[i] > upper_keltner[i]
-        breakout_down = close[i] < lower_keltner[i]
+        price_above_ema12h = close[i] > ema50_12h_aligned[i]
+        price_below_ema12h = close[i] < ema50_12h_aligned[i]
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         if position == 0:
-            # Long: Break above upper Keltner + rising ATR trend + volume spike
-            if breakout_up and atr_trend_up_4h[i] and volume_ok[i]:
+            # Long: RSI oversold + above 12h EMA50 + volume spike
+            if rsi_oversold and price_above_ema12h and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Break below lower Keltner + falling ATR trend + volume spike
-            elif breakout_down and atr_trend_down_4h[i] and volume_ok[i]:
+            # Short: RSI overbought + below 12h EMA50 + volume spike
+            elif rsi_overbought and price_below_ema12h and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit: Return to middle (EMA20) or ATR trend reverses
+            # Exit conditions - RSI mean reversion or trend change
             if position == 1:
-                if close[i] < ema20[i] or not atr_trend_up_4h[i]:
+                # Exit: RSI returns to neutral (>=50) OR trend turns bearish
+                if rsi[i] >= 50 or close[i] < ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > ema20[i] or not atr_trend_down_4h[i]:
+                # Exit: RSI returns to neutral (<=50) OR trend turns bullish
+                if rsi[i] <= 50 or close[i] > ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
