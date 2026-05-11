@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_7x14_RSIFailure_Pullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,46 +17,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # RSI(7) - fast momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_series = pd.Series(gain)
+    loss_series = pd.Series(loss)
+    avg_gain = gain_series.ewm(alpha=1/7, adjust=False, min_periods=7).mean()
+    avg_loss = loss_series.ewm(alpha=1/7, adjust=False, min_periods=7).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi7 = (100 - (100 / (1 + rs))).values
+    
+    # RSI(14) - slower momentum for confirmation
+    gain14 = gain_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    loss14 = loss_series.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs14 = gain14 / (loss14 + 1e-10)
+    rsi14 = (100 - (100 / (1 + rs14))).values
+    
+    # 14-period EMA for pullback context
+    ema14 = pd.Series(close).ewm(span=14, adjust=False, min_periods=14).mean().values
+    
+    # Weekly trend filter (1w SMA 50)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
-    ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
-    trend_4h_up = close > ema_20_4h_aligned
+    close_1w = df_1w['close'].values
+    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    weekly_uptrend = close > sma50_1w_aligned
     
-    # 1d volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    volume_ma20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    volume_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma20_1d)
-    volume_filter = volume > 1.5 * volume_ma20_1d_aligned
-    
-    # Camarilla levels (from previous day)
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
-    
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
+    # Volume filter (20-period average)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * volume_ma20
     
     signals = np.zeros(n)
     position = 0
     
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    
-    start_idx = 20
+    start_idx = max(14, 20)  # ensure indicators ready
     
     for i in range(start_idx, n):
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if np.isnan(trend_4h_up[i]) or np.isnan(volume_filter[i]) or np.isnan(R1[i]) or np.isnan(S1[i]):
+        if np.isnan(rsi7[i]) or np.isnan(rsi14[i]) or np.isnan(ema14[i]) or np.isnan(weekly_uptrend[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +64,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0 and in_session:
-            # Long: price > R1, 4h uptrend, volume spike
-            if close[i] > R1[i] and trend_4h_up[i] and volume_filter[i]:
-                signals[i] = 0.20
+        if position == 0:
+            # Long: RSI7 < 30 (oversold) AND RSI14 < 50 (weak momentum) AND price > EMA14 (pullback in uptrend) AND weekly uptrend AND volume
+            if rsi7[i] < 30 and rsi14[i] < 50 and close[i] > ema14[i] and weekly_uptrend[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price < S1, 4h downtrend, volume spike
-            elif close[i] < S1[i] and not trend_4h_up[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: RSI7 > 70 (overbought) AND RSI14 > 50 (strong momentum) AND price < EMA14 (pullback in downtrend) AND weekly downtrend AND volume
+            elif rsi7[i] > 70 and rsi14[i] > 50 and close[i] < ema14[i] and not weekly_uptrend[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price < S1 or 4h downtrend
-            if close[i] < S1[i] or not trend_4h_up[i]:
+            # Exit long: RSI7 > 50 (momentum recovered) OR weekly trend turns down
+            if rsi7[i] > 50 or not weekly_uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price > R1 or 4h uptrend
-            if close[i] > R1[i] or trend_4h_up[i]:
+            # Exit short: RSI7 < 50 (momentum weakened) OR weekly trend turns up
+            if rsi7[i] < 50 or weekly_uptrend[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
