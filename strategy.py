@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -25,19 +25,19 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # 4h Camarilla R1/S1
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # 12h Camarilla R1/S1
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    r1_4h = close_4h + (range_4h * 1.0833)
-    s1_4h = close_4h - (range_4h * 1.0833)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    pivot_12h = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r1_12h = close_12h + (range_12h * 1.0833)
+    s1_12h = close_12h - (range_12h * 1.0833)
+    r1_12h_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
+    s1_12h_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
     
     # Volume spike: current volume > 2.0 x 20-period average
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -49,7 +49,7 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(r1_4h_aligned[i]) or np.isnan(s1_4h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(r1_12h_aligned[i]) or np.isnan(s1_12h_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -59,23 +59,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Close breaks above R1, above 1d EMA34, volume spike
-            if close[i] > r1_4h_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
+            if close[i] > r1_12h_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Close breaks below S1, below 1d EMA34, volume spike
-            elif close[i] < s1_4h_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
+            elif close[i] < s1_12h_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: Close below S1 or below 1d EMA34
-            if close[i] < s1_4h_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            if close[i] < s1_12h_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: Close above R1 or above 1d EMA34
-            if close[i] > r1_4h_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            if close[i] > r1_12h_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
