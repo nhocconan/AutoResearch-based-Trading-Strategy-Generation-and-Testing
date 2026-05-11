@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_RSI_Overbought"
-timeframe = "1d"
+name = "6h_ElderRay_BullBearPower_1dTrend_Filter"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,40 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA trend on 1d
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=10))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    er = np.zeros_like(change)
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
-    er = np.concatenate([np.full(10, np.nan), er])
+    # Get 1d data for Elder Ray and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 13:
+        return np.zeros(n)
     
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2
-    kama = np.full_like(close, np.nan)
-    kama[9] = close[9]  # seed
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    for i in range(10, n):
-        if not np.isnan(sc[i]) and not np.isnan(kama[i-1]):
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate 13-period EMA for 1d (used for Elder Ray and trend)
+    ema13_1d = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
     
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Elder Ray components: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power_1d = high_1d - ema13_1d
+    bear_power_1d = low_1d - ema13_1d
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    # Align Elder Ray components to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
+    ema13_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
+    
+    # Volume filter: current volume > 1.3x 20-period average
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (1.3 * vol_ma_20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # ensure KAMA and RSI ready
+    # Start after indicators are ready
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(kama[i]) or np.isnan(rsi[i]):
+        # Skip if 1d EMA13 data is not ready
+        if np.isnan(ema13_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +59,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA and RSI not overbought
-            if close[i] > kama[i] and rsi[i] < 70:
+            # Enter long: Bull Power > 0 and price above 1d EMA13 with volume
+            if volume_filter[i] and bull_power_aligned[i] > 0 and close[i] > ema13_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA and RSI not oversold
-            elif close[i] < kama[i] and rsi[i] > 30:
+            # Enter short: Bear Power < 0 and price below 1d EMA13 with volume
+            elif volume_filter[i] and bear_power_aligned[i] < 0 and close[i] < ema13_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA or RSI overbought
-            if close[i] < kama[i] or rsi[i] >= 70:
+            # Exit long: Bear Power turns negative (momentum shift)
+            if bear_power_aligned[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA or RSI oversold
-            if close[i] > kama[i] or rsi[i] <= 30:
+            # Exit short: Bull Power turns positive (momentum shift)
+            if bull_power_aligned[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
