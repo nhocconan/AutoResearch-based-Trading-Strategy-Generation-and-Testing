@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "1d_Camarilla_R3S3_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,22 +17,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for trend filter (1d EMA34) and Camarilla levels (R1, S1)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for trend filter (weekly EMA100)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 100:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema100_1w = pd.Series(close_1w).ewm(span=100, adjust=False, min_periods=100).mean().values
+    trend_up_1w = close_1w > ema100_1w
+    
+    # Get daily data for Camarilla levels (R3, S3)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    
-    # Calculate Camarilla levels (R1, S1) from previous day
-    R1 = np.full(len(high_1d), np.nan)
-    S1 = np.full(len(high_1d), np.nan)
+    # Calculate Camarilla levels (R3, S3) from previous day
+    R3 = np.full(len(high_1d), np.nan)
+    S3 = np.full(len(high_1d), np.nan)
     
     for i in range(1, len(high_1d)):
         prev_high = high_1d[i-1]
@@ -40,31 +45,13 @@ def generate_signals(prices):
         prev_close = close_1d[i-1]
         range_val = prev_high - prev_low
         if range_val > 0:
-            R1[i] = prev_close + range_val * 1.1 / 6
-            S1[i] = prev_close - range_val * 1.1 / 6
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Get weekly data for volatility filter (weekly ATR14)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly ATR14
-    tr1 = high_1w[1:] - low_1w[1:]
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr14_1w = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Align indicators to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    atr14_1w_aligned = align_htf_to_ltf(prices, df_1w, atr14_1w)
+    # Align indicators to daily timeframe
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
     
     # Volume moving average (20-period) for confirmation
     vol_ma20 = np.full(n, np.nan)
@@ -78,14 +65,13 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 34, 14)  # Need enough data for indicators
+    start_idx = max(20, 100)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or
-            np.isnan(atr14_1w_aligned[i]) or
+        if (np.isnan(R3_aligned[i]) or 
+            np.isnan(S3_aligned[i]) or
+            np.isnan(trend_up_1w_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -95,30 +81,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + volume confirmation + volatility filter
-            if (close[i] > R1_aligned[i] and 
-                trend_up_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i] and
-                atr14_1w_aligned[i] > 0):  # Ensure volatility is present
+            # Long: price breaks above R3 + weekly uptrend + volume confirmation
+            if (close[i] > R3_aligned[i] and 
+                trend_up_1w_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend + volume confirmation + volatility filter
-            elif (close[i] < S1_aligned[i] and 
-                  not trend_up_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i] and
-                  atr14_1w_aligned[i] > 0):
+            # Short: price breaks below S3 + weekly downtrend + volume confirmation
+            elif (close[i] < S3_aligned[i] and 
+                  not trend_up_1w_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S1 or trend changes
-            if (close[i] < S1_aligned[i] or not trend_up_1d_aligned[i]):
+            # Long exit: price breaks below S3 or weekly trend changes
+            if (close[i] < S3_aligned[i] or not trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R1 or trend changes
-            if (close[i] > R1_aligned[i] or trend_up_1d_aligned[i]):
+            # Short exit: price breaks above R3 or weekly trend changes
+            if (close[i] > R3_aligned[i] or trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
