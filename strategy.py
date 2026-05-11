@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolume"
-timeframe = "1h"
+name = "6h_WeeklyPivot_Trend_DailyVolume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,47 +17,40 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for pivot points
+    df_weekly = get_htf_data(prices, '1w')
+    if len(df_weekly) < 10:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get daily data for trend filter and volume
+    df_daily = get_htf_data(prices, '1d')
+    if len(df_daily) < 50:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels from previous 1d bar's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly pivot points from previous weekly bar
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Previous 1d bar's range
-    range_1d = high_1d - low_1d
+    weekly_pivot = (high_weekly + low_weekly + close_weekly) / 3.0
+    weekly_range = high_weekly - low_weekly
     
-    # Calculate Camarilla R1 and S1 levels (tighter than R3/S3 for fewer trades)
-    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
-    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
+    # Weekly resistance and support levels (R1, S1)
+    weekly_r1 = 2 * weekly_pivot - low_weekly
+    weekly_s1 = 2 * weekly_pivot - high_weekly
     
-    # Align Camarilla levels to 1h timeframe (using previous 1d bar's values)
-    r1_1h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_1h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    # Align weekly levels to 6h timeframe (using previous weekly bar's values)
+    r1_6h = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    s1_6h = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
-    # 4h EMA50 for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Daily EMA50 for trend filter
+    close_daily = df_daily['close'].values
+    ema_50_daily = pd.Series(close_daily).ewm(span=50, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_daily, ema_50_daily)
     
-    # 1d volume filter: current volume > 1.5x 20-period average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = vol_1d / vol_ma_1d
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
-    volume_filter = vol_ratio_1d_aligned > 1.5
-    
-    # Session filter: 08-20 UTC (only trade during active hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Volume filter: current volume > 1.5x 50-period average
+    vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,17 +60,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_1h[i]) or np.isnan(s1_1h[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(volume_filter[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_filter[i]:
+        if (np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,27 +70,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above 4h EMA50 (uptrend) AND volume spike
-            if close[i] > r1_1h[i] and close[i] > ema_4h_aligned[i] and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: price breaks above weekly R1 AND above daily EMA50 (uptrend) AND volume spike
+            if close[i] > r1_6h[i] and close[i] > ema_50_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND below 4h EMA50 (downtrend) AND volume spike
-            elif close[i] < s1_1h[i] and close[i] < ema_4h_aligned[i] and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: price breaks below weekly S1 AND below daily EMA50 (downtrend) AND volume spike
+            elif close[i] < s1_6h[i] and close[i] < ema_50_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below 4h EMA50 (trend change)
-            if close[i] < s1_1h[i] or close[i] < ema_4h_aligned[i]:
+            # Long exit: price falls below weekly S1 OR below daily EMA50 (trend change)
+            if close[i] < s1_6h[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above 4h EMA50 (trend change)
-            if close[i] > r1_1h[i] or close[i] > ema_4h_aligned[i]:
+            # Short exit: price rises above weekly R1 OR above daily EMA50 (trend change)
+            if close[i] > r1_6h[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
