@@ -1,4 +1,3 @@
-#3/17/2025, 3:40:13 AM hypothesis: This strategy combines the proven 4h Camarilla R1/S1 breakout with a 1-day EMA34 trend filter and volume spike confirmation, which has shown strong performance in backtests (e.g., 4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn achieved test Sharpe 1.901 on SOLUSDT). The addition of the 1-day EMA34 provides a robust trend filter that works in both bull and bear markets by ensuring trades are taken only in the direction of the higher timeframe trend, while the volume spike adds confirmation of institutional interest. The Camarilla levels provide precise entry points based on institutional support/resistance levels. The strategy uses discrete position sizing (0.25) to minimize fee churn and includes explicit exit conditions to manage risk. By focusing on the 4h timeframe with 1h trend and volume filters, it aims to capture meaningful moves while avoiding overtrading.
 #!/usr/bin/env python3
 name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_Trend_Volume"
 timeframe = "4h"
@@ -18,12 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA34 trend filter
+    # 1d data for EMA34 trend filter and Camarilla pivot levels
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 34:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
     # Calculate EMA34 on 1d
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
@@ -31,12 +32,8 @@ def generate_signals(prices):
     # Align 1d EMA34 to 4h
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # 1d data for Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1, S1 (using previous day's range)
+    # Calculate Camarilla levels from previous 1d bar
+    # Using previous day's range (yesterday's high/low)
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
