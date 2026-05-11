@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_VolumeS_Enhanced"
 timeframe = "4h"
 leverage = 1.0
 
@@ -47,6 +47,15 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > (vol_ma * 2.0)
     
+    # Additional filter: require volatility filter - ATR > 0.5 * ATR(50)
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    volatility_filter = atr > (atr_ma * 0.5)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
@@ -56,7 +65,8 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is invalid
         if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i]) or 
+            np.isnan(volatility_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,12 +75,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND above 1d EMA34 (uptrend) AND volume spike
-            if close[i] > r3_4h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
+            # Long: price breaks above R3 AND above 1d EMA34 (uptrend) AND volume spike AND volatility present
+            if close[i] > r3_4h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i] and volatility_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND below 1d EMA34 (downtrend) AND volume spike
-            elif close[i] < s3_4h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
+            # Short: price breaks below S3 AND below 1d EMA34 (downtrend) AND volume spike AND volatility present
+            elif close[i] < s3_4h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i] and volatility_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
