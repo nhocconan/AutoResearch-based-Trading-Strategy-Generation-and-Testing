@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_1w_1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1
-Hypothesis: Combine weekly trend filter with daily Camarilla R3/S3 breakouts on 12h timeframe.
-Weekly trend ensures alignment with major market direction (bull/bear). Daily Camarilla levels provide
-intraday support/resistance. Volume spike confirms institutional participation. Designed for fewer trades
-(12-37/year) to minimize fee drag while capturing strong moves in both bull and bear markets.
+4h_Vortex_VolumeSpike_Trend_v1
+Hypothesis: Vortex Indicator (VI) detects trend direction, with VI+ > VI- indicating uptrend and VI- > VI+ indicating downtrend. Combined with volume spike confirmation and price position relative to 1-day EMA50 for trend strength. Works in bull markets (VI+ cross above VI- in uptrend) and bear markets (VI- cross above VI+ in downtrend). Volume spike confirms institutional interest. Target: 20-50 trades per year on 4h timeframe.
 """
 
-name = "12h_1w_1d_Camarilla_R3_S3_Breakout_1wTrend_VolumeSpike_v1"
-timeframe = "12h"
+name = "4h_Vortex_VolumeSpike_Trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,17 +22,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W Data for Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    
-    close_1w = df_1w['close'].values
-    # Weekly EMA50 for trend filter
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === 1D Data for Camarilla Pivots ===
+    # === 1D Data for Trend Filter and Vortex Calculation ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
@@ -44,22 +31,35 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
+    # True Range for Vortex calculation
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First day
     
-    # Camarilla levels: R3/S3 = C ± (H-L) * 1.1/2
-    rang = prev_high - prev_low
-    r3 = prev_close + rang * 1.1 / 2
-    s3 = prev_close - rang * 1.1 / 2
+    # Vortex Indicator components
+    vm_plus = np.abs(high_1d - np.roll(low_1d, 1))
+    vm_minus = np.abs(low_1d - np.roll(high_1d, 1))
+    vm_plus[0] = np.abs(high_1d[0] - low_1d[0])  # First day
+    vm_minus[0] = np.abs(low_1d[0] - high_1d[0])  # First day
     
-    # Align 1D indicators to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Vortex Indicator (VI) - 14 period
+    period = 14
+    sum_vm_plus = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
+    sum_vm_minus = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
+    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    vi_plus = sum_vm_plus / sum_tr
+    vi_minus = sum_vm_minus / sum_tr
+    
+    # Trend filter: EMA50 on 1d close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1D indicators to 4h timeframe
+    vi_plus_aligned = align_htf_to_ltf(prices, df_1d, vi_plus)
+    vi_minus_aligned = align_htf_to_ltf(prices, df_1d, vi_minus)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume spike: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,13 +69,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(vi_plus_aligned[i]) or 
+            np.isnan(vi_minus_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,24 +84,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND weekly uptrend (close > weekly EMA50) AND volume spike
-            if close[i] > r3_aligned[i] and close[i] > ema_50_1w_aligned[i] and volume_spike[i]:
+            # Long: VI+ crosses above VI- AND price above EMA50 AND volume spike
+            if (vi_plus_aligned[i] > vi_minus_aligned[i] and 
+                vi_plus_aligned[i-1] <= vi_minus_aligned[i-1] and
+                close[i] > ema_50_aligned[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND weekly downtrend (close < weekly EMA50) AND volume spike
-            elif close[i] < s3_aligned[i] and close[i] < ema_50_1w_aligned[i] and volume_spike[i]:
+            # Short: VI- crosses above VI+ AND price below EMA50 AND volume spike
+            elif (vi_minus_aligned[i] > vi_plus_aligned[i] and 
+                  vi_minus_aligned[i-1] <= vi_plus_aligned[i-1] and
+                  close[i] < ema_50_aligned[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below weekly EMA50 OR reverses below R3
-            if close[i] < ema_50_1w_aligned[i] or close[i] < r3_aligned[i]:
+            # Long exit: VI- crosses above VI+ OR price crosses below EMA50
+            if (vi_minus_aligned[i] > vi_plus_aligned[i] and 
+                vi_minus_aligned[i-1] <= vi_plus_aligned[i-1]) or \
+               close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above weekly EMA50 OR reverses above S3
-            if close[i] > ema_50_1w_aligned[i] or close[i] > s3_aligned[i]:
+            # Short exit: VI+ crosses above VI- OR price crosses above EMA50
+            if (vi_plus_aligned[i] > vi_minus_aligned[i] and 
+                vi_plus_aligned[i-1] <= vi_minus_aligned[i-1]) or \
+               close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
