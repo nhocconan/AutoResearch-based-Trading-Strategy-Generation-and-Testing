@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Weekly_R1_S1_Breakout_WeeklyTrend_VolumeSpike
-Hypothesis: Weekly R1/S1 breakouts with weekly trend filter (EMA50) and volume spike confirmation. Works in bull markets (buy R1 breakouts in uptrend) and bear markets (sell S1 breakdowns in downtrend). Volume spike confirms institutional interest. Target: 15-30 trades per year on 12h timeframe.
+4h_KAMA_Trend_Reversal_1dVolatilityBreakout_v1
+Hypothesis: KAMA adapts to market efficiency, providing smooth trend signals. Combine KAMA direction with 1-day volatility breakout (ATR-based) to catch trend reversals in both bull and bear markets. Volatility expansion confirms institutional participation. Target: 20-40 trades per year on 4h timeframe.
 """
 
-name = "12h_Weekly_R1_S1_Breakout_WeeklyTrend_VolumeSpike"
-timeframe = "12h"
+name = "4h_KAMA_Trend_Reversal_1dVolatilityBreakout_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -22,51 +22,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Data for Weekly R1/S1 and Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    # === 1D Data for Volatility Breakout ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 30:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Previous week's OHLC for weekly R1/S1 calculation
-    prev_high = np.roll(high_1w, 1)
-    prev_low = np.roll(low_1w, 1)
-    prev_close = np.roll(close_1w, 1)
-    prev_high[0] = high_1w[0]  # First week uses same week's high
-    prev_low[0] = low_1w[0]    # First week uses same week's low
-    prev_close[0] = close_1w[0] # First week uses same week's close
+    # 1D ATR for volatility breakout
+    tr1 = np.maximum(high_1d[1:] - low_1d[1:], np.abs(high_1d[1:] - close_1d[:-1]))
+    tr2 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.inf], np.maximum(tr1, tr2)])
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Weekly R1/S1: C ± (H-L) * 1.1/12
-    rang = prev_high - prev_low
-    r1 = prev_close + rang * 1.1 / 12
-    s1 = prev_close - rang * 1.1 / 12
+    # Volatility breakout: today's range > 1.5x average ATR
+    daily_range = high_1d - low_1d
+    vol_breakout = daily_range > (atr_14 * 1.5)
     
-    # Weekly trend filter: EMA50 on weekly close
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align volatility breakout to 4h timeframe
+    vol_breakout_aligned = align_htf_to_ltf(prices, df_1d, vol_breakout)
     
-    # Align weekly indicators to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # === 4h KAMA Calculation ===
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, n=10))  # 10-period change
+    change = np.concatenate([[np.nan]*10, change])
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # will fix below
     
-    # Volume spike: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    # Proper volatility calculation (sum of absolute changes)
+    volatility = np.zeros_like(close)
+    for i in range(1, len(close)):
+        volatility[i] = volatility[i-1] + np.abs(close[i] - close[i-1])
+    volatility = np.concatenate([[np.nan]*9, volatility[9:]])  # 10-period sum
+    
+    # Avoid division by zero
+    er = np.where(volatility != 0, change / volatility, 0)
+    
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    
+    # KAMA calculation
+    kama = np.full_like(close, np.nan)
+    kama[9] = close[9]  # start after 10 periods
+    for i in range(10, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_aligned[i])):
+        if (np.isnan(kama[i]) or 
+            np.isnan(vol_breakout_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,24 +88,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND uptrend (price > EMA50) AND volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
+            # Long: price above KAMA AND volatility breakout (expansion)
+            if close[i] > kama[i] and vol_breakout_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 AND downtrend (price < EMA50) AND volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
+            # Short: price below KAMA AND volatility breakout (expansion)
+            elif close[i] < kama[i] and vol_breakout_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below EMA50 OR reverses below R1
-            if close[i] < ema_50_aligned[i] or close[i] < r1_aligned[i]:
+            # Long exit: price crosses below KAMA
+            if close[i] < kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above EMA50 OR reverses above S1
-            if close[i] > ema_50_aligned[i] or close[i] > s1_aligned[i]:
+            # Short exit: price crosses above KAMA
+            if close[i] > kama[i]:
                 signals[i] = 0.0
                 position = 0
             else:
