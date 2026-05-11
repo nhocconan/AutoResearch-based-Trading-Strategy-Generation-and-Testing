@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_Pivot_Breakout_1dTrend_Volume_Confirmation
-Hypothesis: Combine daily Camarilla pivot levels with 1d trend filter and volume confirmation for breakout trades. Works in bull/bear by aligning with higher timeframe trend. Uses discrete position sizing to minimize fee churn. Target: 20-40 trades/year on 4h.
+12h_Camarilla_Pivot_Breakout_1dTrend_Volume_Confirmation
+Hypothesis: Daily Camarilla pivot breakouts aligned with 1d trend and volume confirmation on 12h timeframe.
+Works in bull/bear by filtering with higher timeframe trend. Target: 12-37 trades/year on 12h.
 """
 
-name = "4h_Camarilla_Pivot_Breakout_1dTrend_Volume_Confirmation"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_Breakout_1dTrend_Volume_Confirmation"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -28,29 +29,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Calculate Camarilla levels from previous day's OHLC
-    # H, L, C from previous completed daily candle
     ph = df_1d['high'].values
     pl = df_1d['low'].values
     pc = df_1d['close'].values
     
-    # Camarilla levels: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
-    # We use R3, R2, S3, S2 for breakout/retest
+    # Camarilla levels: R3, R2, S2, S3
     camarilla_r3 = pc + (ph - pl) * 1.1 / 4
     camarilla_r2 = pc + (ph - pl) * 1.1 / 6
     camarilla_s2 = pc - (ph - pl) * 1.1 / 6
     camarilla_s3 = pc - (ph - pl) * 1.1 / 4
     
-    # Align to 4h timeframe (these levels are valid until next daily candle)
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    r2_4h = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    s2_4h = align_htf_to_ltf(prices, df_1d, camarilla_s2)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Align to 12h timeframe (these levels are valid until next daily candle)
+    r3_12h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    r2_12h = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    s2_12h = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    s3_12h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     # === Daily Trend Filter (EMA34) ===
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Volume Filter (1.5x 20-period EMA on 4h) ===
+    # === Volume Filter (1.5x 20-period EMA on 12h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
@@ -62,8 +61,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(r2_4h[i]) or np.isnan(s2_4h[i]) or np.isnan(s3_4h[i]) or
-            np.isnan(ema34_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(r2_12h[i]) or np.isnan(s2_12h[i]) or np.isnan(s3_12h[i]) or
+            np.isnan(ema34_12h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,30 +72,30 @@ def generate_signals(prices):
         
         if position == 0:
             # Long breakout: price breaks above R3 with uptrend and volume
-            if (close[i] > r3_4h[i] and 
-                close[i] > ema34_4h[i] and 
+            if (close[i] > r3_12h[i] and 
+                close[i] > ema34_12h[i] and 
                 volume_ok[i]):
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
             # Short breakdown: price breaks below S3 with downtrend and volume
-            elif (close[i] < s3_4h[i] and 
-                  close[i] < ema34_4h[i] and 
+            elif (close[i] < s3_12h[i] and 
+                  close[i] < ema34_12h[i] and 
                   volume_ok[i]):
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price breaks below R2 (profit target or reversal)
-            if close[i] < r2_4h[i]:
+            if close[i] < r2_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
             # Short exit: price breaks above S2 (profit target or reversal)
-            if close[i] > s2_4h[i]:
+            if close[i] > s2_12h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
