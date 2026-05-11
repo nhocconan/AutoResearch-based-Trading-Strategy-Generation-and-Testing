@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_1d_WeeklyPivot_R3S3_Breakout_TrendVolume
-Hypothesis: Price breaking above weekly R3 or below weekly S3 with daily trend confirmation (EMA34) and volume spike. Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA34 daily), buy breakouts above R3; in downtrend (price < EMA34 daily), sell breakdowns below S3. Volume confirms institutional interest. Designed for 6h timeframe with weekly pivot structure and daily trend filter to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets by capturing strong momentum moves after breaking key weekly levels.
+12h_1d_WeeklyPivot_R3S3_Breakout_TrendVolume
+Hypothesis: Price breaking above weekly R3 or below weekly S3 with daily trend confirmation (EMA34) and volume spike. Uses weekly pivot levels as strong support/resistance. In uptrend (price > EMA34 daily), buy breakouts above R3; in downtrend (price < EMA34 daily), sell breakdowns below S3. Volume confirms institutional interest. Designed for 12h timeframe with weekly pivot structure and daily trend filter to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets by capturing strong momentum moves after breaking key weekly levels.
 """
 
-name = "6h_1d_WeeklyPivot_R3S3_Breakout_TrendVolume"
-timeframe = "6h"
+name = "12h_1d_WeeklyPivot_R3S3_Breakout_TrendVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -53,7 +53,7 @@ def generate_signals(prices):
     w_r3 = w_close_prev + (1.1/4) * (w_high_prev - w_low_prev)
     w_s3 = w_close_prev - (1.1/4) * (w_high_prev - w_low_prev)
     
-    # Align weekly R3/S3 to 6h timeframe
+    # Align weekly R3/S3 to 12h timeframe
     w_r3_aligned = align_htf_to_ltf(prices, df_1w, w_r3)
     w_s3_aligned = align_htf_to_ltf(prices, df_1w, w_s3)
     w_pivot_aligned = align_htf_to_ltf(prices, df_1w, w_pivot)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     ).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (20-period average on 6h)
+    # Volume confirmation (20-period average on 12h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
