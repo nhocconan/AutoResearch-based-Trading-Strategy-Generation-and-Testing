@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_1w_VolumeWeighted_Camarilla_R3S3_Breakout"
-timeframe = "12h"
+name = "1h_4h_1d_Camarilla_R3S3_Breakout_Trend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -27,68 +27,54 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate previous day's Camarilla R3 and S3 levels
-    R3 = np.full(len(high_1d), np.nan)
-    S3 = np.full(len(high_1d), np.nan)
+    R3 = np.zeros(len(high_1d))
+    S3 = np.zeros(len(high_1d))
     
-    for i in range(1, len(high_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        if range_val > 0:  # Avoid division by zero
+    for i in range(len(high_1d)):
+        if i < 1:
+            R3[i] = np.nan
+            S3[i] = np.nan
+        else:
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            range_val = prev_high - prev_low
             R3[i] = prev_close + range_val * 1.1 / 4
             S3[i] = prev_close - range_val * 1.1 / 4
     
-    # Get weekly trend filter (HTF)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 4h trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
-    ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_up = close_1w > ema20
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_up_4h = close_4h > ema20_4h
     
-    # Align HTF indicators to 12h timeframe
+    # Align indicators to 1h timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
+    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
     
-    # Volume-weighted price action confirmation (LTF)
-    # Calculate 12-period VWAP-like momentum
-    typical_price = (high + low + close) / 3
-    vwap_num = np.zeros(n)
-    vwap_den = np.zeros(n)
-    
+    # Volume moving average (20-period) for confirmation
+    vol_ma20 = np.zeros(n)
     for i in range(n):
-        start_idx = max(0, i - 11)
-        vwap_num[i] = np.sum(typical_price[start_idx:i+1] * volume[start_idx:i+1])
-        vwap_den[i] = np.sum(volume[start_idx:i+1])
-    
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
-    price_above_vwap = typical_price > vwap
-    
-    # Volume confirmation - current volume > 1.5x average of last 12 periods
-    vol_ma12 = np.zeros(n)
-    for i in range(n):
-        if i < 12:
-            vol_ma12[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            vol_ma12[i] = np.mean(volume[i-11:i+1])
-    
-    volume_surge = volume > (1.5 * vol_ma12)
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 12)  # Ensure sufficient warmup for all indicators
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
-        # Skip if any critical data is NaN
+        # Skip if any data is NaN
         if (np.isnan(R3_aligned[i]) or 
             np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or
-            np.isnan(vwap[i]) or
-            np.isnan(vol_ma12[i])):
+            np.isnan(trend_up_4h_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -97,33 +83,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 + uptrend + price above VWAP + volume surge
+            # Long: price breaks above R3 + 4h uptrend + volume confirmation
             if (close[i] > R3_aligned[i] and 
-                trend_up_aligned[i] and 
-                price_above_vwap[i] and 
-                volume_surge[i]):
-                signals[i] = 0.25
+                trend_up_4h_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
+                signals[i] = 0.20
                 position = 1
-            # Short: price breaks below S3 + downtrend + price below VWAP + volume surge
+            # Short: price breaks below S3 + 4h downtrend + volume confirmation
             elif (close[i] < S3_aligned[i] and 
-                  not trend_up_aligned[i] and 
-                  not price_above_vwap[i] and 
-                  volume_surge[i]):
-                signals[i] = -0.25
+                  not trend_up_4h_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes or price falls below VWAP
-            if (close[i] < S3_aligned[i] or not trend_up_aligned[i] or not price_above_vwap[i]):
+            # Long exit: price breaks below S3 or 4h trend changes to down
+            if (close[i] < S3_aligned[i] or not trend_up_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes or price rises above VWAP
-            if (close[i] > R3_aligned[i] or trend_up_aligned[i] or price_above_vwap[i]):
+            # Short exit: price breaks above R3 or 4h trend changes to up
+            if (close[i] > R3_aligned[i] or trend_up_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
