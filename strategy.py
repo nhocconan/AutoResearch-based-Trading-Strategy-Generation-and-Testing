@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3_S3_Breakout_1dTrend_Volume
-# Hypothesis: 12h breakout at Camarilla R3/S3 levels with daily trend filter and volume confirmation.
-# Uses 1d EMA34 trend for direction, Camarilla from 1d for entry levels, and volume spike for confirmation.
-# Designed for low trade frequency (12-37/year) to minimize fee drift while capturing strong moves.
+# 4h_Camarilla_R3_S3_Breakout_1dTrend_Filter_Volume
+# Hypothesis: 4h breakout at daily Camarilla R3/S3 levels with daily trend filter (EMA34 slope) and volume confirmation.
+# Uses daily EMA34 slope for trend direction, daily Camarilla for entry levels, and volume spike for confirmation.
+# Designed for low trade frequency (20-50/year) to minimize fee drag while capturing strong moves in both bull and bear markets.
+# The daily trend filter ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws.
 
-name = "12h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Filter_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,38 +18,32 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla calculation and trend filter
+    # Get daily data for trend filter and Camarilla calculation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # --- Camarilla levels from previous day ---
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
-    
-    # Calculate ranges
-    range_hl = prev_high - prev_low
-    
-    # Camarilla R3 and S3
-    r3 = prev_close + range_hl * 1.1 / 2
-    s3 = prev_close - range_hl * 1.1 / 2
-    
-    # Align Camarilla levels to 12h (previous day's levels available at 12h open)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # --- Daily trend: EMA34 slope ---
     daily_close = df_1d['close'].values
     ema_34_1d = pd.Series(daily_close).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_slope_34_1d = np.diff(ema_34_1d, prepend=ema_34_1d[0])
     ema_slope_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_slope_34_1d)
+    
+    # --- Camarilla levels from previous day ---
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
+    prev_close = df_1d['close'].values
+    range_hl = prev_high - prev_low
+    r3 = prev_close + range_hl * 1.1 / 2
+    s3 = prev_close - range_hl * 1.1 / 2
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
     # --- ATR for volatility and trailing stop ---
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -57,7 +52,7 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # --- Volume confirmation (2.5x 20-period average) ---
+    # --- Volume confirmation (2.0x 20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -86,8 +81,8 @@ def generate_signals(prices):
         bullish_trend = ema_slope_34_1d_aligned[i] > 0
         bearish_trend = ema_slope_34_1d_aligned[i] < 0
         
-        # Volume confirmation (2.5x average)
-        volume_surge = volume[i] > 2.5 * vol_ma[i]
+        # Volume confirmation (2.0x average)
+        volume_surge = volume[i] > 2.0 * vol_ma[i]
         
         if position == 0:
             # Long: price breaks above R3 in bullish trend with volume surge
