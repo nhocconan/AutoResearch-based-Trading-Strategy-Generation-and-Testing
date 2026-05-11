@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_KAMA_Direction_1dTrend_VolumeSpike
-Hypothesis: Trade in direction of Kaufman Adaptive Moving Average (KAMA) with 1d trend filter and volume spike confirmation. 
-KAMA adapts to market noise, reducing whipsaws in ranging markets while capturing trends. 
-Combined with daily trend and volume confirmation, this should work in both bull and bear markets by filtering counter-trend moves.
-Target: 20-30 trades/year on 4h to minimize fee drag.
+1d_1w_382_Camarilla_R1S1_Retest_WeeklyTrend
+Hypothesis: Trade pullbacks to Camarilla R1/S1 levels after breakouts in the direction of the weekly trend, with volume confirmation. 1d timeframe, 1w trend filter. Target: 15-25 trades/year (60-100 total over 4 years). Works in bull by buying pullbacks in uptrends, in bear by selling rallies in downtrends.
 """
 
-name = "4h_KAMA_Direction_1dTrend_VolumeSpike"
-timeframe = "4h"
+name = "1d_1w_382_Camarilla_R1S1_Retest_WeeklyTrend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -25,57 +22,41 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Daily Trend Filter (EMA34) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # === Weekly OHLC for Camarilla Pivots (from previous week) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_4h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # Calculate Camarilla levels from previous week's OHLC
+    ph_w = df_1w['high'].values
+    pl_w = df_1w['low'].values
+    pc_w = df_1w['close'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) on 4h close ===
-    # ER (Efficiency Ratio) = |change| / sum(|changes|) over fast period
-    # Smoothing constant = [ER * (fastest SC - slowest SC) + slowest SC]^2
-    # KAMA = previous KAMA + SC * (price - previous KAMA)
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    lookback = 10  # ER lookback period
+    # Camarilla R1 and S1 (most significant levels for retest)
+    camarilla_r1_w = pc_w + (ph_w - pl_w) * 1.1 / 2
+    camarilla_s1_w = pc_w - (ph_w - pl_w) * 1.1 / 2
     
-    change = np.abs(np.diff(close, prepend=close[0]))
-    abs_change = change
+    # Align to 1d timeframe (wait for weekly bar to close)
+    r1_1d = align_htf_to_ltf(prices, df_1w, camarilla_r1_w)
+    s1_1d = align_htf_to_ltf(prices, df_1w, camarilla_s1_w)
     
-    # Calculate Efficiency Ratio
-    er = np.zeros(n)
-    for i in range(lookback, n):
-        net_change = abs(close[i] - close[i-lookback])
-        total_change = np.sum(abs_change[i-lookback+1:i+1])
-        if total_change > 0:
-            er[i] = net_change / total_change
-        else:
-            er[i] = 0
+    # === Weekly Trend Filter (EMA34) ===
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Smoothing constant
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
-    
-    # Calculate KAMA
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # === Volume Filter (2.0x 20-period EMA on 4h) ===
+    # === Volume Filter (1.5x 20-period EMA on 1d) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 2.0
+    volume_ok = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers KAMA and daily calculations)
-    start_idx = 40
+    # Start after warmup (covers weekly calculations)
+    start_idx = 70
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_4h[i]) or np.isnan(kama[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or np.isnan(ema34_1d[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -84,28 +65,32 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA with uptrend and volume spike
-            if (close[i] > kama[i] and 
-                close[i] > ema34_4h[i] and 
+            # Long retest: price pulls back to R1 in uptrend with volume
+            if (close[i] >= r1_1d[i] * 0.998 and close[i] <= r1_1d[i] * 1.002 and  # within 0.2% of R1
+                close[i] > ema34_1d[i] and 
                 volume_ok[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA with downtrend and volume spike
-            elif (close[i] < kama[i] and 
-                  close[i] < ema34_4h[i] and 
+            # Short retest: price rallies to S1 in downtrend with volume
+            elif (close[i] >= s1_1d[i] * 0.998 and close[i] <= s1_1d[i] * 1.002 and  # within 0.2% of S1
+                  close[i] < ema34_1d[i] and 
                   volume_ok[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price crosses below KAMA
-            if close[i] < kama[i]:
+            # Long exit: price breaks above R1 (breakout continuation) or drops below S1 (reversal)
+            if close[i] > r1_1d[i] * 1.005:  # break above R1 with buffer
+                signals[i] = 0.25  # maintain for momentum
+            elif close[i] < s1_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price crosses above KAMA
-            if close[i] > kama[i]:
+            # Short exit: price breaks below S1 (breakdown continuation) or rises above R1 (reversal)
+            if close[i] < s1_1d[i] * 0.995:  # break below S1 with buffer
+                signals[i] = -0.25  # maintain for momentum
+            elif close[i] > r1_1d[i]:
                 signals[i] = 0.0
                 position = 0
             else:
