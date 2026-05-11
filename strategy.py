@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Refined"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d Camarilla pivot levels (previous day)
+    # 1d data (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -25,11 +25,11 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla levels for each 1d bar
+    # Camarilla R1 and S1 from previous day
     camarilla_r1 = close_1d + (high_1d - low_1d) * 1.083
     camarilla_s1 = close_1d - (high_1d - low_1d) * 1.083
     
-    # Align Camarilla levels to 4h timeframe (use previous day's levels)
+    # Align to 4h timeframe (use previous day's levels)
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
