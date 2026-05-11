@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+name = "4h_Donchian20_Upper_Lower_Breakout_Trend_Filter_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day trend: EMA34
+    # Daily trend filter: EMA34 on daily close (must be in uptrend for long, downtrend for short)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
@@ -25,30 +25,35 @@ def generate_signals(prices):
     ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Daily Camarilla pivot levels (using previous day's OHLC)
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # Weekly trend filter: EMA34 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Calculate Camarilla levels
-    R1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    S1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Donchian channel (20-period) on 4h
+    # Use pandas rolling with min_periods to avoid look-ahead
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    
-    # Volume spike: volume > 2.0 * 20-period SMA of volume (on 4h)
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 2.0 * vol_sma
+    # Volume confirmation: volume > 1.3 * 20-period SMA of volume (on 4h)
+    vol_series = pd.Series(volume)
+    vol_sma = vol_series.rolling(window=20, min_periods=20).mean().values
+    vol_confirm = volume > 1.3 * vol_sma
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(34, 20)
+    start_idx = max(34, 20)  # Ensure indicators are warmed up
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or np.isnan(vol_sma[i]):
+        # Skip if any required data is not available
+        if (np.isnan(ema_34_1d_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_sma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,24 +62,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + 1d uptrend + volume spike
-            if close[i] > R1_aligned[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]:
+            # Long: price breaks above Donchian upper band + uptrend on 1d and 1w + volume confirmation
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                close[i] > ema_34_1w_aligned[i] and 
+                vol_confirm[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + 1d downtrend + volume spike
-            elif close[i] < S1_aligned[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]:
+            # Short: price breaks below Donchian lower band + downtrend on 1d and 1w + volume confirmation
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  close[i] < ema_34_1w_aligned[i] and 
+                  vol_confirm[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S1
-            if close[i] < S1_aligned[i]:
+            # Long position: exit if price breaks below Donchian lower band or trend turns down
+            if close[i] < donchian_low[i] or close[i] < ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R1
-            if close[i] > R1_aligned[i]:
+            # Short position: exit if price breaks above Donchian upper band or trend turns up
+            if close[i] > donchian_high[i] or close[i] > ema_34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
