@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm
-# Hypothesis: Breakout of 1-day Camarilla R3/S3 levels with 1-day EMA34 trend filter and volume confirmation on 12h timeframe.
-# Uses daily chart for structure (Camarilla levels, EMA trend) and 12h for entry/execution.
-# Designed for low trade frequency (target 12-37/year) to minimize fee drag and work in both bull/bear markets via trend alignment.
+# 4h_VWAP_Deviation_ZScore_MeanReversion_v1
+# Hypothesis: Mean-reversion using VWAP deviation Z-score with 1-day trend filter and volume confirmation.
+# Works in bull/bear by fading extremes only when higher timeframe trend aligns.
+# Targets 20-35 trades/year via strict Z-score > 2.0 or < -2.0 requirement.
 
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Confirm"
-timeframe = "12h"
+name = "4h_VWAP_Deviation_ZScore_MeanReversion_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,27 +25,29 @@ def generate_signals(prices):
     
     # === 1d Data (loaded ONCE) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # === 1d Camarilla Pivot Levels (R3, S3) ===
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
+    # === VWAP Deviation Calculation ===
+    typical_price = (high + low + close) / 3
+    tp_vol = typical_price * volume
+    cum_tp_vol = np.cumsum(tp_vol)
+    cum_vol = np.cumsum(volume)
+    vwap = cum_tp_vol / cum_vol
+    vwap_dev = (close - vwap) / vwap  # percentage deviation
     
-    # Align 1d levels to 12h
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    # Rolling Z-score of VWAP deviation (20-period)
+    vwap_dev_series = pd.Series(vwap_dev)
+    vwap_zscore = (vwap_dev_series - vwap_dev_series.rolling(20, min_periods=20).mean()) / \
+                  vwap_dev_series.rolling(20, min_periods=20).std(ddof=0)
+    vwap_zscore = vwap_zscore.fillna(0).values
     
-    # === 1d EMA34 Trend Filter ===
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === 1d EMA50 Trend Filter ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_4h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === Volume Spike Filter (20-period EMA) ===
+    # === Volume Spike Filter ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5  # Require 1.5x average volume
+    volume_ok = volume > vol_ema20 * 1.5
     
     # === Signal Parameters ===
     position_size = 0.25  # 25% of capital per trade
@@ -54,13 +56,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     holding_bars = 0
     
-    # Start after warmup (covers EMA34)
+    # Start after warmup
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
-            np.isnan(ema34_1d_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(vwap_zscore[i]) or np.isnan(ema50_1d_4h[i]) or 
+            np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,35 +72,37 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R3 (both open and close) + above 1d EMA34 + volume spike
-            if (open_price[i] > r3_12h[i] and close[i] > r3_12h[i] and 
-                close[i] > ema34_1d_12h[i] and volume_ok[i]):
+            # Long: VWAP deviation < -2.0 (undervalued) + above 1d EMA50 + volume spike
+            if (vwap_zscore[i] < -2.0 and 
+                close[i] > ema50_1d_4h[i] and 
+                volume_ok[i]):
                 signals[i] = position_size
                 position = 1
                 holding_bars = 0
-            # Short: Break below S3 (both open and close) + below 1d EMA34 + volume spike
-            elif (open_price[i] < s3_12h[i] and close[i] < s3_12h[i] and 
-                  close[i] < ema34_1d_12h[i] and volume_ok[i]):
+            # Short: VWAP deviation > 2.0 (overvalued) + below 1d EMA50 + volume spike
+            elif (vwap_zscore[i] > 2.0 and 
+                  close[i] < ema50_1d_4h[i] and 
+                  volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
                 holding_bars = 0
         else:
-            # Enforce minimum holding period (6 bars = 3 days)
+            # Enforce minimum holding period (8 bars)
             holding_bars += 1
-            if holding_bars < 6:
+            if holding_bars < 8:
                 signals[i] = position_size if position == 1 else -position_size
                 continue
             
-            # Exit: Price closes below/above opposite level
+            # Exit: VWAP deviation returns to neutral (|Z| < 0.5) or opposite extreme
             if position == 1:
-                if close[i] < s3_12h[i]:
+                if vwap_zscore[i] > -0.5 or vwap_zscore[i] > 1.0:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                if close[i] > r3_12h[i]:
+                if vwap_zscore[i] < 0.5 or vwap_zscore[i] < -1.0:
                     signals[i] = 0.0
                     position = 0
                     holding_bars = 0
