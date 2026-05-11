@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_1wPivot_Breakout_Trend_Volume
-Hypothesis: Trade breakouts at weekly pivot levels (R4/S4) on 1d timeframe with 1d trend filter and volume confirmation.
-Weekly pivots act as strong support/resistance levels. Breakouts in direction of daily trend with volume confirmation
-should capture significant moves. Weekly pivot calculation provides fewer, more significant levels than daily pivots,
-reducing trade frequency. Works in bull/bear markets by aligning with daily trend direction.
+6h_VolumeSpike_1dTrend_FadeFromDailyVWAP
+Hypothesis: Fade price moves away from daily VWAP on 6h timeframe during low volatility periods, 
+but only when aligned with daily trend. Uses volume spike as entry trigger and daily trend filter.
+Works in bull/bear markets by fading mean-reversion moves in trending environments.
 """
 
-name = "1d_1wPivot_Breakout_Trend_Volume"
-timeframe = "1d"
+name = "6h_VolumeSpike_1dTrend_FadeFromDailyVWAP"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -25,46 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly OHLC for Pivot Points ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # Calculate Weekly Pivot Points from previous week's OHLC
-    ph_w = df_1w['high'].values
-    pl_w = df_1w['low'].values
-    pc_w = df_1w['close'].values
-    
-    # Weekly Pivot Point (PP)
-    pp_w = (ph_w + pl_w + pc_w) / 3.0
-    # Weekly R4 and S4 (strongest breakout levels)
-    r4_w = pp_w + 3 * (ph_w - pl_w)
-    s4_w = pp_w - 3 * (ph_w - pl_w)
-    
-    # Align to 1d timeframe
-    r4_1d = align_htf_to_ltf(prices, df_1w, r4_w)
-    s4_1d = align_htf_to_ltf(prices, df_1w, s4_w)
-    
-    # === Daily Trend Filter (EMA34) ===
+    # === Daily VWAP ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Calculate daily VWAP components
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    pv = typical_price * df_1d['volume']
+    cum_pv = pv.cumsum()
+    cum_vol = df_1d['volume'].cumsum()
+    vwap = cum_pv / cum_vol
+    vwap_values = vwap.values
     
-    # === Volume Filter (2.0x 20-period EMA on 1d) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 2.0
+    # Align VWAP to 6h timeframe
+    vwap_6h = align_htf_to_ltf(prices, df_1d, vwap_values)
+    
+    # === Daily Trend Filter (EMA50) ===
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_6h = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === Volume Spike Filter (2.5x 30-period EMA on 6h) ===
+    vol_ema30 = pd.Series(volume).ewm(span=30, adjust=False, min_periods=30).mean().values
+    volume_spike = volume > vol_ema30 * 2.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers weekly calculations)
-    start_idx = 50
+    # Start after warmup (covers daily calculations)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]) or np.isnan(ema34_1d[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(vwap_6h[i]) or np.isnan(ema50_6h[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,28 +65,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: price closes above R4 with uptrend and volume
-            if (close[i] > r4_1d[i] and 
-                close[i] > ema34_1d[i] and 
-                volume_ok[i]):
+            # Long entry: price below VWAP, uptrend, volume spike (fade downside deviation)
+            if (close[i] < vwap_6h[i] and 
+                close[i] > ema50_6h[i] and 
+                volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: price closes below S4 with downtrend and volume
-            elif (close[i] < s4_1d[i] and 
-                  close[i] < ema34_1d[i] and 
-                  volume_ok[i]):
+            # Short entry: price above VWAP, downtrend, volume spike (fade upside deviation)
+            elif (close[i] > vwap_6h[i] and 
+                  close[i] < ema50_6h[i] and 
+                  volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below midpoint between R4 and S4 (mean reversion)
-            if close[i] < (r4_1d[i] + s4_1d[i]) / 2:
+            # Long exit: price crosses above VWAP (mean reversion complete) or trend breaks
+            if close[i] >= vwap_6h[i] or close[i] < ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above midpoint between R4 and S4 (mean reversion)
-            if close[i] > (r4_1d[i] + s4_1d[i]) / 2:
+            # Short exit: price crosses below VWAP (mean reversion complete) or trend breaks
+            if close[i] <= vwap_6h[i] or close[i] > ema50_6h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
