@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Pivot_Breakout_Trend_Volume
-Hypothesis: 12h chart breakouts at 1d Camarilla R3/S3 levels, filtered by 1d EMA trend and volume spikes.
-Trades in direction of 1d trend using previous 1d bar's Camarilla levels. Volume confirmation filters false breakouts.
-Designed for moderate trade frequency (~15-35/year) to balance opportunity and fee drag. Works in bull/bear by following higher timeframe trend.
+6h_OrderFlow_Imbalance_VWAP_Divergence_v2
+Hypothesis: Detect institutional order flow imbalances via VWAP divergence on 6h timeframe, filtered by 1D trend and volume confirmation. 
+Works in bull/bear by following 1D trend direction. VWAP divergence signals exhaustion of moves, allowing mean reversion entries.
+Designed for low trade frequency (~20-40/year) to minimize fee drag while capturing high-probability reversals.
 """
 
-name = "12h_Pivot_Breakout_Trend_Volume"
-timeframe = "12h"
+name = "6h_OrderFlow_Imbalance_VWAP_Divergence_v2"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -24,48 +24,60 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1d Data for Trend Filter and Camarilla Levels ===
+    # === 1D Data for Trend Filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 1D EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 1d EMA34 for trend
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # === VWAP Calculation on 6h ===
+    typical_price = (high + low + close) / 3.0
+    pv = typical_price * volume
+    cum_pv = np.cumsum(pv)
+    cum_vol = np.cumsum(volume)
+    # Avoid division by zero
+    vwap = np.where(cum_vol > 0, cum_pv / cum_vol, typical_price)
     
-    # Previous 1d bar's OHLC for Camarilla calculation
-    ph_1d = high_1d  # previous 1d high
-    pl_1d = low_1d   # previous 1d low
-    pc_1d = df_1d['close'].values  # previous 1d close
+    # === VWAP Divergence Detection ===
+    # Bullish divergence: price makes lower low, VWAP makes higher low
+    # Bearish divergence: price makes higher high, VWAP makes lower high
+    # We'll use a 5-period lookback for simplicity
+    lookback = 5
     
-    # Camarilla levels: R3, S3
-    # R3 = close + 1.1 * (high - low) / 2
-    # S3 = close - 1.1 * (high - low) / 2
-    camarilla_r3 = pc_1d + 1.1 * (ph_1d - pl_1d) / 2
-    camarilla_s3 = pc_1d - 1.1 * (ph_1d - pl_1d) / 2
+    # Price swings
+    price_lower_low = np.zeros(n, dtype=bool)
+    price_higher_high = np.zeros(n, dtype=bool)
+    vwap_higher_low = np.zeros(n, dtype=bool)
+    vwap_lower_high = np.zeros(n, dtype=bool)
     
-    # Align Camarilla levels to 12h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    for i in range(lookback, n):
+        # Price lower low: current low < lowest low in lookback period
+        price_lower_low[i] = low[i] == np.min(low[i-lookback:i+1])
+        # Price higher high: current high == highest high in lookback period
+        price_higher_high[i] = high[i] == np.max(high[i-lookback:i+1])
+        # VWAP higher low: current VWAP > lowest VWAP in lookback period
+        vwap_higher_low[i] = vwap[i] > np.min(vwap[i-lookback:i+1])
+        # VWAP lower high: current VWAP < highest VWAP in lookback period
+        vwap_lower_high[i] = vwap[i] < np.max(vwap[i-lookback:i+1])
     
-    # === Volume Filter: 2.0x 20-period EMA on 12h ===
+    # Volume filter: 1.5x 20-period EMA volume
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_spike = volume > vol_ema20 * 2.0
+    volume_spike = volume > vol_ema20 * 1.5
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (covers 1d EMA34)
-    start_idx = 40
+    # Start after warmup
+    start_idx = max(50, lookback)
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vwap[i]) or np.isnan(volume_spike[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -74,28 +86,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 with uptrend and volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                volume_spike[i]):
+            # Long: bullish VWAP divergence + uptrend on 1D + volume spike
+            if (price_lower_low[i] and vwap_higher_low[i] and 
+                close[i] > ema50_1d_aligned[i] and volume_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 with downtrend and volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  volume_spike[i]):
+            # Short: bearish VWAP divergence + downtrend on 1D + volume spike
+            elif (price_higher_high[i] and vwap_lower_high[i] and 
+                  close[i] < ema50_1d_aligned[i] and volume_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below S3 (mean reversion to midpoint)
-            if close[i] < s3_aligned[i]:
+            # Long exit: price crosses above VWAP (momentum resumption) or trend fails
+            if close[i] > vwap[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above R3 (mean reversion to midpoint)
-            if close[i] > r3_aligned[i]:
+            # Short exit: price crosses below VWAP (momentum resumption) or trend fails
+            if close[i] < vwap[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
