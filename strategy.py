@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# 6h_WeeklyTrend_DailyPullback
-# Hypothesis: On 6h chart, go long when price pulls back to 1d VWAP during a 1w uptrend (price > weekly VWAP), short when price rallies to 1d VWAP during a 1w downtrend. Uses volume confirmation to avoid false signals.
-# Designed for 6h timeframe with 1w trend filter and 1d VWAP mean reversion. Works in both bull and bear markets by trading with the weekly trend.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# 1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume
+# Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 1d, filtered by 1w EMA50 trend and volume above 1.5x median. Exit on opposite Camarilla touch or ATR stop.
+# Designed for 1d timeframe with 1w trend filter to reduce whipsaw in both bull and bear markets.
+# Target: 30-100 total trades over 4 years (7-25/year).
 
-name = "6h_WeeklyTrend_DailyPullback"
-timeframe = "6h"
+name = "1d_Camarilla_R1_S1_Breakout_WeeklyTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,55 +17,64 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1w and 1d data for trend and VWAP
+    # Get 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1w) < 1 or len(df_1d) < 1:
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # 1d OHLCV
+    close_1d = prices['close'].values
+    high_1d = prices['high'].values
+    low_1d = prices['low'].values
+    volume_1d = prices['volume'].values
     
-    # --- 1w VWAP for trend filter ---
-    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
-    vwap_num_1w = np.cumsum(typical_price_1w * df_1w['volume'].values)
-    vwap_den_1w = np.cumsum(df_1w['volume'].values)
-    vwap_1w = vwap_num_1w / vwap_den_1w
-    vwap_1w[vwap_den_1w == 0] = np.nan
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
+    # --- 1w Trend Filter: EMA50 ---
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # --- 1d VWAP for entry signal ---
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    vwap_num_1d = np.cumsum(typical_price_1d * df_1d['volume'].values)
-    vwap_den_1d = np.cumsum(df_1d['volume'].values)
-    vwap_1d = vwap_num_1d / vwap_den_1d
-    vwap_1d[vwap_den_1d == 0] = np.nan
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
+    # --- 1d Camarilla Levels (based on previous day) ---
+    # Calculate from previous 1d bar (shifted by 1 to avoid lookahead)
+    prev_close = np.roll(close_1d, 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close[0] = close_1d[0]
+    prev_high[0] = high_1d[0]
+    prev_low[0] = low_1d[0]
+    
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
     
     # --- Volume Filter: above 1.5x median of last 20 periods ---
-    vol_median = pd.Series(volume_6h).rolling(window=20, min_periods=10).median().values
+    vol_median = pd.Series(volume_1d).rolling(window=20, min_periods=10).median().values
     vol_threshold = vol_median * 1.5
+    
+    # --- ATR for stoploss (14-period) ---
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after enough data for volume median
-    start_idx = 20
+    # Start after warmup period
+    start_idx = 50  # for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vwap_1w_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or 
-            np.isnan(vol_threshold[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
-                # Exit on opposite VWAP touch
-                if position == 1 and close_6h[i] <= vwap_1d_aligned[i]:
+                # Check stoploss
+                if position == 1 and close_1d[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] >= vwap_1d_aligned[i]:
+                elif position == -1 and close_1d[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -73,34 +82,44 @@ def generate_signals(prices):
             continue
         
         # Determine 1w trend
-        trend_up = close_6h[i] > vwap_1w_aligned[i]
-        trend_down = close_6h[i] < vwap_1w_aligned[i]
+        trend_up = close_1d[i] > ema50_1w_aligned[i]
+        trend_down = close_1d[i] < ema50_1w_aligned[i]
         
-        # Volume filter
-        vol_ok = volume_6h[i] > vol_threshold[i]
+        # Volume filter: above 1.5x median
+        vol_ok = volume_1d[i] > vol_threshold[i]
         
         if position == 0:
-            # Look for entries: pullback to 1d VWAP in direction of 1w trend
-            if trend_up and vol_ok and close_6h[i] <= vwap_1d_aligned[i] * 1.005:  # Allow small buffer
-                # Long: price at or below 1d VWAP during 1w uptrend
+            # Look for entries only in direction of 1w trend with volume
+            if close_1d[i] > camarilla_r1[i] and trend_up and vol_ok:
+                # Long: price breaks above R1 + 1w uptrend + volume
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_6h[i]
-            elif trend_down and vol_ok and close_6h[i] >= vwap_1d_aligned[i] * 0.995:  # Allow small buffer
-                # Short: price at or above 1d VWAP during 1w downtrend
+                entry_price = close_1d[i]
+            elif close_1d[i] < camarilla_s1[i] and trend_down and vol_ok:
+                # Short: price breaks below S1 + 1w downtrend + volume
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_6h[i]
+                entry_price = close_1d[i]
         else:
-            # Exit when price crosses 1d VWAP in opposite direction
+            # Update stoploss and check exits
             if position == 1:
-                if close_6h[i] <= vwap_1d_aligned[i]:
+                # Stoploss
+                if close_1d[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses below S1
+                elif close_1d[i] <= camarilla_s1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if close_6h[i] >= vwap_1d_aligned[i]:
+                # Stoploss
+                if close_1d[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses above R1
+                elif close_1d[i] >= camarilla_r1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
