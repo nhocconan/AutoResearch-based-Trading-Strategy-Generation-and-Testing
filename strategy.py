@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Williams_Alligator_Trend_Filter"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_Volume_Spike"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,27 +17,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 12h and 1d data
-    df_12h = get_htf_data(prices, '12h')
+    # Get daily data for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_12h) < 20 or len(df_1d) < 20:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Williams Alligator from 12h: Jaw (13), Teeth (8), Lips (5)
-    close_12h = df_12h['close'].values
-    jaw = pd.Series(close_12h).rolling(window=13, center=False).mean().shift(8).values
-    teeth = pd.Series(close_12h).rolling(window=8, center=False).mean().shift(5).values
-    lips = pd.Series(close_12h).rolling(window=5, center=False).mean().shift(3).values
+    # Calculate Camarilla pivot levels from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator aligned: bullish when Lips > Teeth > Jaw
-    bullish = (lips > teeth) & (teeth > jaw)
-    bearish = (lips < teeth) & (teeth < jaw)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    bullish_aligned = align_htf_to_ltf(prices, df_12h, bullish)
-    bearish_aligned = align_htf_to_ltf(prices, df_12h, bearish)
+    # Resistance and support levels
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
+    r4 = pivot + (range_1d * 1.1)
+    s4 = pivot - (range_1d * 1.1)
     
-    # Volume confirmation: 20-period volume average
+    # Calculate 20-period volume average for spike detection
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -45,16 +44,24 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
+    # Align daily Camarilla levels to 4h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(bullish_aligned[i]) or 
-            np.isnan(bearish_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ma20_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -63,27 +70,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Alligator bullish + volume above average
-            if bullish_aligned[i] and volume[i] > 1.2 * vol_ma20[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R3 with volume spike
+            if (close[i] > r3_aligned[i] and 
+                volume[i] > 2.0 * vol_ma20_aligned[i]):
+                signals[i] = 0.30
                 position = 1
-            # Short: Alligator bearish + volume above average
-            elif bearish_aligned[i] and volume[i] > 1.2 * vol_ma20[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S3 with volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  volume[i] > 2.0 * vol_ma20_aligned[i]):
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: Alligator turns bearish or volume drops significantly
-            if bearish_aligned[i] or volume[i] < 0.7 * vol_ma20[i]:
+            # Long exit: price breaks below S4 or volume drops significantly
+            if (close[i] < s4_aligned[i] or 
+                volume[i] < 0.5 * vol_ma20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
-            # Short exit: Alligator turns bullish or volume drops significantly
-            if bullish_aligned[i] or volume[i] < 0.7 * vol_ma20[i]:
+            # Short exit: price breaks above R4 or volume drops significantly
+            if (close[i] > r4_aligned[i] or 
+                volume[i] < 0.5 * vol_ma20_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
