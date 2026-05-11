@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-# 4H_Vortex_Volume_Crossover_v1
-# Hypothesis: Vortex Indicator crossovers combined with volume confirmation
-# capture trend changes in both bull and bear markets. Vortex identifies
-# directional movement strength, volume confirms conviction. Uses 4h timeframe
-# with 1d ADX regime filter to avoid chop. Targets 25-50 trades/year for low
-# frequency and minimal fee drag. Works in trends (trend follow) and ranges
-# (mean reversion via Vortex crossovers at extremes).
+"""
+12h_KAMA_Trend_Volume_Signal_v1
+Hypothesis: KAMA adapts to market noise, providing reliable trend direction.
+In ranging markets, KAMA stays flat, reducing false signals. Combined with
+volume confirmation (2x average) and 1d ADX trend filter (>25), this strategy
+captures strong trends while avoiding whipsaws. Targets 12-37 trades/year
+on 12h timeframe with low frequency to minimize fee drag. Works in both bull
+and bear markets by only trading when trend is strong (ADX>25).
+"""
 
-name = "4H_Vortex_Volume_Crossover_v1"
-timeframe = "4h"
+name = "12h_KAMA_Trend_Volume_Signal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,81 +22,76 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for ADX regime filter (HTF)
+    # Get 1d data for ADX (HTF)
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 30:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- Vortex Indicator (14-period) on 4h ---
-    # VM+ = |High - Prior Low|, VM- = |Low - Prior High|
-    vm_plus = np.abs(high - np.roll(low, 1))
-    vm_minus = np.abs(low - np.roll(high, 1))
-    vm_plus[0] = np.abs(high[0] - low[0])  # first period
-    vm_minus[0] = vm_plus[0]
+    # --- KAMA (10-period ER, 2/30 SC) on 12h ---
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10, prepend=close[:10]))
+    volatility = np.sum(np.abs(np.diff(close, k=1, prepend=0)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    # Smoothing Constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2
+    # KAMA calculation
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # True Range
-    tr1 = np.abs(high - np.roll(low, 1))
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]  # first period
-    
-    # Sum over 14 periods
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus_sum / tr_sum
-    vi_minus = vm_minus_sum / tr_sum
-    
-    # --- 1d ADX (14-period) for regime filter ---
+    # --- 1d ADX (14-period) ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate +DM and -DM
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    plus_dm[0] = 0
-    minus_dm[0] = 0
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr1[0] = high_1d[0] - low_1d[0]  # first day
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # True Range for 1d
-    tr1_1d = np.abs(high_1d - np.roll(low_1d, 1))
-    tr2_1d = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3_1d = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1_1d, np.maximum(tr2_1d, tr3_1d))
-    tr_1d[0] = high_1d[0] - low_1d[0]
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
     
     # Smoothed values
-    tr_sum_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-    plus_dm_sum_1d = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_sum_1d = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
+    def smooth(val, period):
+        s = np.zeros_like(val)
+        s[period-1] = np.sum(val[:period])
+        for i in range(period, len(val)):
+            s[i] = s[i-1] - (s[i-1] / period) + val[i]
+        return s
     
-    # DI+ and DI-
-    plus_di_1d = 100 * (plus_dm_sum_1d / tr_sum_1d)
-    minus_di_1d = 100 * (minus_dm_sum_1d / tr_sum_1d)
+    atr = smooth(tr, 14)
+    dm_plus_smooth = smooth(dm_plus, 14)
+    dm_minus_smooth = smooth(dm_minus, 14)
     
-    # DX and ADX
-    dx_denom = plus_di_1d + minus_di_1d
-    dx_denom = np.where(dx_denom == 0, 1e-10, dx_denom)
-    dx = 100 * np.abs(plus_di_1d - minus_di_1d) / dx_denom
-    adx_1d = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # DI and DX
+    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
+    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = smooth(dx, 14)
     
-    # Align 1d ADX to 4h
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align 1d ADX to 12h
+    adx_12h = align_htf_to_ltf(prices, df_1d, adx)
     
-    # --- Volume Spike (4h) ---
+    # --- Volume Spike (12h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)
+    vol_spike = volume > (2.0 * vol_ma.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,29 +101,22 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if ADX is NaN
-        if np.isnan(adx_1d_aligned[i]):
+        if np.isnan(adx_12h[i]):
             if position != 0:
-                # Hold position until ADX available
-                signals[i] = 0.25 if position == 1 else -0.25
+                # Simple trailing: exit if price crosses KAMA
+                if position == 1 and close[i] < kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close[i] > kama[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Regime filter: only trade when ADX > 20 (trending market)
-        if adx_1d_aligned[i] < 20:
-            # In chop, exit any position
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Vortex crossover signals
-        vi_plus_crossover = vi_plus[i] > vi_minus[i] and vi_plus[i-1] <= vi_minus[i-1]
-        vi_minus_crossover = vi_minus[i] > vi_plus[i] and vi_minus[i-1] <= vi_plus[i-1]
-        
-        # Entry conditions
-        long_entry = vi_plus_crossover and vol_spike[i]
-        short_entry = vi_minus_crossover and vol_spike[i]
+        # Entry conditions: KAMA trend + volume spike + strong trend (ADX>25)
+        long_entry = (close[i] > kama[i]) and vol_spike[i] and (adx_12h[i] > 25)
+        short_entry = (close[i] < kama[i]) and vol_spike[i] and (adx_12h[i] > 25)
         
         if position == 0:
             if long_entry:
@@ -136,15 +126,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit on Vortex reverse crossover
+            # Exit on KAMA cross or ADX weakening
             if position == 1:
-                if vi_minus_crossover:
+                if (close[i] < kama[i]) or (adx_12h[i] < 20):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if vi_plus_crossover:
+                if (close[i] > kama[i]) or (adx_12h[i] < 20):
                     signals[i] = 0.0
                     position = 0
                 else:
