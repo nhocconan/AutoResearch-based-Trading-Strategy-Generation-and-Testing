@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend"
+name = "4h_Camarilla_R3_S3_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for daily trend and previous close
+    # Get 1d data for daily trend
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 20:
@@ -39,15 +39,19 @@ def generate_signals(prices):
     prev_low = df_1d['low'].shift(1).values
     
     # Camarilla levels (using previous day's range)
+    R3 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 4
+    S3 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 4
     R1 = prev_close + 1.1 * (prev_high - prev_low) * 1.1 / 6
     S1 = prev_close - 1.1 * (prev_high - prev_low) * 1.1 / 6
     
     # Align Camarilla levels
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
     S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
     
     # Volume filter: volume > 1.5x 20-period average
-    vol_ma20 = np.zeros(n)
+    vol_ma20 = np.full(n, np.nan)
     for i in range(n):
         if i < 20:
             vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
@@ -60,7 +64,8 @@ def generate_signals(prices):
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or 
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
             np.isnan(trend_up_1d_aligned[i]) or np.isnan(trend_down_1d_aligned[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
@@ -71,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 in 1d uptrend with volume surge
-            if (close[i] > R1_aligned[i] and 
+            # Long: price breaks above R3 in 1d uptrend with volume surge
+            if (close[i] > R3_aligned[i] and 
                 trend_up_1d_aligned[i] and 
                 volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 in 1d downtrend with volume surge
-            elif (close[i] < S1_aligned[i] and 
+            # Short: price breaks below S3 in 1d downtrend with volume surge
+            elif (close[i] < S3_aligned[i] and 
                   trend_down_1d_aligned[i] and 
                   volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 or 1d trend changes
-            if (close[i] < S1_aligned[i] or not trend_up_1d_aligned[i]):
+            # Long exit: price falls below R1 or 1d trend changes
+            if (close[i] < R1_aligned[i] or not trend_up_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above R1 or 1d trend changes
-            if (close[i] > R1_aligned[i] or not trend_down_1d_aligned[i]):
+            # Short exit: price rises above S1 or 1d trend changes
+            if (close[i] > S1_aligned[i] or not trend_down_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
