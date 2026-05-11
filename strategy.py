@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-1d_1w_Keltner_Breakout_Trend
-Hypothesis: On 1d timeframe, break above/below Keltner Channel (20, 2.0) signals trend.
-Use 1-week EMA50 as trend filter: only take longs when price > 1w EMA50, shorts when price < 1w EMA50.
-This avoids counter-trend trades in strong monthly trends. Weekly EMA50 adapts slowly,
-providing a robust bull/bear filter. Keltner breakout catches momentum; weekly filter
-ensures alignment with major trend. Target: 15-25 trades/year (60-100 total).
-Works in bull by buying breakouts in uptrend; works in bear by selling breakdowns in downtrend.
+6h_1d_Camarilla_R3_S3_Breakout_With_1dTrend_Volume
+Hypothesis: On 6-hour timeframe, buy breakouts above Camarilla R3 and sell breakdowns below S3,
+but only when aligned with 1-day trend (close > EMA34) and volume > 1.5x average.
+This combines intraday breakout logic with daily trend filter and volume confirmation.
+In bull markets: buys breakouts in uptrend. In bear markets: sells breakdowns in downtrend.
+Volume filter ensures participation. Target: 12-30 trades/year per symbol.
 """
 
-name = "1d_1w_Keltner_Breakout_Trend"
-timeframe = "1d"
+name = "6h_1d_Camarilla_R3_S3_Breakout_With_1dTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -19,93 +18,113 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter and Camarilla levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 1d OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # --- 1d Keltner Channel (20, 2.0) ---
-    # EMA20 of close
-    ema_20 = np.full(n, np.nan)
-    if n >= 20:
-        ema_20[19] = np.mean(close[:20])
-        for i in range(20, n):
-            ema_20[i] = 0.1 * close[i] + 0.9 * ema_20[i-1]
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema_34_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 34:
+        alpha = 2 / (34 + 1)
+        ema_34_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_34_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_34_1d[i-1]
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # ATR(20)
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]  # first TR
-    atr = np.full(n, np.nan)
-    if n >= 20:
-        atr[19] = np.mean(tr[1:21])  # average of TR[1] to TR[20]
-        for i in range(21, n):
-            atr[i] = 0.05 * tr[i] + 0.95 * atr[i-1]
+    # --- 1d volume average (20-period) for volume filter ---
+    vol_1d = df_1d['volume'].values
+    vol_avg_20_1d = np.full(len(vol_1d), np.nan)
+    if len(vol_1d) >= 20:
+        for i in range(19, len(vol_1d)):
+            vol_avg_20_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_avg_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20_1d)
     
-    # Keltner bounds
-    kc_upper = ema_20 + 2.0 * atr
-    kc_lower = ema_20 - 2.0 * atr
+    # --- Calculate Camarilla levels from previous 1-day OHLC ---
+    # Camarilla: based on previous day's range
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d_prev = df_1d['close'].values  # same as close_1d
     
-    # --- 1w EMA50 (trend filter) ---
-    close_1w = df_1w['close'].values
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_1w[i] = 2/(50+1) * close_1w[i] + (1 - 2/(50+1)) * ema_1w[i-1]
+    # Calculate levels for each day, then shift by 1 to get previous day's levels
+    range_1d = high_1d - low_1d
+    # Camarilla levels
+    R3 = close_1d_prev + range_1d * 1.1 / 6
+    S3 = close_1d_prev - range_1d * 1.1 / 6
+    R4 = close_1d_prev + range_1d * 1.1 / 2
+    S4 = close_1d_prev - range_1d * 1.1 / 2
     
-    # Align 1w EMA50 to 1d
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Shift to get previous day's levels (today's levels based on yesterday's data)
+    R3_prev = np.roll(R3, 1)
+    S3_prev = np.roll(S3, 1)
+    R4_prev = np.roll(R4, 1)
+    S4_prev = np.roll(S4, 1)
+    # First day has no previous
+    R3_prev[0] = np.nan
+    S3_prev[0] = np.nan
+    R4_prev[0] = np.nan
+    S4_prev[0] = np.nan
+    
+    # Align Camarilla levels to 6h
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_prev)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_prev)
+    R4_aligned = align_htf_to_ltf(prices, df_1d, R4_prev)
+    S4_aligned = align_htf_to_ltf(prices, df_1d, S4_prev)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max(1d EMA20, ATR20, 1w EMA50)
-    start_idx = max(20, 20, 50)
+    # Warmup: need EMA34 and volume average
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if np.isnan(ema_20[i]) or np.isnan(atr[i]) or np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or np.isnan(ema_1w_aligned[i]):
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(vol_avg_20_1d_aligned[i]) or
+            np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or
+            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Breakout conditions
-        breakout_up = close[i] > kc_upper[i]
-        breakout_down = close[i] < kc_lower[i]
-        
-        # 1w trend: price above/below EMA50
-        trend_up = close[i] > ema_1w_aligned[i]  # Compare 1d close to 1w EMA50 aligned
-        trend_down = close[i] < ema_1w_aligned[i]
+        # Volume filter: current volume > 1.5x 20-day average
+        volume_filter = volume[i] > 1.5 * vol_avg_20_1d_aligned[i]
         
         if position == 0:
-            if breakout_up and trend_up:
-                # Long: breakout above KC upper in 1w uptrend
+            # Long: break above R3 with uptrend and volume
+            if (close[i] > R3_aligned[i] and 
+                close[i] > ema_34_1d_aligned[i] and 
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
-            elif breakout_down and trend_down:
-                # Short: breakdown below KC lower in 1w downtrend
+            # Short: break below S3 with downtrend and volume
+            elif (close[i] < S3_aligned[i] and 
+                  close[i] < ema_34_1d_aligned[i] and 
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: break below KC lower OR trend turns down
-                if breakout_down or not trend_up:
+                # Exit long: close below S3 or trend reverses
+                if close[i] < S3_aligned[i] or close[i] < ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: break above KC upper OR trend turns up
-                if breakout_up or not trend_down:
+                # Exit short: close above R3 or trend reverses
+                if close[i] > R3_aligned[i] or close[i] > ema_34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
