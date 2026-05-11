@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Donchian20_WeeklyPivotDirection_VolumeConfirm"
-timeframe = "6h"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_TrendFilter_Adaptive"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,24 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel on 6h (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate 1d EMA34 for trend filter (HTF) - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Weekly pivot from 1w data for direction filter
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Calculate daily high/low/close for Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Volume filter: 50-period EMA for spike detection
-    vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
-    volume_ok = volume > vol_ema50 * 2.0  # Volume spike filter
+    # Camarilla levels: R3, S3
+    hl_range = high_1d - low_1d
+    r3 = close_1d + hl_range * 1.25
+    s3 = close_1d - hl_range * 1.25
     
-    # Fixed position size to minimize churn
-    position_size = 0.25
+    # Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Volume filter: 20-period EMA for spike detection
+    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
+    volume_ok = volume > vol_ema20 * 2.0  # Volume spike threshold
+    
+    # Adaptive position sizing based on volatility
+    returns = np.diff(np.log(close), prepend=np.log(close[0]))
+    vol_20 = pd.Series(returns).rolling(window=20, min_periods=20).std().values * np.sqrt(365*24)
+    position_size = np.clip(0.30 / (1 + vol_20 * 2), 0.15, 0.30)  # Inverse vol scaling
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -44,8 +53,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -55,35 +64,35 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        breakout_long = close[i] > high_max[i]
-        breakout_short = close[i] < low_min[i]
-        price_above_pivot = close[i] > pivot_1w_aligned[i]
-        price_below_pivot = close[i] < pivot_1w_aligned[i]
+        price_above_ema1d = close[i] > ema34_1d_aligned[i]
+        price_below_ema1d = close[i] < ema34_1d_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Breakout above Donchian high + above weekly pivot + volume spike
-            if breakout_long and price_above_pivot and volume_ok[i]:
-                signals[i] = position_size
+            # Long: Price breaks above R3 + above 1d EMA34 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
+                signals[i] = position_size[i]
                 position = 1
-            # Short: Breakout below Donchian low + below weekly pivot + volume spike
-            elif breakout_short and price_below_pivot and volume_ok[i]:
-                signals[i] = -position_size
+            # Short: Price breaks below S3 + below 1d EMA34 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
+                signals[i] = -position_size[i]
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions - simplified to reduce churn
             if position == 1:
-                # Exit: Price closes below Donchian low OR below weekly pivot
-                if close[i] < low_min[i] or close[i] < pivot_1w_aligned[i]:
+                # Exit: Price crosses below S3 OR trend reverses
+                if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = position_size
+                    signals[i] = position_size[i]
             elif position == -1:
-                # Exit: Price closes above Donchian high OR above weekly pivot
-                if close[i] > high_max[i] or close[i] > pivot_1w_aligned[i]:
+                # Exit: Price crosses above R3 OR trend reverses
+                if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -position_size
+                    signals[i] = -position_size[i]
     
     return signals
