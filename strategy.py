@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_Trend_With_Filter"
-timeframe = "1h"
+name = "6h_1w_1d_Momentum_Confluence"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,78 +16,51 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    open_time = pd.DatetimeIndex(prices['open_time'])
-    hours = open_time.hour
     
-    # Get 4h and 1d data
-    df_4h = get_htf_data(prices, '4h')
+    # Get weekly and daily data
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_4h) < 20 or len(df_1d) < 20:
+    if len(df_1w) < 50 or len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d EMA50 and EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_up_1d = ema50_1d > ema200_1d
-    trend_down_1d = ema50_1d < ema200_1d
+    # Weekly EMA50 for trend
+    weekly_close = df_1w['close'].values
+    ema50_w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    weekly_trend = weekly_close > ema50_w
     
-    # Calculate previous day's Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Daily RSI(14) for momentum
+    daily_close = df_1d['close'].values
+    delta = np.diff(daily_close, prepend=daily_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Shift by 1 to use previous day's data
-    ph = high_1d[:-1]
-    pl = low_1d[:-1]
-    pc = close_1d[:-1]
-    range_val = ph - pl
-    
-    # Calculate Camarilla levels for previous day
-    h5 = pc + 1.1 * range_val * 1.1 / 12
-    h4 = pc + 1.1 * range_val * 1.1 / 6
-    h3 = pc + 1.1 * range_val * 1.1 / 4
-    l3 = pc - 1.1 * range_val * 1.1 / 4
-    l4 = pc - 1.1 * range_val * 1.1 / 6
-    l5 = pc - 1.1 * range_val * 1.1 / 12
-    
-    # Align all to 1h
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    trend_up_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    trend_down_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma20 = np.zeros(n)
+    # 60-period volume average for confirmation
+    vol_ma60 = np.zeros(n)
     for i in range(n):
-        if i < 20:
-            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        if i < 60:
+            vol_ma60[i] = np.mean(volume[:i+1]) if i > 0 else 0
         else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+            vol_ma60[i] = np.mean(volume[i-59:i+1])
+    
+    # Align weekly trend and daily RSI to 6h
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(100, 20)
+    start_idx = max(100, 60)
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
-            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
-            np.isnan(vol_ma20[i])):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
-        if not in_session:
+        if (np.isnan(weekly_trend_aligned[i]) or 
+            np.isnan(rsi_aligned[i]) or
+            np.isnan(vol_ma60[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -96,31 +69,31 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above H3 in daily uptrend with volume surge
-            if (close[i] > h3_aligned[i] and 
-                trend_up_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = 0.20
+            # Long: weekly uptrend + RSI > 55 + volume confirmation
+            if (weekly_trend_aligned[i] and 
+                rsi_aligned[i] > 55 and 
+                volume[i] > 1.3 * vol_ma60[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below L3 in daily downtrend with volume surge
-            elif (close[i] < l3_aligned[i] and 
-                  trend_down_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -0.20
+            # Short: weekly downtrend + RSI < 45 + volume confirmation
+            elif (not weekly_trend_aligned[i] and 
+                  rsi_aligned[i] < 45 and 
+                  volume[i] > 1.3 * vol_ma60[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below L3 or daily trend changes
-            if (close[i] < l3_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: weekly trend changes or RSI < 40
+            if (not weekly_trend_aligned[i] or rsi_aligned[i] < 40):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above H3 or daily trend changes
-            if (close[i] > h3_aligned[i] or not trend_down_aligned[i]):
+            # Short exit: weekly trend changes or RSI > 60
+            if (weekly_trend_aligned[i] or rsi_aligned[i] > 60):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
