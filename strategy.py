@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-12h_WilliamsAlligator_TrixVolume_ElderRay
-Hypothesis: Combine Williams Alligator (trend direction), TRIX (momentum), and Elder Ray (bull/bear power) with volume confirmation on 12h timeframe. Uses 1w trend filter to avoid counter-trend trades. Designed to work in both bull and bear markets by following the primary trend with momentum confirmation. Targets 15-30 trades/year to minimize fee drag.
+12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike
+Hypothesis: Breakout above Camarilla R3 or below S3 with 1d EMA trend filter and volume confirmation. Works in bull/bear markets by trading breakouts in trend direction. Uses 12h timeframe for low trade frequency to minimize fee drag. Targets 15-30 trades/year.
 """
 
-name = "12h_WilliamsAlligator_TrixVolume_ElderRay"
+name = "12h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,100 +22,93 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === Williams Alligator (13,8,5 SMAs) ===
-    jaw = pd.Series(close).rolling(window=13, min_periods=13).mean().values  # 13-period SMMA
-    teeth = pd.Series(close).rolling(window=8, min_periods=8).mean().values   # 8-period SMMA
-    lips = pd.Series(close).rolling(window=5, min_periods=5).mean().values    # 5-period SMMA
+    # === 1d OHLC for Camarilla pivot calculation ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Alligator alignment: lips > teeth > jaw = bullish, lips < teeth < jaw = bearish
-    bullish_alligator = (lips > teeth) & (teeth > jaw)
-    bearish_alligator = (lips < teeth) & (teeth < jaw)
+    # Calculate Camarilla levels from previous 1d bar
+    # R3 = close + 1.1*(high-low)/2
+    # S3 = close - 1.1*(high-low)/2
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # === TRIX (15-period) ===
-    # TRIX = EMA(EMA(EMA(close, 15), 15), 15) - 1 period ago
-    ema1 = pd.Series(close).ewm(span=15, min_periods=15, adjust=False).mean()
-    ema2 = ema1.ewm(span=15, min_periods=15, adjust=False).mean()
-    ema3 = ema2.ewm(span=15, min_periods=15, adjust=False).mean()
-    trix = ema3.pct_change() * 100  # percentage change
-    trix_values = trix.fillna(0).values
+    camarilla_range = prev_high - prev_low
+    r3 = prev_close + 1.1 * camarilla_range / 2
+    s3 = prev_close - 1.1 * camarilla_range / 2
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = pd.Series(trix_values).ewm(span=9, min_periods=9, adjust=False).mean().values
+    # Align to 12h timeframe
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # TRIX bullish/bearish crossover
-    trix_bullish = trix_values > trix_signal
-    trix_bearish = trix_values < trix_signal
+    # === 1d EMA34 Trend Filter ===
+    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === Elder Ray (13-period EMA) ===
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13  # High minus EMA
-    bear_power = low - ema13   # Low minus EMA
-    
-    # Elder Ray signals
-    elder_bullish = bull_power > 0
-    elder_bearish = bear_power < 0
-    
-    # === Volume Spike Filter ===
+    # === Volume Spike Filter (12h) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.8  # 1.8x average volume for confirmation
-    
-    # === 1week EMA34 Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema34_1w = pd.Series(close_1w).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1w_12h = align_htf_to_ltf(prices, df_1w, ema34_1w)
-    
-    # 1w trend: price above/below EMA34
-    trend_up = close > ema34_1w_12h
-    trend_down = close < ema34_1w_12h
+    volume_ok = volume > vol_ema20 * 2.0  # 2x average volume
     
     # === Signal Parameters ===
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    holding_bars = 0
     
-    # Start after warmup (covers all indicator calculations)
-    start_idx = 50
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(trix_values[i]) or np.isnan(trix_signal[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(ema34_1w_12h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema34_12h[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
+                holding_bars = 0
             else:
                 signals[i] = 0.0
             continue
         
         if position == 0:
-            # Long: Bullish Alligator + TRIX bullish cross + Elder Ray bullish + volume + 1w uptrend
-            if (bullish_alligator[i] and trix_bullish[i] and elder_bullish[i] and 
-                volume_ok[i] and trend_up[i]):
+            # Long: Close breaks above R3 + above 1d EMA34 + volume spike
+            if (close[i] > r3_12h[i] and 
+                close[i] > ema34_12h[i] and volume_ok[i]):
                 signals[i] = position_size
                 position = 1
-            # Short: Bearish Alligator + TRIX bearish cross + Elder Ray bearish + volume + 1w downtrend
-            elif (bearish_alligator[i] and trix_bearish[i] and elder_bearish[i] and 
-                  volume_ok[i] and trend_down[i]):
+                holding_bars = 0
+            # Short: Close breaks below S3 + below 1d EMA34 + volume spike
+            elif (close[i] < s3_12h[i] and 
+                  close[i] < ema34_12h[i] and volume_ok[i]):
                 signals[i] = -position_size
                 position = -1
+                holding_bars = 0
         else:
-            # Exit: Opposite signal or Alligator alignment change
+            # Enforce minimum holding period (4 bars)
+            holding_bars += 1
+            if holding_bars < 4:
+                signals[i] = position_size if position == 1 else -position_size
+                continue
+            
+            # Exit: Close returns to 1d EMA34
             if position == 1:
-                # Exit long on bearish signals or Alligator turning bearish
-                if (bearish_alligator[i] or trix_bearish[i] or not elder_bullish[i]):
+                if close[i] < ema34_12h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit short on bullish signals or Alligator turning bullish
-                if (bullish_alligator[i] or trix_bullish[i] or not elder_bearish[i]):
+                if close[i] > ema34_12h[i]:
                     signals[i] = 0.0
                     position = 0
+                    holding_bars = 0
                 else:
                     signals[i] = -position_size
     
