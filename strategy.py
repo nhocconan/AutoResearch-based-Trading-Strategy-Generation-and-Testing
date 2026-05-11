@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-6h_ElderRay_Alligator_Combo_v1
-Hypothesis: Combine Elder Ray (bull/bear power) with Williams Alligator (jaw/teeth/lips) on 1d timeframe.
-Elder Ray measures bull/bear power relative to EMA13; Alligator shows trend alignment.
-In bull markets: strong bull power + Alligator aligned bullish (lips>teeth>jaw).
-In bear markets: strong bear power + Alligator aligned bearish (jaw>teeth>lips).
-This dual-filter reduces whipsaws and works in both regimes.
-Target: 50-150 total trades over 4 years on 6h timeframe.
+12h_Donchian_Breakout_Volume_Filter_v1
+Hypothesis: Use 1d Donchian breakouts with volume confirmation and ATR filter on 12h timeframe.
+Donchian breakouts capture strong trends, volume confirms institutional participation,
+ATR filter avoids whipsaws in choppy markets. Works in both bull and bear markets
+by filtering breakouts with volume and volatility context.
+Target: 50-150 total trades over 4 years on 12h timeframe.
 """
 
-name = "6h_ElderRay_Alligator_Combo_v1"
-timeframe = "6h"
+name = "12h_Donchian_Breakout_Volume_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -19,52 +18,56 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === 1D Data for Elder Ray and Alligator ===
+    # === 1D Data for Donchian Channels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 26:  # Need enough data for EMA13 and Alligator
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close_1d).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high_1d - ema13
-    bear_power = low_1d - ema13
+    # Donchian channels (20-period high/low)
+    period20_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    period20_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Williams Alligator: Jaw (13), Teeth (8), Lips (5) SMAs
-    jaw = pd.Series(close_1d).rolling(window=13, min_periods=13).mean().values
-    teeth = pd.Series(close_1d).rolling(window=8, min_periods=8).mean().values
-    lips = pd.Series(close_1d).rolling(window=5, min_periods=5).mean().values
+    # Align Donchian channels to 12h timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, period20_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, period20_low)
     
-    # Align all indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    jaw_aligned = align_htf_to_ltf(prices, df_1d, jaw)
-    teeth_aligned = align_htf_to_ltf(prices, df_1d, teeth)
-    lips_aligned = align_htf_to_ltf(prices, df_1d, lips)
+    # === 12h Indicators ===
+    # Volume moving average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR (14-period) for stop loss and volatility filter
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 26
+    # Start after warmup (need at least 20 days of data)
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(bull_power_aligned[i]) or 
-            np.isnan(bear_power_aligned[i]) or 
-            np.isnan(jaw_aligned[i]) or 
-            np.isnan(teeth_aligned[i]) or 
-            np.isnan(lips_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -72,33 +75,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Elder Ray signals
-        strong_bull_power = bull_power_aligned[i] > 0
-        strong_bear_power = bear_power_aligned[i] < 0
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirm = volume[i] > 1.5 * vol_ma[i]
         
-        # Alligator alignment
-        alligator_bullish = lips_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > jaw_aligned[i]
-        alligator_bearish = jaw_aligned[i] > teeth_aligned[i] and teeth_aligned[i] > lips_aligned[i]
+        # ATR filter: avoid trading when ATR is too low (choppy market)
+        atr_filter = atr[i] > 0.01 * close[i]  # ATR > 1% of price
         
         if position == 0:
-            # Long: strong bull power + Alligator bullish alignment
-            if strong_bull_power and alligator_bullish:
+            # Long: price breaks above Donchian high + volume confirmation + ATR filter
+            if close[i] > donchian_high_aligned[i] and volume_confirm and atr_filter:
                 signals[i] = 0.25
                 position = 1
-            # Short: strong bear power + Alligator bearish alignment
-            elif strong_bear_power and alligator_bearish:
+            # Short: price breaks below Donchian low + volume confirmation + ATR filter
+            elif close[i] < donchian_low_aligned[i] and volume_confirm and atr_filter:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: weak bull power OR Alligator not bullish
-            if not strong_bull_power or not alligator_bullish:
+            # Long exit: price breaks below Donchian low
+            if close[i] < donchian_low_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: weak bear power OR Alligator not bearish
-            if not strong_bear_power or not alligator_bearish:
+            # Short exit: price breaks above Donchian high
+            if close[i] > donchian_high_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
