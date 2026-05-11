@@ -1,12 +1,5 @@
-# 4h_Momentum_Volume_Trend
-# Hypothesis: Combines 4h momentum (RSI > 55) with volume confirmation (volume > 1.5x 20-period average) and trend filter (price > 4h EMA50) for long entries.
-# Short entries use RSI < 45, volume confirmation, and price < 4h EMA50.
-# Works in both bull and bear markets by capturing momentum shifts with volume confirmation.
-# Uses 4h timeframe to limit trades (target: 20-50/year) and reduce fee drag.
-# Exit when momentum reverses (RSI crosses back below 50 for longs, above 50 for shorts).
-
 #!/usr/bin/env python3
-name = "4h_Momentum_Volume_Trend"
+name = "4h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,41 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h data for EMA50 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get 1d data for trend filter (EMA34) and volume calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    # 4h EMA50 for trend filter
-    ema_50_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Previous day high, low, close for Camarilla calculation
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_close = df_1d['close'].shift(1).values
     
-    # RSI calculation on 4h closes
-    delta = np.diff(df_4h['close'].values, prepend=np.nan)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi_aligned = align_htf_to_ltf(prices, df_4h, rsi)
+    # Calculate Camarilla levels R3 and S3 (outer bands for breakout)
+    r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
+    s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
     
-    # Volume ratio: current volume / 20-period average
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = df_4h['volume'].values / vol_ma_4h
+    # 1d EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    
+    # 1d volume filter: 20-period average
+    df_1d_vol = df_1d['volume'].values
+    vol_ma_1d = pd.Series(df_1d_vol).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = df_1d_vol / vol_ma_1d
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    vol_ratio_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio)
+    
+    # Align all 1d data to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
+    
+    # Session filter: 8-20 UTC (aligned to 4h)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (max of EMA50, RSI, vol lookback)
-    start_idx = 50
+    # Start after warmup
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi_aligned[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ratio_aligned[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio_aligned[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -67,29 +68,48 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Check session
+        if not in_session[i]:
+            if position == 1:
+                signals[i] = 0.25
+            elif position == -1:
+                signals[i] = -0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume threshold - avoid low-volume false breakouts
+        volume_surge = vol_ratio_aligned[i] > 1.5
+        
         if position == 0:
-            # Long: RSI > 55 (bullish momentum), volume surge, price above EMA50
-            if (rsi_aligned[i] > 55 and 
-                vol_ratio_aligned[i] > 1.5 and 
-                close[i] > ema_50_aligned[i]):
+            # Long: Price breaks above R3 with volume and above 1d EMA34 trend
+            if (close[i] > r3_aligned[i] and 
+                volume_surge and 
+                close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: RSI < 45 (bearish momentum), volume surge, price below EMA50
-            elif (rsi_aligned[i] < 45 and 
-                  vol_ratio_aligned[i] > 1.5 and 
-                  close[i] < ema_50_aligned[i]):
+            # Short: Price breaks below S3 with volume and below 1d EMA34 trend
+            elif (close[i] < s3_aligned[i] and 
+                  volume_surge and 
+                  close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: momentum reversal (RSI crosses back below/above 50)
+            # Exit: price returns to opposite S1/R1 level (inner band for mean reversion)
             if position == 1:
-                if rsi_aligned[i] < 50:
+                # Calculate S1 for exit
+                s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+                s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+                if close[i] <= s1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if rsi_aligned[i] > 50:
+                # Calculate R1 for exit
+                r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
+                r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+                if close[i] >= r1_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
