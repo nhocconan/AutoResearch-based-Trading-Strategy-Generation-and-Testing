@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1d_Keltner_Squeeze_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mta_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,47 +17,55 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # 1. Load weekly data ONCE for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # 2. Weekly EMA34 for trend filter
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema34_1w)
     
-    # Load 1d data ONCE for Camarilla levels
-    df_1d = get_htf_data(prices, '1d')
+    # 3. Daily ATR for Keltner Channels
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Calculate daily high/low/close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # 4. Daily EMA20 for Keltner middle
+    ema20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Camarilla levels: R1, S1 (tighter breakout levels)
-    hl_range = high_1d - low_1d
-    r1 = close_1d + hl_range * 1.0833
-    s1 = close_1d - hl_range * 1.0833
+    # 5. Keltner Channels
+    keltner_upper = ema20 + 2.0 * atr
+    keltner_lower = ema20 - 2.0 * atr
     
-    # Align Camarilla levels to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # 6. Bollinger Bands for squeeze detection
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma20 + 2.0 * std20
+    bb_lower = sma20 - 2.0 * std20
     
-    # Volume filter: 20-period EMA for spike detection
+    # 7. Squeeze condition: BB inside Keltner
+    squeeze = (bb_upper <= keltner_upper) & (bb_lower >= keltner_lower)
+    
+    # 8. Momentum: 12-period ROC
+    roc = np.zeros_like(close)
+    roc[12:] = (close[12:] - close[:-12]) / close[:-12] * 100
+    
+    # 9. Volume filter: 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # Volume spike filter
+    volume_ok = volume > vol_ema20 * 1.5
     
-    # Fixed position size to avoid churn
+    # 10. Fixed position size
     position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 100
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema34_1w_aligned[i]) or np.isnan(keltner_upper[i]) or 
+            np.isnan(keltner_lower[i]) or np.isnan(roc[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -67,32 +75,35 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema12h = close[i] > ema50_12h_aligned[i]
-        price_below_ema12h = close[i] < ema50_12h_aligned[i]
-        breakout_long = close[i] > r1_aligned[i]
-        breakout_short = close[i] < s1_aligned[i]
+        in_squeeze = squeeze[i]
+        momentum_up = roc[i] > 0
+        momentum_down = roc[i] < 0
+        price_above_keltner_upper = close[i] > keltner_upper[i]
+        price_below_keltner_lower = close[i] < keltner_lower[i]
+        weekly_uptrend = close[i] > ema34_1w_aligned[i]
+        weekly_downtrend = close[i] < ema34_1w_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R1 + above 12h EMA50 + volume spike
-            if breakout_long and price_above_ema12h and volume_ok[i]:
+            # Long: Squeeze breakout up + momentum up + weekly uptrend + volume
+            if in_squeeze and momentum_up and price_above_keltner_upper and weekly_uptrend and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S1 + below 12h EMA50 + volume spike
-            elif breakout_short and price_below_ema12h and volume_ok[i]:
+            # Short: Squeeze breakout down + momentum down + weekly downtrend + volume
+            elif in_squeeze and momentum_down and price_below_keltner_lower and weekly_downtrend and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - tighten to reduce churn
+            # Exit conditions
             if position == 1:
-                # Exit: Price crosses below S1 OR trend reverses
-                if close[i] < s1_aligned[i] or close[i] < ema50_12h_aligned[i]:
+                # Exit: Price closes below Keltner lower OR momentum turns negative
+                if close[i] < keltner_lower[i] or roc[i] < 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R1 OR trend reverses
-                if close[i] > r1_aligned[i] or close[i] > ema50_12h_aligned[i]:
+                # Exit: Price closes above Keltner upper OR momentum turns positive
+                if close[i] > keltner_upper[i] or roc[i] > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
