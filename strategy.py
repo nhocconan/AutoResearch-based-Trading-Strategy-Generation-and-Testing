@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_TRIX_VolumeSpike_1dTrend"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -32,14 +32,20 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # TRIX (12,9): TRIX = EMA(EMA(EMA(close,12),12),12); signal = 9-period EMA of TRIX
-    ema1 = pd.Series(close).ewm(span=12, adjust=False, min_periods=12).mean()
-    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
-    trix = 100 * (ema3.diff() / ema3.shift(1))
-    trix_signal = trix.ewm(span=9, adjust=False, min_periods=9).mean()
-    trix_hist = trix - trix_signal
-    trix_hist = trix_hist.fillna(0).values
+    # Camarilla pivot levels from previous day
+    # Calculate pivots using previous day's high, low, close
+    prev_high = np.roll(high, 1)  # previous bar's high
+    prev_low = np.roll(low, 1)    # previous bar's low
+    prev_close = np.roll(close, 1) # previous bar's close
+    
+    # For first bar, use first values to avoid NaN
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    prev_close[0] = close[0]
+    
+    # Camarilla levels
+    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
     # Session filter: 08-20 UTC
     hours = pd.DatetimeIndex(prices['open_time']).hour
@@ -48,12 +54,12 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for TRIX and EMAs
+    start_idx = 40  # Need enough data for EMA, volume, and pivots
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(trix_hist[i])):
+            np.isnan(R1[i]) or np.isnan(S1[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -70,24 +76,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX histogram crosses above zero + daily uptrend + volume filter
-            if trix_hist[i] > 0 and trix_hist[i-1] <= 0 and trend_up[i] and volume_filter[i]:
+            # Long: Close above R1 + daily uptrend + volume filter
+            if close[i] > R1[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX histogram crosses below zero + daily downtrend + volume filter
-            elif trix_hist[i] < 0 and trix_hist[i-1] >= 0 and not trend_up[i] and volume_filter[i]:
+            # Short: Close below S1 + daily downtrend + volume filter
+            elif close[i] < S1[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX histogram crosses below zero or daily trend down
-            if trix_hist[i] < 0 and trix_hist[i-1] >= 0 or not trend_up[i]:
+            # Long exit: Close below S1 or daily trend down
+            if close[i] < S1[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX histogram crosses above zero or daily trend up
-            if trix_hist[i] > 0 and trix_hist[i-1] <= 0 or trend_up[i]:
+            # Short exit: Close above R1 or daily trend up
+            if close[i] > R1[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
