@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Trend_With_DMI"
+name = "4h_TRIX_VolumeSpike_12hTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 150:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,81 +17,41 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivots and trend filters
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 12h data for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 20:
         return np.zeros(n)
     
-    # Calculate daily Camarilla levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # TRIX (15-period) - TRIPLE EMA of 1-period ROC
+    close_series = pd.Series(close)
+    roc = close_series.pct_change(1)  # 1-period rate of change
+    ema1 = roc.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
+    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
+    trix = ema3 * 100  # scale for readability
     
-    # Previous day's range
-    range_1d = high_1d - low_1d
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_signal = trix.ewm(span=9, adjust=False, min_periods=9).mean()
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = close_1d + (range_1d * 1.1 / 2)
-    camarilla_s3 = close_1d - (range_1d * 1.1 / 2)
+    # 12h EMA21 for trend filter
+    close_12h = pd.Series(df_12h['close'].values)
+    ema_12h = close_12h.ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Align Camarilla levels to 4h timeframe
-    r3_4h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    
-    # Daily EMA34 for trend filter
-    close_1d_series = pd.Series(close_1d)
-    ema_1d = close_1d_series.ewm(span=34, min_periods=34).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # DMI (ADX) on daily timeframe for trend strength
-    # Calculate +DI, -DI, and ADX
-    high_1d_series = pd.Series(high_1d)
-    low_1d_series = pd.Series(low_1d)
-    
-    # True Range
-    tr1 = high_1d_series - low_1d_series
-    tr2 = abs(high_1d_series - close_1d_series.shift(1))
-    tr3 = abs(low_1d_series - close_1d_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    
-    # Directional Movement
-    up_move = high_1d_series.diff()
-    down_move = low_1d_series.diff().multiply(-1)
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(span=14, min_periods=14).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14).mean().values
-    
-    # Calculate +DI, -DI, and ADX
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=14, min_periods=14).mean().values
-    
-    # Align DMI components to 4h
-    adx_4h = align_htf_to_ltf(prices, df_1d, adx)
-    plus_di_4h = align_htf_to_ltf(prices, df_1d, plus_di)
-    minus_di_4h = align_htf_to_ltf(prices, df_1d, minus_di)
-    
-    # Volume filter: current volume > 1.8x 30-period average
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    # Volume filter: current volume > 2.0x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 150
+    # Start after warmup (need enough data for TRIX calculation)
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(adx_4h[i]) or 
-            np.isnan(plus_di_4h[i]) or np.isnan(minus_di_4h[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -100,26 +60,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 AND above daily EMA34 AND ADX > 25 AND +DI > -DI AND volume spike
-            if (close[i] > r3_4h[i] and close[i] > ema_1d_aligned[i] and 
-                adx_4h[i] > 25 and plus_di_4h[i] > minus_di_4h[i] and volume_filter[i]):
+            # Long: TRIX crosses above signal line AND above 12h EMA21 (uptrend) AND volume spike
+            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and close[i] > ema_12h_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 AND below daily EMA34 AND ADX > 25 AND -DI > +DI AND volume spike
-            elif (close[i] < s3_4h[i] and close[i] < ema_1d_aligned[i] and 
-                  adx_4h[i] > 25 and minus_di_4h[i] > plus_di_4h[i] and volume_filter[i]):
+            # Short: TRIX crosses below signal line AND below 12h EMA21 (downtrend) AND volume spike
+            elif trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and close[i] < ema_12h_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S3 OR below daily EMA34 OR ADX < 20
-            if (close[i] < s3_4h[i] or close[i] < ema_1d_aligned[i] or adx_4h[i] < 20):
+            # Long exit: TRIX crosses below signal line OR below 12h EMA21 (trend change)
+            if trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price rises above R3 OR above daily EMA34 OR ADX < 20
-            if (close[i] > r3_4h[i] or close[i] > ema_1d_aligned[i] or adx_4h[i] < 20):
+            # Short exit: TRIX crosses above signal line OR above 12h EMA21 (trend change)
+            if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
