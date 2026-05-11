@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 1d_1w_KAMA_Trend_With_Weekly_Volume_Filter
-# Hypothesis: Uses daily KAMA direction with weekly volume surge filter to capture trending moves.
-# Long when daily KAMA rising and weekly volume > 1.5x average; short when daily KAMA falling and weekly volume > 1.5x average.
-# KAMA adapts to market noise, reducing whipsaws in sideways markets. Weekly volume filter ensures participation in institutional moves.
-# Works in bull markets (riding uptrends) and bear markets (riding downtrends) by following adaptive trend.
-# Weekly timeframe reduces noise and false signals, keeping trade frequency low to avoid fee drag.
+# 6h_RSI_Divergence_Volume_Confirmation
+# Hypothesis: Combines RSI divergence (bullish/bearish) with volume confirmation and 1d trend filter.
+# Bullish divergence: price makes lower low, RSI makes higher low -> long signal when volume confirms.
+# Bearish divergence: price makes higher high, RSI makes lower high -> short signal when volume confirms.
+# Uses 1d EMA50 as trend filter: only take longs in uptrend, shorts in downtrend.
+# Works in bull markets by catching pullbacks in uptrends, works in bear markets by catching bounces in downtrends.
+# Volume confirmation reduces false signals. Targets 15-30 trades/year.
 
-name = "1d_1w_KAMA_Trend_With_Weekly_Volume_Filter"
-timeframe = "1d"
+name = "6h_RSI_Divergence_Volume_Confirmation"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -16,110 +17,100 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get weekly data for volume filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Daily price data
+    # Price and volume arrays
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Daily KAMA (adaptive trend) ---
-    # Efficiency Ratio
-    change = np.abs(np.diff(close, n=1))
-    change = np.insert(change, 0, 0)  # align length
+    # --- 1d EMA50 for trend filter ---
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_slope = ema_50_1d - np.roll(ema_50_1d, 1)
+    ema_50_1d_slope[0] = 0
+    ema_50_1d_slope = pd.Series(ema_50_1d_slope).ewm(span=3, adjust=False, min_periods=1).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_50_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d_slope)
     
-    # Volatility sum over 10 periods
-    vol = np.abs(np.diff(close, n=1))
-    vol = np.insert(vol, 0, 0)
-    volatility = np.zeros_like(close)
-    for i in range(len(volatility)):
-        if i < 10:
-            volatility[i] = np.nan
-        else:
-            volatility[i] = np.sum(vol[i-9:i+1])
+    # --- RSI(14) calculation ---
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(span=14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Efficiency Ratio
-    er = np.zeros_like(close)
-    er[:] = np.nan
-    mask = volatility != 0
-    er[mask] = change[mask] / volatility[mask]
+    # --- Volume confirmation (volume > 20-period average) ---
+    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_surge = volume > vol_ma
     
-    # Smoothing constants
-    sc = np.zeros_like(close)
-    sc[:] = np.nan
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = er * (fast_sc - slow_sc) + slow_sc
-    sc = sc * sc  # square for smoothing
+    # --- RSI divergence detection (lookback 5 bars) ---
+    def detect_divergence(price_series, rsi_series, lookback=5):
+        bullish_div = np.zeros_like(price_series, dtype=bool)
+        bearish_div = np.zeros_like(price_series, dtype=bool)
+        
+        for i in range(lookback, len(price_series)):
+            # Bullish divergence: price makes lower low, RSI makes higher low
+            if (price_series[i] < price_series[i-lookback:i].min() and 
+                rsi_series[i] > rsi_series[i-lookback:i].min()):
+                bullish_div[i] = True
+            # Bearish divergence: price makes higher high, RSI makes lower high
+            if (price_series[i] > price_series[i-lookback:i].max() and 
+                rsi_series[i] < rsi_series[i-lookback:i].max()):
+                bearish_div[i] = True
+        return bullish_div, bearish_div
     
-    # KAMA calculation
-    kama = np.zeros_like(close)
-    kama[:] = np.nan
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]) or np.isnan(kama[i-1]):
-            kama[i] = close[i]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # KAMA direction (slope)
-    kama_slope = kama - np.roll(kama, 1)
-    kama_slope[0] = 0
-    # Smooth the slope to reduce noise
-    kama_slope_smooth = pd.Series(kama_slope).ewm(span=5, adjust=False, min_periods=1).mean().values
-    
-    # --- Weekly volume filter ---
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(vol_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge_1w = vol_1w > (vol_ma_1w * 1.5)  # 1.5x average volume
-    vol_surge_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_surge_1w)
+    bullish_div, bearish_div = detect_divergence(close, rsi, 5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for KAMA (need ~30 periods for stability)
-    start_idx = 40
+    # Warmup: enough for RSI (14) and EMA50 slope (50+3)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama_slope_smooth[i]) or
-            np.isnan(vol_surge_1w_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(ema_50_1d_slope_aligned[i]) or
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from smoothed KAMA slope
-        uptrend = kama_slope_smooth[i] > 0
-        downtrend = kama_slope_smooth[i] < 0
+        # Trend direction from 1d EMA50 slope
+        uptrend = ema_50_1d_slope_aligned[i] > 0
+        downtrend = ema_50_1d_slope_aligned[i] < 0
         
         if position == 0:
-            if uptrend and vol_surge_1w_aligned[i]:
-                # Long: rising KAMA + weekly volume surge
+            # Long: bullish divergence + volume surge + uptrend filter
+            if bullish_div[i] and vol_surge[i] and uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif downtrend and vol_surge_1w_aligned[i]:
-                # Short: falling KAMA + weekly volume surge
+            # Short: bearish divergence + volume surge + downtrend filter
+            elif bearish_div[i] and vol_surge[i] and downtrend:
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: KAMA slope turns down OR weekly volume surge ends
-                if not uptrend or not vol_surge_1w_aligned[i]:
+                # Exit long: bearish divergence OR trend turns down
+                if bearish_div[i] or downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: KAMA slope turns up OR weekly volume surge ends
-                if not downtrend or not vol_surge_1w_aligned[i]:
+                # Exit short: bullish divergence OR trend turns up
+                if bullish_div[i] or uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
