@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume_Adaptive"
-timeframe = "12h"
+name = "1d_KAMA_Trend_RSI_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,77 +17,70 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and ATR
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
-        return np.zeros(n)
+    # KAMA calculation parameters
+    er_period = 10
+    fast_ema = 2
+    slow_ema = 30
     
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate Efficiency Ratio (ER)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder for correct calculation
     
-    # 1d EMA34 for trend
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    
-    # 1d ATR(14) for volatility regime
-    tr = np.zeros(len(df_1d))
-    tr[0] = high_1d[0] - low_1d[0]
-    for i in range(1, len(df_1d)):
-        tr[i] = max(high_1d[i] - low_1d[i], 
-                    abs(high_1d[i] - close_1d[i-1]), 
-                    abs(low_1d[i] - close_1d[i-1]))
-    
-    atr14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    
-    # Get 12h data for Camarilla levels (R3, S3)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 2:
-        return np.zeros(n)
-    
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    # Calculate Camarilla levels (R3, S3) from previous 12h period
-    R3 = np.full(len(high_12h), np.nan)
-    S3 = np.full(len(high_12h), np.nan)
-    
-    for i in range(1, len(high_12h)):
-        prev_high = high_12h[i-1]
-        prev_low = low_12h[i-1]
-        prev_close = close_12h[i-1]
-        range_val = prev_high - prev_low
-        if range_val > 0:
-            R3[i] = prev_close + range_val * 1.1 / 4
-            S3[i] = prev_close - range_val * 1.1 / 4
-    
-    # Align indicators to 12h timeframe
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    atr14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr14_1d)
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
-    
-    # Volume moving average (20-period) for confirmation
-    vol_ma20 = np.full(n, np.nan)
+    # Correct ER calculation: need rolling volatility
+    er = np.zeros(n)
     for i in range(n):
-        if i < 20:
-            if i > 0:
-                vol_ma20[i] = np.mean(volume[:i+1])
+        if i < er_period:
+            er[i] = np.nan
         else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+            price_change = np.abs(close[i] - close[i-er_period])
+            volatility_sum = np.sum(np.abs(np.diff(close[i-er_period+1:i+1])))
+            er[i] = price_change / (volatility_sum + 1e-10)
+    
+    # Smoothing constants
+    sc = (er * (2/(fast_ema+1) - 2/(slow_ema+1)) + 2/(slow_ema+1)) ** 2
+    
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[0] = close[0]
+    for i in range(1, n):
+        if np.isnan(sc[i]):
+            kama[i] = kama[i-1]
+        else:
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_up_1w = close_1w > ema20_1w
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    
+    # RSI(14) for overbought/oversold
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     
-    start_idx = max(30, 34)  # Need enough data for indicators
+    start_idx = max(30, 20, 14)  # Ensure enough data
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or 
-            np.isnan(S3_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or
-            np.isnan(atr14_1d_aligned[i]) or
+        if (np.isnan(kama[i]) or 
+            np.isnan(trend_up_1w_aligned[i]) or
+            np.isnan(rsi[i]) or
             np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
@@ -96,40 +89,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Adaptive position sizing based on volatility regime
-        # Scale position size: 0.20 in low vol, 0.35 in high vol (max 0.40)
-        vol_ratio = atr14_1d_aligned[i] / (atr14_1d_aligned[i] + 1e-10)  # Normalize
-        vol_ratio = min(vol_ratio, 2.0)  # Cap at 2x
-        base_size = 0.20 + 0.15 * min(vol_ratio / 2.0, 1.0)  # 0.20 to 0.35
-        
         if position == 0:
-            # Long: price breaks above R3 + uptrend + volume confirmation
-            if (close[i] > R3_aligned[i] and 
-                trend_up_1d_aligned[i] and 
-                volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = base_size
+            # Long: price above KAMA (uptrend) + RSI < 50 (not overbought) + volume confirmation
+            if (close[i] > kama[i] and 
+                trend_up_1w_aligned[i] and 
+                rsi[i] < 50 and
+                volume[i] > 1.2 * vol_ma20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 + downtrend + volume confirmation
-            elif (close[i] < S3_aligned[i] and 
-                  not trend_up_1d_aligned[i] and 
-                  volume[i] > 1.5 * vol_ma20[i]):
-                signals[i] = -base_size
+            # Short: price below KAMA (downtrend) + RSI > 50 (not oversold) + volume confirmation
+            elif (close[i] < kama[i] and 
+                  not trend_up_1w_aligned[i] and 
+                  rsi[i] > 50 and
+                  volume[i] > 1.2 * vol_ma20[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below S3 or trend changes
-            if (close[i] < S3_aligned[i] or 
-                not trend_up_1d_aligned[i]):
+            # Long exit: price below KAMA or RSI > 70 (overbought)
+            if (close[i] < kama[i] or 
+                rsi[i] > 70):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = base_size
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price breaks above R3 or trend changes
-            if (close[i] > R3_aligned[i] or 
-                trend_up_1d_aligned[i]):
+            # Short exit: price above KAMA or RSI < 30 (oversold)
+            if (close[i] > kama[i] or 
+                rsi[i] < 30):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -base_size
+                signals[i] = -0.25
     
     return signals
