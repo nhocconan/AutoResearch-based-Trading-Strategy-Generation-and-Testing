@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-6H_WeeklyPivot_DonchianBreakout_Volume
+12h_WeeklyPivot_DonchianBreakout_Volume
 Hypothesis: Price breaking above/below weekly pivot-derived support/resistance (R1/S1) with 
 Donchian(20) breakout in same direction and volume confirmation, filtered by daily trend (price > EMA50).
 Weekly pivots capture institutional levels; Donchian breakouts signal momentum; volume confirms participation.
-Daily trend filter avoids counter-trend whipsaws. Designed for low frequency (15-30 trades/year) 
+Daily trend filter avoids counter-trend whipsaws. Designed for low frequency (12-37 trades/year) 
 to work in both bull (breakouts) and bear (mean reversion at extremes) markets.
 """
 
-name = "6H_WeeklyPivot_DonchianBreakout_Volume"
-timeframe = "6h"
+name = "12h_WeeklyPivot_DonchianBreakout_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -31,7 +31,7 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
+    # 12h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -48,7 +48,7 @@ def generate_signals(prices):
     r1_w = 2 * pp_w - low_1w
     s1_w = 2 * pp_w - high_1w
     
-    # Align weekly levels to 6h timeframe (using previous week's levels)
+    # Align weekly levels to 12h timeframe (using previous week's levels)
     r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
     s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
     
@@ -57,11 +57,11 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # --- Donchian Channel (20) on 6h ---
+    # --- Donchian Channel (20) on 12h ---
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # --- Volume Spike (6h) ---
+    # --- Volume Spike (12h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
     
