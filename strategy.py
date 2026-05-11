@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1d_Camarilla_R3S3_Breakout_Trend_Volume_v4"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R3S3_Breakout_Trend_Volume_v2"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -28,16 +28,21 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Previous day's Camarilla levels
-    R3 = np.full(len(high_1d), np.nan)
-    S3 = np.full(len(high_1d), np.nan)
+    R3 = np.zeros(len(high_1d))
+    S3 = np.zeros(len(high_1d))
     
-    for i in range(1, len(high_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        R3[i] = prev_close + range_val * 1.1 / 4
-        S3[i] = prev_close - range_val * 1.1 / 4
+    for i in range(len(high_1d)):
+        if i < 1:
+            R3[i] = np.nan
+            S3[i] = np.nan
+        else:
+            # Camarilla formulas using previous day's range
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            range_val = prev_high - prev_low
+            R3[i] = prev_close + range_val * 1.1 / 4
+            S3[i] = prev_close - range_val * 1.1 / 4
     
     # Get weekly trend filter
     df_1w = get_htf_data(prices, '1w')
@@ -48,7 +53,7 @@ def generate_signals(prices):
     ema20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
     trend_up = close_1w > ema20
     
-    # Align indicators to 12h timeframe
+    # Align indicators to daily timeframe
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
