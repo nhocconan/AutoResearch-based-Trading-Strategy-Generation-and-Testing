@@ -1,65 +1,60 @@
 #!/usr/bin/env python3
 """
-12h_Weekly_TLDR_Pivot_Breakout_DailyTrend
-Hypothesis: Uses weekly TLDR (True Low/High of the Day Range) pivot levels derived from Monday's open to Friday's close for weekly context, combined with daily trend filter (EMA34) and volume confirmation. Enters when price breaks above/below weekly pivot level in direction of daily trend with volume spike. Exits on opposite pivot level or trend reversal. Designed for 12h timeframe to capture multi-day swings while avoiding intraday noise. Targets 15-30 trades/year via strict weekly/daily confluence.
+4h_Aroon_MeanReversion_TrendFilter
+Hypothesis: Uses Aroon oscillator (25-period) to detect trend exhaustion and mean-reversion opportunities, filtered by 1d EMA50 trend direction and volume confirmation. Enters long when Aroon down crosses above Aroon up (downtrend exhaustion) with price below 1d EMA50, and short when Aroon up crosses above Aroon down (uptrend exhaustion) with price above 1d EMA50. Exits on Aroon crossover reversal or trend reversal. Designed to capture mean-reversion in ranging markets while avoiding trend-following losses in strong trends. Targets 20-40 trades/year via Aroon crossover signals with trend and volume filters.
 """
 
-name = "12h_Weekly_TLDR_Pivot_Breakout_DailyTrend"
-timeframe = "12h"
+name = "4h_Aroon_MeanReversion_TrendFilter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_weekly_tldr_pivot(weekly_open, weekly_high, weekly_low, weekly_close):
-    """Calculate weekly TLDR pivot: (weekly_open + weekly_high + weekly_low + weekly_close) / 4"""
-    return (weekly_open + weekly_high + weekly_low + weekly_close) / 4
+def calculate_aroon(high, low, period=25):
+    """Calculate Aroon Up and Aroon Down"""
+    n = len(high)
+    aroon_up = np.full(n, np.nan)
+    aroon_down = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Periods since highest high
+        highest_high_idx = i - np.argmax(high[i-period:i+1])
+        aroon_up[i] = ((period - (i - highest_high_idx)) / period) * 100
+        
+        # Periods since lowest low
+        lowest_low_idx = i - np.argmin(low[i-period:i+1])
+        aroon_down[i] = ((period - (i - lowest_low_idx)) / period) * 100
+    
+    return aroon_up, aroon_down
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Weekly TLDR Pivot (from Monday open to Friday close) ---
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
-        return np.zeros(n)
-    
-    # We need weekly OHLC from actual weekly bars
-    weekly_open = df_1w['open'].values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    
-    # Calculate TLDR pivot for each weekly bar
-    weekly_pivot = np.zeros_like(weekly_close)
-    for i in range(len(weekly_close)):
-        weekly_pivot[i] = calculate_weekly_tldr_pivot(
-            weekly_open[i], weekly_high[i], weekly_low[i], weekly_close[i]
-        )
-    
-    # Align weekly pivot to 12h (wait for weekly bar to close)
-    weekly_pivot_12h = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # --- Daily EMA34 Trend Filter ---
+    # --- Daily EMA50 Trend Filter ---
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    ema_34_1d = pd.Series(df_1d['close'].values).ewm(
-        span=34, adjust=False, min_periods=34
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(
+        span=50, adjust=False, min_periods=50
     ).mean().values
-    ema_34_12h = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    ema_50_4h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # --- Volume Spike Detection (24-period average for 12h) ---
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # --- Aroon Oscillator (25-period) ---
+    aroon_up, aroon_down = calculate_aroon(high, low, 25)
+    
+    # --- Volume Spike Detection (20-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
@@ -67,12 +62,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(weekly_pivot_12h[i]) or np.isnan(ema_34_12h[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_50_4h[i]) or np.isnan(aroon_up[i]) or 
+            np.isnan(aroon_down[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -82,37 +77,37 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 2.0
+        volume_spike = vol_ratio[i] > 1.5
+        
+        # Aroon crossover signals
+        aroon_up_cross = (aroon_up[i] > aroon_down[i]) and (aroon_up[i-1] <= aroon_down[i-1])
+        aroon_down_cross = (aroon_down[i] > aroon_up[i]) and (aroon_down[i-1] <= aroon_up[i-1])
         
         if position == 0:
-            # Long: price breaks above weekly pivot + above daily EMA34 + volume
-            if (close[i] > weekly_pivot_12h[i] and 
-                close[i] > ema_34_12h[i] and 
-                close[i-1] <= weekly_pivot_12h[i-1] and  # crossed above pivot this bar
+            # Long: Aroon down crosses above Aroon up (downtrend exhaustion) + price below 1d EMA50 + volume
+            if (aroon_down_cross and 
+                close[i] < ema_50_4h[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly pivot + below daily EMA34 + volume
-            elif (close[i] < weekly_pivot_12h[i] and 
-                  close[i] < ema_34_12h[i] and 
-                  close[i-1] >= weekly_pivot_12h[i-1] and  # crossed below pivot this bar
+            # Short: Aroon up crosses above Aroon down (uptrend exhaustion) + price above 1d EMA50 + volume
+            elif (aroon_up_cross and 
+                  close[i] > ema_50_4h[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price crosses below weekly pivot OR trend turns down
-                if (close[i] < weekly_pivot_12h[i] and close[i-1] >= weekly_pivot_12h[i-1]) or \
-                   (close[i] < ema_34_12h[i]):
+                # Exit long: Aroon up crosses above Aroon down OR trend turns up
+                if aroon_up_cross or (close[i] > ema_50_4h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses above weekly pivot OR trend turns up
-                if (close[i] > weekly_pivot_12h[i] and close[i-1] <= weekly_pivot_12h[i-1]) or \
-                   (close[i] > ema_34_12h[i]):
+                # Exit short: Aroon down crosses above Aroon up OR trend turns down
+                if aroon_down_cross or (close[i] < ema_50_4h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
