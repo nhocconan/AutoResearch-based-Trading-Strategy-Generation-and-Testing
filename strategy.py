@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Keltner_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_With_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,49 +17,47 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter and volatility
+    # Get 1d data for trend filter (using 1d EMA50)
     df_1d = get_htf_data(prices, '1d')
     
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate 1d ATR(14) for Keltner channels
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Get 1d data for Camarilla pivots (from previous 1d bar)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first period
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Previous 1d bar's range
+    range_1d = high_1d - low_1d
     
-    # Calculate 1d EMA(20) for Keltner middle line
-    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20).mean().values
+    # Calculate Camarilla R1 and S1 levels
+    camarilla_r1 = close_1d + (range_1d * 1.1 / 12)
+    camarilla_s1 = close_1d - (range_1d * 1.1 / 12)
     
-    # Upper and lower Keltner bands (1d)
-    keltner_upper = ema_20_1d + (2.0 * atr_1d)
-    keltner_lower = ema_20_1d - (2.0 * atr_1d)
+    # Align Camarilla levels to 4h timeframe (using previous 1d bar's values)
+    r1_4h = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    s1_4h = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
-    # Align Keltner bands to 6h timeframe
-    keltner_upper_6h = align_htf_to_ltf(prices, df_1d, keltner_upper)
-    keltner_lower_6h = align_htf_to_ltf(prices, df_1d, keltner_lower)
-    
-    # Volume filter: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 2.0)
+    volume_filter = volume > (vol_ma * 1.8)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(keltner_upper_6h[i]) or np.isnan(keltner_lower_6h[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,27 +66,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above upper Keltner band AND volume surge
-            if close[i] > keltner_upper_6h[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 AND above 1d EMA50 (uptrend) AND volume surge
+            if close[i] > r1_4h[i] and close[i] > ema_1d_aligned[i] and volume_filter[i]:
+                signals[i] = 0.30
                 position = 1
-            # Short: price breaks below lower Keltner band AND volume surge
-            elif close[i] < keltner_lower_6h[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 AND below 1d EMA50 (downtrend) AND volume surge
+            elif close[i] < s1_4h[i] and close[i] < ema_1d_aligned[i] and volume_filter[i]:
+                signals[i] = -0.30
                 position = -1
         elif position == 1:
-            # Long exit: price falls below middle line (EMA20)
-            if close[i] < keltner_upper_6h[i] - (atr_1d[i] * 2.0):  # using upper band as proxy for simplicity
+            # Long exit: price falls below S1 OR below 1d EMA50 (trend change)
+            if close[i] < s1_4h[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.30  # maintain position
         elif position == -1:
-            # Short exit: price rises above middle line (EMA20)
-            if close[i] > keltner_lower_6h[i] + (atr_1d[i] * 2.0):  # using lower band as proxy for simplicity
+            # Short exit: price rises above R1 OR above 1d EMA50 (trend change)
+            if close[i] > r1_4h[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.30  # maintain position
     
     return signals
