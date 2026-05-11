@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-
-# 4h_Camarilla_R1_S1_Breakout_12hTrend_Volume
-# Hypothesis: Camarilla R1/S1 levels from 1d provide high-probability intraday breakout levels.
-# Breakouts above R1 (long) or below S1 (short) are traded only when aligned with 12h EMA50 trend
+# 12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Spike
+# Hypothesis: Camarilla R3/S3 levels from daily provide strong support/resistance.
+# Breakouts above R3 (long) or below S3 (short) are traded only when aligned with 1d EMA50 trend
 # and confirmed by volume spikes, with exits on opposite Camarilla level touches.
-# Designed for low turnover (~20-30 trades/year) to minimize fee drag in ranging 2025 markets.
-# Target: < 100 total trades over 4 years to avoid fee decay while maintaining edge in BTC/ETH.
+# Designed for low turnover (~15-30 trades/year) to minimize fee drag in ranging 2025 markets.
+# Target: ~80 total trades over 4 years to avoid fee drag while maintaining edge in BTC/ETH.
 
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_Pivot_R3S3_Breakout_1dTrend_Volume_Spike"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -33,18 +32,16 @@ def generate_signals(prices):
     
     pivot = (high_1d + low_1d + close_1d) / 3
     range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 4)
-    s1 = pivot - (range_1d * 1.1 / 4)
+    r3 = pivot + (range_1d * 1.1 / 2)
+    s3 = pivot - (range_1d * 1.1 / 2)
     
-    # Align 1d Camarilla levels to 4h
-    r1_4h = align_htf_to_ltf(prices, df_1d, r1)
-    s1_4h = align_htf_to_ltf(prices, df_1d, s1)
+    # Align 1d Camarilla levels to 12h
+    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
     
-    # === 12h EMA50 Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # === 1d EMA50 Trend Filter ===
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # === Volume Spike Filter (20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
@@ -57,12 +54,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup (need enough data for indicators)
-    start_idx = 50  # covers EMA50
+    start_idx = 60  # covers EMA50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_4h[i]) or np.isnan(s1_4h[i]) or 
-            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(r3_12h[i]) or np.isnan(s3_12h[i]) or 
+            np.isnan(ema50_1d_12h[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -72,26 +69,26 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R1 + above 12h EMA50 + volume spike
-            if close[i] > r1_4h[i] and close[i] > ema50_12h_4h[i] and volume_ok[i]:
+            # Long: Break above R3 + above 1d EMA50 + volume spike
+            if close[i] > r3_12h[i] and close[i] > ema50_1d_12h[i] and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Break below S1 + below 12h EMA50 + volume spike
-            elif close[i] < s1_4h[i] and close[i] < ema50_12h_4h[i] and volume_ok[i]:
+            # Short: Break below S3 + below 1d EMA50 + volume spike
+            elif close[i] < s3_12h[i] and close[i] < ema50_1d_12h[i] and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit: Price touches or crosses below S1 (opposite level)
-                if close[i] < s1_4h[i]:
+                # Exit: Price touches or crosses below S3 (opposite level)
+                if close[i] < s3_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price touches or crosses above R1 (opposite level)
-                if close[i] > r1_4h[i]:
+                # Exit: Price touches or crosses above R3 (opposite level)
+                if close[i] > r3_12h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
