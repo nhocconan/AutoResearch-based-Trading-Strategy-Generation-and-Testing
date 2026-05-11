@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R3S3_Reversal_1dTrend_Filter
-Hypothesis: On 12h timeframe, price tends to reverse from 1d Camarilla R3/S3 levels when the 1d trend (EMA34) is aligned, providing mean-reversion opportunities in ranging conditions and continuation in strong trends. Uses 1d EMA34 trend filter to avoid counter-trend trades, targeting 15-30 trades/year to minimize fee drag.
+6h_4HourTrend_6HourMomentum
+Hypothesis: Use 4h EMA trend filter to determine bias, then enter on 6h momentum bursts with volume confirmation. 
+In trending markets (price above/below 4h EMA50), go long/short when 6h RSI crosses 50 with volume > 1.5x average. 
+This avoids whipsaws by only taking trades aligned with higher timeframe trend, reducing false signals.
+Target: 20-40 trades/year per symbol.
 """
 
-name = "12h_Camarilla_R3S3_Reversal_1dTrend_Filter"
-timeframe = "12h"
+name = "6h_4HourTrend_6HourMomentum"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,105 +17,105 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for trend filter and Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    # Get 4h data for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
+    # 6h data
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    volume_6h = prices['volume'].values
     
-    # --- 1d EMA34 for trend filter ---
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_12h = align_htf_to_ltf(prices, df_1d, ema34_1d)  # aligned to 12h
+    # --- 4h EMA50 for trend filter ---
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # --- 1d Camarilla Pivot Levels (using previous day) ---
-    # Calculate from previous day's OHLC
-    prev_high = np.roll(df_1d['high'].values, 1)
-    prev_low = np.roll(df_1d['low'].values, 1)
-    prev_close = np.roll(df_1d['close'].values, 1)
-    prev_high[0] = df_1d['high'].values[0]
-    prev_low[0] = df_1d['low'].values[0]
-    prev_close[0] = df_1d['close'].values[0]
+    # --- 6h RSI(14) for momentum ---
+    delta = np.diff(close_6h, prepend=close_6h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_val = prev_high - prev_low
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Camarilla levels
-    r3 = pivot + (range_val * 1.1 / 2.0)
-    s3 = pivot - (range_val * 1.1 / 2.0)
-    
-    # Align Camarilla levels to 12h
-    r3_12h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+    # --- 6h Volume average for confirmation ---
+    vol_ma = pd.Series(volume_6h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after warmup period
-    start_idx = 35  # for EMA34 calculation
+    # Start after warmup
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema34_12h[i]) or np.isnan(r3_12h[i]) or np.isnan(s3_12h[i])):
+        if (np.isnan(ema50_4h_aligned[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
-                # Simple stoploss: 2.5% adverse move
-                adverse_pct = 0.025
-                if position == 1 and close_12h[i] <= entry_price * (1 - adverse_pct):
+                # Check stoploss (2x ATR from entry)
+                atr_est = np.abs(high_6h[i] - low_6h[i])
+                if position == 1 and close_6h[i] <= entry_price - 2.0 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_12h[i] >= entry_price * (1 + adverse_pct):
+                elif position == -1 and close_6h[i] >= entry_price + 2.0 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Trend filter: price above EMA34 = uptrend, below = downtrend
-        is_uptrend = close_12h[i] > ema34_12h[i]
-        is_downtrend = close_12h[i] < ema34_12h[i]
+        # Determine trend bias from 4h EMA50
+        bullish_trend = close_6h[i] > ema50_4h_aligned[i]
+        bearish_trend = close_6h[i] < ema50_4h_aligned[i]
+        
+        # Volume confirmation
+        vol_confirm = volume_6h[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Look for mean-reversion entries at Camarilla levels
-            # Long when price touches S3 in uptrend or ranging market
-            if close_12h[i] <= s3_12h[i] * 1.001:  # slight buffer for touching
-                if is_uptrend or not is_downtrend:  # allow in uptrend or ranging
+            # Look for entries
+            if bullish_trend and vol_confirm:
+                # Long when RSI crosses above 50 in uptrend
+                if rsi[i] > 50 and rsi[i-1] <= 50:
                     signals[i] = 0.25
                     position = 1
-                    entry_price = close_12h[i]
-            # Short when price touches R3 in downtrend or ranging market
-            elif close_12h[i] >= r3_12h[i] * 0.999:  # slight buffer for touching
-                if is_downtrend or not is_uptrend:  # allow in downtrend or ranging
+                    entry_price = close_6h[i]
+            elif bearish_trend and vol_confirm:
+                # Short when RSI crosses below 50 in downtrend
+                if rsi[i] < 50 and rsi[i-1] >= 50:
                     signals[i] = -0.25
                     position = -1
-                    entry_price = close_12h[i]
+                    entry_price = close_6h[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long position: exit when price reaches pivot or shows weakness
-                if close_12h[i] >= pivot[i] * 0.999:  # reached pivot level
+                # Long position
+                # Exit if trend changes or RSI overbought
+                if not bullish_trend or rsi[i] >= 70:
                     signals[i] = 0.0
                     position = 0
-                # Stoploss: 2.5% adverse move
-                elif close_12h[i] <= entry_price * (1 - 0.025):
+                # Stoploss: 2x ATR
+                elif close_6h[i] <= entry_price - 2.0 * np.abs(high_6h[i] - low_6h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Short position: exit when price reaches pivot or shows weakness
-                if close_12h[i] <= pivot[i] * 1.001:  # reached pivot level
+                # Short position
+                # Exit if trend changes or RSI oversold
+                if not bearish_trend or rsi[i] <= 30:
                     signals[i] = 0.0
                     position = 0
-                # Stoploss: 2.5% adverse move
-                elif close_12h[i] >= entry_price * (1 + 0.025):
+                # Stoploss: 2x ATR
+                elif close_6h[i] >= entry_price + 2.0 * np.abs(high_6h[i] - low_6h[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
