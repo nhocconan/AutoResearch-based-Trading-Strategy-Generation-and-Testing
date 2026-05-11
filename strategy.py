@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1w_Donchian_Breakout"
-timeframe = "12h"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,34 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get weekly data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 21:  # Need 20 periods for Donchian + 1 for shift
-        return np.zeros(n)
-    
-    # Weekly Donchian channels (20-period high/low)
-    high_20 = pd.Series(df_1w['high']).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(df_1w['low']).rolling(window=20, min_periods=20).min().values
-    
-    # Weekly trend filter using 20-period EMA
-    ema20_1w = pd.Series(df_1w['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Align weekly data to 12h timeframe
-    upper_band = align_htf_to_ltf(prices, df_1w, high_20)
-    lower_band = align_htf_to_ltf(prices, df_1w, low_20)
-    ema20_aligned = align_htf_to_ltf(prices, df_1w, ema20_1w)
-    
-    # Daily volume filter (volume spike)
+    # Get daily and weekly data
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1d) < 20 or len(df_1w) < 5:
         return np.zeros(n)
     
-    # Daily volume 20-period average
-    vol_ma20_1d = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().values
-    vol_ma20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    # Daily pivot points (using previous day)
+    prev_day_high = df_1d['high'].shift(1).values
+    prev_day_low = df_1d['low'].shift(1).values
+    prev_day_close = df_1d['close'].shift(1).values
+    pivot = (prev_day_high + prev_day_low + prev_day_close) / 3
+    r1 = 2 * pivot - prev_day_low
+    s1 = 2 * pivot - prev_day_high
+    r2 = pivot + (prev_day_high - prev_day_low)
+    s2 = pivot - (prev_day_high - prev_day_low)
     
-    # Align current volume to compare with daily average
-    vol_current_aligned = align_htf_to_ltf(prices, df_1d, df_1d['volume'].values)
+    # Weekly trend filter (EMA34 > EMA89)
+    ema34_1w = pd.Series(df_1w['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema89_1w = pd.Series(df_1w['close']).ewm(span=89, adjust=False, min_periods=89).mean().values
+    trend_up_1w = ema34_1w > ema89_1w
+    trend_down_1w = ema34_1w < ema89_1w
+    
+    # Align all to 4h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    trend_down_aligned = align_htf_to_ltf(prices, df_1w, trend_down_1w)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma20 = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -53,9 +64,10 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(ema20_aligned[i]) or np.isnan(vol_ma20_aligned[i]) or
-            np.isnan(vol_current_aligned[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
+            np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -64,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above weekly Donchian upper band in uptrend with volume surge
-            if (close[i] > upper_band[i] and 
-                close[i] > ema20_aligned[i] and 
-                vol_current_aligned[i] > 1.5 * vol_ma20_aligned[i]):
+            # Long: price breaks above R1 in weekly uptrend with volume surge
+            if (close[i] > r1_aligned[i] and 
+                trend_up_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below weekly Donchian lower band in downtrend with volume surge
-            elif (close[i] < lower_band[i] and 
-                  close[i] < ema20_aligned[i] and 
-                  vol_current_aligned[i] > 1.5 * vol_ma20_aligned[i]):
+            # Short: price breaks below S1 in weekly downtrend with volume surge
+            elif (close[i] < s1_aligned[i] and 
+                  trend_down_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below weekly Donchian lower band or trend turns down
-            if (close[i] < lower_band[i] or close[i] < ema20_aligned[i]):
+            # Long exit: price falls below S1 or weekly trend changes
+            if (close[i] < s1_aligned[i] or not trend_up_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above weekly Donchian upper band or trend turns up
-            if (close[i] > upper_band[i] or close[i] > ema20_aligned[i]):
+            # Short exit: price rises above R1 or weekly trend changes
+            if (close[i] > r1_aligned[i] or not trend_down_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
