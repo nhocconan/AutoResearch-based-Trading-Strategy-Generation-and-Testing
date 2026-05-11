@@ -1,45 +1,43 @@
 #!/usr/bin/env python3
-name = "12h_Donchian_20_Breakout_1dTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_WeeklyKeltnerBreakout_TrendFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily trend: EMA34
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Weekly trend: EMA20 on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_ltf_to_htf(prices, df_1w, ema_20_1w)
     
-    # Donchian channel (20-period high/low)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume spike: volume > 1.5 * 20-period SMA of volume
-    vol_sma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > 1.5 * vol_sma
+    # Daily Keltner Channel (20, 2.0)
+    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    atr = pd.Series(high - low).rolling(window=20, min_periods=20).mean().values
+    upper = ema_20 + 2.0 * atr
+    lower = ema_20 - 2.0 * atr
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)
+    start_idx = 20
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_sma[i]):
+        if np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,27 +46,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above Donchian high + above daily EMA34 + volume spike
-            if close[i] > donch_high[i] and close[i] > ema_34_1d_aligned[i] and vol_spike[i]:
-                signals[i] = 0.30
+            # Long: close above weekly EMA20 and upper Keltner band
+            if close[i] > ema_20_1w_aligned[i] and close[i] > upper[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low + below daily EMA34 + volume spike
-            elif close[i] < donch_low[i] and close[i] < ema_34_1d_aligned[i] and vol_spike[i]:
-                signals[i] = -0.30
+            # Short: close below weekly EMA20 and lower Keltner band
+            elif close[i] < ema_20_1w_aligned[i] and close[i] < lower[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below Donchian low
-            if close[i] < donch_low[i]:
+            # Exit long: close below EMA20
+            if close[i] < ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above Donchian high
-            if close[i] > donch_high[i]:
+            # Exit short: close above EMA20
+            if close[i] > ema_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
