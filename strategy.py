@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-1d_RVOL_Breakout_v1
-Hypothesis: On the daily timeframe, breakouts from the previous day's high/low
-with above-average volume (RVOL > 1.5) capture momentum moves that persist
-through the next day. Works in bull markets (breakouts continue up) and bear
-markets (breakdowns continue down) by following the direction of the breakout.
-Uses 1-week EMA as a trend filter to avoid counter-trend trades. Target: 30-100
-trades over 4 years (7-25/year) on 1d timeframe.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS
+Hypothesis: Camarilla pivot levels from daily timeframe provide key support/resistance.
+Price breaking above R1 or below S1 with volume confirmation and aligned with daily trend
+(EMA34) captures institutional breakouts. Works in bull markets via momentum continuation
+and in bear markets via mean-reversion bounces from extreme levels. Target: 20-50 trades/year.
 """
 
-name = "1d_RVOL_Breakout_v1"
-timeframe = "1d"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,57 +25,54 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1D Data for Reference Levels ===
+    # === DAILY DATA FOR CAMARILLA PIVOTS AND TREND ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    vol_1d = df_1d['volume'].values
+    # Previous day's OHLC for Camarilla calculation
+    prev_high = df_1d['high'].iloc[:-1].values
+    prev_low = df_1d['low'].iloc[:-1].values
+    prev_close = df_1d['close'].iloc[:-1].values
     
-    # Previous day's high/low (reference for breakout)
-    prev_high_1d = np.roll(high_1d, 1)
-    prev_low_1d = np.roll(low_1d, 1)
-    prev_vol_1d = np.roll(vol_1d, 1)
-    prev_high_1d[0] = np.nan
-    prev_low_1d[0] = np.nan
-    prev_vol_1d[0] = np.nan
+    # Calculate Camarilla levels for previous day
+    # R4 = close + (high - low) * 1.1 / 2
+    # R3 = close + (high - low) * 1.1/4
+    # R2 = close + (high - low) * 1.1/6
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
+    # S2 = close - (high - low) * 1.1/6
+    # S3 = close - (high - low) * 1.1/4
+    # S4 = close - (high - low) * 1.1/2
     
-    # Align to 1d (no shift needed as we use previous day's values)
-    prev_high_aligned = prev_high_1d
-    prev_low_aligned = prev_low_1d
-    prev_vol_aligned = prev_vol_1d
+    hl_range = prev_high - prev_low
+    r1 = prev_close + hl_range * 1.1 / 12
+    s1 = prev_close - hl_range * 1.1 / 12
     
-    # === 1W Data for Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    # Align Camarilla levels to 4h timeframe (available after daily close)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    close_1w = df_1w['close'].values
-    # 1-week EMA50 for trend filter
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Daily EMA34 for trend filter
+    ema34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # === RVOL Calculation (Relative Volume) ===
-    # 20-day average volume for RVOL denominator
-    vol_series = pd.Series(volume)
-    vol_ma20 = vol_series.rolling(window=20, min_periods=20).mean().values
-    rvol = volume / vol_ma20
+    # === VOLUME FILTER ===
+    # Volume spike: current volume > 1.5 * 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50  # need 20 for vol MA + buffers
+    start_idx = max(30, 20)  # EMA34 and volume MA warmup
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(prev_high_aligned[i]) or 
-            np.isnan(prev_low_aligned[i]) or 
-            np.isnan(prev_vol_aligned[i]) or 
-            np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(rvol[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,28 +81,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long breakout: close > prev day high + RVOL > 1.5 + above weekly EMA
-            if (close[i] > prev_high_aligned[i] and 
-                rvol[i] > 1.5 and 
-                close[i] > ema50_1w_aligned[i]):
+            # Long: price breaks above R1 with volume spike and price above daily EMA34 (uptrend)
+            if (close[i] > r1_aligned[i]) and volume_spike[i] and (close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakdown: close < prev day low + RVOL > 1.5 + below weekly EMA
-            elif (close[i] < prev_low_aligned[i] and 
-                  rvol[i] > 1.5 and 
-                  close[i] < ema50_1w_aligned[i]):
+            # Short: price breaks below S1 with volume spike and price below daily EMA34 (downtrend)
+            elif (close[i] < s1_aligned[i]) and volume_spike[i] and (close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close below previous day's low (failed breakout) or RVOL drops
-            if close[i] < prev_low_aligned[i] or rvol[i] < 1.0:
+            # Long exit: price breaks below S1 (reversal) OR volume dries up
+            if (close[i] < s1_aligned[i]) or (volume[i] < vol_ma[i] * 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: close above previous day's high (failed breakdown) or RVOL drops
-            if close[i] > prev_high_aligned[i] or rvol[i] < 1.0:
+            # Short exit: price breaks above R1 (reversal) OR volume dries up
+            if (close[i] > r1_aligned[i]) or (volume[i] < vol_ma[i] * 0.5):
                 signals[i] = 0.0
                 position = 0
             else:
