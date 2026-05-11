@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Filter_with_Volume_and_Chop
-Hypothesis: Use KAMA trend direction on daily timeframe as primary filter, combined with volume spike and Choppiness Index regime filter to avoid whipsaws. Designed for low trade frequency (<25/year) on 1d timeframe to minimize fee drag. Works in bull/bear by only taking trades in direction of KAMA trend when market is not too choppy.
+6h_Adaptive_Kelly_TRIX_Momentum_12hTrend
+Hypothesis: Combine TRIX momentum with 12h trend filter and adaptive Kelly sizing based on TRIX signal strength. Works in bull/bear by aligning with higher timeframe trend while using TRIX zero-cross for entry timing. Adaptive sizing reduces exposure during weak signals, lowering drawdown. Target: 15-30 trades/year on 6h.
 """
 
-name = "1d_KAMA_Trend_Filter_with_Volume_and_Chop"
-timeframe = "1d"
+name = "6h_Adaptive_Kelly_TRIX_Momentum_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -14,89 +14,47 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # === KAMA (Kaufman Adaptive Moving Average) on 1d ===
-    # Get daily data
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # === 12h Trend Filter (EMA34) ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
+    ema34_12h = pd.Series(df_12h['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema34_12h)
     
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(df_1d['close'].diff(10))
-    volatility = df_1d['close'].diff().abs().rolling(10, min_periods=1).sum()
-    er = change / volatility.replace(0, np.nan)
-    er = er.fillna(0).values  # Replace NaN with 0 when volatility is 0
+    # === TRIX Calculation (15,9,9) ===
+    # TRIX = EMA(EMA(EMA(close,15),9),9) - 1 period ago, then % change
+    ema1 = pd.Series(close).ewm(span=15, adjust=False, min_periods=15).mean()
+    ema2 = ema1.ewm(span=9, adjust=False, min_periods=9).mean()
+    ema3 = ema2.ewm(span=9, adjust=False, min_periods=9).mean()
+    trix_raw = ema3.pct_change() * 100  # percentage
+    trix = trix_raw.values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)   # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # === TRIX Signal Line (9-period EMA of TRIX) ===
+    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
     
-    # Calculate KAMA
-    kama = np.full_like(df_1d['close'], np.nan, dtype=float)
-    kama[0] = df_1d['close'].iloc[0]
-    for i in range(1, len(df_1d)):
-        if not np.isnan(sc[i]):
-            kama[i] = kama[i-1] + sc[i] * (df_1d['close'].iloc[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
-    
-    # Align KAMA to daily timeframe (no additional delay needed for trend)
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # === Choppiness Index on 1w (HTF) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 14:
-        return np.zeros(n)
-    
-    # True Range
-    tr1 = df_1w['high'] - df_1w['low']
-    tr2 = np.abs(df_1w['high'] - df_1w['close'].shift(1))
-    tr3 = np.abs(df_1w['low'] - df_1w['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(14)
-    atr14 = pd.Series(tr).rolling(14, min_periods=14).mean().values
-    
-    # Highest high and lowest low over 14 periods
-    hh = df_1w['high'].rolling(14, min_periods=14).max().values
-    ll = df_1w['low'].rolling(14, min_periods=14).min().values
-    
-    # Choppiness Index
-    chop = np.full_like(df_1w['close'], np.nan, dtype=float)
-    for i in range(14, len(df_1w)):
-        if atr14[i] > 0 and hh[i] > ll[i]:
-            chop[i] = 100 * np.log10(np.sum(tr[i-13:i+1]) / (atr14[i] * np.log2(14))) / np.log10(hh[i] - ll[i])
-        else:
-            chop[i] = 50.0  # Neutral when undefined
-    
-    # Align Choppiness Index to daily timeframe with 1-week delay (wait for weekly close)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
-    
-    # === Volume Spike Filter (2x 20-day EMA) ===
+    # === Volume Filter (1.5x 20-period EMA) ===
     vol_ema20 = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    volume_ok = volume > vol_ema20 * 2.0
+    volume_ok = volume > vol_ema20 * 1.5
     
     # === Signal Parameters ===
-    position_size = 0.25
+    base_size = 0.25  # base position size
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 30
+    # Start after warmup (covers TRIX and EMA calculations)
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(kama_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(volume_ok[i])):
+        if (np.isnan(trix[i]) or np.isnan(trix_signal[i]) or 
+            np.isnan(ema34_12h_aligned[i]) or np.isnan(volume_ok[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -105,29 +63,34 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above KAMA (uptrend), low chop (trending market), volume spike
-            if (close[i] > kama_aligned[i] and 
-                chop_aligned[i] < 50.0 and volume_ok[i]):
-                signals[i] = position_size
+            # Long: TRIX crosses above signal line with uptrend (close > EMA34_12h) and volume
+            if (trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1] and
+                close[i] > ema34_12h_aligned[i] and volume_ok[i]):
+                # Adaptive sizing based on TRIX strength (normalized)
+                trix_strength = min(abs(trix[i]) / 0.5, 1.0)  # cap at 1.0 for 0.5 TRIX
+                size = base_size * (0.5 + 0.5 * trix_strength)  # 0.5-1.0x base
+                signals[i] = size
                 position = 1
-            # Short: Price below KAMA (downtrend), low chop (trending market), volume spike
-            elif (close[i] < kama_aligned[i] and 
-                  chop_aligned[i] < 50.0 and volume_ok[i]):
-                signals[i] = -position_size
+            # Short: TRIX crosses below signal line with downtrend (close < EMA34_12h) and volume
+            elif (trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1] and
+                  close[i] < ema34_12h_aligned[i] and volume_ok[i]):
+                trix_strength = min(abs(trix[i]) / 0.5, 1.0)
+                size = base_size * (0.5 + 0.5 * trix_strength)
+                signals[i] = -size
                 position = -1
         else:
-            # Exit: Price crosses KAMA in opposite direction OR chop becomes too high (choppy market)
+            # Exit: TRIX crosses back through signal line
             if position == 1:
-                if close[i] < kama_aligned[i] or chop_aligned[i] > 61.8:
+                if trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = position_size
+                    signals[i] = base_size  # maintain base size while in trend
             elif position == -1:
-                if close[i] > kama_aligned[i] or chop_aligned[i] > 61.8:
+                if trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -position_size
+                    signals[i] = -base_size
     
     return signals
