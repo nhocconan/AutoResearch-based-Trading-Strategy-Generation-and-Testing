@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_TRIX_Volume_Spike_1dTrend"
+name = "12h_FlippingPoint_RSI_BB_1wTrend"
 timeframe = "12h"
 leverage = 1.0
 
@@ -9,29 +9,55 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 1D data (HTF)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get 1W data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # TRIX on 1D: EMA15 of EMA15 of EMA15
-    ema1 = pd.Series(df_1d['close']).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = ema1.ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = ema2.ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    trix = trix.fillna(0).values
-    trix_signal = pd.Series(trix).ewm(span=9, adjust=False, min_periods=9).mean().values
+    # RSI(14) on 12H
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align TRIX signal
-    trix_signal_aligned = align_htf_to_ltf(prices, df_1d, trix_signal)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
     
-    # Volume spike: volume > 2x 20-period average
+    for i in range(1, n):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Bollinger Bands (20, 2) on 12H
+    sma20 = np.zeros(n)
+    std20 = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            sma20[i] = np.mean(close[:i+1])
+            std20[i] = np.std(close[:i+1]) if i > 0 else 0
+        else:
+            sma20[i] = np.mean(close[i-19:i+1])
+            std20[i] = np.std(close[i-19:i+1])
+    
+    upper_bb = sma20 + 2 * std20
+    lower_bb = sma20 - 2 * std20
+    
+    # Weekly trend: price > SMA50 on 1W
+    sma50_1w = pd.Series(df_1w['close']).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -39,17 +65,14 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # 1D EMA34 trend filter
-    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_aligned[i]) or np.isnan(trix_signal_aligned[i]) or np.isnan(vol_ma20[i]):
+        if (np.isnan(rsi[i]) or np.isnan(sma50_1w_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -57,35 +80,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Flipping point: RSI crosses 50 with Bollinger Band support/resistance
+        rsi_prev = rsi[i-1] if i > 0 else 50
+        rsi_cross_up = rsi_prev < 50 and rsi[i] >= 50
+        rsi_cross_down = rsi_prev > 50 and rsi[i] <= 50
+        
+        bb_support = close[i] <= lower_bb[i] * 1.02  # near or below lower BB
+        bb_resistance = close[i] >= upper_bb[i] * 0.98  # near or above upper BB
+        
+        weekly_uptrend = close[i] > sma50_1w_aligned[i]
+        weekly_downtrend = close[i] < sma50_1w_aligned[i]
+        
         if position == 0:
-            # Long: TRIX crosses above signal, price > EMA34, volume spike
-            if trix_signal_aligned[i] > trix_signal_aligned[i-1] and \
-               trix_signal_aligned[i-1] <= trix_signal_aligned[i-2] and \
-               close[i] > ema34_aligned[i] and \
-               volume[i] > 2 * vol_ma20[i]:
+            # Long: RSI crosses above 50, near lower BB, weekly uptrend, volume surge
+            if (rsi_cross_up and bb_support and weekly_uptrend and 
+                volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: TRIX crosses below signal, price < EMA34, volume spike
-            elif trix_signal_aligned[i] < trix_signal_aligned[i-1] and \
-                 trix_signal_aligned[i-1] >= trix_signal_aligned[i-2] and \
-                 close[i] < ema34_aligned[i] and \
-                 volume[i] > 2 * vol_ma20[i]:
+            # Short: RSI crosses below 50, near upper BB, weekly downtrend, volume surge
+            elif (rsi_cross_down and bb_resistance and weekly_downtrend and 
+                  volume[i] > 1.5 * vol_ma20[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX crosses below signal or price < EMA34
-            if trix_signal_aligned[i] < trix_signal_aligned[i-1] and \
-               trix_signal_aligned[i-1] >= trix_signal_aligned[i-2] or \
-               close[i] < ema34_aligned[i]:
+            # Long exit: RSI crosses below 50 OR price crosses above upper BB OR weekly trend fails
+            if (rsi_cross_down or close[i] >= upper_bb[i] or not weekly_uptrend):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: TRIX crosses above signal or price > EMA34
-            if trix_signal_aligned[i] > trix_signal_aligned[i-1] and \
-               trix_signal_aligned[i-1] <= trix_signal_aligned[i-2] or \
-               close[i] > ema34_aligned[i]:
+            # Short exit: RSI crosses above 50 OR price crosses below lower BB OR weekly trend fails
+            if (rsi_cross_up or close[i] <= lower_bb[i] or not weekly_downtrend):
                 signals[i] = 0.0
                 position = 0
             else:
