@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Supertrend_1dTrend_Filtered
-Hypothesis: Use Supertrend on 12h for trend direction, filtered by 1d ADX to avoid counter-trend trades. In strong trends (1d ADX > 25), follow 12h Supertrend. In weak trends (1d ADX < 25), reduce position size to avoid whipsaw. Uses volume confirmation (volume > 1.3x 20-period average) to filter false signals. Designed for 15-30 trades/year per symbol to minimize fee drift while capturing major trends. Works in both bull and bear markets by adapting to trend strength.
+4h_KAMA_Trend_With_RSI_Filter
+Hypothesis: KAMA adapts to market noise, providing reliable trend signals in both trending and ranging markets.
+Combined with RSI(14) > 50 for long and < 50 for short filters to avoid counter-trend entries.
+Uses volume confirmation (volume > 1.3x 20-period average) to filter false signals.
+Designed for 20-40 trades/year per symbol to avoid fee drag while capturing trends.
+Works in both bull and bear markets by adapting to market conditions via KAMA's efficiency ratio.
 """
 
-name = "12h_Supertrend_1dTrend_Filtered"
-timeframe = "12h"
+name = "4h_KAMA_Trend_With_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,160 +21,115 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for ADX filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
-        return np.zeros(n)
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
-    # 12h OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # --- KAMA Calculation ---
+    # Efficiency Ratio
+    change = np.abs(np.diff(close_4h, prepend=close_4h[0]))
+    volatility = np.sum(np.abs(np.diff(close_4h)), axis=0)  # placeholder, will compute properly below
     
-    # --- 1d ADX for trend strength filter (14 period) ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range
-    tr1 = np.abs(high_1d - low_1d)
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Directional Movement
-    up_move = np.diff(high_1d, prepend=high_1d[0])
-    down_move = -np.diff(low_1d, prepend=low_1d[0])
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed DM
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values / atr_1d
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    adx_12h_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # --- 12h Supertrend (ATR=10, multiplier=3.0) ---
-    # True Range for 12h
-    tr1_12h = np.abs(high - low)
-    tr2_12h = np.abs(high - np.roll(close, 1))
-    tr3_12h = np.abs(low - np.roll(close, 1))
-    tr_12h = np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))
-    tr_12h[0] = tr1_12h[0]
-    atr_12h = pd.Series(tr_12h).rolling(window=10, min_periods=10).mean().values
-    
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + 3.0 * atr_12h
-    basic_lb = (high + low) / 2 - 3.0 * atr_12h
-    
-    # Final Upper and Lower Bands
-    final_ub = np.zeros_like(close)
-    final_lb = np.zeros_like(close)
-    
-    for i in range(len(close)):
-        if i == 0:
-            final_ub[i] = basic_ub[i]
-            final_lb[i] = basic_lb[i]
+    # Proper volatility calculation (sum of absolute changes over period)
+    volatility_raw = np.abs(np.diff(close_4h))
+    volatility = np.zeros_like(volatility_raw)
+    for i in range(len(volatility_raw)):
+        if i < 10:
+            volatility[i] = np.sum(volatility_raw[:i+1]) if i > 0 else volatility_raw[0]
         else:
-            if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-                final_ub[i] = basic_ub[i]
-            else:
-                final_ub[i] = final_ub[i-1]
-                
-            if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-                final_lb[i] = basic_lb[i]
-            else:
-                final_lb[i] = final_lb[i-1]
+            volatility[i] = np.sum(volatility_raw[i-9:i+1])
     
-    # Supertrend direction
-    supertrend = np.zeros_like(close)
-    for i in range(len(close)):
-        if i == 0:
-            supertrend[i] = 1.0  # start long
-        else:
-            if close[i] > final_ub[i-1]:
-                supertrend[i] = 1.0
-            elif close[i] < final_lb[i-1]:
-                supertrend[i] = -1.0
-            else:
-                supertrend[i] = supertrend[i-1]
+    # Avoid division by zero
+    er = np.where(volatility > 0, change / volatility, 0)
     
-    supertrend_aligned = supertrend  # already on 12h timeframe
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
     
-    # --- Volume confirmation ---
-    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # KAMA
+    kama = np.zeros_like(close_4h)
+    kama[0] = close_4h[0]
+    for i in range(1, len(close_4h)):
+        kama[i] = kama[i-1] + sc[i] * (close_4h[i] - kama[i-1])
+    
+    # --- RSI Calculation ---
+    delta = np.diff(close_4h, prepend=close_4h[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder's smoothing
+    avg_gain = np.zeros_like(gain)
+    avg_loss = np.zeros_like(loss)
+    avg_gain[13] = np.mean(gain[1:14])  # first 14 periods
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(gain)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # --- Volume Average ---
+    vol_avg = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 30  # for ADX and ATR
+    start_idx = 30  # for KAMA and RSI
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(supertrend_aligned[i]) or 
-            np.isnan(vol_avg[i])):
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(vol_avg[i]):
             if position != 0:
-                # Simple trailing stop: reverse if Supertrend flips
-                if position == 1 and supertrend_aligned[i] == -1:
+                # Check stoploss (1.5x ATR from entry)
+                atr_est = np.max([high_4h[i] - low_4h[i], 
+                                 np.abs(high_4h[i] - close_4h[i-1]),
+                                 np.abs(low_4h[i] - close_4h[i-1])]) if i > 0 else high_4h[i] - low_4h[i]
+                if position == 1 and close_4h[i] <= entry_price - 1.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and supertrend_aligned[i] == 1:
+                elif position == -1 and close_4h[i] >= entry_price + 1.5 * atr_est:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine trend strength: ADX < 25 = weak, ADX > 25 = strong
-        is_strong_trend = adx_12h_aligned[i] > 25
-        is_weak_trend = adx_12h_aligned[i] < 25
-        
         # Volume confirmation: current volume > 1.3x 20-period average
-        vol_confirm = volume[i] > 1.3 * vol_avg[i]
+        vol_confirm = volume_4h[i] > 1.3 * vol_avg[i]
         
         if position == 0:
-            # Look for entries based on Supertrend and trend strength
+            # Look for entries
             if vol_confirm:
-                if supertrend_aligned[i] == 1:
-                    if is_strong_trend:
-                        signals[i] = 0.30  # full position in strong trend
-                        position = 1
-                    else:
-                        signals[i] = 0.15  # half position in weak trend
-                        position = 1
-                elif supertrend_aligned[i] == -1:
-                    if is_strong_trend:
-                        signals[i] = -0.30  # full position in strong trend
-                        position = -1
-                    else:
-                        signals[i] = -0.15  # half position in weak trend
-                        position = -1
+                # Long: price above KAMA AND RSI > 50
+                if close_4h[i] > kama[i] and rsi[i] > 50:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close_4h[i]
+                # Short: price below KAMA AND RSI < 50
+                elif close_4h[i] < kama[i] and rsi[i] < 50:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close_4h[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long position management
-                if supertrend_aligned[i] == -1:
-                    # Supertrend flipped to down - exit
+                # Long position: exit when price crosses below KAMA OR RSI < 40
+                if close_4h[i] < kama[i] or rsi[i] < 40:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    # Still in uptrend - hold
-                    signals[i] = 0.30 if is_strong_trend else 0.15
+                    signals[i] = 0.25
             elif position == -1:
-                # Short position management
-                if supertrend_aligned[i] == 1:
-                    # Supertrend flipped to up - exit
+                # Short position: exit when price crosses above KAMA OR RSI > 60
+                if close_4h[i] > kama[i] or rsi[i] > 60:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    # Still in downtrend - hold
-                    signals[i] = -0.30 if is_strong_trend else -0.15
+                    signals[i] = -0.25
     
     return signals
