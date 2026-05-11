@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_VolumeTrend_v2"
+name = "4h_RSI_Extremes_Trend_Align"
 timeframe = "4h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,43 +17,33 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1D data for Camarilla levels and trend
+    # RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1D EMA50 for trend
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 50:
         return np.zeros(n)
+    ema50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels
-    # R3 = Close + (High - Low) * 1.1 / 4
-    # S3 = Close - (High - Low) * 1.1 / 4
-    R3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4
-    S3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4
-    
-    # Align to 4h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3_1d)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3_1d)
-    
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Volume spike: current volume > 2.0 x 20-period average (adjust for fewer signals)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (2.0 * volume_ma)
+    # Volume filter: current > 1.5 x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after indicators are ready
-    start_idx = 40
+    start_idx = 60  # RSI + EMA warmup
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if np.isnan(rsi[i]) or np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,28 +52,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long entry: price breaks above R3, uptrend (price > EMA34), volume spike
-            if (close[i] > R3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and
-                volume_spike[i]):
+            # Long: RSI oversold (<30) + uptrend (close > EMA50) + volume filter
+            if (rsi[i] < 30 and 
+                close[i] > ema50_1d_aligned[i] and
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short entry: price breaks below S3, downtrend (price < EMA34), volume spike
-            elif (close[i] < S3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and
-                  volume_spike[i]):
+            # Short: RSI overbought (>70) + downtrend (close < EMA50) + volume filter
+            elif (rsi[i] > 70 and 
+                  close[i] < ema50_1d_aligned[i] and
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price crosses below S3 (opposite level)
-            if close[i] < S3_aligned[i]:
+            # Exit long: RSI crosses above 50 (momentum fade)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price crosses above R3 (opposite level)
-            if close[i] > R3_aligned[i]:
+            # Exit short: RSI crosses below 50
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
