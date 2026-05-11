@@ -1,12 +1,6 @@
-# 12h_Keltner_WeeklyTrend_VolumeSpike
-# Hypothesis: 12h Keltner channel breakout with weekly trend filter and daily volume spike
-# Works in bull markets via trend-following breakouts; works in bear markets via volatility expansion during downtrends
-# Uses weekly trend to avoid counter-trend trades, volume spike to confirm institutional interest
-# Target: 20-50 trades/year to avoid fee drag
-
 #!/usr/bin/env python3
-name = "12h_Keltner_WeeklyTrend_VolumeSpike"
-timeframe = "12h"
+name = "1d_WeeklyTrend_VolumeBreakout"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -23,14 +17,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w trend: close above/below 1w EMA20
+    # Weekly trend: price above/below 20-week EMA
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 20:
         return np.zeros(n)
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    trend_up = close > ema_1w_aligned
+    ema_20w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
+    trend_up = close > ema_20w_aligned
     
     # Daily volume filter: volume > 1.5x 20-day average
     df_1d = get_htf_data(prices, '1d')
@@ -41,31 +35,19 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Keltner Channel (12h): EMA20 ± 2*ATR(10)
-    ema20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr10 = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
-    kc_upper = ema20 + 2 * atr10
-    kc_lower = ema20 - 2 * atr10
-    
-    # Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    # Daily price breakout: Donchian(20) breakout
+    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 40  # Need enough data for EMA, ATR, and volume
+    start_idx = 40  # Need enough data for EMA, Donchian, volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
-            np.isnan(ema20[i]) or np.isnan(atr10[i])):
+        if (np.isnan(ema_20w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
+            np.isnan(donch_upper[i]) or np.isnan(donch_lower[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -73,33 +55,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if not session_filter[i]:
-            if position != 0:
+        # Trend filter: avoid counter-trend trades in weak trends
+        if not trend_up[i] and not (close[i] < ema_20w_aligned[i]):
+            # In weak weekly downtrend, only allow shorts
+            if position == 1:
                 signals[i] = 0.0
                 position = 0
-            else:
+            continue
+        if trend_up[i] and not (close[i] > ema_20w_aligned[i]):
+            # In weak weekly uptrend, only allow longs
+            if position == -1:
                 signals[i] = 0.0
+                position = 0
             continue
         
         if position == 0:
-            # Long: Close above Keltner upper + weekly uptrend + volume filter
-            if close[i] > kc_upper[i] and trend_up[i] and volume_filter[i]:
+            # Long: Donchian breakout up + weekly uptrend + volume filter
+            if close[i] > donch_upper[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Close below Keltner lower + weekly downtrend + volume filter
-            elif close[i] < kc_lower[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Donchian breakout down + weekly downtrend + volume filter
+            elif close[i] < donch_lower[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Close below Keltner lower or weekly trend down
-            if close[i] < kc_lower[i] or not trend_up[i]:
+            # Long exit: Donchian breakdown or weekly trend down
+            if close[i] < donch_lower[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Close above Keltner upper or weekly trend up
-            if close[i] > kc_upper[i] or trend_up[i]:
+            # Short exit: Donchian breakout up or weekly trend up
+            if close[i] > donch_upper[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
