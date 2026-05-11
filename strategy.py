@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R1S1_Breakout_TrendFilter
-Hypothesis: Price breaking above daily R1 or below daily S1 with daily trend confirmation (EMA50) and volume spike. Uses daily Camarilla levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with daily trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
+4h_1w_Camarilla_Pivot_Sweep_TrendReversal
+Hypothesis: Price sweeps through weekly Camarilla R4/S4 levels with rejection (close back inside) during low volatility, then reverses with weekly trend alignment. Works in ranging markets (reversion) and trending markets (breakout after sweep). Uses weekly structure for low-frequency, high-conviction trades.
 """
 
-name = "4h_1d_Camarilla_R1S1_Breakout_TrendFilter"
+name = "4h_1w_Camarilla_Pivot_Sweep_TrendReversal"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Price and volume
@@ -23,58 +23,64 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for Camarilla pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    # Weekly data for Camarilla pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate daily Camarilla pivot points using previous period's OHLC
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Calculate weekly Camarilla pivot points using previous week's OHLC
+    w_high = df_1w['high'].values
+    w_low = df_1w['low'].values
+    w_close = df_1w['close'].values
     
-    # Shift to use previous period's data (avoid look-ahead)
-    d_high_prev = np.roll(d_high, 1)
-    d_low_prev = np.roll(d_low, 1)
-    d_close_prev = np.roll(d_close, 1)
-    # First period: use current values to avoid NaN
-    d_high_prev[0] = d_high[0]
-    d_low_prev[0] = d_low[0]
-    d_close_prev[0] = d_close[0]
+    # Shift to use previous week's data (avoid look-ahead)
+    w_high_prev = np.roll(w_high, 1)
+    w_low_prev = np.roll(w_low, 1)
+    w_close_prev = np.roll(w_close, 1)
+    # First week: use current values to avoid NaN
+    w_high_prev[0] = w_high[0]
+    w_low_prev[0] = w_low[0]
+    w_close_prev[0] = w_close[0]
     
     # Calculate pivot point
-    pivot = (d_high_prev + d_low_prev + d_close_prev) / 3.0
-    # Calculate Camarilla R1 and S1 levels
-    r1 = d_close_prev + (1.1/12) * (d_high_prev - d_low_prev)
-    s1 = d_close_prev - (1.1/12) * (d_high_prev - d_low_prev)
+    pivot = (w_high_prev + w_low_prev + w_close_prev) / 3.0
+    # Calculate Camarilla R4 and S4 levels (outer bands)
+    r4 = w_close_prev + (1.1/2) * (w_high_prev - w_low_prev)
+    s4 = w_close_prev - (1.1/2) * (w_high_prev - w_low_prev)
     
-    # Align daily R1/S1 to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    # Align weekly R4/S4 to 4h timeframe
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
-    # Daily trend filter (EMA 50)
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(
-        span=50, adjust=False, min_periods=50
+    # Weekly trend filter (EMA 34)
+    close_1w = df_1w['close'].values
+    ema_34_1w = pd.Series(close_1w).ewm(
+        span=34, adjust=False, min_periods=34
     ).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    # Volume confirmation (20-period average on 4h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # Volatility filter: ATR(20) < ATR(50) = low volatility environment
+    # Calculate ATR components
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr_20 = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
+    low_vol = atr_20 < atr_50
+    low_vol = np.nan_to_num(low_vol, nan=False)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(ema_34_1w_aligned[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -83,36 +89,33 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume threshold
-        volume_spike = vol_ratio[i] > 2.0
+        # Sweep detection: price briefly breaks level but closes back inside
+        swept_above = high[i] > r4_aligned[i] and close[i] < r4_aligned[i]
+        swept_below = low[i] < s4_aligned[i] and close[i] > s4_aligned[i]
         
         if position == 0:
-            # Long: break above daily R1 + above daily EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
-                volume_spike):
+            # Long: swept below S4 (bear trap) + weekly uptrend + low vol
+            if swept_below and close[i] > ema_34_1w_aligned[i] and low_vol[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S1 + below daily EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
-                  volume_spike):
+            # Short: swept above R4 (bull trap) + weekly downtrend + low vol
+            elif swept_above and close[i] < ema_34_1w_aligned[i] and low_vol[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to daily pivot or trend reversal
+            # Exit conditions: return to weekly pivot or trend reversal
             if position == 1:
-                # Exit long: price returns to daily pivot OR trend turns down
+                # Exit long: price returns to weekly pivot OR trend turns down
                 if (close[i] <= pivot_aligned[i]) or \
-                   (close[i] < ema_50_1d_aligned[i]):
+                   (close[i] < ema_34_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to daily pivot OR trend turns up
+                # Exit short: price returns to weekly pivot OR trend turns up
                 if (close[i] >= pivot_aligned[i]) or \
-                   (close[i] > ema_50_1d_aligned[i]):
+                   (close[i] > ema_34_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
