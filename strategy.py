@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_RVI_BullBear_1dTrend_50
-Hypothesis: Relative Vigor Index (RVI) crossing above/below zero with 1d EMA50 trend filter and volume confirmation (1.5x 20-period median). RVI measures trend strength via price action relative to open-close range. In bull markets (price > 1d EMA50), long on RVI upward crosses; in bear markets (price < 1d EMA50), short on RVI downward crosses. Volume confirms momentum. Designed for fewer, higher-quality trades (target: 20-40/year) to avoid fee drag and work in both bull and bear regimes.
+4h_TRIX_ZeroCross_Volume_1dTrend
+Hypothesis: TRIX(12) crossing zero line on 4h, filtered by 1d EMA34 trend and volume spike (2x median). TRIX filters whipsaws and captures momentum shifts. Works in bull (zero crosses up) and bear (zero crosses down). Target: 20-40 trades/year to avoid fee drag.
 """
 
-name = "4h_RVI_BullBear_1dTrend_50"
+name = "4h_TRIX_ZeroCross_Volume_1dTrend"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Get 1d data for trend filter
@@ -24,57 +24,41 @@ def generate_signals(prices):
     
     # 4h OHLCV
     close_4h = prices['close'].values
-    open_4h = prices['open'].values
-    high_4h = prices['high'].values
-    low_4h = prices['low'].values
     volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
+    # --- 1d Trend Filter: EMA34 ---
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- RVI (10-period) ---
-    numerator = close_4h - open_4h
-    denominator = high_4h - low_4h
-    # Avoid division by zero
-    denom_safe = np.where(denominator == 0, 1e-10, denominator)
-    price_change = numerator / denom_safe
+    # --- TRIX(12) calculation (triple EMA) ---
+    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean()
+    ema2 = ema1.ewm(span=12, adjust=False, min_periods=12).mean()
+    ema3 = ema2.ewm(span=12, adjust=False, min_periods=12).mean()
+    trix = (ema3 / ema3.shift(1) - 1) * 100
+    trix_values = trix.fillna(0).values
     
-    # Smooth numerator and denominator separately
-    num_smooth = pd.Series(price_change).ewm(span=10, adjust=False, min_periods=10).mean().values
-    den_smooth = pd.Series(np.ones_like(price_change)).ewm(span=10, adjust=False, min_periods=10).mean().values  # Always 1 for smoothed denominator
-    rvi = num_smooth / den_smooth
-    
-    # --- Volume Filter: spike above 1.5x median of last 20 periods ---
+    # --- Volume Filter: spike above 2x median of last 20 periods ---
     vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
-    vol_threshold = vol_median * 1.5
-    
-    # --- ATR for stoploss (14-period) ---
-    tr1 = np.abs(high_4h - low_4h)
-    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
-    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_threshold = vol_median * 2.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA50 and RVI
+    start_idx = 35  # for TRIX (12*3) + buffer
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rvi[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
+        if (np.isnan(trix_values[i]) or np.isnan(trix_values[i-1]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i])):
             if position != 0:
-                # Check stoploss
-                if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
+                # Exit on TRIX zero cross in opposite direction
+                if position == 1 and trix_values[i] < 0:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_4h[i] >= entry_price + 2.0 * atr[i]:
+                elif position == -1 and trix_values[i] > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -82,48 +66,34 @@ def generate_signals(prices):
             continue
         
         # Determine 1d trend
-        trend_up = close_4h[i] > ema50_1d_aligned[i]
-        trend_down = close_4h[i] < ema50_1d_aligned[i]
+        trend_up = close_4h[i] > ema34_1d_aligned[i]
+        trend_down = close_4h[i] < ema34_1d_aligned[i]
         
-        # Volume filter: spike above 1.5x median
+        # Volume filter: spike above 2x median
         vol_ok = volume_4h[i] > vol_threshold[i]
         
-        # RVI signals: crossing zero
-        rvi_cross_up = (rvi[i] > 0) and (rvi[i-1] <= 0)
-        rvi_cross_down = (rvi[i] < 0) and (rvi[i-1] >= 0)
-        
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume
-            if rvi_cross_up and trend_up and vol_ok:
-                # Long: RVI crosses up + 1d uptrend + volume spike
+            # Look for entries only in direction of 1d trend with volume spike
+            if trix_values[i] > 0 and trix_values[i-1] <= 0 and trend_up and vol_ok:
+                # Long: TRIX crosses up through zero + 1d uptrend + volume spike
                 signals[i] = 0.25
                 position = 1
                 entry_price = close_4h[i]
-            elif rvi_cross_down and trend_down and vol_ok:
-                # Short: RVI crosses down + 1d downtrend + volume spike
+            elif trix_values[i] < 0 and trix_values[i-1] >= 0 and trend_down and vol_ok:
+                # Short: TRIX crosses down through zero + 1d downtrend + volume spike
                 signals[i] = -0.25
                 position = -1
                 entry_price = close_4h[i]
         else:
-            # Update stoploss and check exits
+            # Exit: TRIX crosses zero in opposite direction
             if position == 1:
-                # Stoploss
-                if close_4h[i] <= entry_price - 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: RVI crosses back below zero
-                elif rvi[i] < 0:
+                if trix_values[i] < 0:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Stoploss
-                if close_4h[i] >= entry_price + 2.0 * atr[i]:
-                    signals[i] = 0.0
-                    position = 0
-                # Exit: RVI crosses back above zero
-                elif rvi[i] > 0:
+                if trix_values[i] > 0:
                     signals[i] = 0.0
                     position = 0
                 else:
