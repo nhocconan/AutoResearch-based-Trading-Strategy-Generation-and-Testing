@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_4hTrend_1dVolume"
+name = "1h_Camarilla_R3S3_Breakout_4hTrend_1dVolume_v2"
 timeframe = "1h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -19,7 +19,7 @@ def generate_signals(prices):
     
     # Get 4h data for trend filter (EMA50)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
+    if len(df_4h) < 50:
         return np.zeros(n)
     
     # Get 1d data for Camarilla pivot levels
@@ -45,9 +45,8 @@ def generate_signals(prices):
     ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
     # 1d volume filter: 20-period average
-    df_1d_vol = get_htf_data(prices, '1d')['volume'].values
+    df_1d_vol = df_1d['volume'].values
     vol_ma_1d = pd.Series(df_1d_vol).rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     vol_ratio = df_1d_vol / vol_ma_1d
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     vol_ratio_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio)
@@ -60,7 +59,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
