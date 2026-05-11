@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-6H_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike
-Hypothesis: Uses 12h timeframe for trend filter (more stable than 1d) and 6h for entry timing. 
-Buys when price breaks above 12h Camarilla R3 with 12h uptrend and 6h volume spike. 
-Sells when price breaks below 12h S3 with 12h downtrend and volume spike. 
-Focuses on 12h Camarilla R3/S3 levels (stronger than R1/S1) to reduce whipsaw in ranging markets.
-Designed for 6h timeframe to target 12-37 trades/year (50-150 total over 4 years).
+4H_Donchian_20_Breakout_TRIX_Zero_Cross_Volume_Confirmation
+Hypothesis: 4h Donchian(20) breakouts capture trend continuation. TRIX(12) zero cross confirms momentum shift.
+Volume spike (>1.5x 20-period EMA) filters false breakouts. Works in bull/bear by taking both long and short breakouts.
+Target: 25-40 trades/year (~100-160 total over 4 years) to stay under 400 trade limit and minimize fee drag.
 """
 
-name = "6H_Camarilla_R3_S3_Breakout_12hTrend_VolumeSpike"
-timeframe = "6h"
+name = "4H_Donchian_20_Breakout_TRIX_Zero_Cross_Volume_Confirmation"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -18,7 +16,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -26,42 +24,53 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load 12h data ONCE for trend filter and Camarilla levels
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
+    # === TRIX CALCULATION (12-period) ===
+    # TRIX = EMA(EMA(EMA(close, 12), 12), 12) - 1 period ago
+    ema1 = pd.Series(close).ewm(span=12, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=12, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=12, adjust=False).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3  # percentage change
+    trix = np.where(np.isnan(trix) | (ema3 == 0), 0, trix)  # handle div by zero
     
-    # 12h EMA50 for trend filter
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # Calculate 12h Camarilla levels: R3, S3 (outer levels for stronger signals)
-    hl_range_12h = high_12h - low_12h
-    r3_12h = close_12h + hl_range_12h * 1.5000
-    s3_12h = close_12h - hl_range_12h * 1.5000
-    
-    # Align 12h Camarilla levels to 6h timeframe
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    
-    # 6h volume filter: 20-period EMA for spike detection
+    # === VOLUME FILTER ===
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
-    # Fixed position size to minimize churn
-    position_size = 0.25
+    # === DONCHIAN CHANNEL (20-period) ===
+    # Highest high and lowest low over past 20 periods
+    highest_high = np.maximum.accumulate(high)
+    lowest_low = np.minimum.accumulate(low)
     
+    # For true rolling window, we need to look back 20 periods
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
+    
+    # For first 20 bars, use expanding window
+    for i in range(20):
+        donchian_high[i] = highest_high[i]
+        donchian_low[i] = lowest_low[i]
+    
+    # === TRIX ZERO CROSS SIGNAL ===
+    # TRIX > 0 = bullish momentum, TRIX < 0 = bearish momentum
+    trix_bullish = trix > 0
+    trix_bearish = trix < 0
+    
+    # === SIGNAL GENERATION ===
+    position_size = 0.25
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 60
+    # Start after warmup (need 20 for Donchian + some for TRIX stability)
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or 
-            np.isnan(s3_12h_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(trix[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -70,33 +79,31 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Conditions
-        price_above_ema12h = close[i] > ema50_12h_aligned[i]
-        price_below_ema12h = close[i] < ema50_12h_aligned[i]
-        breakout_long = close[i] > r3_12h_aligned[i]
-        breakout_short = close[i] < s3_12h_aligned[i]
+        # Breakout conditions
+        breakout_long = close[i] > donchian_high[i]
+        breakout_short = close[i] < donchian_low[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above 12h EMA50 + volume spike
-            if breakout_long and price_above_ema12h and volume_ok[i]:
+            # Long: Donchian breakout up + TRIX bullish + volume spike
+            if breakout_long and trix_bullish[i] and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below 12h EMA50 + volume spike
-            elif breakout_short and price_below_ema12h and volume_ok[i]:
+            # Short: Donchian breakout down + TRIX bearish + volume spike
+            elif breakout_short and trix_bearish[i] and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit conditions - use opposite Donchian band or TRIX reversal
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses (close below 12h EMA)
-                if close[i] < s3_12h_aligned[i] or close[i] < ema50_12h_aligned[i]:
+                # Exit long: price breaks below Donchian low OR TRIX turns bearish
+                if close[i] < donchian_low[i] or (trix[i] < 0 and trix[i-1] >= 0):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses (close above 12h EMA)
-                if close[i] > r3_12h_aligned[i] or close[i] > ema50_12h_aligned[i]:
+                # Exit short: price breaks above Donchian high OR TRIX turns bullish
+                if close[i] > donchian_high[i] or (trix[i] > 0 and trix[i-1] <= 0):
                     signals[i] = 0.0
                     position = 0
                 else:
