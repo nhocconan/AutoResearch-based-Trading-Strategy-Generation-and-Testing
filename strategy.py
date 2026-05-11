@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_Supertrend_Trend_4h_1d_Confirm"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,49 +17,50 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # 4h trend: Supertrend (ATR-based)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 30:
         return np.zeros(n)
     
-    # 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Get 1d data for Camarilla calculations
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # ATR for Supertrend
+    tr1 = high_4h[1:] - low_4h[1:]
+    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
+    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Calculate Camarilla levels from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Basic upper and lower bands
+    hl2 = (high_4h + low_4h) / 2
+    upper = hl2 + 3 * atr
+    lower = hl2 - 3 * atr
     
-    # Camarilla levels: R1, S1 (breakout zones) and R2, S2 (fade zones)
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R1 = C + Range * 1.1 / 12
-    # S1 = C - Range * 1.1 / 12
-    # R2 = C + Range * 1.1 / 6
-    # S2 = C - Range * 1.1 / 6
-    pivot_1d = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1_1d = close_1d + range_1d * 1.1 / 12
-    s1_1d = close_1d - range_1d * 1.1 / 12
-    r2_1d = close_1d + range_1d * 1.1 / 6
-    s2_1d = close_1d - range_1d * 1.1 / 6
+    # Supertrend calculation
+    supertrend = np.zeros_like(close_4h)
+    direction = np.ones_like(close_4h)  # 1 for uptrend, -1 for downtrend
     
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    supertrend[0] = upper[0]
+    for i in range(1, len(close_4h)):
+        if close_4h[i] > supertrend[i-1]:
+            supertrend[i] = max(lower[i], supertrend[i-1])
+            direction[i] = 1
+        else:
+            supertrend[i] = min(upper[i], supertrend[i-1])
+            direction[i] = -1
     
-    # Volume spike: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align 4h Supertrend direction to 1h
+    supertrend_dir_aligned = align_htf_to_ltf(prices, df_4h, direction)
+    
+    # 1d volume spike: current volume > 2x 24-period average (on 1h data)
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     volume_spike = volume > (vol_ma * 2)
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,9 +70,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(volume_spike[i])):
+        if (np.isnan(supertrend_dir_aligned[i]) or 
+            np.isnan(volume_spike[i]) or 
+            np.isnan(in_session[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,28 +80,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        if position == 0:
-            # Long: price breaks above R1 AND above 12h EMA50 (uptrend) AND volume spike
-            if close[i] > r1_aligned[i] and close[i] > ema_12h_aligned[i] and volume_spike[i]:
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S1 AND below 12h EMA50 (downtrend) AND volume spike
-            elif close[i] < s1_aligned[i] and close[i] < ema_12h_aligned[i] and volume_spike[i]:
-                signals[i] = -0.25
-                position = -1
-        elif position == 1:
-            # Long exit: price falls below S2 OR below 12h EMA50 (trend change)
-            if close[i] < s2_aligned[i] or close[i] < ema_12h_aligned[i]:
+        if in_session[i]:
+            if position == 0:
+                # Long: 4h uptrend AND volume spike
+                if supertrend_dir_aligned[i] == 1 and volume_spike[i]:
+                    signals[i] = 0.20
+                    position = 1
+                # Short: 4h downtrend AND volume spike
+                elif supertrend_dir_aligned[i] == -1 and volume_spike[i]:
+                    signals[i] = -0.20
+                    position = -1
+            elif position == 1:
+                # Long exit: 4h downtrend
+                if supertrend_dir_aligned[i] == -1:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20  # maintain position
+            elif position == -1:
+                # Short exit: 4h uptrend
+                if supertrend_dir_aligned[i] == 1:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20  # maintain position
+        else:
+            # Outside session: flatten
+            if position != 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
-        elif position == -1:
-            # Short exit: price rises above R2 OR above 12h EMA50 (trend change)
-            if close[i] > r2_aligned[i] or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25  # maintain position
     
     return signals
