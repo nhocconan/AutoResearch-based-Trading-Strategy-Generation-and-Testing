@@ -1,32 +1,17 @@
-# The strategy below implements a 4-hour timeframe approach combining:
-# - 12-hour Donchian channel breakouts for entry signals
-# - 1-day EMA trend filter to confirm higher timeframe direction
-# - Volume confirmation to ensure institutional participation
-# - ATR-based volatility filter to avoid choppy markets
-# - Discrete position sizing (0.25) to minimize fee churn
-# - Clear exit conditions when trend reverses or volatility drops
-#
-# This approach targets 20-40 trades per year by requiring multiple confluence factors,
-# reducing false signals while capturing strong trending moves in both bull and bear markets.
-# The 12h/1d/4h timeframe combination provides multi-timeframe alignment without
-# excessive trading frequency.
-
 #!/usr/bin/env python3
 """
-4h_12h_1D_DonchianBreakout_EMATrend_VolumeFilter
-Hypothesis: Use 12-hour Donchian channel breakouts as entry signals, filtered by
-1-day EMA trend direction and volume confirmation. Enter long when price breaks
-above 12h Donchian upper channel in 1d uptrend with above-average volume.
-Enter short when price breaks below 12h Donchian lower channel in 1d downtrend
-with above-average volume. Exit when trend reverses or volume drops below average.
-This captures institutional breakout moves with multi-timeframe confirmation,
-reducing false signals in choppy markets. Target: 20-40 trades/year to avoid fee drag.
-Works in bull by buying breakouts in uptrend; works in bear by selling breakdowns
-in downtrend.
+12h_1d_Camarilla_R1_S1_Breakout_TrendVolume
+Hypothesis: Use daily Camarilla R1/S1 levels as breakout triggers with 12h trend filter (12h EMA50) and volume confirmation.
+In 12h uptrend (price above 12h EMA50), go long on break above daily R1.
+In 12h downtrend (price below 12h EMA50), go short on break below daily S1.
+Exit when price returns to daily Pivot or reverses trend.
+Targets 12-30 trades/year (48-120 over 4 years) to minimize fee drag.
+Works in bull by buying breakouts in uptrend; works in bear by selling breakdowns in downtrend.
+Volume filter ensures breakouts have participation, reducing false signals.
 """
 
-name = "4h_12h_1D_DonchianBreakout_EMATrend_VolumeFilter"
-timeframe = "4h"
+name = "12h_1d_Camarilla_R1_S1_Breakout_TrendVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -38,101 +23,93 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12-hour data for Donchian channels (20-period)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
-        return np.zeros(n)
-    
-    # Get 1-day data for EMA trend filter
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4-hour OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # 12h OHLCV
+    close_12h = prices['close'].values
+    high_12h = prices['high'].values
+    low_12h = prices['low'].values
+    volume_12h = prices['volume'].values
     
-    # --- 12-hour Donchian Channel (20-period) ---
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    
-    # Calculate 12h Donchian upper and lower
-    donch_high_12h = np.full(len(high_12h), np.nan)
-    donch_low_12h = np.full(len(low_12h), np.nan)
-    
-    for i in range(20, len(high_12h)):
-        donch_high_12h[i] = np.max(high_12h[i-20:i])
-        donch_low_12h[i] = np.min(low_12h[i-20:i])
-    
-    # Align 12h Donchian levels to 4h timeframe
-    donch_high_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_high_12h)
-    donch_low_12h_aligned = align_htf_to_ltf(prices, df_12h, donch_low_12h)
-    
-    # --- 1-day EMA (50-period) for trend filter ---
+    # --- Daily Camarilla Levels (from previous day) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
     
-    # Calculate EMA with proper initialization
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = close_1d[:50].mean()  # Simple average for first value
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 / (50 + 1)) + (ema_50_1d[i-1] * (49 / (50 + 1)))
+    # Calculate Camarilla levels: R1, S1, Pivot (using previous day's OHLC)
+    camarilla_R1 = np.full(len(high_1d), np.nan)
+    camarilla_S1 = np.full(len(high_1d), np.nan)
+    camarilla_P = np.full(len(high_1d), np.nan)
     
-    # Align 1d EMA to 4h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    for i in range(1, len(high_1d)):
+        # Previous day's OHLC
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        # Camarilla formulas
+        camarilla_P[i] = (ph + pl + pc) / 3.0
+        camarilla_R1[i] = pc + (ph - pl) * 1.1 / 12
+        camarilla_S1[i] = pc - (ph - pl) * 1.1 / 12
     
-    # --- Volume confirmation (20-period average) ---
-    vol_ma_20 = np.full(n, np.nan)
+    # Align Camarilla levels to 12h timeframe
+    camarilla_R1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_R1)
+    camarilla_S1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_S1)
+    camarilla_P_aligned = align_htf_to_ltf(prices, df_1d, camarilla_P)
     
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
+    # --- 12h Trend Filter: EMA50 ---
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # --- Volume Confirmation: 12h volume > 20-period average ---
+    vol_ma_20 = pd.Series(volume_12h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = max(20, 50)  # Need both Donchian and EMA warmup
+    start_idx = 50  # for EMA50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donch_high_12h_aligned[i]) or np.isnan(donch_low_12h_aligned[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
+        if (np.isnan(camarilla_R1_aligned[i]) or np.isnan(camarilla_S1_aligned[i]) or 
+            np.isnan(camarilla_P_aligned[i]) or np.isnan(ema50_12h[i]) or 
+            np.isnan(vol_ma_20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine 1-day trend based on price relative to EMA
-        uptrend = close[i] > ema_50_1d_aligned[i]
-        downtrend = close[i] < ema_50_1d_aligned[i]
+        # Determine 12h trend
+        trend_up = close_12h[i] > ema50_12h[i]
+        trend_down = close_12h[i] < ema50_12h[i]
         
-        # Volume confirmation: current volume above 20-period average
-        volume_confirm = volume[i] > vol_ma_20[i]
+        # Volume confirmation
+        vol_ok = volume_12h[i] > vol_ma_20[i]
         
         if position == 0:
-            # Look for entries only in direction of 1-day trend with volume confirmation
-            if uptrend and close[i] > donch_high_12h_aligned[i] and volume_confirm:
-                # Long: 1d uptrend + 12h breakout above upper channel + volume
+            # Look for entries only in direction of 12h trend with volume
+            if trend_up and vol_ok and close_12h[i] > camarilla_R1_aligned[i]:
+                # Long: 12h uptrend + volume + break above daily R1
                 signals[i] = 0.25
                 position = 1
-            elif downtrend and close[i] < donch_low_12h_aligned[i] and volume_confirm:
-                # Short: 1d downtrend + 12h breakdown below lower channel + volume
+            elif trend_down and vol_ok and close_12h[i] < camarilla_S1_aligned[i]:
+                # Short: 12h downtrend + volume + break below daily S1
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: 1d trend turns down OR volume drops below average
-                if not uptrend or not volume_confirm:
+                # Exit long: trend turns down OR price returns to daily Pivot
+                if not trend_up or close_12h[i] < camarilla_P_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: 1d trend turns up OR volume drops below average
-                if not downtrend or not volume_confirm:
+                # Exit short: trend turns up OR price returns to daily Pivot
+                if not trend_down or close_12h[i] > camarilla_P_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
