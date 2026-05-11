@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_1w_Camarilla_R1_S1_Breakout_Trend"
-timeframe = "12h"
+name = "1d_1w_Camarilla_R1_S1_Breakout_Trend"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly Camarilla pivot levels (R1, S1)
+    # 1w Camarilla pivot levels (R1, S1)
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) < 2:
         return np.zeros(n)
@@ -32,20 +32,15 @@ def generate_signals(prices):
     r1_1w = close_1w + (range_1w * 1.0833)
     s1_1w = close_1w - (range_1w * 1.0833)
     
-    # Align levels to 12h timeframe
+    # Align levels to 1d timeframe
     r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
     s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
-    # Daily EMA34 trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # 1w EMA34 trend filter
+    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w)
     
-    close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation (12h volume > 1.5x 20-period average)
+    # Volume confirmation (1d volume > 1.5x 20-period average)
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_filter = volume > 1.5 * volume_ma20
     
@@ -55,7 +50,7 @@ def generate_signals(prices):
     start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]) or np.isnan(ema_34_1w_aligned[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,23 +60,23 @@ def generate_signals(prices):
         
         if position == 0:
             # Long: Close breaks above R1, above EMA34, volume confirmation
-            if close[i] > r1_1w_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i]:
+            if close[i] > r1_1w_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
             # Short: Close breaks below S1, below EMA34, volume confirmation
-            elif close[i] < s1_1w_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i]:
+            elif close[i] < s1_1w_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Exit long: Close below S1 or below EMA34
-            if close[i] < s1_1w_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            if close[i] < s1_1w_aligned[i] or close[i] < ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short: Close above R1 or above EMA34
-            if close[i] > r1_1w_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            if close[i] > r1_1w_aligned[i] or close[i] > ema_34_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
