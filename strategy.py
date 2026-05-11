@@ -1,6 +1,5 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "12h_1d_Donchian_Breakout_Volume"
+name = "12h_1d_Donchian_Breakout_Volume_Trend"
 timeframe = "12h"
 leverage = 1.0
 
