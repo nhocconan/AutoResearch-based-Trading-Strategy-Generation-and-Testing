@@ -1,10 +1,14 @@
-#!/usr/bin/env python3
-# 4h_Camarilla_R3_S3_Breakout_1wTrend_Volume_v3
-# Hypothesis: Refined version focusing on fewer trades and stronger signals. Uses 1w EMA34 trend direction, 1d Camarilla R3/S3 for breakout levels, and volume confirmation (3x average). 
-# Added stricter volume filter (3x vs 2.5x) and reduced position size to 0.20 to lower trade frequency and fee drag. Target: 20-40 trades/year.
+# ==============================
+# EXPERIMENT #151498 - DAILY STRATEGY
+# ==============================
+# Hypothesis: 1D Donchian(20) breakout with weekly trend filter (1W EMA50 slope) and volume confirmation (1.5x 20D average)
+# Uses daily Donchian breakouts for entry, weekly trend for direction filter, and volume surge for confirmation.
+# Designed for low trade frequency (7-25/year) to minimize fee drag while capturing strong directional moves.
+# Works in both bull and bear markets via trend filter (only trades in direction of weekly trend).
+# ==============================
 
-name = "4h_Camarilla_R3_S3_Breakout_1wTrend_Volume_v3"
-timeframe = "4h"
+name = "1D_Donchian20_Breakout_1wTrend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -16,9 +20,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get daily data for Camarilla calculation
+    # Get daily data for Donchian calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # Get weekly data for trend filter
@@ -26,33 +30,29 @@ def generate_signals(prices):
     if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Camarilla levels from previous day ---
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
-    prev_close = df_1d['close'].values
+    # --- Daily Donchian(20) channels ---
+    # Upper band: 20-day high
+    # Lower band: 20-day low
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Calculate ranges
-    range_hl = prev_high - prev_low
+    # Align Donchian bands to daily (already daily, but using for consistency)
+    # Since we're on daily timeframe, no alignment needed for daily data
+    # But we'll keep the structure for clarity
     
-    # Camarilla R3 and S3
-    r3 = prev_close + range_hl * 1.1 / 2
-    s3 = prev_close - range_hl * 1.1 / 2
-    
-    # Align Camarilla levels to 4h (previous day's levels available at 4h open)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # --- Weekly trend: EMA34 slope ---
+    # --- Weekly trend: EMA50 slope ---
     weekly_close = df_1w['close'].values
-    ema_34_1w = pd.Series(weekly_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_slope_34_1w = np.diff(ema_34_1w, prepend=ema_34_1w[0])
-    ema_slope_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_34_1w)
+    ema_50_1w = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_slope_50_1w = np.diff(ema_50_1w, prepend=ema_50_1w[0])
+    ema_slope_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_slope_50_1w)
     
     # --- ATR for volatility and trailing stop ---
     tr1 = np.maximum(high - low, np.absolute(high - np.roll(close, 1)))
@@ -61,7 +61,7 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # --- Volume confirmation (3x 20-period average) ---
+    # --- Volume confirmation (1.5x 20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -74,9 +74,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or
-            np.isnan(ema_slope_34_1w_aligned[i]) or
+        if (np.isnan(donchian_upper[i]) or
+            np.isnan(donchian_lower[i]) or
+            np.isnan(ema_slope_50_1w_aligned[i]) or
             np.isnan(atr[i]) or
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -86,22 +86,22 @@ def generate_signals(prices):
                 lowest_low_since_entry = 0.0
             continue
         
-        # Trend filter from weekly EMA34 slope
-        bullish_trend = ema_slope_34_1w_aligned[i] > 0
-        bearish_trend = ema_slope_34_1w_aligned[i] < 0
+        # Trend filter from weekly EMA50 slope
+        bullish_trend = ema_slope_50_1w_aligned[i] > 0
+        bearish_trend = ema_slope_50_1w_aligned[i] < 0
         
-        # Volume confirmation (3x average - stricter)
-        volume_surge = volume[i] > 3.0 * vol_ma[i]
+        # Volume confirmation (1.5x average)
+        volume_surge = volume[i] > 1.5 * vol_ma[i]
         
         if position == 0:
-            # Long: price breaks above R3 in bullish trend with volume surge
-            if close[i] > r3_aligned[i] and bullish_trend and volume_surge:
-                signals[i] = 0.20
+            # Long: price breaks above Donchian upper in bullish trend with volume surge
+            if close[i] > donchian_upper[i] and bullish_trend and volume_surge:
+                signals[i] = 0.25
                 position = 1
                 highest_high_since_entry = high[i]
-            # Short: price breaks below S3 in bearish trend with volume surge
-            elif close[i] < s3_aligned[i] and bearish_trend and volume_surge:
-                signals[i] = -0.20
+            # Short: price breaks below Donchian lower in bearish trend with volume surge
+            elif close[i] < donchian_lower[i] and bearish_trend and volume_surge:
+                signals[i] = -0.25
                 position = -1
                 lowest_low_since_entry = low[i]
         else:
@@ -116,7 +116,7 @@ def generate_signals(prices):
                     position = 0
                     highest_high_since_entry = 0.0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
                 # Update lowest low since entry
                 if low[i] < lowest_low_since_entry:
@@ -128,6 +128,6 @@ def generate_signals(prices):
                     position = 0
                     lowest_low_since_entry = 0.0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
