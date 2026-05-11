@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-# 4h_1D_RSI_Momentum_Squeeze
-# Hypothesis: RSI momentum with Bollinger Band squeeze on 1d timeframe, traded on 4h.
-# Long when: RSI(14) > 55 AND BB width (20,2) at 20-day low AND price > 4h EMA(50)
-# Short when: RSI(14) < 45 AND BB width (20,2) at 20-day low AND price < 4h EMA(50)
-# Exit when RSI crosses 50 or BB width expands above 40-day average.
-# Works in bull by catching momentum in low volatility breakouts; works in bear by fading rallies in squeeze.
-# Target: 25-40 trades/year (100-160 total) to avoid fee drag.
+"""
+12h_Camarilla_R3_S3_Breakout_1wTrend
+Hypothesis: On 12h chart, price breaking Camarilla R3/S3 levels with weekly trend filter (1w EMA50) and volume confirmation captures institutional breakout moves. Works in bull (buy R3 breakouts in uptrend) and bear (sell S3 breakdowns in downtrend). Weekly trend filter avoids counter-trend trades. Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+"""
 
-name = "4h_1D_RSI_Momentum_Squeeze"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,120 +14,105 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for RSI and Bollinger Bands
+    # Get weekly data for trend filter
+    df_1w = get_htf_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
+        return np.zeros(n)
+    
+    # Get daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 40:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d RSI(14) ---
+    # --- Weekly EMA50 trend ---
+    close_1w = df_1w['close'].values
+    ema_1w = np.full(len(close_1w), np.nan)
+    for i in range(len(close_1w)):
+        if i < 50:
+            ema_1w[i] = np.nan
+        elif i == 50:
+            ema_1w[i] = np.mean(close_1w[0:50])
+        else:
+            ema_1w[i] = (close_1w[i] * 2 / (50 + 1)) + (ema_1w[i-1] * (49 / (50 + 1)))
+    
+    # --- Daily Camarilla levels (using previous day's OHLC) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = np.full_like(close_1d, np.nan)
-    avg_loss = np.full_like(close_1d, np.nan)
+    
+    # Camarilla R3 and S3
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
     for i in range(1, len(close_1d)):
-        if i < 14:
-            avg_gain[i] = np.mean(gain[1:i+1]) if i > 0 else np.nan
-            avg_loss[i] = np.mean(loss[1:i+1]) if i > 0 else np.nan
-        else:
-            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, np.nan)
-    rsi_1d = 100 - (100 / (1 + rs))
+        # Use previous day's OHLC
+        ph = high_1d[i-1]
+        pl = low_1d[i-1]
+        pc = close_1d[i-1]
+        rang = ph - pl
+        camarilla_r3[i] = pc + (rang * 1.1 / 4)
+        camarilla_s3[i] = pc - (rang * 1.1 / 4)
     
-    # --- 1d Bollinger Bands (20,2) ---
-    sma_20 = np.full_like(close_1d, np.nan)
-    std_20 = np.full_like(close_1d, np.nan)
-    for i in range(len(close_1d)):
-        if i < 19:
-            sma_20[i] = np.nan
-            std_20[i] = np.nan
-        else:
-            sma_20[i] = np.mean(close_1d[i-19:i+1])
-            std_20[i] = np.std(close_1d[i-19:i+1])
-    upper_bb = sma_20 + 2 * std_20
-    lower_bb = sma_20 - 2 * std_20
-    bb_width = upper_bb - lower_bb
+    # --- 12h volume MA(20) ---
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
-    # BB width percentiles for squeeze detection
-    bb_width_20d_low = np.full_like(bb_width, np.nan)
-    bb_width_40d_avg = np.full_like(bb_width, np.nan)
-    for i in range(len(bb_width)):
-        if i < 19:
-            bb_width_20d_low[i] = np.nan
-            bb_width_40d_avg[i] = np.nan
-        elif i < 39:
-            bb_width_20d_low[i] = np.min(bb_width[20:i+1]) if i >= 20 else np.nan
-            bb_width_40d_avg[i] = np.nan
-        else:
-            bb_width_20d_low[i] = np.min(bb_width[i-19:i+1])
-            bb_width_40d_avg[i] = np.mean(bb_width[i-39:i+1])
+    # Align weekly EMA50 to 12h
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # --- 4h EMA(50) for trend filter ---
-    ema_50 = np.full(n, np.nan)
-    for i in range(n):
-        if i < 49:
-            ema_50[i] = np.nan
-        elif i == 49:
-            ema_50[i] = np.mean(close[0:50])
-        else:
-            ema_50[i] = (close[i] * 2 / (50 + 1)) + (ema_50[i-1] * 49 / (50 + 1))
-    
-    # Align 1d indicators to 4h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
-    bb_width_20d_low_aligned = align_htf_to_ltf(prices, df_1d, bb_width_20d_low)
-    bb_width_40d_avg_aligned = align_htf_to_ltf(prices, df_1d, bb_width_40d_avg)
+    # Align daily Camarilla levels to 12h
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: max(1d RSI needs 14, BB 20, EMA50)
-    start_idx = max(50, 40)  # EMA50 and BB40d
+    # Warmup: max(weekly EMA50 needs 50, daily Camarilla needs 1, vol MA20)
+    start_idx = max(50, 1, 20)
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(rsi_1d_aligned[i]) or
-            np.isnan(bb_width_20d_low_aligned[i]) or
-            np.isnan(bb_width_40d_avg_aligned[i]) or
-            np.isnan(ema_50[i])):
+        if (np.isnan(ema_1w_aligned[i]) or
+            np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Squeeze condition: BB width at 20-day low
-        squeeze = bb_width_20d_low_aligned[i] <= bb_width_40d_avg_aligned[i] * 0.8
+        # Volume confirmation
+        vol_spike = volume[i] > vol_ma[i] * 1.5
         
         if position == 0:
-            if rsi_1d_aligned[i] > 55 and squeeze and close[i] > ema_50[i]:
-                # Long: bullish momentum in low volatility
+            if close[i] > camarilla_r3_aligned[i] and close[i] > ema_1w_aligned[i] and vol_spike:
+                # Long: break above R3 in weekly uptrend
                 signals[i] = 0.25
                 position = 1
-            elif rsi_1d_aligned[i] < 45 and squeeze and close[i] < ema_50[i]:
-                # Short: bearish momentum in low volatility
+            elif close[i] < camarilla_s3_aligned[i] and close[i] < ema_1w_aligned[i] and vol_spike:
+                # Short: break below S3 in weekly downtrend
                 signals[i] = -0.25
                 position = -1
         else:
             if position == 1:
-                # Exit long: RSI < 50 OR squeeze ends
-                if rsi_1d_aligned[i] < 50 or bb_width_20d_low_aligned[i] > bb_width_40d_avg_aligned[i] * 1.2:
+                # Exit long: price closes below weekly EMA50 OR re-enters Camarilla body
+                if close[i] < ema_1w_aligned[i] or (camarilla_s3_aligned[i] < close[i] < camarilla_r3_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: RSI > 50 OR squeeze ends
-                if rsi_1d_aligned[i] > 50 or bb_width_20d_low_aligned[i] > bb_width_40d_avg_aligned[i] * 1.2:
+                # Exit short: price closes above weekly EMA50 OR re-enters Camarilla body
+                if close[i] > ema_1w_aligned[i] or (camarilla_s3_aligned[i] < close[i] < camarilla_r3_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
