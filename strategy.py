@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Trend_Filter_RSI"
-timeframe = "1d"
+name = "6h_Premium_Discount_Order_Block"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,70 +17,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average)
-    # Fast EMA period = 2, Slow EMA period = 30
-    fast_period = 2
-    slow_period = 30
-    
-    # Direction = abs(close - close[fast_period])
-    change = np.abs(np.diff(close, n=fast_period))
-    # Volatility = sum of abs(close - close[1]) over fast_period
-    volatility = np.zeros_like(close)
-    for i in range(fast_period, len(close)):
-        volatility[i] = np.sum(np.abs(np.diff(close[i-fast_period:i+1, 1])))
-    
-    # Avoid division by zero
-    volatility[volatility == 0] = 1e-10
-    
-    # Efficiency Ratio
-    er = change / volatility
-    # Smoothing constant
-    sc = np.power(er * (2/(fast_period+1) - 2/(slow_period+1)) + 2/(slow_period+1), 2)
-    
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    
-    # RSI(14)
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(close)
-    avg_loss = np.zeros_like(close)
-    
-    # First average
-    avg_gain[14] = np.mean(gain[1:15])
-    avg_loss[14] = np.mean(loss[1:15])
-    
-    # Wilder smoothing
-    for i in range(15, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    rsi[:14] = 50  # Neutral before enough data
-    
-    # Weekly trend filter (1w EMA20)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d structure: identify swing highs/lows for order blocks
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    weekly_uptrend = close > ema_1w_aligned
+    
+    # Daily high/low for premium/discount zones
+    daily_high = df_1d['high'].values
+    daily_low = df_1d['low'].values
+    daily_close = df_1d['close'].values
+    
+    # Calculate 10-day ATR for volatility normalization
+    tr1 = np.abs(daily_high[1:] - daily_low[1:])
+    tr2 = np.abs(daily_high[1:] - daily_close[:-1])
+    tr3 = np.abs(daily_low[1:] - daily_close[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
+    atr_10 = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
+    
+    # Align daily data to 6h timeframe
+    daily_high_aligned = align_htf_to_ltf(prices, df_1d, daily_high)
+    daily_low_aligned = align_htf_to_ltf(prices, df_1d, daily_low)
+    daily_close_aligned = align_htf_to_ltf(prices, df_1d, daily_close)
+    atr_10_aligned = align_htf_to_ltf(prices, df_1d, atr_10)
+    
+    # Premium/discount zones: above/below 50% of daily range
+    daily_range = daily_high_aligned - daily_low_aligned
+    midpoint = daily_low_aligned + 0.5 * daily_range
+    
+    # Volume filter: 2-period volume spike
+    vol_ma2 = pd.Series(volume).rolling(window=2, min_periods=2).mean().values
+    volume_filter = volume > 1.5 * vol_ma2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 30  # Need enough data for indicators
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(daily_high_aligned[i]) or np.isnan(daily_low_aligned[i]) or 
+            np.isnan(midpoint[i]) or np.isnan(atr_10_aligned[i]) or np.isnan(vol_ma2[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -88,25 +65,32 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        current_price = close[i]
+        atr = atr_10_aligned[i]
+        
+        # Define entry zones with ATR buffer
+        premium_zone = midpoint[i] + 0.5 * atr
+        discount_zone = midpoint[i] - 0.5 * atr
+        
         if position == 0:
-            # Long: Price > KAMA + RSI > 50 + Weekly uptrend
-            if close[i] > kama[i] and rsi[i] > 50 and weekly_uptrend[i]:
+            # Long: price in discount zone with volume spike
+            if current_price < discount_zone and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price < KAMA + RSI < 50 + Weekly downtrend
-            elif close[i] < kama[i] and rsi[i] < 50 and not weekly_uptrend[i]:
+            # Short: price in premium zone with volume spike
+            elif current_price > premium_zone and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price < KAMA or RSI < 40
-            if close[i] < kama[i] or rsi[i] < 40:
+            # Long exit: price returns to midpoint or enters premium zone
+            if current_price > midpoint[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price > KAMA or RSI > 60
-            if close[i] > kama[i] or rsi[i] > 60:
+            # Short exit: price returns to midpoint or enters discount zone
+            if current_price < midpoint[i]:
                 signals[i] = 0.0
                 position = 0
             else:
