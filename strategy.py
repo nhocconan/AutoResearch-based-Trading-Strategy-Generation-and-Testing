@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_RSI_Reversal_Kelly_WeeklyTrend
-Hypothesis: On daily timeframe, take mean-reversion entries when RSI(14) < 30 (oversold) in weekly uptrend or RSI(14) > 70 (overbought) in weekly downtrend. Position size dynamically scaled by Kelly criterion based on recent win rate and average win/loss ratio. Uses Kelly fraction capped at 0.30 to manage risk. Works in both bull and bear markets by aligning with weekly trend direction.
+12h_Donchian_20_Breakout_1dTrend_VolumeSpike_v2
+Hypothesis: Use 12h Donchian(20) breakouts with 1d EMA50 trend filter and volume spike confirmation. Works in bull markets (buy upper band breaks in uptrend) and bear markets (sell lower band breaks in downtrend). Volume spike confirms institutional interest. Target: 20-50 trades per year on 12h timeframe.
 """
 
-name = "1d_RSI_Reversal_Kelly_WeeklyTrend"
-timeframe = "1d"
+name = "12h_Donchian_20_Breakout_1dTrend_VolumeSpike_v2"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,69 +20,39 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # === WEEKLY DATA FOR TREND FILTER ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # === 1D Data for Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly EMA21 for trend filter
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Trend filter: EMA50 on 1d close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === DAILY RSI FOR MEAN REVERSION ===
-    # RSI(14) calculation
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0.0)
-    loss = np.where(delta < 0, -delta, 0.0)
+    # === 12h Donchian Channels ===
+    # Donchian(20): upper = max(high, 20), lower = min(low, 20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Calculate win rate and win/loss ratio for Kelly (using last 60 days)
-    lookback = 60
-    returns = np.diff(close, prepend=close[0]) / close
-    wins = np.zeros(n)
-    losses = np.zeros(n)
-    
-    for i in range(lookback, n):
-        start = i - lookback
-        period_returns = returns[start:i+1]
-        winning = period_returns[period_returns > 0]
-        losing = period_returns[period_returns < 0]
-        win_rate = len(winning) / lookback if lookback > 0 else 0.5
-        avg_win = np.mean(winning) if len(winning) > 0 else 0.0
-        avg_loss = np.mean(np.abs(losing)) if len(losing) > 0 else 0.01
-        win_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 1.0
-        
-        # Kelly fraction: f = (bp - q) / b where b = win_loss_ratio, p = win_rate, q = 1-p
-        if win_loss_ratio > 0:
-            kelly = (win_loss_ratio * win_rate - (1 - win_rate)) / win_loss_ratio
-            kelly = max(0, min(kelly, 0.30))  # Cap at 0.30, no negative
-        else:
-            kelly = 0.0
-        
-        wins[i] = win_rate
-        losses[i] = win_loss_ratio
-    
-    # Forward fill for periods before lookback
-    for i in range(1, lookback):
-        wins[i] = wins[i-1] if i > 0 else 0.5
-        losses[i] = losses[i-1] if i > 0 else 1.0
+    # Volume spike: current volume > 2x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if np.isnan(rsi[i]) or np.isnan(ema_21_1w_aligned[i]):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -90,38 +60,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        kelly_size = wins[i] * losses[i]  # Simplified Kelly proxy using precomputed values
-        if kelly_size > 0.30:
-            kelly_size = 0.30
-        elif kelly_size < 0.05:
-            kelly_size = 0.0  # Minimum size threshold
-        
         if position == 0:
-            # Long: RSI < 30 (oversold) AND weekly uptrend (close > weekly EMA21)
-            if rsi[i] < 30 and close[i] > ema_21_1w_aligned[i]:
-                signals[i] = kelly_size if kelly_size > 0 else 0.25
+            # Long: price breaks above Donchian upper AND uptrend (price > EMA50) AND volume spike
+            if close[i] > donchian_upper[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: RSI > 70 (overbought) AND weekly downtrend (close < weekly EMA21)
-            elif rsi[i] > 70 and close[i] < ema_21_1w_aligned[i]:
-                signals[i] = -kelly_size if kelly_size > 0 else -0.25
+            # Short: price breaks below Donchian lower AND downtrend (price < EMA50) AND volume spike
+            elif close[i] < donchian_lower[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: RSI > 60 (overbought territory) OR price crosses below weekly EMA21
-            if rsi[i] > 60 or close[i] < ema_21_1w_aligned[i]:
+            # Long exit: price crosses below Donchian lower OR EMA50
+            if close[i] < donchian_lower[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = wins[i] * losses[i]  # maintain position scaled by Kelly
-                if signals[i] > 0.30:
-                    signals[i] = 0.30
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: RSI < 40 (oversold territory) OR price crosses above weekly EMA21
-            if rsi[i] < 40 or close[i] > ema_21_1w_aligned[i]:
+            # Short exit: price crosses above Donchian upper OR EMA50
+            if close[i] > donchian_upper[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -wins[i] * losses[i]  # maintain position scaled by Kelly
-                if signals[i] < -0.30:
-                    signals[i] = -0.30
+                signals[i] = -0.25  # maintain position
     
     return signals
