@@ -1,63 +1,89 @@
 #!/usr/bin/env python3
-name = "1d_Camarilla_R1_S1_Breakout_1wTrend_With_Volume"
-timeframe = "1d"
+name = "6h_Adaptive_Kelly_Volume_Regime_12hTrend"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
+from math import exp, sqrt
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get weekly data for trend filter (using weekly EMA50)
-    df_1w = get_htf_data(prices, '1w')
+    # Get 12h data for trend filter and volatility
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1w) < 50:
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Get weekly data for Camarilla pivots (from previous weekly bar)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 12h EMA50 for trend
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Previous weekly bar's range
-    range_1w = high_1w - low_1w
+    # 12h ATR for volatility
+    tr_12h = np.maximum(high_12h - low_12h,
+                        np.maximum(abs(high_12h - np.roll(close_12h, 1)),
+                                   abs(low_12h - np.roll(close_12h, 1))))
+    tr_12h[0] = high_12h[0] - low_12h[0]
+    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
     
-    # Calculate Camarilla R1 and S1 levels
-    camarilla_r1 = close_1w + (range_1w * 1.1 / 12)
-    camarilla_s1 = close_1w - (range_1w * 1.1 / 12)
+    # 6h RSI for mean reversion signals
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Align Camarilla levels to daily timeframe (using previous weekly bar's values)
-    r1_1d = align_htf_to_ltf(prices, df_1w, camarilla_r1)
-    s1_1d = align_htf_to_ltf(prices, df_1w, camarilla_s1)
-    
-    # Volume filter: current volume > 1.8x 20-period average
+    # 6h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.8)
+    volume_ok = volume > (vol_ma * 1.5)
+    
+    # Kelly fraction calculation (simplified)
+    # Win probability based on RSI extremes
+    prob_win_long = np.where(rsi < 30, 0.6,
+                     np.where(rsi > 70, 0.4, 0.5))
+    prob_win_short = np.where(rsi > 70, 0.6,
+                      np.where(rsi < 30, 0.4, 0.5))
+    
+    # Win/loss ratio based on volatility
+    win_loss_ratio = 1.5  # Assume 1.5:1 reward/risk
+    
+    # Kelly f = (bp - q) / b where b = win_loss_ratio, p = prob_win, q = prob_loss
+    kelly_long = (win_loss_ratio * prob_win_long - (1 - prob_win_long)) / win_loss_ratio
+    kelly_short = (win_loss_ratio * prob_win_short - (1 - prob_win_short)) / win_loss_ratio
+    
+    # Cap Kelly at 0.3 and apply volatility scaling
+    vol_normalized = atr_12h_aligned / (pd.Series(atr_12h_aligned).rolling(50, min_periods=1).mean().values + 1e-10)
+    vol_scaling = np.clip(1.0 / vol_normalized, 0.5, 2.0)  # Inverse vol scaling
+    
+    kelly_long = np.clip(kelly_long, 0, 0.3) * vol_scaling
+    kelly_short = np.clip(kelly_short, 0, 0.3) * vol_scaling
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 30
+    start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(r1_1d[i]) or np.isnan(s1_1d[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_filter[i])):
+        # Skip if any data invalid
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or 
+            np.isnan(rsi[i]) or np.isnan(volume_ok[i]) or
+            np.isnan(kelly_long[i]) or np.isnan(kelly_short[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,27 +92,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 AND above weekly EMA50 (uptrend) AND volume surge
-            if close[i] > r1_1d[i] and close[i] > ema_1w_aligned[i] and volume_filter[i]:
-                signals[i] = 0.30
+            # Long: RSI oversold + above 12h EMA (uptrend) + volume
+            if rsi[i] < 30 and close[i] > ema_12h_aligned[i] and volume_ok[i]:
+                signals[i] = kelly_long[i]
                 position = 1
-            # Short: price breaks below S1 AND below weekly EMA50 (downtrend) AND volume surge
-            elif close[i] < s1_1d[i] and close[i] < ema_1w_aligned[i] and volume_filter[i]:
-                signals[i] = -0.30
+            # Short: RSI overbought + below 12h EMA (downtrend) + volume
+            elif rsi[i] > 70 and close[i] < ema_12h_aligned[i] and volume_ok[i]:
+                signals[i] = -kelly_short[i]
                 position = -1
         elif position == 1:
-            # Long exit: price falls below S1 OR below weekly EMA50 (trend change)
-            if close[i] < s1_1d[i] or close[i] < ema_1w_aligned[i]:
+            # Long exit: RSI overbought OR below 12h EMA (trend change)
+            if rsi[i] > 70 or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30  # maintain position
+                signals[i] = kelly_long[i]  # maintain position
         elif position == -1:
-            # Short exit: price rises above R1 OR above weekly EMA50 (trend change)
-            if close[i] > r1_1d[i] or close[i] > ema_1w_aligned[i]:
+            # Short exit: RSI oversold OR above 12h EMA (trend change)
+            if rsi[i] < 30 or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30  # maintain position
+                signals[i] = -kelly_short[i]  # maintain position
     
     return signals
