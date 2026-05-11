@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_1d_Camarilla_R3_S3_Breakout_Trend_Scaled
-Hypothesis: Breakout above/below daily Camarilla R3/S3 levels on 4h, filtered by 1d EMA34 trend and volume above median. Uses smaller position size (0.20) to reduce trade frequency and improve generalization. Designed to work in both bull and bear markets via trend filter.
+4h_Donchian_Breakout_Volume_Trend_Filter
+Hypothesis: Price breaking above/below Donchian(20) channels on 4h, filtered by 1d EMA50 trend and volume above 50-period median. Exit on opposite Donchian touch or ATR(14) stop. Designed to work in both bull and bear markets via trend filter. Targets ~20-40 trades/year.
 """
 
-name = "4h_1d_Camarilla_R3_S3_Breakout_Trend_Scaled"
+name = "4h_Donchian_Breakout_Volume_Trend_Filter"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,26 +28,17 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA34 ---
+    # --- 1d Trend Filter: EMA50 ---
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- 4h Camarilla Levels (based on previous day) ---
-    # Calculate from previous 1d bar (shifted by 1 to avoid lookahead)
-    prev_close = np.roll(close_4h, 1)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close[0] = close_4h[0]
-    prev_high[0] = high_4h[0]
-    prev_low[0] = low_4h[0]
+    # --- 4h Donchian Channels (20-period) ---
+    highest_high = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla R3 and S3 levels
-    camarilla_r3 = prev_close + (prev_high - prev_low) * 1.1 / 4
-    camarilla_s3 = prev_close - (prev_high - prev_low) * 1.1 / 4
-    
-    # --- Volume Filter: above median of last 20 periods ---
-    vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
+    # --- Volume Filter: above 50-period median ---
+    vol_median = pd.Series(volume_4h).rolling(window=50, min_periods=20).median().values
     
     # --- ATR for stoploss (14-period) ---
     tr1 = np.abs(high_4h - low_4h)
@@ -62,12 +53,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 34  # for EMA34
+    start_idx = 50  # for EMA50 and Donchian
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_median[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_median[i]) or np.isnan(atr[i])):
             if position != 0:
                 # Check stoploss
                 if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
@@ -77,26 +68,26 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20 if position == 1 else -0.20
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
         # Determine 1d trend
-        trend_up = close_4h[i] > ema34_1d_aligned[i]
-        trend_down = close_4h[i] < ema34_1d_aligned[i]
+        trend_up = close_4h[i] > ema50_1d_aligned[i]
+        trend_down = close_4h[i] < ema50_1d_aligned[i]
         
         # Volume filter: above median
         vol_ok = volume_4h[i] > vol_median[i]
         
         if position == 0:
             # Look for entries only in direction of 1d trend with volume
-            if close_4h[i] > camarilla_r3[i] and trend_up and vol_ok:
-                # Long: price breaks above R3 + 1d uptrend + volume
-                signals[i] = 0.20
+            if close_4h[i] > highest_high[i] and trend_up and vol_ok:
+                # Long: price breaks above Donchian high + 1d uptrend + volume
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_4h[i]
-            elif close_4h[i] < camarilla_s3[i] and trend_down and vol_ok:
-                # Short: price breaks below S3 + 1d downtrend + volume
-                signals[i] = -0.20
+            elif close_4h[i] < lowest_low[i] and trend_down and vol_ok:
+                # Short: price breaks below Donchian low + 1d downtrend + volume
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_4h[i]
         else:
@@ -106,22 +97,22 @@ def generate_signals(prices):
                 if close_4h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses below S3
-                elif close_4h[i] <= camarilla_s3[i]:
+                # Exit: price touches or crosses below Donchian low
+                elif close_4h[i] <= lowest_low[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
                 # Stoploss
                 if close_4h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses above R3
-                elif close_4h[i] >= camarilla_r3[i]:
+                # Exit: price touches or crosses above Donchian high
+                elif close_4h[i] >= highest_high[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
