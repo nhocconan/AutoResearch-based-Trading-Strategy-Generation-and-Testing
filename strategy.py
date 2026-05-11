@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-1d_WilliamsFractal_Breakout_1wTrend_VolumeSpike
-Hypothesis: Williams Fractal breakouts with 1w trend filter and volume spike confirmation. Works in bull markets (buy bullish fractal breakouts in uptrend) and bear markets (sell bearish fractal breakdowns in downtrend). Weekly trend filter avoids counter-trend trades. Volume spike confirms institutional interest. Target: 10-25 trades per year on 1d timeframe.
+6h_Engulfing_Engulfing_1dTrend_VolumeSpike_v1
+Hypothesis: Combine daily candle engulfing patterns with 1d trend filter and volume spike confirmation. 
+Bullish engulfing in uptrend + volume spike = long; Bearish engulfing in downtrend + volume spike = short.
+Uses price action for reversal signals, works in both bull and bear markets by following higher timeframe trend.
+Targets 15-35 trades/year on 6h timeframe (~60-140 total over 4 years).
 """
 
-name = "1d_WilliamsFractal_Breakout_1wTrend_VolumeSpike"
-timeframe = "1d"
+name = "6h_Engulfing_Engulfing_1dTrend_VolumeSpike_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf, compute_williams_fractals
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
@@ -22,38 +25,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # === 1W Data for Trend Filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # === 1D Data for Engulfing Patterns and Trend Filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    open_1d = df_1d['open'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Trend filter: EMA34 on 1w close (needs 2-bar confirmation after close)
-    ema_34_1w = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_34_1w, additional_delay_bars=2)
+    # Bullish engulfing: current green candle engulfs previous red candle
+    bullish_engulf = (close_1d > open_1d) & (open_1d < close_1d.shift(1)) & (close_1d > open_1d.shift(1)) & (open_1d <= close_1d.shift(1))
+    # Bearish engulfing: current red candle engulfs previous green candle
+    bearish_engulf = (close_1d < open_1d) & (open_1d > close_1d.shift(1)) & (close_1d < open_1d.shift(1)) & (open_1d >= close_1d.shift(1))
     
-    # === Williams Fractals on 1d ===
-    bearish_fractal, bullish_fractal = compute_williams_fractals(high, low)
-    # Fractals need 2 extra 1d bars after center bar for confirmation
-    bearish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bearish_fractal, additional_delay_bars=2)
-    bullish_fractal_aligned = align_htf_to_ltf(prices, df_1w, bullish_fractal, additional_delay_bars=2)
+    # Handle first element (no previous day)
+    bullish_engulf[0] = False
+    bearish_engulf[0] = False
     
-    # Volume spike: current volume > 1.5x 20-period average
+    # Trend filter: EMA50 on 1d close
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    
+    # Align 1D indicators to 6h timeframe
+    bullish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bullish_engulf.astype(float))
+    bearish_engulf_aligned = align_htf_to_ltf(prices, df_1d, bearish_engulf.astype(float))
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # Volume spike: current volume > 2x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 1.5)
+    volume_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema_34_1w_aligned[i]) or 
-            np.isnan(bearish_fractal_aligned[i]) or 
-            np.isnan(bullish_fractal_aligned[i])):
+        if (np.isnan(bullish_engulf_aligned[i]) or 
+            np.isnan(bearish_engulf_aligned[i]) or 
+            np.isnan(ema_50_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,24 +75,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: bullish fractal breakout AND uptrend (close > EMA34) AND volume spike
-            if bullish_fractal_aligned[i] and close[i] > ema_34_1w_aligned[i] and volume_spike[i]:
+            # Long: bullish engulfing AND uptrend (close > EMA50) AND volume spike
+            if bullish_engulf_aligned[i] > 0.5 and close[i] > ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: bearish fractal breakdown AND downtrend (close < EMA34) AND volume spike
-            elif bearish_fractal_aligned[i] and close[i] < ema_34_1w_aligned[i] and volume_spike[i]:
+            # Short: bearish engulfing AND downtrend (close < EMA50) AND volume spike
+            elif bearish_engulf_aligned[i] > 0.5 and close[i] < ema_50_aligned[i] and volume_spike[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: close crosses below EMA34 OR bearish fractal appears
-            if close[i] < ema_34_1w_aligned[i] or bearish_fractal_aligned[i]:
+            # Long exit: bearish engulfing OR price breaks below EMA50
+            if bearish_engulf_aligned[i] > 0.5 or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: close crosses above EMA34 OR bullish fractal appears
-            if close[i] > ema_34_1w_aligned[i] or bullish_fractal_aligned[i]:
+            # Short exit: bullish engulfing OR price breaks above EMA50
+            if bullish_engulf_aligned[i] > 0.5 or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
