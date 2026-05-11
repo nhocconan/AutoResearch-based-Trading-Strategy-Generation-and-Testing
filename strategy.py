@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Vortex_Volume_Spike_1dTrend
-Hypothesis: Vortex indicator (VI+ > VI-) signals trend direction, filtered by 1d EMA50 trend and volume spike (1.5x median). 
-Works in bull (VI+ > VI- + uptrend) and bear (VI- > VI+ + downtrend). 
-Fewer trades via strict confluence: trend + volume + Vortex crossover. Target: 20-40 trades/year.
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v5
+Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA34 trend and volume spike (2x median). Uses tighter R1/S1 levels for fewer, higher-quality trades. Trend filter from daily timeframe ensures alignment with longer-term momentum. Volume confirms conviction. Designed to work in bull (uptrend breaks) and bear (downtrend breaks). Target: 20-50 trades/year to avoid fee drag.
 """
 
-name = "4h_Vortex_Volume_Spike_1dTrend"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,93 +28,101 @@ def generate_signals(prices):
     low_4h = prices['low'].values
     volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
+    # --- 1d Trend Filter: EMA34 ---
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- Vortex Indicator (14-period) on 4h ---
-    # True Range
+    # --- 4h Camarilla Levels (based on previous day) ---
+    # Calculate from previous 4h bar (shifted by 1 to avoid lookahead)
+    prev_close = np.roll(close_4h, 1)
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close[0] = close_4h[0]
+    prev_high[0] = high_4h[0]
+    prev_low[0] = low_4h[0]
+    
+    # Camarilla R1 and S1 levels (tighter than R3/S3)
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # --- Volume Filter: spike above 2x median of last 20 periods ---
+    vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
+    vol_threshold = vol_median * 2.0
+    
+    # --- ATR for stoploss (14-period) ---
     tr1 = np.abs(high_4h - low_4h)
     tr2 = np.abs(high_4h - np.roll(close_4h, 1))
     tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first bar
-    
-    # Vortex movement
-    vm_plus = np.abs(high_4h - np.roll(low_4h, 1))
-    vm_minus = np.abs(low_4h - np.roll(high_4h, 1))
-    vm_plus[0] = 0
-    vm_minus[0] = 0
-    
-    # Sum over 14 periods
-    tr14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    vm_plus14 = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
-    vm_minus14 = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
-    
-    # VI+ and VI-
-    vi_plus = vm_plus14 / tr14
-    vi_minus = vm_minus14 / tr14
-    
-    # --- Volume Filter: spike above 1.5x median of last 20 periods ---
-    vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
-    vol_threshold = vol_median * 1.5
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA50 and Vortex
+    start_idx = 50  # for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
-                # Simple exit: reverse signal or opposite Vortex crossover
-                if position == 1 and vi_minus[i] > vi_plus[i]:
+                # Check stoploss
+                if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and vi_plus[i] > vi_minus[i]:
+                elif position == -1 and close_4h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20 if position == 1 else -0.20
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
         # Determine 1d trend
-        trend_up = close_4h[i] > ema50_1d_aligned[i]
-        trend_down = close_4h[i] < ema50_1d_aligned[i]
+        trend_up = close_4h[i] > ema34_1d_aligned[i]
+        trend_down = close_4h[i] < ema34_1d_aligned[i]
         
-        # Volume filter: spike above 1.5x median
+        # Volume filter: spike above 2x median
         vol_ok = volume_4h[i] > vol_threshold[i]
         
         if position == 0:
             # Look for entries only in direction of 1d trend with volume spike
-            if vi_plus[i] > vi_minus[i] and trend_up and vol_ok:
-                # Long: VI+ > VI- + 1d uptrend + volume spike
-                signals[i] = 0.20
+            if close_4h[i] > camarilla_r1[i] and trend_up and vol_ok:
+                # Long: price breaks above R1 + 1d uptrend + volume spike
+                signals[i] = 0.25
                 position = 1
                 entry_price = close_4h[i]
-            elif vi_minus[i] > vi_plus[i] and trend_down and vol_ok:
-                # Short: VI- > VI+ + 1d downtrend + volume spike
-                signals[i] = -0.20
+            elif close_4h[i] < camarilla_s1[i] and trend_down and vol_ok:
+                # Short: price breaks below S1 + 1d downtrend + volume spike
+                signals[i] = -0.25
                 position = -1
                 entry_price = close_4h[i]
         else:
-            # Exit on Vortex crossover in opposite direction
+            # Update stoploss and check exits
             if position == 1:
-                if vi_minus[i] > vi_plus[i]:  # Vortex signals bearish
+                # Stoploss
+                if close_4h[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses below S1
+                elif close_4h[i] <= camarilla_s1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                if vi_plus[i] > vi_minus[i]:  # Vortex signals bullish
+                # Stoploss
+                if close_4h[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: price touches or crosses above R1
+                elif close_4h[i] >= camarilla_r1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
