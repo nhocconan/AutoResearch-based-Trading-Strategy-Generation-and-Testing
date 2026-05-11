@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1d_TripleEMA_WeeklyTrend_Filter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,48 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 1d data for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return np.zeros(n)
+    # Calculate 3 EMAs on weekly
+    ema8_1w = pd.Series(close_1w).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55_1w = pd.Series(close_1w).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # Calculate EMA50 on 12h
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Align weekly EMAs to daily
+    ema8_1w_aligned = align_htf_to_ltf(prices, df_1w, ema8_1w)
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
+    ema55_1w_aligned = align_htf_to_ltf(prices, df_1w, ema55_1w)
     
-    # Align 12h EMA50 to 4h
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    # Calculate daily EMAs for entry signals
+    ema8_daily = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
+    ema21_daily = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema55_daily = pd.Series(close).ewm(span=55, adjust=False, min_periods=55).mean().values
     
-    # Calculate Camarilla levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla R1, S1 (using previous day's range)
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
-    
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume spike (24-period average)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Volume filter: volume > 1.5x 20-day average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (vol_ma20 * 1.5)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure EMA50 is ready
+    start_idx = 55  # Ensure EMAs are ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema50_12h_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(vol_ma[i]):
+        # Skip if any required data is NaN
+        if (np.isnan(ema8_1w_aligned[i]) or np.isnan(ema21_1w_aligned[i]) or 
+            np.isnan(ema55_1w_aligned[i]) or np.isnan(ema8_daily[i]) or 
+            np.isnan(ema21_daily[i]) or np.isnan(ema55_daily[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -67,28 +64,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1, above 12h EMA50, volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema50_12h_aligned[i] and 
-                vol_spike[i]):
+            # Long: weekly EMA8 > EMA21 > EMA55 AND daily EMA8 > EMA21 > EMA55 AND volume filter
+            if (ema8_1w_aligned[i] > ema21_1w_aligned[i] > ema55_1w_aligned[i] and
+                ema8_daily[i] > ema21_daily[i] > ema55_daily[i] and
+                vol_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1, below 12h EMA50, volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema50_12h_aligned[i] and 
-                  vol_spike[i]):
+            # Short: weekly EMA8 < EMA21 < EMA55 AND daily EMA8 < EMA21 < EMA55 AND volume filter
+            elif (ema8_1w_aligned[i] < ema21_1w_aligned[i] < ema55_1w_aligned[i] and
+                  ema8_daily[i] < ema21_daily[i] < ema55_daily[i] and
+                  vol_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S1 or below 12h EMA50
-            if close[i] < s1_aligned[i] or close[i] < ema50_12h_aligned[i]:
+            # Exit long: weekly trend turns bearish OR daily EMA cross down
+            if (ema8_1w_aligned[i] < ema21_1w_aligned[i] or
+                ema8_daily[i] < ema21_daily[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R1 or above 12h EMA50
-            if close[i] > r1_aligned[i] or close[i] > ema50_12h_aligned[i]:
+            # Exit short: weekly trend turns bullish OR daily EMA cross up
+            if (ema8_1w_aligned[i] > ema21_1w_aligned[i] or
+                ema8_daily[i] > ema21_daily[i]):
                 signals[i] = 0.0
                 position = 0
             else:
