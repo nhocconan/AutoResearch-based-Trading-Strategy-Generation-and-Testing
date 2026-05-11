@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_RSI_ChopFilter"
-timeframe = "1d"
+name = "6h_Donchian20_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,61 +17,36 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # 1d data for trend and volume context
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # KAMA on daily close
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.abs(np.diff(close, n=10, prepend=close[:10]))
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (0.6 - 0.06) + 0.06) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Donchian channels (20-period) on 6h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Choppiness Index (14)
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    hh = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    ll = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.where((hh - ll) != 0, 100 * np.log10(np.nansum(atr) / (hh - ll)) / np.log10(14), 50)
+    # 1d volume spike (20-period average)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (vol_ma_1d * 1.5)
     
-    # Align weekly KAMA trend
-    kama_1w = np.zeros_like(close_1w)
-    change_1w = np.abs(np.diff(close_1w, prepend=close_1w[0]))
-    volatility_1w = np.abs(np.diff(close_1w, n=10, prepend=close_1w[:10]))
-    er_1w = np.where(volatility_1w != 0, change_1w / volatility_1w, 0)
-    sc_1w = (er_1w * (0.6 - 0.06) + 0.06) ** 2
-    kama_1w[0] = close_1w[0]
-    for i in range(1, len(close_1w)):
-        kama_1w[i] = kama_1w[i-1] + sc_1w[i] * (close_1w[i] - kama_1w[i-1])
-    kama_1w_trend = kama_1w > np.roll(kama_1w, 1)
-    kama_1w_trend_aligned = align_htf_to_ltf(prices, df_1w, kama_1w_trend.astype(float))
+    # Align 1d indicators to 6h timeframe
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(14, 10)
+    start_idx = max(20, 34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(kama_1w_trend_aligned[i]):
+        if np.isnan(ema34_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -79,25 +54,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Trend condition: price above/below 1d EMA34
+        uptrend = close[i] > ema34_1d_aligned[i]
+        downtrend = close[i] < ema34_1d_aligned[i]
+        
         if position == 0:
-            # Long: KAMA up (trend) + RSI > 50 + Chop < 61.8 (trending market)
-            if kama[i] > kama[i-1] and rsi[i] > 50 and chop[i] < 61.8 and kama_1w_trend_aligned[i] > 0.5:
+            # Long: breakout above Donchian high + uptrend + volume spike
+            if close[i] > highest_high[i] and uptrend and vol_spike_1d_aligned[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down (trend) + RSI < 50 + Chop < 61.8 (trending market)
-            elif kama[i] < kama[i-1] and rsi[i] < 50 and chop[i] < 61.8 and kama_1w_trend_aligned[i] < 0.5:
+            # Short: breakdown below Donchian low + downtrend + volume spike
+            elif close[i] < lowest_low[i] and downtrend and vol_spike_1d_aligned[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: KAMA turns down OR RSI < 40
-            if kama[i] < kama[i-1] or rsi[i] < 40:
+            # Exit long: breakdown below Donchian low
+            if close[i] < lowest_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: KAMA turns up OR RSI > 60
-            if kama[i] > kama[i-1] or rsi[i] > 60:
+            # Exit short: breakout above Donchian high
+            if close[i] > highest_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
