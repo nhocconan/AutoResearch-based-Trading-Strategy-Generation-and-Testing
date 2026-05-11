@@ -1,20 +1,16 @@
-# 1. Hypothesis:
-# Strategy: 4H Camarilla Pivot Breakout with Volume Spike and Trend Filter
-# Timeframe: 4H (primary), using 1D for Camarilla pivot calculation and trend filter
-# Rationale: Camarilla pivot levels provide high-probability support/resistance in both trending and ranging markets.
-# Breakout from R3/S3 levels with volume confirmation indicates strong momentum.
-# Trend filter (1D EMA34) ensures we trade in the direction of the higher timeframe trend.
-# This combination has shown strong performance in backtests (e.g., SHARPE up to 1.90) by capturing strong moves while avoiding chop.
-# Expected trade frequency: ~20-50 trades/year per symbol, avoiding excessive fee drag.
-
-# 2. Implementation:
 #!/usr/bin/env python3
 """
-4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn
-Breakout from Camarilla R3/S3 levels with volume spike and 1D EMA34 trend filter.
+4h_Liquidity_Grab_Reversal_v1
+Hypothesis: Uses liquidity grab (equal highs/lows) as reversal signals in choppy markets.
+In high choppiness (Choppiness > 61.8), we look for liquidity sweeps:
+- Bearish liquidity grab: new high above recent high followed by close below prior high
+- Bullish liquidity grab: new low below recent low followed by close above prior low
+Entries occur on the next bar after confirmation. Exits on RSI mean reversion.
+Designed for low trade frequency by requiring both liquidity grab and high choppiness.
+Works in both bull and bear markets as liquidity grabs often precede reversals.
 """
 
-name = "4H_Camarilla_R3S3_Breakout_1dEMA34_VolumeSpike_Dyn"
+name = "4h_Liquidity_Grab_Reversal_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,63 +23,82 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1D data for Camarilla pivots and trend filter
+    # Get 1d data for Choppiness Index
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 35:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4H OHLCV
+    # 4h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # --- Calculate 1D Camarilla Pivot Levels (using previous day's OHLC) ---
-    # Shift to use previous day's data to avoid look-ahead
+    # --- RSI (14-period) on 4h close ---
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # Neutral when undefined
+    
+    # --- Choppiness Index (14-period) on 1d data ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Previous day's values (avoid look-ahead by using shift)
-    high_prev = np.roll(high_1d, 1)
-    low_prev = np.roll(low_1d, 1)
-    close_prev = np.roll(close_1d, 1)
-    # First value: use first available (no look-ahead)
-    high_prev[0] = high_1d[0]
-    low_prev[0] = low_1d[0]
-    close_prev[0] = close_1d[0]
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
     
-    # Calculate pivot and Camarilla levels
-    pivot = (high_prev + low_prev + close_prev) / 3.0
-    range_val = high_prev - low_prev
+    # ATR (14-period)
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Camarilla levels
-    R3 = pivot + (range_val * 1.1 / 4.0)
-    S3 = pivot - (range_val * 1.1 / 4.0)
+    # Sum of true ranges over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
     
-    # --- 1D EMA34 for Trend Filter ---
-    close_1d_series = pd.Series(close_1d)
-    ema_34 = close_1d_series.ewm(span=34, adjust=False, min_periods=34).mean().values
+    # Choppiness Index = 100 * log10(tr_sum / (atr * 14)) / log10(14)
+    chop = 100 * np.log10(tr_sum / (atr * 14)) / np.log10(14)
+    chop = np.nan_to_num(chop, nan=50.0)  # Replace NaN with neutral value
     
-    # --- Volume Spike Detection (20-period average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Align Choppiness Index to 4h
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
-    # --- Align 1D indicators to 4H ---
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # --- Liquidity Grab Detection ---
+    # Lookback period for recent highs/lows
+    lookback = 20
+    
+    # Arrays to track liquidity grab signals
+    bullish_grab = np.zeros(n, dtype=bool)
+    bearish_grab = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        # Recent swing high/low
+        recent_high = np.max(high[i-lookback:i])
+        recent_low = np.min(low[i-lookback:i])
+        
+        # Bullish liquidity grab: new low followed by close above recent low
+        if low[i] < recent_low and close[i] > recent_low:
+            bullish_grab[i] = True
+            
+        # Bearish liquidity grab: new high followed by close below recent high
+        if high[i] > recent_high and close[i] < recent_high:
+            bearish_grab[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (max of Camarilla lookback, EMA, volume)
-    start_idx = 35
+    # Start after warmup
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]) or vol_ma[i] == 0):
-            # Maintain current position if valid, otherwise flat
+        if np.isnan(rsi[i]) or np.isnan(chop_aligned[i]):
+            # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -92,33 +107,34 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume spike: current volume > 1.5x 20-period average
-        volume_spike = volume[i] > (1.5 * vol_ma[i])
+        # Regime filter: only trade in choppy/ranging markets
+        choppy_market = chop_aligned[i] > 61.8
         
         if position == 0:
-            # Look for breakout opportunities
-            # Long: price breaks above R3 with volume spike and above EMA34 (uptrend)
-            if (close[i] > R3_aligned[i] and volume_spike and 
-                close[i] > ema_34_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below S3 with volume spike and below EMA34 (downtrend)
-            elif (close[i] < S3_aligned[i] and volume_spike and 
-                  close[i] < ema_34_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # Look for liquidity grab signals in choppy markets
+            if choppy_market:
+                if bullish_grab[i]:
+                    signals[i] = 0.25
+                    position = 1
+                elif bearish_grab[i]:
+                    signals[i] = -0.25
+                    position = -1
         else:
-            # Exit conditions
+            # Exit conditions: RSI mean reversion or regime change
             if position == 1:
-                # Exit long: price breaks below S3 (failed breakout/reversal) or volume drops
-                if close[i] < S3_aligned[i] or volume[i] < (0.5 * vol_ma[i]):
+                # Exit long: RSI > 50 (overbought) or market becomes trending
+                trending_market = chop_aligned[i] < 38.2
+                exit_signal = (rsi[i] > 50) or trending_market
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price breaks above R3 (failed breakout/reversal) or volume drops
-                if close[i] > R3_aligned[i] or volume[i] < (0.5 * vol_ma[i]):
+                # Exit short: RSI < 50 (oversold) or market becomes trending
+                trending_market = chop_aligned[i] < 38.2
+                exit_signal = (rsi[i] < 50) or trending_market
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
