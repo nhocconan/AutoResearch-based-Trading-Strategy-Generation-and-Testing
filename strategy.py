@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_TRIX_Trend_Filtered_With_Volume
-Hypothesis: TRIX momentum combined with 1d trend filter and volume spikes provides reliable entries.
-TRIX filters noise and captures sustained momentum, while volume confirms institutional participation.
-Trades only in direction of higher timeframe trend to avoid counter-trend whipsaws.
-Designed for low frequency (12-25 trades/year) to minimize fee drag in both bull and bear markets.
+6H_WeeklyPivot_DonchianBreakout_Volume
+Hypothesis: Price breaking above/below weekly pivot-derived support/resistance (R1/S1) with 
+Donchian(20) breakout in same direction and volume confirmation, filtered by daily trend (price > EMA50).
+Weekly pivots capture institutional levels; Donchian breakouts signal momentum; volume confirms participation.
+Daily trend filter avoids counter-trend whipsaws. Designed for low frequency (15-30 trades/year) 
+to work in both bull (breakouts) and bear (mean reversion at extremes) markets.
 """
 
-name = "12h_TRIX_Trend_Filtered_With_Volume"
-timeframe = "12h"
+name = "6H_WeeklyPivot_DonchianBreakout_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,45 +21,63 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # Get weekly data for pivot calculation (using weekly high/low/close)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
+    # Get daily data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
+        return np.zeros(n)
+    
+    # 6h OHLCV
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- TRIX (15-period EMA of EMA of EMA of price change) ---
-    # Calculate ROC (rate of change)
-    roc = np.diff(close, prepend=close[0])
-    # Triple EMA
-    ema1 = pd.Series(roc).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema2 = pd.Series(ema1).ewm(span=15, adjust=False, min_periods=15).mean()
-    ema3 = pd.Series(ema2).ewm(span=15, adjust=False, min_periods=15).mean()
-    trix = ema3.values
+    # --- Weekly Pivot Points (R1, S1) ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # --- 1d EMA50 for trend filter ---
+    # Weekly pivot point
+    pp_w = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly R1 and S1
+    r1_w = 2 * pp_w - low_1w
+    s1_w = 2 * pp_w - high_1w
+    
+    # Align weekly levels to 6h timeframe (using previous week's levels)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
+    
+    # --- Daily EMA50 for trend filter ---
     close_1d = df_1d['close'].values
     ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # --- Volume Spike (12h) ---
+    # --- Donchian Channel (20) on 6h ---
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # --- Volume Spike (6h) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (2.0 * vol_ma.values)  # Strong volume confirmation
+    vol_spike = volume > (1.5 * vol_ma.values)  # Volume confirmation
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(trix[i]) or 
-            np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(r1_w_aligned[i]) or 
+            np.isnan(s1_w_aligned[i]) or 
+            np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(highest_high[i]) or
+            np.isnan(lowest_low[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -68,9 +87,18 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Entry conditions: TRIX momentum with volume and trend alignment
-        long_entry = (trix[i] > 0) and vol_spike[i] and (close[i] > ema_50_1d_aligned[i])
-        short_entry = (trix[i] < 0) and vol_spike[i] and (close[i] < ema_50_1d_aligned[i])
+        # Entry conditions: 
+        # Long: Price > weekly R1 AND breaks Donchian high AND volume spike AND above daily EMA50
+        # Short: Price < weekly S1 AND breaks Donchian low AND volume spike AND below daily EMA50
+        long_entry = (close[i] > r1_w_aligned[i]) and \
+                     (high[i] > highest_high[i-1]) and \
+                     vol_spike[i] and \
+                     (close[i] > ema_50_1d_aligned[i])
+        
+        short_entry = (close[i] < s1_w_aligned[i]) and \
+                      (low[i] < lowest_low[i-1]) and \
+                      vol_spike[i] and \
+                      (close[i] < ema_50_1d_aligned[i])
         
         if position == 0:
             if long_entry:
@@ -82,17 +110,23 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Exit conditions: TRIX crosses zero or trend reversal
+            # Exit conditions: 
+            # Long: Price crosses below weekly pivot OR Donchian low OR below daily EMA50
+            # Short: Price crosses above weekly pivot OR Donchian high OR above daily EMA50
             if position == 1:
-                # Exit if TRIX turns negative or trend turns down
-                if (trix[i] < 0) or (close[i] < ema_50_1d_aligned[i]):
+                pp_w_aligned = align_htf_to_ltf(prices, df_1w, pp_w)
+                if (close[i] < pp_w_aligned[i]) or \
+                   (low[i] < lowest_low[i]) or \
+                   (close[i] < ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit if TRIX turns positive or trend turns up
-                if (trix[i] > 0) or (close[i] > ema_50_1d_aligned[i]):
+                pp_w_aligned = align_htf_to_ltf(prices, df_1w, pp_w)
+                if (close[i] > pp_w_aligned[i]) or \
+                   (high[i] > highest_high[i]) or \
+                   (close[i] > ema_50_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
