@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12H_Camarilla_R3_S3_Breakout_1dTrend_Volume
+4H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeS
 Hypothesis: Daily EMA50 defines medium-term trend, daily Camarilla R3/S3 levels act as strong support/resistance.
 In bull markets, buy breakouts above R3 with daily uptrend. In bear markets, sell breakdowns below S3 with daily downtrend.
-Volume spike confirms institutional interest. Uses 12h timeframe to capture fewer, higher-quality trades.
-Target: 12-37 trades/year (50-150 total) to minimize fee drag in ranging 2025 market.
+Volume spike confirms institutional interest. Uses 4h timeframe for better trade frequency and lower fee drag vs 1d.
+Target: 20-50 trades/year, low turnover to minimize fee drag in ranging 2025 market.
 """
 
-name = "12H_Camarilla_R3_S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -41,11 +41,11 @@ def generate_signals(prices):
     r3 = close_1d + hl_range * 1.5000
     s3 = close_1d - hl_range * 1.5000
     
-    # Align Camarilla levels to 12h timeframe
+    # Align Camarilla levels to 4h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: 20-period EMA for spike detection (using 12h volume)
+    # Volume filter: 20-period EMA for spike detection (using 4h volume)
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
