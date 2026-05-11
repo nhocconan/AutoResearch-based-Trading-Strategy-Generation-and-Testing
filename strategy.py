@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_12hEMA50_Trend_VolumeS"
-timeframe = "4h"
+name = "1h_4h_1d_Camarilla_Trend_Filter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,38 +17,57 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h data for trend filter (EMA50)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 4h data for Camarilla levels (primary direction)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 10:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # 1d data for Camarilla pivot levels (HLC from previous day)
+    # Calculate Camarilla levels for previous 4h bar
+    # H, L, C from previous completed 4h bar
+    H = high_4h[:-1]  # shift by 1 to get previous bar
+    L = low_4h[:-1]
+    C = close_4h[:-1]
+    
+    # Camarilla levels
+    R4 = C + ((H - L) * 1.1 / 2)
+    R3 = C + ((H - L) * 1.1 / 4)
+    R2 = C + ((H - L) * 1.1 / 6)
+    R1 = C + ((H - L) * 1.1 / 12)
+    S1 = C - ((H - L) * 1.1 / 12)
+    S2 = C - ((H - L) * 1.1 / 6)
+    S3 = C - ((H - L) * 1.1 / 4)
+    S4 = C - ((H - L) * 1.1 / 2)
+    
+    # Align Camarilla levels to 1h
+    R4_1h = align_htf_to_ltf(prices, df_4h, R4)
+    R3_1h = align_htf_to_ltf(prices, df_4h, R3)
+    R2_1h = align_htf_to_ltf(prices, df_4h, R2)
+    R1_1h = align_htf_to_ltf(prices, df_4h, R1)
+    S1_1h = align_htf_to_ltf(prices, df_4h, S1)
+    S2_1h = align_htf_to_ltf(prices, df_4h, S2)
+    S3_1h = align_htf_to_ltf(prices, df_4h, S3)
+    S4_1h = align_htf_to_ltf(prices, df_4h, S4)
+    
+    # Get 1d data for trend filter (EMA50)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels for each 1d bar (based on previous day's HLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1h = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Camarilla levels: R4, R3, R2, R1, S1, S2, S3, S4
-    # R1 = Close + 1.1*(High-Low)/12
-    # S1 = Close - 1.1*(High-Low)/12
-    camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
-    camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
+    # Volume filter: current volume > 1.5 * 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma20 * 1.5)
     
-    # Align Camarilla levels to 4h (using previous day's levels for current 4h bar)
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Volume spike detection (4h)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / np.where(volume_ma > 0, volume_ma, 1)
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
@@ -56,8 +75,17 @@ def generate_signals(prices):
     start_idx = 50  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(camarilla_r1_aligned[i]) or 
-            np.isnan(camarilla_s1_aligned[i]) or np.isnan(volume_ratio[i])):
+        if (np.isnan(R1_1h[i]) or np.isnan(S1_1h[i]) or 
+            np.isnan(ema50_1h[i]) or np.isnan(vol_ma20[i])):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Check filters
+        if not (session_filter[i] and volume_filter[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -66,33 +94,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 with volume spike and uptrend (price > 12h EMA50)
-            if (close[i] > camarilla_r1_aligned[i] and 
-                volume_ratio[i] > 1.5 and
-                close[i] > ema50_12h_aligned[i]):
-                signals[i] = 0.25
+            # Long: price > R1 and above EMA50 (bullish trend)
+            if close[i] > R1_1h[i] and close[i] > ema50_1h[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: Price breaks below S1 with volume spike and downtrend (price < 12h EMA50)
-            elif (close[i] < camarilla_s1_aligned[i] and 
-                  volume_ratio[i] > 1.5 and
-                  close[i] < ema50_12h_aligned[i]):
-                signals[i] = -0.25
+            # Short: price < S1 and below EMA50 (bearish trend)
+            elif close[i] < S1_1h[i] and close[i] < ema50_1h[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: Price breaks below S1 or trend reverses
-            if (close[i] < camarilla_s1_aligned[i] or 
-                close[i] < ema50_12h_aligned[i]):
+            # Exit long: price < S1 (strong bearish reversal) or below EMA50
+            if close[i] < S1_1h[i] or close[i] < ema50_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: Price breaks above R1 or trend reverses
-            if (close[i] > camarilla_r1_aligned[i] or 
-                close[i] > ema50_12h_aligned[i]):
+            # Exit short: price > R1 (strong bullish reversal) or above EMA50
+            if close[i] > R1_1h[i] or close[i] > ema50_1h[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
