@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1d_Weekly_Range_Breakout_v1
-Hypothesis: Buy near weekly lows during accumulation, sell near weekly highs during distribution.
-Uses weekly range to identify accumulation/distribution phases. In both bull and bear markets,
-price tends to respect weekly support/resistance levels. Adds volume confirmation to avoid
-false breakouts. Target: 20-50 trades over 4 years (5-12/year) on 1d timeframe.
+12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v1
+Hypothesis: Uses Camarilla pivot levels (R1/S1) from 1d timeframe for entry, filtered by 1d EMA34 trend and volume spike.
+In bull markets, price breaks above R1 in uptrend; in bear markets, price breaks below S1 in downtrend.
+Volume spike confirms institutional participation. Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
 """
 
-name = "1d_Weekly_Range_Breakout_v1"
-timeframe = "1d"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -21,42 +20,52 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # === Weekly Data for Range Calculation ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 2:
+    # === 1D Data for Camarilla Pivots and Trend ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    # Previous week's range (avoid look-ahead)
-    prev_high_1w = high_1w  # This is the prior week's high
-    prev_low_1w = low_1w    # This is the prior week's low
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align weekly range to daily
-    weekly_high_aligned = align_htf_to_ltf(prices, df_1w, prev_high_1w)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_1w, prev_low_1w)
+    # Calculate Camarilla levels for each 1d bar
+    # R1 = close + (high - low) * 1.1 / 12
+    # S1 = close - (high - low) * 1.1 / 12
+    camarilla_range = (high_1d - low_1d) * 1.1 / 12
+    r1_1d = close_1d + camarilla_range
+    s1_1d = close_1d - camarilla_range
     
-    # === Volume Confirmation (Daily) ===
-    # Volume ratio: current volume vs 20-day average
-    vol_series = pd.Series(volume)
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    # Align Camarilla levels to 12h
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    
+    # 1d EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # === Volume Spike Filter (12h) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.zeros(n)
+    for i in range(n):
+        if vol_ma[i] > 0:
+            vol_ratio[i] = volume[i] / vol_ma[i]
+        else:
+            vol_ratio[i] = 1.0
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 34
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(weekly_high_aligned[i]) or 
-            np.isnan(weekly_low_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,33 +74,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price near weekly low with volume confirmation (accumulation)
-            # Near weekly low: within 1.5% of weekly low
-            near_weekly_low = (low[i] <= weekly_low_aligned[i] * 1.015)
-            # Volume confirmation: above average volume
-            vol_confirm = vol_ratio[i] > 1.2
-            
-            if near_weekly_low and vol_confirm:
+            # Long: price breaks above R1 in uptrend with volume spike
+            if (close[i] > r1_aligned[i] and 
+                ema34_1d_aligned[i] < close[i] and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: price near weekly high with volume confirmation (distribution)
-            # Near weekly high: within 1.5% of weekly high
-            near_weekly_high = (high[i] >= weekly_high_aligned[i] * 0.985)
-            if near_weekly_high and vol_confirm:
+            # Short: price breaks below S1 in downtrend with volume spike
+            elif (close[i] < s1_aligned[i] and 
+                  ema34_1d_aligned[i] > close[i] and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price reaches weekly high or loses momentum
-            # Exit when price reaches weekly high or volume dries up
-            if (high[i] >= weekly_high_aligned[i] * 0.995) or (vol_ratio[i] < 0.8):
+            # Long exit: price falls below EMA34 or volume drops
+            if (close[i] < ema34_1d_aligned[i] or 
+                vol_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price reaches weekly low or loses momentum
-            # Exit when price reaches weekly low or volume dries up
-            if (low[i] <= weekly_low_aligned[i] * 1.005) or (vol_ratio[i] < 0.8):
+            # Short exit: price rises above EMA34 or volume drops
+            if (close[i] > ema34_1d_aligned[i] or 
+                vol_ratio[i] < 0.8):
                 signals[i] = 0.0
                 position = 0
             else:
