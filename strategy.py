@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Stellar_Volume_Target_Signal"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -22,37 +22,40 @@ def generate_signals(prices):
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # 1D RSI(14)
-    delta = np.diff(df_1d['close'].values)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = np.concatenate([[np.nan] * 14, rsi_1d[14:]])
+    # 1D EMA34 for trend filter
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Align RSI
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # Calculate 1D Camarilla pivot levels from previous day
+    # Based on previous day's high, low, close
+    ph = df_1d['high'].shift(1).values  # Previous day high
+    pl = df_1d['low'].shift(1).values   # Previous day low
+    pc = df_1d['close'].shift(1).values # Previous day close
     
-    # 4h Bollinger Bands (20,2)
-    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    upper_band = sma20 + 2 * std20
-    lower_band = sma20 - 2 * std20
+    # Camarilla R1 and S1 levels
+    r1 = pc + (ph - pl) * 1.1 / 12
+    s1 = pc - (ph - pl) * 1.1 / 12
     
-    # 4h Volume spike (current > 1.5x 20-period average)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ma20[:19] = np.nan
+    # Align pivot levels to 12h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    
+    # Volume filter: volume > 1.5x 20-period average on 12h
+    vol_ma20 = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma20[i] = np.mean(volume[:i+1]) if i > 0 else 0
+        else:
+            vol_ma20[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(20, 50)
+    start_idx = max(50, 20)
     
     for i in range(start_idx, n):
-        if (np.isnan(rsi_1d_aligned[i]) or np.isnan(sma20[i]) or np.isnan(upper_band[i]) or 
-            np.isnan(lower_band[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(ema34_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,30 +63,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Long: RSI oversold (<30), price near lower band, volume spike
-        if (position == 0 and 
-            rsi_1d_aligned[i] < 30 and 
-            close[i] <= lower_band[i] * 1.02 and  # within 2% of lower band
-            volume[i] > 1.5 * vol_ma20[i]):
-            signals[i] = 0.25
-            position = 1
-        # Short: RSI overbought (>70), price near upper band, volume spike
-        elif (position == 0 and 
-              rsi_1d_aligned[i] > 70 and 
-              close[i] >= upper_band[i] * 0.98 and  # within 2% of upper band
-              volume[i] > 1.5 * vol_ma20[i]):
-            signals[i] = -0.25
-            position = -1
+        if position == 0:
+            # Long: Price breaks above R1, above 1D EMA34, volume surge
+            if close[i] > r1_aligned[i] and close[i] > ema34_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Price breaks below S1, below 1D EMA34, volume surge
+            elif close[i] < s1_aligned[i] and close[i] < ema34_aligned[i] and volume[i] > 1.5 * vol_ma20[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit: RSI > 50 or price crosses above middle band
-            if rsi_1d_aligned[i] > 50 or close[i] > sma20[i]:
+            # Long exit: Price closes below S1 or below EMA34
+            if close[i] < s1_aligned[i] or close[i] < ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: RSI < 50 or price crosses below middle band
-            if rsi_1d_aligned[i] < 50 or close[i] < sma20[i]:
+            # Short exit: Price closes above R1 or above EMA34
+            if close[i] > r1_aligned[i] or close[i] > ema34_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
