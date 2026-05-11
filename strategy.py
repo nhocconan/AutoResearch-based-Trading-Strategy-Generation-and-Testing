@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Camarilla_R3S3_Breakout_12hTrend_Volume_Spike
-# Hypothesis: Camarilla R3/S3 levels from 1d provide strong intraday support/resistance.
-# Breakouts above R3 (long) or below S3 (short) are traded only when aligned with 12h EMA50 trend
-# and confirmed by volume spikes, with exits on opposite Camarilla level touches.
-# Designed for low turnover (~20-30 trades/year) to minimize fee drag in ranging 2025 markets.
-# Target: < 100 total trades over 4 years to avoid fee drag while maintaining edge in BTC/ETH.
+# 1h_Regime_Adaptive_4hTrend_1dMomentum
+# Hypothesis: In 1h timeframe, use 4h trend direction (EMA20) and 1d momentum (RSI14) to filter entries.
+# Long when: price > 4h EMA20 AND 1d RSI > 50 AND 1h RSI < 30 (pullback in uptrend)
+# Short when: price < 4h EMA20 AND 1d RSI < 50 AND 1h RSI > 70 (bounce in downtrend)
+# Adds session filter (08-20 UTC) to avoid low-liquidity hours.
+# Position size fixed at 0.20 to limit drawdown. Target: 20-40 trades/year.
+# Designed to work in both bull (trend following on pullbacks) and bear (mean reversion in downtrend) markets.
 
-name = "4h_Camarilla_Pivot_R3S3_Breakout_12hTrend_Volume_Spike"
-timeframe = "4h"
+name = "1h_Regime_Adaptive_4hTrend_1dMomentum"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -24,44 +25,62 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # === 1d Camarilla Pivot Levels ===
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # === 4h EMA20 Trend Filter ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    
+    # === 1d RSI14 for Regime ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi14_1d = 100 - (100 / (1 + rs))
+    rsi14_1d = rsi14_1d.replace([np.inf, -np.inf], 100).fillna(50).values
+    rsi14_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi14_1d)
     
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r3 = pivot + (range_1d * 1.1 / 2)
-    s3 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align 1d Camarilla levels to 4h
-    r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # === 12h EMA50 Trend Filter ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_4h = align_htf_to_ltf(prices, df_12h, ema50_12h)
-    
-    # === Volume Spike Filter (20-period EMA) ===
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0  # Require 2x average volume
+    # === 1h RSI14 for Entry Timing ===
+    delta_1h = pd.Series(close).diff()
+    gain_1h = delta_1h.clip(lower=0)
+    loss_1h = -delta_1h.clip(upper=0)
+    avg_gain_1h = gain_1h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss_1h = loss_1h.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs_1h = avg_gain_1h / avg_loss_1h
+    rsi14_1h = 100 - (100 / (1 + rs_1h))
+    rsi14_1h = rsi14_1h.replace([np.inf, -np.inf], 100).fillna(50).values
     
     # === Signal Parameters ===
-    position_size = 0.25
+    position_size = 0.20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for indicators)
-    start_idx = 50  # covers EMA50
+    # Start after warmup (need enough data for RSI)
+    start_idx = 30  # covers 14+14 for safety
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or 
-            np.isnan(ema50_12h_4h[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(rsi14_1d_aligned[i]) or 
+            np.isnan(rsi14_1h[i])):
+            if position == 1:
+                signals[i] = 0.0
+            elif position == -1:
+                signals[i] = 0.0
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if outside trading session
+        if not in_session[i]:
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -71,26 +90,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Break above R3 + above 12h EMA50 + volume spike
-            if close[i] > r3_4h[i] and close[i] > ema50_12h_4h[i] and volume_ok[i]:
+            # Long: Uptrend (price > 4h EMA20) + bullish regime (1d RSI > 50) + oversold entry (1h RSI < 30)
+            if (close[i] > ema20_4h_aligned[i] and 
+                rsi14_1d_aligned[i] > 50 and 
+                rsi14_1h[i] < 30):
                 signals[i] = position_size
                 position = 1
-            # Short: Break below S3 + below 12h EMA50 + volume spike
-            elif close[i] < s3_4h[i] and close[i] < ema50_12h_4h[i] and volume_ok[i]:
+            # Short: Downtrend (price < 4h EMA20) + bearish regime (1d RSI < 50) + overbought entry (1h RSI > 70)
+            elif (close[i] < ema20_4h_aligned[i] and 
+                  rsi14_1d_aligned[i] < 50 and 
+                  rsi14_1h[i] > 70):
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions: reverse signal or RSI mean reversion
             if position == 1:
-                # Exit: Price touches or crosses below S3 (opposite level)
-                if close[i] < s3_4h[i]:
+                # Exit: 1h RSI crosses above 70 (overbought) or trend breaks
+                if (rsi14_1h[i] >= 70 or close[i] < ema20_4h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price touches or crosses above R3 (opposite level)
-                if close[i] > r3_4h[i]:
+                # Exit: 1h RSI crosses below 30 (oversold) or trend breaks
+                if (rsi14_1h[i] <= 30 or close[i] > ema20_4h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
