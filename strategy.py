@@ -1,16 +1,13 @@
-#/usr/bin/env python3
-"""
-4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
-Hypothesis: Uses Camarilla pivot levels (R1/S1) from daily timeframe for breakout entries.
-Enters long when price breaks above R1 with volume confirmation and above daily EMA34.
-Enters short when price breaks below S1 with volume confirmation and below daily EMA34.
-Exits on opposite breakout or loss of volume confirmation.
-Designed for low trade frequency by requiring confluence of price level, volume, and trend.
-Works in both bull and bear markets by following the intermediate-term trend via EMA filter.
-"""
+#!/usr/bin/env python3
+# 1D_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume
+# Hypothesis: Uses weekly Camarilla pivot levels (R3/S3) on 1d chart with volume confirmation and weekly trend filter.
+# Long when price breaks above weekly R3 with volume > 1.5x average and price above weekly EMA34.
+# Short when price breaks below weekly S3 with volume > 1.5x average and price below weekly EMA34.
+# Designed for low trade frequency by requiring both level breakout and volume confirmation.
+# Weekly trend filter avoids counter-trend trades. Works in both bull and bear markets by following the weekly trend.
 
-name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "1D_Weekly_Camarilla_R3_S3_Breakout_Trend_Volume"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -22,41 +19,43 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for Camarilla levels and trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 34:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # Daily OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- Calculate Camarilla levels from previous day ---
-    # Camarilla: R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # Use previous day's OHLC to avoid look-ahead
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # --- Weekly Camarilla Calculation (R3, S3) ---
+    # Based on previous week's OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate R1 and S1
-    r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
+    # Calculate pivot and ranges
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    range_hl = high_1w - low_1w
     
-    # Align Camarilla levels to 4h
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    # Camarilla levels: R3 = close + (high-low)*1.1/4, S3 = close - (high-low)*1.1/4
+    r3 = close_1w + (range_hl * 1.1 / 4.0)
+    s3 = close_1w - (range_hl * 1.1 / 4.0)
+    
+    # Align weekly levels to daily
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
     # --- Volume Spike Detection (20-period average) ---
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    # --- Trend Filter (EMA34 on 1d close) ---
-    close_1d = df_1d['close'].values
-    ema_34 = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34)
+    # --- Weekly Trend Filter (EMA34 on weekly close) ---
+    ema_34 = pd.Series(close_1w).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(ema_34_aligned[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
@@ -81,30 +80,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above R1 with volume, above daily EMA34
-            if (close[i] > r1_aligned[i] and 
+            # Long: price breaks above weekly R3 with volume, above weekly EMA
+            if (close[i] > r3_aligned[i] and 
                 volume_spike and 
                 close[i] > ema_34_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 with volume, below daily EMA34
-            elif (close[i] < s1_aligned[i] and 
+            # Short: price breaks below weekly S3 with volume, below weekly EMA
+            elif (close[i] < s3_aligned[i] and 
                   volume_spike and 
                   close[i] < ema_34_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: opposite breakout or loss of volume confirmation
+            # Exit conditions: opposite breakout
             if position == 1:
-                # Exit long: price breaks below S1
-                if close[i] < s1_aligned[i]:
+                # Exit long: price breaks below weekly S3
+                if close[i] < s3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price breaks above R1
-                if close[i] > r1_aligned[i]:
+                # Exit short: price breaks above weekly R3
+                if close[i] > r3_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
