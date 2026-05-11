@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: On 12h timeframe, price breaking above/below Camarilla R1/S1 levels from prior 1d candle acts as momentum signal in trending markets. Uses 1d EMA50 for trend filter and 1d volume spike (>1.5x average) for confirmation. Only enters in direction of 1d trend. Designed for low trade frequency (12-37/year) with clear entry/exit rules to minimize fee drag. Works in bull/bear by following higher timeframe trend.
+1h_4H1D_Trend_With_Volume
+Hypothesis: In both bull and bear markets, price tends to follow the higher timeframe trend (4h/1d). 
+Enter long when 4h EMA21 > EMA50 and 1d EMA50 > EMA100, with volume confirmation on 1h.
+Enter short when 4h EMA21 < EMA50 and 1d EMA50 < EMA100, with volume confirmation.
+Use session filter (08-20 UTC) to avoid low-liquidity hours. 
+Target 15-30 trades/year (~60-120 total over 4 years) by requiring EMA alignment + volume.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1h_4H1D_Trend_With_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -17,107 +21,103 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla levels, trend, and volume
+    # Get 4h data for trend
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 50:
+        return np.zeros(n)
+    
+    # Get 1d data for higher timeframe trend
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla levels from previous 1d OHLC
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
-    prev_close = df_1d['close'].shift(1).values
+    # 4h EMA21 and EMA50 for trend
+    close_4h = df_4h['close'].values
+    ema21_4h = pd.Series(close_4h).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema21_4h_aligned = align_htf_to_ltf(prices, df_4h, ema21_4h)
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
     
-    # Handle first value
-    prev_high[0] = df_1d['high'].iloc[0]
-    prev_low[0] = df_1d['low'].iloc[0]
-    prev_close[0] = df_1d['close'].iloc[0]
+    # 1d EMA50 and EMA100 for higher timeframe trend
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
-    # Camarilla calculations
-    range_ = prev_high - prev_low
-    cam_pp = (prev_high + prev_low + prev_close) / 3
-    cam_r1 = cam_pp + (range_ * 1.1 / 12)
-    cam_s1 = cam_pp - (range_ * 1.1 / 12)
-    cam_r2 = cam_pp + (range_ * 1.1 / 6)
-    cam_s2 = cam_pp - (range_ * 1.1 / 6)
+    # 1h volume confirmation
+    volume = prices['volume'].values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Align Camarilla levels to 12h
-    cam_r1_12h = align_htf_to_ltf(prices, df_1d, cam_r1)
-    cam_s1_12h = align_htf_to_ltf(prices, df_1d, cam_s1)
-    cam_r2_12h = align_htf_to_ltf(prices, df_1d, cam_r2)
-    cam_s2_12h = align_htf_to_ltf(prices, df_1d, cam_s2)
-    
-    # 1d EMA50 for trend filter
-    ema50_1d = df_1d['close'].ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_12h = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # 1d volume average for confirmation
-    vol_avg_1d = df_1d['volume'].rolling(window=20, min_periods=20).mean().values
-    vol_avg_12h = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
-    
-    # 12h price data
-    close_12h = prices['close'].values
-    volume_12h = prices['volume'].values
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start after warmup
+    # Start after warmup period
     start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(cam_r1_12h[i]) or np.isnan(cam_s1_12h[i]) or 
-            np.isnan(ema50_12h[i]) or np.isnan(vol_avg_12h[i])):
+        if (np.isnan(ema21_4h_aligned[i]) or np.isnan(ema50_4h_aligned[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema100_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
-                # Exit logic: close position if reverse signal or stop hit
-                if position == 1 and close_12h[i] <= cam_s1_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif position == -1 and close_12h[i] >= cam_r1_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                # Simple stop: exit if trend breaks
+                if position == 1:
+                    if ema21_4h_aligned[i] <= ema50_4h_aligned[i] or ema50_1d_aligned[i] <= ema100_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = 0.20
+                else:  # position == -1
+                    if ema21_4h_aligned[i] >= ema50_4h_aligned[i] or ema50_1d_aligned[i] >= ema100_1d_aligned[i]:
+                        signals[i] = 0.0
+                        position = 0
+                    else:
+                        signals[i] = -0.20
             continue
         
-        # Volume confirmation: current 12h volume > 1.5x 1d average volume
-        vol_confirm = volume_12h[i] > 1.5 * vol_avg_12h[i]
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.2 * vol_ma[i]
+        
+        # Trend conditions
+        bullish_4h = ema21_4h_aligned[i] > ema50_4h_aligned[i]
+        bearish_4h = ema21_4h_aligned[i] < ema50_4h_aligned[i]
+        bullish_1d = ema50_1d_aligned[i] > ema100_1d_aligned[i]
+        bearish_1d = ema50_1d_aligned[i] < ema100_1d_aligned[i]
         
         if position == 0:
-            # Look for entries in direction of 1d trend
-            if vol_confirm:
-                # Long: price breaks above R1 and above EMA50 (uptrend)
-                if close_12h[i] > cam_r1_12h[i] and close_12h[i] > ema50_12h[i]:
-                    signals[i] = 0.25
+            # Look for new entries
+            if in_session[i] and vol_confirm:
+                # Long: both 4h and 1d bullish
+                if bullish_4h and bullish_1d:
+                    signals[i] = 0.20
                     position = 1
-                    entry_price = close_12h[i]
-                # Short: price breaks below S1 and below EMA50 (downtrend)
-                elif close_12h[i] < cam_s1_12h[i] and close_12h[i] < ema50_12h[i]:
-                    signals[i] = -0.25
+                    entry_price = prices['close'].iloc[i]
+                # Short: both 4h and 1d bearish
+                elif bearish_4h and bearish_1d:
+                    signals[i] = -0.20
                     position = -1
-                    entry_price = close_12h[i]
+                    entry_price = prices['close'].iloc[i]
         else:
             # Manage existing position
             if position == 1:
-                # Long: exit if price breaks below S1 (trend reversal) or at R2 (target)
-                if close_12h[i] < cam_s1_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif close_12h[i] >= cam_r2_12h[i]:
+                # Exit long if either timeframe turns bearish
+                if not (bullish_4h and bullish_1d):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
-            elif position == -1:
-                # Short: exit if price breaks above R1 (trend reversal) or at S2 (target)
-                if close_12h[i] > cam_r1_12h[i]:
-                    signals[i] = 0.0
-                    position = 0
-                elif close_12h[i] <= cam_s2_12h[i]:
+                    signals[i] = 0.20
+            else:  # position == -1
+                # Exit short if either timeframe turns bullish
+                if not (bearish_4h and bearish_1d):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
