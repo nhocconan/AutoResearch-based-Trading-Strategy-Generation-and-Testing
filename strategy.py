@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_Keltner_Breakout_1dTrend_Volume
-# Hypothesis: Combines 4h Keltner channel breakouts with 1d trend structure and volume confirmation.
-# Long when: 1) daily structure is bullish (HH and HL), 2) price breaks above 4h Keltner upper band (EMA20 + 2*ATR), 3) volume > 1.5x 20-period average.
-# Short when: 1) daily structure is bearish (LH and LL), 2) price breaks below 4h Keltner lower band (EMA20 - 2*ATR), 3) volume > 1.5x 20-period average.
-# Exits when price returns to the EMA20 or structure breaks.
-# Works in bull markets by buying dips in uptrends and in bear markets by selling rallies in downtrends.
-# Volume confirmation reduces false breakouts. 4h timeframe limits trades to avoid fee drag.
+# 12h_Camarilla_R3_S3_Breakout_1wTrend_Volume
+# Hypothesis: Combines 12h Camarilla R3/S3 breakouts with 1week trend structure and volume confirmation.
+# Long when: 1) weekly structure is bullish (HH and HL), 2) price breaks above 12h Camarilla R3 level, 3) volume > 1.5x 20-period average.
+# Short when: 1) weekly structure is bearish (LH and LL), 2) price breaks below 12h Camarilla S3 level, 3) volume > 1.5x 20-period average.
+# Exits when price returns to the 12h EMA10 or structure breaks.
+# Uses weekly trend to avoid counter-trend trades in strong trends, volume to confirm breakout validity.
+# 12h timeframe limits trades to avoid fee drag (target: 12-37 trades/year).
 
-name = "4h_Keltner_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "12h_Camarilla_R3_S3_Breakout_1wTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,82 +20,86 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for structure (HH, HL, LH, LL)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get weekly data for structure (HH, HL, LH, LL)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 1d structure: HH/HL for uptrend, LH/LL for downtrend ---
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # --- 1w structure: HH/HL for uptrend, LH/LL for downtrend ---
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     # Higher High: today's high > yesterday's high
-    hh = high_1d > np.roll(high_1d, 1)
+    hh = high_1w > np.roll(high_1w, 1)
     # Higher Low: today's low > yesterday's low
-    hl = low_1d > np.roll(low_1d, 1)
+    hl = low_1w > np.roll(low_1w, 1)
     # Lower High: today's high < yesterday's high
-    lh = high_1d < np.roll(high_1d, 1)
+    lh = high_1w < np.roll(high_1w, 1)
     # Lower Low: today's low < yesterday's low
-    ll = low_1d < np.roll(low_1d, 1)
+    ll = low_1w < np.roll(low_1w, 1)
     # Uptrend: HH and HL
     uptrend = hh & hl
     # Downtrend: LH and LL
     downtrend = lh & ll
-    # First bar: no previous day, set to False
+    # First bar: no previous week, set to False
     uptrend[0] = False
     downtrend[0] = False
     
-    # --- 4h EMA20 for Keltner center ---
+    # --- 12h EMA10 for exit ---
     close_series = pd.Series(close)
-    ema20 = close_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema10 = close_series.ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # --- 4h ATR(20) for Keltner width ---
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = 0  # first bar has no previous close
-    atr_series = pd.Series(tr)
-    atr20 = atr_series.ewm(span=20, adjust=False, min_periods=20).mean().values
+    # --- 12h Camarilla levels (based on previous day's OHLC) ---
+    # Note: Camarilla levels are typically calculated from daily OHLC, but we'll use 12h high/low/close as proxy
+    # For true daily Camarilla, we would need to align daily data, but for simplicity and avoiding look-ahead,
+    # we use the previous 12h bar's high, low, close to calculate levels for the current bar.
+    # This assumes the 12h bar approximates the daily session for level calculation.
+    ph = np.roll(high, 1)  # previous high
+    pl = np.roll(low, 1)   # previous low
+    pc = np.roll(close, 1) # previous close
+    # First bar: no previous bar, set to 0 to avoid invalid levels
+    ph[0] = ph[1] if len(ph) > 1 else 0
+    pl[0] = pl[1] if len(pl) > 1 else 0
+    pc[0] = pc[1] if len(pc) > 1 else 0
     
-    # --- 4h Keltner bands ---
-    keltner_upper = ema20 + 2 * atr20
-    keltner_lower = ema20 - 2 * atr20
+    # Calculate Camarilla levels
+    R3 = pc + (ph - pl) * 1.1 / 2
+    S3 = pc - (ph - pl) * 1.1 / 2
     
-    # --- 4h volume confirmation (volume > 20-period average) ---
+    # --- 12h volume confirmation (volume > 20-period average) ---
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Align all 1d indicators to 4h timeframe
-    uptrend_aligned = align_htf_to_ltf(prices, df_1d, uptrend)
-    downtrend_aligned = align_htf_to_ltf(prices, df_1d, downtrend)
+    # Align all 1w indicators to 12h timeframe
+    uptrend_aligned = align_htf_to_ltf(prices, df_1w, uptrend)
+    downtrend_aligned = align_htf_to_ltf(prices, df_1w, downtrend)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA20, ATR20, and volume MA(20)
-    start_idx = max(20, 20)  # EMA20, ATR20, vol MA all need 20
+    # Warmup: enough for EMA10, volume MA(20), and Camarilla (need 1 for previous bar)
+    start_idx = max(10, 20, 1)  # EMA10, vol MA, and need at least 1 bar for Camarilla
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(keltner_upper[i]) or
-            np.isnan(keltner_lower[i]) or
-            np.isnan(ema20[i]) or
+        if (np.isnan(ema10[i]) or
             np.isnan(vol_ma[i]) or
             np.isnan(uptrend_aligned[i]) or
-            np.isnan(downtrend_aligned[i])):
+            np.isnan(downtrend_aligned[i]) or
+            np.isnan(R3[i]) or
+            np.isnan(S3[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Structure from 1d
+        # Structure from 1w
         is_uptrend = uptrend_aligned[i]
         is_downtrend = downtrend_aligned[i]
         
@@ -104,26 +108,26 @@ def generate_signals(prices):
         
         if position == 0:
             if is_uptrend and vol_spike:
-                # Long: daily uptrend + volume spike + price above Keltner upper
-                if close[i] > keltner_upper[i]:
+                # Long: weekly uptrend + volume spike + price above Camarilla R3
+                if close[i] > R3[i]:
                     signals[i] = 0.25
                     position = 1
             elif is_downtrend and vol_spike:
-                # Short: daily downtrend + volume spike + price below Keltner lower
-                if close[i] < keltner_lower[i]:
+                # Short: weekly downtrend + volume spike + price below Camarilla S3
+                if close[i] < S3[i]:
                     signals[i] = -0.25
                     position = -1
         else:
             if position == 1:
-                # Exit long: price returns to EMA20 OR structure breaks down
-                if close[i] < ema20[i] or not is_uptrend:
+                # Exit long: price returns to EMA10 OR structure breaks down
+                if close[i] < ema10[i] or not is_uptrend:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to EMA20 OR structure breaks up
-                if close[i] > ema20[i] or not is_downtrend:
+                # Exit short: price returns to EMA10 OR structure breaks up
+                if close[i] > ema10[i] or not is_downtrend:
                     signals[i] = 0.0
                     position = 0
                 else:
