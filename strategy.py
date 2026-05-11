@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS
-Hypothesis: Use 12h EMA trend direction, Camarilla R3/S3 levels from daily as breakout levels,
-with volume confirmation. Designed to capture breakouts in trending markets while avoiding
-false signals in ranging conditions. Designed for low trade frequency and high win rate.
+1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeFilter
+Hypothesis: Use 4h Camarilla pivot R1/S1 breakout for trend direction with 1d volume confirmation and 1h entry timing. 
+Camarilla pivots provide precise support/resistance levels that work in both trending and ranging markets. 
+Volume filter ensures moves have conviction. Limited to 1-2 trades per week to control fee drag.
 """
 
-name = "4h_Camarilla_R3_S3_Breakout_12hTrend_VolumeS"
-timeframe = "4h"
+name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVolumeFilter"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3
+    range_ = high - low
+    r1 = close + range_ * 1.1 / 12
+    s1 = close - range_ * 1.1 / 12
+    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
@@ -24,57 +32,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 12h data for trend direction
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 20:
+    # Get 4h data for Camarilla pivot levels (trend direction)
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
     
-    close_12h = df_12h['close'].values
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h EMA for trend direction
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_prev = np.roll(ema_12h, 1)
-    ema_12h_prev[0] = ema_12h[0]
-    trend_12h = np.where(ema_12h > ema_12h_prev, 1, -1)
+    # Calculate 4h Camarilla levels
+    camarilla_pivot_4h = np.zeros(len(df_4h))
+    camarilla_r1_4h = np.zeros(len(df_4h))
+    camarilla_s1_4h = np.zeros(len(df_4h))
     
-    # Align 12h trend to 4h timeframe
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h.astype(float))
+    for i in range(len(df_4h)):
+        pivot, r1, s1 = calculate_camarilla(high_4h[i], low_4h[i], close_4h[i])
+        camarilla_pivot_4h[i] = pivot
+        camarilla_r1_4h[i] = r1
+        camarilla_s1_4h[i] = s1
     
-    # Get daily data for Camarilla levels
+    # Align 4h Camarilla levels to 1h timeframe
+    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_pivot_4h)
+    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_r1_4h)
+    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, camarilla_s1_4h)
+    
+    # Get 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla levels (R3, S3) from previous day
-    # Camarilla: R3 = close + 1.1*(high-low)/2, S3 = close - 1.1*(high-low)/2
-    camarilla_range = (high_1d - low_1d)
-    r3_level = close_1d + 1.1 * camarilla_range / 2
-    s3_level = close_1d - 1.1 * camarilla_range / 2
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_level)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_level)
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.3)
+    volume_1d = df_1d['volume'].values
+    # Calculate 20-period average volume on daily timeframe
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Current day's volume > 1.5x 20-day average
+    volume_filter_1d = volume_1d > (vol_ma_1d * 1.5)
+    # Align volume filter to 1h timeframe
+    volume_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_filter_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50
+    start_idx = 30
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(trend_12h_aligned[i]) or 
-            np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(pivot_4h_aligned[i]) or 
+            np.isnan(r1_4h_aligned[i]) or 
+            np.isnan(s1_4h_aligned[i]) or 
+            np.isnan(volume_filter_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -83,27 +90,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 12h uptrend AND price breaks above R3 AND volume filter
-            if trend_12h_aligned[i] == 1 and close[i] > r3_aligned[i] and volume_filter[i]:
-                signals[i] = 0.25
+            # Long: price breaks above R1 with volume confirmation
+            if close[i] > r1_4h_aligned[i] and volume_filter_1d_aligned[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: 12h downtrend AND price breaks below S3 AND volume filter
-            elif trend_12h_aligned[i] == -1 and close[i] < s3_aligned[i] and volume_filter[i]:
-                signals[i] = -0.25
+            # Short: price breaks below S1 with volume confirmation
+            elif close[i] < s1_4h_aligned[i] and volume_filter_1d_aligned[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Long exit: 12h trend turns down OR price drops below S3 (reversal signal)
-            if trend_12h_aligned[i] == -1 or close[i] < s3_aligned[i]:
+            # Long exit: price returns to pivot level
+            if close[i] <= pivot_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25  # maintain position
+                signals[i] = 0.20  # maintain position
         elif position == -1:
-            # Short exit: 12h trend turns up OR price rises above R3 (reversal signal)
-            if trend_12h_aligned[i] == 1 or close[i] > r3_aligned[i]:
+            # Short exit: price returns to pivot level
+            if close[i] >= pivot_4h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25  # maintain position
+                signals[i] = -0.20  # maintain position
     
     return signals
