@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R1S3_Breakout_4hTrend_1dVolatilityFilter"
-timeframe = "1h"
+name = "6h_WeeklyPivot_R3S3_Breakout_TrendVolume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_ohlc
 
 def generate_signals(prices):
     n = len(prices)
@@ -17,65 +17,45 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for volatility filter (ATR ratio)
+    # Get weekly data for pivot points (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    # Get daily data for trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly pivot points: Calculate from previous week's OHLC
+    prev_week_high = np.roll(df_1w['high'].values, 1)
+    prev_week_low = np.roll(df_1w['low'].values, 1)
+    prev_week_close = np.roll(df_1w['close'].values, 1)
+    prev_week_open = np.roll(df_1w['open'].values, 1)
     
-    # Daily ATR(14)
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    # Handle first row
+    prev_week_high[0] = df_1w['high'].values[0]
+    prev_week_low[0] = df_1w['low'].values[0]
+    prev_week_close[0] = df_1w['close'].values[0]
+    prev_week_open[0] = df_1w['open'].values[0]
     
-    # Daily ATR ratio: ATR(7)/ATR(14) to detect volatility expansion/contraction
-    atr_7_1d = pd.Series(tr).rolling(window=7, min_periods=7).mean().values
-    atr_ratio = np.where(atr_1d != 0, atr_7_1d / atr_1d, 1.0)
-    atr_ratio = np.nan_to_num(atr_ratio, nan=1.0)
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
+    # Weekly pivot point (PP)
+    pp = (prev_week_high + prev_week_low + prev_week_close) / 3.0
+    # R3 and S3 levels
+    r3 = pp + 2 * (prev_week_high - prev_week_low)
+    s3 = pp - 2 * (prev_week_high - prev_week_low)
     
-    # Get 4h data for Camarilla levels and trend
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
-        return np.zeros(n)
+    # Align weekly pivot levels to 6h timeframe
+    r3_aligned = align_ltf_to_ohlc(prices, df_1w, r3)
+    s3_aligned = align_ltf_to_ohlc(prices, df_1w, s3)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Daily EMA34 for trend filter
+    ema_34_1d = pd.Series(df_1d['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_ltf_to_ohlc(prices, df_1d, ema_34_1d)
     
-    # Previous 4h bar (to avoid look-ahead)
-    prev_high = np.roll(high_4h, 1)
-    prev_low = np.roll(low_4h, 1)
-    prev_close = np.roll(close_4h, 1)
-    prev_high[0] = high_4h[0]
-    prev_low[0] = low_4h[0]
-    prev_close[0] = close_4h[0]
-    
-    # Camarilla levels for previous 4h bar
-    R3 = prev_close + 1.1 * (prev_high - prev_low) / 6
-    R1 = prev_close + 1.1 * (prev_high - prev_low) / 12
-    S1 = prev_close - 1.1 * (prev_high - prev_low) / 12
-    S3 = prev_close - 1.1 * (prev_high - prev_low) / 6
-    
-    # Align Camarilla levels to 1h timeframe
-    R3_aligned = align_htf_to_ltf(prices, df_4h, R3)
-    R1_aligned = align_htf_to_ltf(prices, df_4h, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_4h, S1)
-    S3_aligned = align_htf_to_ltf(prices, df_4h, S3)
-    
-    # 4h EMA34 for trend filter
-    ema_34_4h = pd.Series(close_4h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_4h, ema_34_4h)
-    
-    # 1h volume filter: volume > 1.5x 20-period average
+    # Volume filter: 20-period average on 6h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma != 0, volume / vol_ma, 1.0)
+    vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
@@ -86,51 +66,47 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R3_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(ema_34_aligned[i]) or np.isnan(atr_ratio_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volatility filter: only trade when volatility is contracting (ATR ratio < 0.8)
-        volatility_contracting = atr_ratio_aligned[i] < 0.8
+        # Volume threshold - avoid low-volume false breakouts
+        volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above R1 with volume, volatility contracting, and above 4h EMA34
-            if (close[i] > R1_aligned[i] and 
-                vol_ratio[i] > 1.5 and 
-                volatility_contracting and 
+            # Long: Price breaks above weekly R3 with volume and bullish trend
+            if (close[i] > r3_aligned[i] and 
+                volume_surge and 
                 close[i] > ema_34_aligned[i]):
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 with volume, volatility contracting, and below 4h EMA34
-            elif (close[i] < S1_aligned[i] and 
-                  vol_ratio[i] > 1.5 and 
-                  volatility_contracting and 
+            # Short: Price breaks below weekly S3 with volume and bearish trend
+            elif (close[i] < s3_aligned[i] and 
+                  volume_surge and 
                   close[i] < ema_34_aligned[i]):
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price reaches opposite Camarilla level or trend fails
+            # Exit: price returns to weekly pivot point or trend fails
             if position == 1:
-                # Exit long: price reaches S3 or closes below 4h EMA34
-                if (close[i] <= S3_aligned[i]) or (close[i] < ema_34_aligned[i]):
+                # Exit long: price returns to pivot or trend turns bearish
+                if (close[i] < pp[i]) or (close[i] < ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: price reaches R3 or closes above 4h EMA34
-                if (close[i] >= R3_aligned[i]) or (close[i] > ema_34_aligned[i]):
+                # Exit short: price returns to pivot or trend turns bullish
+                if (close[i] > pp[i]) or (close[i] > ema_34_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
