@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-# 4H_KAMA_TREND_VOLUME_CONFIRM
-# Hypothesis: KAMA (adaptive moving average) adapts to market noise, providing reliable trend signals.
-# Combined with volume confirmation (>1.5x average volume) and 1d RSI filter (40-60) to avoid false signals.
-# Designed for low-frequency trading (target: 20-40 trades/year) to minimize fee drag.
-# Works in both bull and bear markets by following the adaptive trend.
+"""
+1D_1W_Trend_Follow_with_Regime_Filter_v1
+Hypothesis: 1-day trend following with 1-week trend filter and volatility regime (ATR-based chop) filter.
+Trades only when both timeframes agree on direction AND market is not choppy (ATR ratio < threshold).
+Uses 20-period EMA for trend direction on both 1d and 1w. ATR ratio (current ATR / 20-period ATR avg) to filter chop.
+Targets 10-25 trades per year (40-100 over 4 years) to minimize fee drag.
+Works in bull/bear via trend following; avoids whipsaws via regime filter.
+"""
 
-name = "4H_KAMA_TREND_VOLUME_CONFIRM"
-timeframe = "4h"
+name = "1D_1W_Trend_Follow_with_Regime_Filter_v1"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -18,90 +21,94 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for RSI (HTF)
+    # Get 1d and 1w data (HTF)
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1d) < 30 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1d OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # --- KAMA (10-period ER, 2 and 30 SC) ---
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0)
-    # Calculate ER (efficiency ratio) using rolling sum
-    change_sum = pd.Series(change).rolling(window=10, min_periods=10).sum()
-    volatility_sum = pd.Series(volatility).rolling(window=10, min_periods=10).sum()
-    er = change_sum / (volatility_sum + 1e-10)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # smoothing constant
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # --- 1d EMA(20) for trend ---
+    ema_1d = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean()
+    ema_1d_val = ema_1d.values
     
-    # --- 1d RSI (14-period) ---
-    close_1d = df_1d['close'].values
-    delta = np.diff(close_1d, prepend=close_1d[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi_1d = 100 - (100 / (1 + rs))
-    rsi_1d = rsi_1d.values
+    # --- 1w EMA(20) for trend filter ---
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean()
+    ema_1w_val = ema_1w.values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_val)
     
-    # Align 1d RSI to 4h
-    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    # --- ATR-based regime filter (chop detection) ---
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean()
+    atr_val = atr.values
     
-    # --- Volume Spike (4h) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    vol_spike = volume > (1.5 * vol_ma.values)
+    # 20-period average ATR for regime
+    atr_ma = pd.Series(atr_val).rolling(window=20, min_periods=20).mean()
+    atr_ma_val = atr_ma.values
+    # ATR ratio: current ATR / average ATR (low = chop, high = trending)
+    atr_ratio = atr_val / (atr_ma_val + 1e-10)
+    
+    # Regime: trending when ATR ratio > 0.8 (avoid chop when ratio too low)
+    trending_regime = atr_ratio > 0.8
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
-        # Skip if RSI is NaN
-        if np.isnan(rsi_1d_aligned[i]):
+        # Skip if 1w EMA not available (alignment)
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
-                # Exit if price crosses KAMA
-                if position == 1 and close[i] < kama[i]:
+                # Exit on trend break
+                if position == 1 and close[i] < ema_1d_val[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close[i] > kama[i]:
+                elif position == -1 and close[i] > ema_1d_val[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Entry conditions: price crosses KAMA with volume confirmation and RSI in neutral zone
-        long_entry = (close[i] > kama[i]) and vol_spike[i] and (rsi_1d_aligned[i] > 40) and (rsi_1d_aligned[i] < 60)
-        short_entry = (close[i] < kama[i]) and vol_spike[i] and (rsi_1d_aligned[i] > 40) and (rsi_1d_aligned[i] < 60)
+        # 1d trend direction
+        bullish_1d = close[i] > ema_1d_val[i]
+        bearish_1d = close[i] < ema_1d_val[i]
         
+        # 1w trend filter (must align with 1d)
+        bullish_1w = ema_1w_aligned[i] > ema_1d_val[i]  # 1w EMA above 1d price = bullish
+        bearish_1w = ema_1w_aligned[i] < ema_1d_val[i]  # 1w EMA below 1d price = bearish
+        
+        # Entry: both timeframes agree AND trending regime
         if position == 0:
-            if long_entry:
+            if bullish_1d and bullish_1w and trending_regime[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_entry:
+            elif bearish_1d and bearish_1w and trending_regime[i]:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit on KAMA cross or RSI extreme
+            # Exit: trend break on 1d OR regime turns choppy
             if position == 1:
-                if (close[i] < kama[i]) or (rsi_1d_aligned[i] >= 60) or (rsi_1d_aligned[i] <= 40):
+                if (not bullish_1d) or (not trending_regime[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if (close[i] > kama[i]) or (rsi_1d_aligned[i] >= 60) or (rsi_1d_aligned[i] <= 40):
+                if (not bearish_1d) or (not trending_regime[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
