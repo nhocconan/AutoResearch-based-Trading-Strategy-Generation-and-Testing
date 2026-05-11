@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-1h_4h1d_Camarilla_R3S3_Breakout_TrendVolume
-Hypothesis: Price breaking above 4h R3 or below 4h S3 with daily trend confirmation (EMA34) and volume spike. Uses 4h pivot levels as strong support/resistance. In uptrend (price > EMA34 daily), buy breakouts above R3; in downtrend (price < EMA34 daily), sell breakdowns below S3. Volume confirms institutional interest. Designed for 1h timeframe with 4h pivot structure and daily trend filter to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets by capturing strong momentum moves after breaking key 4h levels.
+12h_1d_SuperTrend_TrendFollow
+Hypothesis: Supertrend indicator on daily timeframe identifies strong trends. 
+Enter long when price crosses above Supertrend on 12h chart with daily uptrend confirmation.
+Enter short when price crosses below Supertrend on 12h chart with daily downtrend confirmation.
+Uses ATR-based dynamic stop and re-entry mechanism to capture trends while minimizing whipsaws.
+Works in both bull (riding uptrends) and bear (riding downtrends) markets by following the daily trend.
 """
 
-name = "1h_4h1d_Camarilla_R3S3_Breakout_TrendVolume"
-timeframe = "1h"
+name = "12h_1d_SuperTrend_TrendFollow"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -14,65 +18,104 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Price and volume
+    # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 4h data for pivot points
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 5:
-        return np.zeros(n)
-    
-    # Daily data for trend filter
+    # Daily data for Supertrend calculation
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
+    if len(df_1d) < 10:
         return np.zeros(n)
     
-    # Calculate 4h pivot points using previous 4h bar's OHLC
-    h4_high = df_4h['high'].values
-    h4_low = df_4h['low'].values
-    h4_close = df_4h['close'].values
-    
-    # Shift to use previous 4h bar's data (avoid look-ahead)
-    h4_high_prev = np.roll(h4_high, 1)
-    h4_low_prev = np.roll(h4_low, 1)
-    h4_close_prev = np.roll(h4_close, 1)
-    # First period: use current values to avoid NaN
-    h4_high_prev[0] = h4_high[0]
-    h4_low_prev[0] = h4_low[0]
-    h4_close_prev[0] = h4_close[0]
-    
-    # Calculate 4h pivot point
-    h4_pivot = (h4_high_prev + h4_low_prev + h4_close_prev) / 3.0
-    # Calculate 4h R3 and S3 levels
-    h4_r3 = h4_close_prev + (1.1/4) * (h4_high_prev - h4_low_prev)
-    h4_s3 = h4_close_prev - (1.1/4) * (h4_high_prev - h4_low_prev)
-    
-    # Align 4h R3/S3 to 1h timeframe
-    h4_r3_aligned = align_htf_to_ltf(prices, df_4h, h4_r3)
-    h4_s3_aligned = align_htf_to_ltf(prices, df_4h, h4_s3)
-    h4_pivot_aligned = align_htf_to_ltf(prices, df_4h, h4_pivot)
-    
-    # Daily trend filter (EMA 34)
+    # Calculate Supertrend on daily timeframe
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(
-        span=34, adjust=False, min_periods=34
-    ).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (20-period average on 1h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma
-    vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
+    # ATR calculation
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Supertrend parameters
+    atr_multiplier = 3.0
+    
+    # Basic upper and lower bands
+    basic_ub = (high_1d + low_1d) / 2 + atr_multiplier * atr
+    basic_lb = (high_1d + low_1d) / 2 - atr_multiplier * atr
+    
+    # Initialize final bands
+    final_ub = np.full_like(close_1d, np.nan)
+    final_lb = np.full_like(close_1d, np.nan)
+    
+    # Calculate final bands
+    for i in range(len(close_1d)):
+        if np.isnan(atr[i]):
+            final_ub[i] = np.nan
+            final_lb[i] = np.nan
+        elif i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if close_1d[i-1] <= final_ub[i-1]:
+                final_ub[i] = min(basic_ub[i], final_ub[i-1])
+            else:
+                final_ub[i] = basic_ub[i]
+                
+            if close_1d[i-1] >= final_lb[i-1]:
+                final_lb[i] = max(basic_lb[i], final_lb[i-1])
+            else:
+                final_lb[i] = basic_lb[i]
+    
+    # Determine Supertrend direction
+    supertrend = np.full_like(close_1d, np.nan)
+    trend_dir = np.full_like(close_1d, np.nan)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(len(close_1d)):
+        if np.isnan(final_ub[i]) or np.isnan(final_lb[i]):
+            supertrend[i] = np.nan
+            trend_dir[i] = np.nan
+        elif i == 0:
+            supertrend[i] = final_ub[i]
+            trend_dir[i] = -1  # Start in downtrend
+        else:
+            if supertrend[i-1] == final_ub[i-1]:
+                if close_1d[i] <= final_ub[i]:
+                    supertrend[i] = final_ub[i]
+                    trend_dir[i] = -1
+                else:
+                    supertrend[i] = final_lb[i]
+                    trend_dir[i] = 1
+            else:
+                if close_1d[i] >= final_lb[i]:
+                    supertrend[i] = final_lb[i]
+                    trend_dir[i] = 1
+                else:
+                    supertrend[i] = final_ub[i]
+                    trend_dir[i] = -1
+    
+    # Align Supertrend and trend direction to 12h timeframe
+    supertrend_aligned = align_htf_to_ltf(prices, df_1d, supertrend)
+    trend_dir_aligned = align_htf_to_ltf(prices, df_1d, trend_dir)
+    
+    # Price crossover detection on 12h chart
+    price_above_st = close > supertrend_aligned
+    price_below_st = close < supertrend_aligned
+    
+    # Previous state for crossover detection
+    price_above_st_prev = np.concatenate([[False], price_above_st[:-1]])
+    price_below_st_prev = np.concatenate([[False], price_below_st[:-1]])
+    
+    # Bullish crossover: price crosses above Supertrend
+    bullish_cross = price_above_st & ~price_above_st_prev
+    # Bearish crossover: price crosses below Supertrend
+    bearish_cross = price_below_st & ~price_below_st_prev
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,51 +124,40 @@ def generate_signals(prices):
     start_idx = 30
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN or outside session
-        if (np.isnan(h4_r3_aligned[i]) or np.isnan(h4_s3_aligned[i]) or 
-            np.isnan(ema_34_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            not in_session[i]):
+        # Skip if required data is NaN
+        if np.isnan(supertrend_aligned[i]) or np.isnan(trend_dir_aligned[i]):
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume threshold
-        volume_spike = vol_ratio[i] > 2.0
-        
         if position == 0:
-            # Long: break above 4h R3 + above daily EMA34 + volume spike
-            if (close[i] > h4_r3_aligned[i] and 
-                close[i] > ema_34_1d_aligned[i] and 
-                volume_spike):
-                signals[i] = 0.20
+            # Long: bullish crossover + daily uptrend
+            if bullish_cross[i] and trend_dir_aligned[i] >= 1:
+                signals[i] = 0.25
                 position = 1
-            # Short: break below 4h S3 + below daily EMA34 + volume spike
-            elif (close[i] < h4_s3_aligned[i] and 
-                  close[i] < ema_34_1d_aligned[i] and 
-                  volume_spike):
-                signals[i] = -0.20
+            # Short: bearish crossover + daily downtrend
+            elif bearish_cross[i] and trend_dir_aligned[i] <= -1:
+                signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to 4h pivot or trend reversal
+            # Exit conditions: price crosses back through Supertrend OR trend reversal
             if position == 1:
-                # Exit long: price returns to 4h pivot OR trend turns down
-                if (close[i] <= h4_pivot_aligned[i]) or \
-                   (close[i] < ema_34_1d_aligned[i]):
+                # Exit long: price crosses below Supertrend OR daily trend turns down
+                if bearish_cross[i] or trend_dir_aligned[i] <= -1:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to 4h pivot OR trend turns up
-                if (close[i] >= h4_pivot_aligned[i]) or \
-                   (close[i] > ema_34_1d_aligned[i]):
+                # Exit short: price crosses above Supertrend OR daily trend turns up
+                if bullish_cross[i] or trend_dir_aligned[i] >= 1:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
