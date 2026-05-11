@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike_Trend_v3"
-timeframe = "4h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -29,7 +29,7 @@ def generate_signals(prices):
     # Calculate EMA34 on 1d for trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Align 1d EMA34 to 4h
+    # Align 1d EMA34 to 12h
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
     # Calculate Camarilla levels from previous 1d bar
@@ -37,13 +37,13 @@ def generate_signals(prices):
     camarilla_r1 = close_1d + 1.1 * (high_1d - low_1d) / 12
     camarilla_s1 = close_1d - 1.1 * (high_1d - low_1d) / 12
     
-    # Align Camarilla levels to 4h
+    # Align Camarilla levels to 12h
     r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     
     # Volume spike (20-period average) - conservative threshold
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)  # Moderate threshold to balance signal frequency
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
