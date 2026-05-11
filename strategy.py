@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "1d_Trix_1wTrend_VolumeFilter"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,41 +17,34 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 1:
+    # TRIX: 15-period EMA applied 3 times on close
+    ema1 = pd.Series(close).ewm(span=15, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=15, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=15, adjust=False).mean().values
+    trix = np.diff(ema3, prepend=ema3[0]) / ema3
+    
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    prev_close = df_1d['close'].values
-    prev_high = df_1d['high'].values
-    prev_low = df_1d['low'].values
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 12
-    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 12
-    
-    # Align Camarilla levels to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    
-    # Get 1d trend: EMA34
-    ema_34_1d = pd.Series(prev_close).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
-    
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-day average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma20
+    volume_filter = volume > 1.3 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and pivots
+    start_idx = 50  # Enough for TRIX and 1w EMA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(trix[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,24 +53,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price breaks above R1 + price above EMA34 (uptrend) + volume confirmation
-            if close[i] > r1_aligned[i] and close[i] > ema_34_aligned[i] and volume_filter[i]:
+            # Long: TRIX crosses above zero + price above 1w EMA50 + volume
+            if trix[i] > 0 and trix[i-1] <= 0 and close[i] > ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S1 + price below EMA34 (downtrend) + volume confirmation
-            elif close[i] < s1_aligned[i] and close[i] < ema_34_aligned[i] and volume_filter[i]:
+            # Short: TRIX crosses below zero + price below 1w EMA50 + volume
+            elif trix[i] < 0 and trix[i-1] >= 0 and close[i] < ema50_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price breaks below S1 OR price below EMA34
-            if close[i] < s1_aligned[i] or close[i] < ema_34_aligned[i]:
+            # Long exit: TRIX crosses below zero OR price crosses below 1w EMA50
+            if trix[i] < 0 and trix[i-1] >= 0 or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price breaks above R1 OR price above EMA34
-            if close[i] > r1_aligned[i] or close[i] > ema_34_aligned[i]:
+            # Short exit: TRIX crosses above zero OR price crosses above 1w EMA50
+            if trix[i] > 0 and trix[i-1] <= 0 or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
