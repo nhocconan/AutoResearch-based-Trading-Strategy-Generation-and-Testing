@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_KAMA_Direction_200MA_Filter_1dTrend"
-timeframe = "4h"
+name = "1d_Camarilla_R1_S1_Breakout_1wTrend_VolumeSpike"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -17,56 +17,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and KAMA calculation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    # 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 50:
         return np.zeros(n)
     
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 200-day EMA for trend filter (long-term trend)
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Calculate EMA50 on 1w for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate KAMA (Kaufman Adaptive Moving Average) on 1d
-    # KAMA parameters: ER period=10, Fast=2, Slow=30
-    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
-    volatility = np.abs(np.diff(close_1d)).sum()  # Will be calculated properly below
+    # Align 1w EMA50 to daily
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Proper ER calculation
-    er = np.zeros_like(close_1d)
-    for i in range(10, len(close_1d)):
-        direction = np.abs(close_1d[i] - close_1d[i-10])
-        volatility = np.abs(np.diff(close_1d[i-9:i+1])).sum()
-        if volatility > 0:
-            er[i] = direction / volatility
-        else:
-            er[i] = 0
+    # Calculate daily OHLC for Camarilla levels
+    # Use previous day's range for current day's levels
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close = np.roll(close, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)  # EMA(2)
-    slow_sc = 2 / (30 + 1)  # EMA(30)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # Camarilla R1 and S1 levels
+    camarilla_r1 = prev_close + 1.1 * (prev_high - prev_low) / 12
+    camarilla_s1 = prev_close - 1.1 * (prev_high - prev_low) / 12
     
-    # Calculate KAMA
-    kama = np.zeros_like(close_1d)
-    kama[0] = close_1d[0]
-    for i in range(1, len(close_1d)):
-        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
-    
-    kama_aligned = align_htf_to_ltf(prices, df_1d, kama)
-    
-    # Volume spike filter (20-period average)
+    # Volume spike (20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 1.5)  # Moderate threshold
+    vol_spike = volume > (vol_ma * 2.0)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 200  # Ensure EMA200 and KAMA are ready
+    start_idx = 50  # Ensure EMA50 is ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema200_1d_aligned[i]) or np.isnan(kama_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema50_1w_aligned[i]) or np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -75,28 +62,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price above KAMA, above 200 EMA, volume spike
-            if (close[i] > kama_aligned[i] and 
-                close[i] > ema200_1d_aligned[i] and 
+            # Long: break above R1, above 1w EMA50, volume spike
+            if (close[i] > camarilla_r1[i] and 
+                close[i] > ema50_1w_aligned[i] and 
                 vol_spike[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price below KAMA, below 200 EMA, volume spike
-            elif (close[i] < kama_aligned[i] and 
-                  close[i] < ema200_1d_aligned[i] and 
+            # Short: break below S1, below 1w EMA50, volume spike
+            elif (close[i] < camarilla_s1[i] and 
+                  close[i] < ema50_1w_aligned[i] and 
                   vol_spike[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: price below KAMA or below 200 EMA
-            if close[i] < kama_aligned[i] or close[i] < ema200_1d_aligned[i]:
+            # Exit long: break below S1 or below 1w EMA50
+            if close[i] < camarilla_s1[i] or close[i] < ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: price above KAMA or above 200 EMA
-            if close[i] > kama_aligned[i] or close[i] > ema200_1d_aligned[i]:
+            # Exit short: break above R1 or above 1w EMA50
+            if close[i] > camarilla_r1[i] or close[i] > ema50_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
