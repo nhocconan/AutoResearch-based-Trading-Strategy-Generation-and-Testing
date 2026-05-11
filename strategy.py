@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_ThreeCandleReversal_Pullback
-# Hypothesis: Captures mean-reversion pullbacks in strong trends using 3-candle reversal patterns.
-# Long when 12h trend up + 3 consecutive lower closes + price near VWAP; short when 12h trend down + 3 consecutive higher closes + price near VWAP.
-# Works in bull/bear by trading pullbacks to the mean within the dominant trend, reducing whipsaw vs pure trend following.
-# Uses volume confirmation and 1-day ATR for stop management.
+# 6h_Ichimoku_Cloud_Breakout
+# Hypothesis: Uses daily Ichimoku cloud (Tenkan/Kijun + Senkou Span A/B) as trend filter and
+# 6h price breaks above/below cloud with momentum confirmation (TK cross) for entries.
+# Works in bull markets by buying cloud breakouts in uptrends, and in bear markets by
+# selling breakdowns in downtrends. The cloud acts as dynamic support/resistance.
+# Daily timeframe ensures fewer, higher-quality signals to avoid fee drag.
 
-name = "4h_ThreeCandleReversal_Pullback"
-timeframe = "4h"
+name = "6h_Ichimoku_Cloud_Breakout"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -15,111 +16,107 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 12h data for trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
-        return np.zeros(n)
-    
-    # Get 1d data for ATR and VWAP
+    # Get daily data for Ichimoku
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 12h EMA34 for trend direction ---
-    close_12h = df_12h['close'].values
-    ema_34_12h = pd.Series(close_12h).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_12h_slope = ema_34_12h - np.roll(ema_34_12h, 1)
-    ema_34_12h_slope[0] = 0
-    ema_34_12h_slope = pd.Series(ema_34_12h_slope).ewm(span=3, adjust=False, min_periods=1).mean().values  # smooth slope
-    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
-    ema_34_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h_slope)
-    
-    # --- 1d ATR(14) for volatility ---
+    # --- Daily Ichimoku components ---
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr_14_1d = pd.Series(tr).ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
     
-    # --- 4h VWAP (session VWAP reset daily) ---
-    # Approximate VWAP using cumulative typical price * volume / cumulative volume
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den > 0, vwap_num / vwap_den, typical_price)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high_1d).rolling(window=period_tenkan, min_periods=period_tenkan).max() +
+                  pd.Series(low_1d).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    # --- 3-candle reversal pattern ---
-    # For long: 3 consecutive lower closes
-    lower_close_1 = close < np.roll(close, 1)
-    lower_close_2 = np.roll(close, 1) < np.roll(close, 2)
-    lower_close_3 = np.roll(close, 2) < np.roll(close, 3)
-    three_lower_close = lower_close_1 & lower_close_2 & lower_close_3
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high_1d).rolling(window=period_kijun, min_periods=period_kijun).max() +
+                 pd.Series(low_1d).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    # For short: 3 consecutive higher closes
-    higher_close_1 = close > np.roll(close, 1)
-    higher_close_2 = np.roll(close, 1) > np.roll(close, 2)
-    higher_close_3 = np.roll(close, 2) > np.roll(close, 3)
-    three_higher_close = higher_close_1 & higher_close_2 & higher_close_3
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
     
-    # --- Volume confirmation (volume > 20-period average) ---
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > vol_ma
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    senkou_span_b = (pd.Series(high_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() +
+                     pd.Series(low_1d).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2
+    senkou_span_b = senkou_span_b.values
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_6h = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_6h = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_6h = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_6h = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_span_a_6h, senkou_span_b_6h)
+    cloud_bottom = np.minimum(senkou_span_a_6h, senkou_span_b_6h)
+    
+    # TK Cross (6h) for momentum confirmation
+    tk_cross = (tenkan_sen_6h - kijun_sen_6h)
+    tk_cross_prev = np.roll(tk_cross, 1)
+    tk_cross_prev[0] = 0
+    tk_cross_up = (tk_cross > 0) & (tk_cross_prev <= 0)
+    tk_cross_down = (tk_cross < 0) & (tk_cross_prev >= 0)
+    
+    # Volume confirmation: volume > 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_surge = volume > vol_ema
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA34 (34), ATR (14), and pattern formation
-    start_idx = 40
+    # Warmup: enough for Ichimoku (52) and TK cross
+    start_idx = 52
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_34_12h_aligned[i]) or
-            np.isnan(ema_34_12h_slope_aligned[i]) or
-            np.isnan(atr_14_1d_aligned[i])):
+        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or
+            np.isnan(tk_cross[i]) or np.isnan(tk_cross_prev[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 12h EMA34 slope
-        uptrend = ema_34_12h_slope_aligned[i] > 0
-        downtrend = ema_34_12h_slope_aligned[i] < 0
+        # Price relative to cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
         
         if position == 0:
-            if uptrend and vol_surge[i]:
-                # Long: 12h uptrend + 3 lower closes + price near VWAP (within 0.5*ATR)
-                if three_lower_close[i] and abs(close[i] - vwap[i]) <= 0.5 * atr_14_1d_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend and vol_surge[i]:
-                # Short: 12h downtrend + 3 higher closes + price near VWAP (within 0.5*ATR)
-                if three_higher_close[i] and abs(close[i] - vwap[i]) <= 0.5 * atr_14_1d_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above cloud + TK cross up + volume surge
+            if price_above_cloud and tk_cross_up[i] and vol_surge[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below cloud + TK cross down + volume surge
+            elif price_below_cloud and tk_cross_down[i] and vol_surge[i]:
+                signals[i] = -0.25
+                position = -1
         else:
             if position == 1:
-                # Exit long: 12h trend turns down OR price extends too far from VWAP
-                if downtrend or abs(close[i] - vwap[i]) > 1.5 * atr_14_1d_aligned[i]:
+                # Exit long: price crosses below cloud OR TK cross down
+                if close[i] < cloud_top[i] or tk_cross_down[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: 12h trend turns up OR price extends too far from VWAP
-                if uptrend or abs(close[i] - vwap[i]) > 1.5 * atr_14_1d_aligned[i]:
+                # Exit short: price crosses above cloud OR TK cross up
+                if close[i] > cloud_bottom[i] or tk_cross_up[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
