@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_VolumeSpike_v1"
-timeframe = "4h"
+name = "12h_Camarilla_R1S1_Breakout_1dTrend_1dVolume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -32,11 +32,12 @@ def generate_signals(prices):
     vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Camarilla levels from previous day (R1, S1)
+    # Camarilla levels from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     range_1d = high_1d - low_1d
+    # Camarilla R1, S1: close +/- 1.1/12 * range
     r1 = close_1d + (1.1/12) * range_1d
     s1 = close_1d - (1.1/12) * range_1d
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
@@ -49,7 +50,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA and Camarilla
+    start_idx = 34  # Need enough data for EMA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
