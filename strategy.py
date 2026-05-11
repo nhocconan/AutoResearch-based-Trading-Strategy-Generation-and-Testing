@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-4h_Donchian20_1dTrend_VolumeBreakout_v1
-Hypothesis: Donchian channel breakouts on 4h timeframe with 1-day EMA trend filter and volume spike confirmation. 
-This follows the winning pattern: price channel breakout + trend filter + volume confirmation. 
-Designed to work in both bull and bear markets by using trend direction to determine breakout bias.
-Target: 25-40 trades per year on 4h timeframe (100-160 total over 4 years).
+6h_OrderBlock_Equilibrium_WeeklyTrend_v1
+Hypothesis: Institutional order blocks (OB) act as support/resistance. In weekly uptrend, buy at bullish OB when price tests it; in weekly downtrend, sell at bearish OB when price tests it. Equilibrium (midpoint of daily range) filters for mean-reversion within the OB zone. Weekly trend avoids counter-trend trades. Target: 15-30 trades/year on 6h.
 """
 
-name = "4h_Donchian20_1dTrend_VolumeBreakout_v1"
-timeframe = "4h"
+name = "6h_OrderBlock_Equilibrium_WeeklyTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -23,26 +20,66 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # === 1D Data for Trend Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    # === 1W Data for Trend Filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
         return np.zeros(n)
     
+    close_1w = df_1w['close'].values
+    # Weekly EMA20 for trend
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # === 1D Data for Order Blocks and Equilibrium ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Trend filter: EMA50 on 1d close
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Bullish OB: down candle (close < open) followed by up candle -> OB = [low, high] of down candle
+    # Bearish OB: up candle (close > open) followed by down candle -> OB = [low, high] of up candle
+    open_1d = df_1d['open'].values
     
-    # Donchian channel (20-period) on 4h data
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    bullish_ob_high = np.full(len(high_1d), np.nan)
+    bullish_ob_low = np.full(len(high_1d), np.nan)
+    bearish_ob_high = np.full(len(high_1d), np.nan)
+    bearish_ob_low = np.full(len(high_1d), np.nan)
     
-    # Volume spike: current volume > 2x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = volume > (vol_ma * 2.0)
+    for i in range(1, len(high_1d)):
+        # Bullish OB: red candle then green candle
+        if close_1d[i-1] < open_1d[i-1] and close_1d[i] > open_1d[i]:
+            bullish_ob_high[i] = high_1d[i-1]
+            bullish_ob_low[i] = low_1d[i-1]
+        # Bearish OB: green candle then red candle
+        if close_1d[i-1] > open_1d[i-1] and close_1d[i] < open_1d[i]:
+            bearish_ob_high[i] = high_1d[i-1]
+            bearish_ob_low[i] = low_1d[i-1]
+    
+    # Forward-fill OBs to keep them active until broken
+    # Convert to pandas Series for ffill, then back to array
+    bullish_ob_high_series = pd.Series(bullish_ob_high).ffill()
+    bullish_ob_low_series = pd.Series(bullish_ob_low).ffill()
+    bearish_ob_high_series = pd.Series(bearish_ob_high).ffill()
+    bearish_ob_low_series = pd.Series(bearish_ob_low).ffill()
+    
+    bullish_ob_high = bullish_ob_high_series.values
+    bullish_ob_low = bullish_ob_low_series.values
+    bearish_ob_high = bearish_ob_high_series.values
+    bearish_ob_low = bearish_ob_low_series.values
+    
+    # Equilibrium: midpoint of daily range
+    equilibrium_1d = (high_1d + low_1d) / 2.0
+    
+    # Align 1D data to 6h timeframe
+    bullish_ob_high_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_high)
+    bullish_ob_low_aligned = align_htf_to_ltf(prices, df_1d, bullish_ob_low)
+    bearish_ob_high_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_high)
+    bearish_ob_low_aligned = align_htf_to_ltf(prices, df_1d, bearish_ob_low)
+    equilibrium_aligned = align_htf_to_ltf(prices, df_1d, equilibrium_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,7 +89,9 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if np.isnan(ema_50_aligned[i]):
+        if (np.isnan(bullish_ob_high_aligned[i]) or 
+            np.isnan(bearish_ob_low_aligned[i]) or 
+            np.isnan(ema_20_1w_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -60,25 +99,38 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
+        
         if position == 0:
-            # Long: price breaks above Donchian high AND uptrend AND volume spike
-            if close[i] > high_roll[i] and close[i] > ema_50_aligned[i] and volume_spike[i]:
+            # Long: weekly uptrend + price tests bullish OB (within OB zone) + price > equilibrium (bullish bias)
+            if (weekly_uptrend and 
+                not np.isnan(bullish_ob_high_aligned[i]) and 
+                not np.isnan(bullish_ob_low_aligned[i]) and
+                low[i] <= bullish_ob_high_aligned[i] and  # price touches or penetrates OB high
+                high[i] >= bullish_ob_low_aligned[i] and  # price touches or penetrates OB low
+                close[i] > equilibrium_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian low AND downtrend AND volume spike
-            elif close[i] < low_roll[i] and close[i] < ema_50_aligned[i] and volume_spike[i]:
+            # Short: weekly downtrend + price tests bearish OB + price < equilibrium (bearish bias)
+            elif (weekly_downtrend and 
+                  not np.isnan(bearish_ob_high_aligned[i]) and 
+                  not np.isnan(bearish_ob_low_aligned[i]) and
+                  low[i] <= bearish_ob_high_aligned[i] and
+                  high[i] >= bearish_ob_low_aligned[i] and
+                  close[i] < equilibrium_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price closes below Donchian low OR trend reverses
-            if close[i] < low_roll[i] or close[i] < ema_50_aligned[i]:
+            # Long exit: price closes below equilibrium OR weekly trend turns down
+            if close[i] < equilibrium_aligned[i] or not weekly_uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price closes above Donchian high OR trend reverses
-            if close[i] > high_roll[i] or close[i] > ema_50_aligned[i]:
+            # Short exit: price closes above equilibrium OR weekly trend turns up
+            if close[i] > equilibrium_aligned[i] or not weekly_downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
