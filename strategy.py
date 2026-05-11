@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-6h_Keltner_Breakout_1dTrend_Volume
-Hypothesis: Price breaking above/below 2xATR Keltner channels on 6h, filtered by 1d EMA50 trend and volume spike (2x median). 
-Keltner channels adapt to volatility, providing dynamic support/resistance. Trend filter ensures trades align with higher timeframe momentum. 
-Volume conviction filters out false breakouts. Works in bull via uptrend breaks above upper channel, in bear via downtrend breaks below lower channel. 
-Target: 15-25 trades/year per symbol (60-100 total over 4 years).
+4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4
+Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 4h, filtered by 1d EMA34 trend and volume spike (2x median). Uses tighter R1/S1 levels for fewer, higher-quality trades. Trend filter from daily timeframe ensures alignment with longer-term momentum. Volume confirms conviction. Designed to work in bull (uptrend breaks) and bear (downtrend breaks). Target: 20-50 trades/year to avoid fee drag.
 """
 
-name = "6h_Keltner_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_v4"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -25,54 +22,59 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 6h OHLCV
-    close_6h = prices['close'].values
-    high_6h = prices['high'].values
-    low_6h = prices['low'].values
-    volume_6h = prices['volume'].values
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA50 ---
+    # --- 1d Trend Filter: EMA34 ---
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # --- 6h Keltner Channel (2x ATR) ---
-    # True Range
-    tr1 = np.abs(high_6h - low_6h)
-    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
-    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    # --- 4h Camarilla Levels (based on previous day) ---
+    # Calculate from previous 4h bar (shifted by 1 to avoid lookahead)
+    prev_close = np.roll(close_4h, 1)
+    prev_high = np.roll(high_4h, 1)
+    prev_low = np.roll(low_4h, 1)
+    prev_close[0] = close_4h[0]
+    prev_high[0] = high_4h[0]
+    prev_low[0] = low_4h[0]
+    
+    # Camarilla R1 and S1 levels (tighter than R3/S3)
+    camarilla_r1 = prev_close + (prev_high - prev_low) * 1.1 / 6
+    camarilla_s1 = prev_close - (prev_high - prev_low) * 1.1 / 6
+    
+    # --- Volume Filter: spike above 2x median of last 20 periods ---
+    vol_median = pd.Series(volume_4h).rolling(window=20, min_periods=10).median().values
+    vol_threshold = vol_median * 2.0
+    
+    # --- ATR for stoploss (14-period) ---
+    tr1 = np.abs(high_4h - low_4h)
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]  # first bar
-    atr = pd.Series(tr).rolling(window=10, min_periods=10).mean().values
-    
-    # Exponential Moving Average (20-period) as middle line
-    ema20 = pd.Series(close_6h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Upper and Lower Keltner Bands
-    keltner_upper = ema20 + 2.0 * atr
-    keltner_lower = ema20 - 2.0 * atr
-    
-    # --- Volume Filter: spike above 2x median of last 30 periods ---
-    vol_median = pd.Series(volume_6h).rolling(window=30, min_periods=15).median().values
-    vol_threshold = vol_median * 2.0
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA20 and EMA50_1d
+    start_idx = 50  # for EMA34
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r1[i]) or np.isnan(camarilla_s1[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i]) or np.isnan(atr[i])):
             if position != 0:
                 # Check stoploss
-                if position == 1 and close_6h[i] <= entry_price - 2.0 * atr[i]:
+                if position == 1 and close_4h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_6h[i] >= entry_price + 2.0 * atr[i]:
+                elif position == -1 and close_4h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -80,44 +82,44 @@ def generate_signals(prices):
             continue
         
         # Determine 1d trend
-        trend_up = close_6h[i] > ema50_1d_aligned[i]
-        trend_down = close_6h[i] < ema50_1d_aligned[i]
+        trend_up = close_4h[i] > ema34_1d_aligned[i]
+        trend_down = close_4h[i] < ema34_1d_aligned[i]
         
         # Volume filter: spike above 2x median
-        vol_ok = volume_6h[i] > vol_threshold[i]
+        vol_ok = volume_4h[i] > vol_threshold[i]
         
         if position == 0:
             # Look for entries only in direction of 1d trend with volume spike
-            if close_6h[i] > keltner_upper[i] and trend_up and vol_ok:
-                # Long: price breaks above upper Keltner + 1d uptrend + volume spike
+            if close_4h[i] > camarilla_r1[i] and trend_up and vol_ok:
+                # Long: price breaks above R1 + 1d uptrend + volume spike
                 signals[i] = 0.25
                 position = 1
-                entry_price = close_6h[i]
-            elif close_6h[i] < keltner_lower[i] and trend_down and vol_ok:
-                # Short: price breaks below lower Keltner + 1d downtrend + volume spike
+                entry_price = close_4h[i]
+            elif close_4h[i] < camarilla_s1[i] and trend_down and vol_ok:
+                # Short: price breaks below S1 + 1d downtrend + volume spike
                 signals[i] = -0.25
                 position = -1
-                entry_price = close_6h[i]
+                entry_price = close_4h[i]
         else:
             # Update stoploss and check exits
             if position == 1:
                 # Stoploss
-                if close_6h[i] <= entry_price - 2.0 * atr[i]:
+                if close_4h[i] <= entry_price - 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses below middle line (EMA20)
-                elif close_6h[i] <= ema20[i]:
+                # Exit: price touches or crosses below S1
+                elif close_4h[i] <= camarilla_s1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
                 # Stoploss
-                if close_6h[i] >= entry_price + 2.0 * atr[i]:
+                if close_4h[i] >= entry_price + 2.0 * atr[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses above middle line (EMA20)
-                elif close_6h[i] >= ema20[i]:
+                # Exit: price touches or crosses above R1
+                elif close_4h[i] >= camarilla_r1[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
