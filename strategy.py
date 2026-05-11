@@ -1,8 +1,14 @@
-# 1d_TurtleTrader_System_v1
-# Hypothesis: Turtle Trading system adapted for daily timeframe with Donchian breakouts, ATR-based position sizing, and volatility filtering. Works in trending markets (both bull and bear) by catching breakouts with strict risk management. Uses 20-day Donchian for entry and 10-day for exit, with ATR stops. Target: 15-25 trades per year on 1d timeframe.
+#!/usr/bin/env python3
+"""
+6h_Ichimoku_TK_Cross_Cloud_Filter_1d
+Hypothesis: Use Ichimoku Cloud from 1d timeframe with TK Cross (Tenkan/Kijun) on 6h for entry signals.
+In bull markets: price above cloud + TK cross up = long. In bear markets: price below cloud + TK cross down = short.
+The cloud acts as dynamic support/resistance and trend filter, reducing whipsaws. TK cross provides timely entries.
+Target: 15-30 trades per year on 6h timeframe.
+"""
 
-name = "1d_TurtleTrader_System_v1"
-timeframe = "1d"
+name = "6h_Ichimoku_TK_Cross_Cloud_Filter_1d"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -11,57 +17,78 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     
-    # === 1D Data for Turtle System ===
+    # === 1D Data for Ichimoku Cloud ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Donchian channels: 20-day for entry, 10-day for exit
-    high_20 = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    high_10 = pd.Series(high_1d).rolling(window=10, min_periods=10).max().values
-    low_10 = pd.Series(low_1d).rolling(window=10, min_periods=10).min().values
+    # Ichimoku parameters
+    tenkan_period = 9
+    kijun_period = 26
+    senkou_span_b_period = 52
     
-    # ATR for volatility filtering and position sizing
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First day
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=tenkan_period, min_periods=tenkan_period).max() + 
+                  pd.Series(low_1d).rolling(window=tenkan_period, min_periods=tenkan_period).min()) / 2
     
-    # Align indicators to 1d timeframe (already aligned, but for consistency)
-    high_20_aligned = align_htf_to_ltf(prices, df_1d, high_20)
-    low_20_aligned = align_htf_to_ltf(prices, df_1d, low_20)
-    high_10_aligned = align_htf_to_ltf(prices, df_1d, high_10)
-    low_10_aligned = align_htf_to_ltf(prices, df_1d, low_10)
-    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun_sen = (pd.Series(high_1d).rolling(window=kijun_period, min_periods=kijun_period).max() + 
+                 pd.Series(low_1d).rolling(window=kijun_period, min_periods=kijun_period).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).max() + 
+                     pd.Series(low_1d).rolling(window=senkou_span_b_period, min_periods=senkou_span_b_period).min()) / 2
+    
+    # Chikou Span (Lagging Span): not used for signals
+    
+    # Align 1D Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
+    
+    # Calculate 6h TK Cross
+    # Tenkan/Kijun cross on 6h
+    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    
+    tk_cross = tenkan_6h - kijun_6h
+    tk_cross_prev = np.roll(tk_cross, 1)
+    tk_cross_prev[0] = 0  # avoid false signal on first bar
+    
+    # Bullish TK cross: tenkan crosses above kijun
+    tk_cross_up = (tk_cross > 0) & (tk_cross_prev <= 0)
+    # Bearish TK cross: tenkan crosses below kijun
+    tk_cross_down = (tk_cross < 0) & (tk_cross_prev >= 0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 20
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(high_20_aligned[i]) or 
-            np.isnan(low_20_aligned[i]) or 
-            np.isnan(high_10_aligned[i]) or 
-            np.isnan(low_10_aligned[i]) or 
-            np.isnan(atr_aligned[i]) or
-            atr_aligned[i] <= 0):
+        if (np.isnan(tenkan_sen_aligned[i]) or 
+            np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or 
+            np.isnan(senkou_span_b_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -69,25 +96,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Determine cloud boundaries
+        cloud_top = max(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = min(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        
         if position == 0:
-            # Long: price breaks above 20-day high
-            if close[i] > high_20_aligned[i]:
+            # Long: price above cloud AND bullish TK cross on 6h
+            if close[i] > cloud_top and tk_cross_up[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-day low
-            elif close[i] < low_20_aligned[i]:
+            # Short: price below cloud AND bearish TK cross on 6h
+            elif close[i] < cloud_bottom and tk_cross_down[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price breaks below 10-day low OR ATR-based stop
-            if close[i] < low_10_aligned[i] or close[i] < (high[i] - 2.0 * atr_aligned[i]):
+            # Long exit: price crosses below cloud OR bearish TK cross
+            if close[i] < cloud_bottom or tk_cross_down[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: price breaks above 10-day high OR ATR-based stop
-            if close[i] > high_10_aligned[i] or close[i] > (low[i] + 2.0 * atr_aligned[i]):
+            # Short exit: price crosses above cloud OR bullish TK cross
+            if close[i] > cloud_top or tk_cross_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
