@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Reduced"
+name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_Adaptive"
 timeframe = "4h"
 leverage = 1.0
 
@@ -40,20 +40,30 @@ def generate_signals(prices):
     vol_ema50 = pd.Series(volume).ewm(span=50, min_periods=50, adjust=False).mean().values
     volume_ok = volume > vol_ema50 * 2.5  # Further increased threshold to reduce trades
     
+    # Adaptive position sizing based on volatility
+    atr_period = 14
+    tr = np.maximum(high[1:] - low[1:], np.maximum(np.abs(high[1:] - close[:-1]), np.abs(low[1:] - close[:-1])))
+    tr = np.insert(tr, 0, high[0] - low[0])
+    atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
+    atr_norm = atr / close
+    vol_percentile = pd.Series(atr_norm).rolling(window=100, min_periods=100).rank(pct=True).values
+    # Scale position size: 0.15 in low vol, 0.30 in high vol
+    position_size = 0.15 + 0.15 * vol_percentile
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 80
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
         if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(position_size[i])):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.0
             elif position == -1:
-                signals[i] = -0.25
+                signals[i] = 0.0
             else:
                 signals[i] = 0.0
             continue
@@ -67,11 +77,11 @@ def generate_signals(prices):
         if position == 0:
             # Long: Price breaks above R3 + above 1d EMA34 + volume spike
             if breakout_long and price_above_ema1d and volume_ok[i]:
-                signals[i] = 0.25
+                signals[i] = position_size[i]
                 position = 1
             # Short: Price breaks below S3 + below 1d EMA34 + volume spike
             elif breakout_short and price_below_ema1d and volume_ok[i]:
-                signals[i] = -0.25
+                signals[i] = -position_size[i]
                 position = -1
         else:
             # Exit conditions
@@ -81,13 +91,13 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = position_size[i]
             elif position == -1:
                 # Exit: Price crosses above R3 OR trend reverses
                 if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -position_size[i]
     
     return signals
