@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# 4h_4h_1d_RSI_CCI_Coherence_v1
-# Hypothesis: Uses RSI(14) and CCI(20) on 4h timeframe for momentum confirmation,
-# combined with 1d CCI(20) trend filter to ensure trades align with higher timeframe momentum.
-# Only enters when both timeframes show coherent momentum (both bullish or both bearish).
-# Uses volume confirmation to filter false signals.
-# Designed for low trade frequency by requiring triple confirmation (4h RSI, 4h CCI, 1d CCI).
-# Works in both bull and bear markets by following the higher timeframe momentum.
+"""
+6h_Ichimoku_TK_Cross_CloudFilter_v1
+Hypothesis: Uses Ichimoku Tenkan/Kijun cross for entry with daily cloud filter for trend direction.
+Long when TK crosses above AND price above daily cloud; Short when TK crosses below AND price below daily cloud.
+Uses volume confirmation to avoid false signals. Designed for low trade frequency by requiring multiple confluence factors.
+Ichimoku works well in both trending and ranging markets, making it suitable for BTC/ETH across market regimes.
+"""
 
-name = "4h_4h_1d_RSI_CCI_Coherence_v1"
-timeframe = "4h"
+name = "6h_Ichimoku_TK_Cross_CloudFilter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,56 +17,64 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
+    # Get 1d data for Ichimoku and cloud
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
+    if len(df_1d) < 52:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 6h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 4h RSI(14) ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # --- Ichimoku Components (9, 26, 52 periods) on 1d ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # --- 4h CCI(20) ---
-    tp = (high + low + close) / 3.0
-    sma_tp = pd.Series(tp).rolling(window=20, min_periods=20).mean().values
-    mad = pd.Series(tp).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci = (tp - sma_tp) / (0.015 * mad + 1e-10)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=9, min_periods=9).max() + 
+                  pd.Series(low_1d).rolling(window=9, min_periods=9).min()) / 2
+    tenkan_sen = tenkan_sen.values
     
-    # --- 1d CCI(20) for trend filter ---
-    tp_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    sma_tp_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).mean().values
-    mad_1d = pd.Series(tp_1d).rolling(window=20, min_periods=20).apply(lambda x: np.mean(np.abs(x - np.mean(x))), raw=True).values
-    cci_1d = (tp_1d - sma_tp_1d) / (0.015 * mad_1d + 1e-10)
-    cci_1d_aligned = align_htf_to_ltf(prices, df_1d, cci_1d)
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=26, min_periods=26).max() + 
+                 pd.Series(low_1d).rolling(window=26, min_periods=26).min()) / 2
+    kijun_sen = kijun_sen.values
     
-    # --- Volume Confirmation (20-period average) ---
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_a = ((tenkan_sen + kijun_sen) / 2)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_b = (pd.Series(high_1d).rolling(window=52, min_periods=52).max() + 
+                pd.Series(low_1d).rolling(window=52, min_periods=52).min()) / 2
+    senkou_b = senkou_b.values
+    
+    # Align Ichimoku components to 6h
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # --- Volume Spike Detection (24-period average) ---
+    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 40
+    # Start after warmup for Ichimoku (52 periods)
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(rsi[i]) or np.isnan(cci[i]) or np.isnan(cci_1d_aligned[i]) or
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or
+            np.isnan(senkou_a_aligned[i]) or np.isnan(senkou_b_aligned[i]) or
             np.isnan(vol_ratio[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
@@ -78,39 +86,43 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation threshold
-        volume_spike = vol_ratio[i] > 1.3
+        volume_spike = vol_ratio[i] > 1.8
+        
+        # Determine cloud boundaries
+        upper_cloud = np.maximum(senkou_a_aligned[i], senkou_b_aligned[i])
+        lower_cloud = np.minimum(senkou_a_aligned[i], senkou_b_aligned[i])
+        
+        # TK Cross signals
+        tk_cross_up = (tenkan_sen_aligned[i] > kijun_sen_aligned[i] and 
+                       tenkan_sen_aligned[i-1] <= kijun_sen_aligned[i-1])
+        tk_cross_down = (tenkan_sen_aligned[i] < kijun_sen_aligned[i] and 
+                         tenkan_sen_aligned[i-1] >= kijun_sen_aligned[i-1])
         
         if position == 0:
-            # Long: 4h RSI > 50 (bullish momentum), 4h CCI > 0 (bullish), 1d CCI > 0 (bullish trend), with volume
-            if (rsi[i] > 50 and 
-                cci[i] > 0 and 
-                cci_1d_aligned[i] > 0 and 
+            # Long: TK cross up + price above cloud + volume spike
+            if (tk_cross_up and 
+                close[i] > upper_cloud and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: 4h RSI < 50 (bearish momentum), 4h CCI < 0 (bearish), 1d CCI < 0 (bearish trend), with volume
-            elif (rsi[i] < 50 and 
-                  cci[i] < 0 and 
-                  cci_1d_aligned[i] < 0 and 
+            # Short: TK cross down + price below cloud + volume spike
+            elif (tk_cross_down and 
+                  close[i] < lower_cloud and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: loss of momentum coherence or volume
+            # Exit conditions: opposite TK cross or loss of cloud position
             if position == 1:
-                # Exit long: loss of bullish coherence
-                if (rsi[i] <= 50 or 
-                    cci[i] <= 0 or 
-                    cci_1d_aligned[i] <= 0):
+                # Exit long: TK cross down OR price drops below cloud
+                if (tk_cross_down or close[i] < lower_cloud):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: loss of bearish coherence
-                if (rsi[i] >= 50 or 
-                    cci[i] >= 0 or 
-                    cci_1d_aligned[i] >= 0):
+                # Exit short: TK cross up OR price rises above cloud
+                if (tk_cross_up or close[i] > upper_cloud):
                     signals[i] = 0.0
                     position = 0
                 else:
