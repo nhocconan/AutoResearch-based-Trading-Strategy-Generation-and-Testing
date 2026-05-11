@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1d_KAMA_Direction_RSI_Pullback_TrendFilter"
-timeframe = "1d"
+name = "6h_ADX_Trend_Filter_EMA_Crossover"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,49 +17,62 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # KAMA trend on 1d
-    price_series = pd.Series(close)
-    change = abs(price_series.diff(1))
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    er = change / volatility.replace(0, np.finfo(float).eps)
-    er = er.fillna(0)
-    sc = (er * 0.06 + 0.06) ** 2  # fast=2, slow=30
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama_dir = np.where(close > kama, 1, -1)
+    # EMA crossover (12 and 26) - base signal
+    ema12 = pd.Series(close).ewm(span=12, min_periods=12, adjust=False).mean().values
+    ema26 = pd.Series(close).ewm(span=26, min_periods=26, adjust=False).mean().values
+    ema_cross = ema12 - ema26  # >0 = bullish momentum
     
-    # RSI(14) for pullback
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.finfo(float).eps)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # ADX for trend strength (14-period)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    # Weekly trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
-    weekly_ma = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean()
-    weekly_ma_values = weekly_ma.values
-    weekly_ma_aligned = align_htf_to_ltf(prices, df_1w, weekly_ma_values)
+    # Directional movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
     
-    # Volume filter (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smooth TR, +DM, -DM
+    tr_smooth = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # DI values
+    plus_di = 100 * plus_dm_smooth / tr_smooth
+    minus_di = 100 * minus_dm_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = np.nan_to_num(dx, nan=0.0)
+    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Daily trend filter from 1D EMA34
+    df_1d = get_htf_data(prices, '1d')
+    ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    
+    # Volume filter - 20-period average
+    vol_ma = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
-    position = 0
-    start_idx = 50
+    position = 0  # 0: flat, 1: long, -1: short
+    
+    # Start after warmup (need enough data for indicators)
+    start_idx = 100
     
     for i in range(start_idx, n):
-        if (np.isnan(kama_dir[i]) or np.isnan(rsi[i]) or 
-            np.isnan(weekly_ma_aligned[i]) or np.isnan(vol_ratio[i])):
+        # Skip if any required data is invalid
+        if (np.isnan(ema12[i]) or np.isnan(ema26[i]) or 
+            np.isnan(adx[i]) or np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -68,31 +81,35 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
+        # Conditions
+        ema_bullish = ema12[i] > ema26[i]
+        ema_bearish = ema12[i] < ema26[i]
+        strong_trend = adx[i] > 25
+        price_above_daily_ema = close[i] > ema34_1d_aligned[i]
+        price_below_daily_ema = close[i] < ema34_1d_aligned[i]
+        volume_ok = vol_ratio[i] > 1.2
+        
         if position == 0:
-            # Long: KAMA up, weekly trend up, RSI pullback <40, volume surge
-            if (kama_dir[i] == 1 and 
-                close[i] > weekly_ma_aligned[i] and 
-                rsi[i] < 40 and 
-                vol_ratio[i] > 1.5):
+            # Long: EMA bullish + strong trend + price above daily EMA + volume
+            if ema_bullish and strong_trend and price_above_daily_ema and volume_ok:
                 signals[i] = 0.25
                 position = 1
-            # Short: KAMA down, weekly trend down, RSI pullback >60, volume surge
-            elif (kama_dir[i] == -1 and 
-                  close[i] < weekly_ma_aligned[i] and 
-                  rsi[i] > 60 and 
-                  vol_ratio[i] > 1.5):
+            # Short: EMA bearish + strong trend + price below daily EMA + volume
+            elif ema_bearish and strong_trend and price_below_daily_ema and volume_ok:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: RSI reverts to middle or trend changes
+            # Exit conditions
             if position == 1:
-                if rsi[i] > 60 or kama_dir[i] == -1:
+                # Exit: EMA turns bearish OR trend weakens OR price crosses below daily EMA
+                if (not ema_bullish) or (adx[i] < 20) or (close[i] <= ema34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                if rsi[i] < 40 or kama_dir[i] == 1:
+                # Exit: EMA turns bullish OR trend weakens OR price crosses above daily EMA
+                if (not ema_bearish) or (adx[i] < 20) or (close[i] >= ema34_1d_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
