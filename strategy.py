@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+#/usr/bin/env python3
+name = "12h_TurtleTrader_1dTrend_Filter"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,29 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for Camarilla pivot levels and trend
+    # Get daily data for Donchian channels and trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous day
-    high_prev = df_1d['high'].shift(1).values
-    low_prev = df_1d['low'].shift(1).values
-    close_prev = df_1d['close'].shift(1).values
+    # 20-period Donchian channels on daily
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper_donchian = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    lower_donchian = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    pivot = (high_prev + low_prev + close_prev) / 3
-    range_prev = high_prev - low_prev
+    # 50-day EMA for trend filter
+    ema_50_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Camarilla levels
-    r3 = close_prev + range_prev * 1.1 / 2
-    s3 = close_prev - range_prev * 1.1 / 2
-    r4 = close_prev + range_prev * 1.1
-    s4 = close_prev - range_prev * 1.1
+    # Align to 12h
+    upper_donchian_aligned = align_htf_to_ltf(prices, df_1d, upper_donchian)
+    lower_donchian_aligned = align_htf_to_ltf(prices, df_1d, lower_donchian)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 100 EMA for daily trend filter
-    close_1d = df_1d['close'].values
-    ema_100_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    
-    # Volume surge detection on 6h (20-period average)
+    # Volume filter: 20-period average on 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
-    
-    # Align all 1d data to 6h
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    ema_100_aligned = align_htf_to_ltf(prices, df_1d, ema_100_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,9 +49,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_100_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_donchian_aligned[i]) or np.isnan(lower_donchian_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -72,33 +60,35 @@ def generate_signals(prices):
             continue
         
         # Volume threshold - avoid low-volume false breakouts
-        volume_surge = vol_ratio[i] > 2.0
+        volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Break above R3 with volume surge AND price above daily EMA100 (uptrend)
-            if (close[i] > r3_aligned[i] and 
+            # Long: Price breaks above upper Donchian channel with volume
+            # AND price above 50-day EMA (uptrend filter)
+            if (close[i] > upper_donchian_aligned[i] and 
                 volume_surge and 
-                close[i] > ema_100_aligned[i]):
+                close[i] > ema_50_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Break below S3 with volume surge AND price below daily EMA100 (downtrend)
-            elif (close[i] < s3_aligned[i] and 
+            # Short: Price breaks below lower Donchian channel with volume
+            # AND price below 50-day EMA (downtrend filter)
+            elif (close[i] < lower_donchian_aligned[i] and 
                   volume_surge and 
-                  close[i] < ema_100_aligned[i]):
+                  close[i] < ema_50_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit: price returns to pivot level or opposite S3/R3 level
+            # Exit: price returns to opposite Donchian channel
             if position == 1:
-                # Exit long: price returns to pivot or drops below S3
-                if (close[i] < (high_prev[i] + low_prev[i] + close_prev[i]) / 3) or (close[i] < s3_aligned[i]):
+                # Exit long: price returns to lower Donchian channel
+                if close[i] < lower_donchian_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to pivot or rises above R3
-                if (close[i] > (high_prev[i] + low_prev[i] + close_prev[i]) / 3) or (close[i] > r3_aligned[i]):
+                # Exit short: price returns to upper Donchian channel
+                if close[i] > upper_donchian_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
