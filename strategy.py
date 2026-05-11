@@ -1,73 +1,43 @@
 #!/usr/bin/env python3
 """
-1h_Supertrend_Filter_4hTrend_Direction
-Hypothesis: Use 4h Supertrend for trend direction and 1h Supertrend for entry timing, with volume confirmation. 
-Designed to capture trends in both bull and bear markets while avoiding whipsaws through multi-timeframe confirmation.
-Limits trades by requiring alignment between 4h trend and 1h entry signal.
+4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1
+Hypothesis: Use 1d Camarilla pivot points (R1/S1) for breakout entries with 1d trend filter and volume spike confirmation.
+Designed to capture institutional breakout attempts in both bull and bear markets while avoiding false breakouts.
+Limits trades by requiring alignment between 1d trend, volume confirmation, and price action at key pivot levels.
 """
 
-name = "1h_Supertrend_Filter_4hTrend_Direction"
-timeframe = "1h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_VolumeSpike_v1"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-def calculate_supertrend(high, low, close, period=10, multiplier=3):
-    """Calculate Supertrend indicator"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot points for the day"""
+    # Pivot point
+    pivot = (high + low + close) / 3
+    # Range
+    range_ = high - low
     
-    # Average True Range
-    atr = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
+    # Camarilla levels
+    r4 = close + range_ * 1.500
+    r3 = close + range_ * 1.250
+    r2 = close + range_ * 1.166
+    r1 = close + range_ * 1.083
+    s1 = close - range_ * 1.083
+    s2 = close - range_ * 1.166
+    s3 = close - range_ * 1.250
+    s4 = close - range_ * 1.500
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + multiplier * atr
-    basic_lb = (high + low) / 2 - multiplier * atr
-    
-    # Final Upper and Lower Bands
-    final_ub = np.copy(basic_ub)
-    final_lb = np.copy(basic_lb)
-    
-    # Supertrend
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close)):
-        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-    
-    # Determine Supertrend and direction
-    for i in range(len(close)):
-        if i == 0:
-            supertrend[i] = final_lb[i]
-            direction[i] = 1
-        else:
-            if supertrend[i-1] == final_ub[i-1]:
-                if close[i] <= final_ub[i]:
-                    supertrend[i] = final_ub[i]
-                else:
-                    supertrend[i] = final_lb[i]
-                    direction[i] = -1
-            else:
-                if close[i] >= final_lb[i]:
-                    supertrend[i] = final_lb[i]
-                else:
-                    supertrend[i] = final_ub[i]
-                    direction[i] = 1
-    
-    return supertrend, direction
+    return r1, s1, r2, s2, r3, s3, r4, s4
+
+def calculate_ema(arr, period):
+    """Calculate EMA with proper handling of NaN"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    return pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -79,39 +49,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Get 1d data for Camarilla levels and trend
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 4h Supertrend for trend direction
-    supertrend_4h, direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, period=10, multiplier=3)
+    # Calculate 1d Camarilla levels (R1, S1)
+    r1_1d, s1_1d, _, _, _, _, _, _ = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Align 4h Supertrend direction to 1h timeframe
-    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h.astype(float))
+    # Calculate 1d EMA34 for trend filter
+    ema34_1d = calculate_ema(close_1d, 34)
     
-    # Calculate 1h Supertrend for entry timing
-    supertrend_1h, direction_1h = calculate_supertrend(high, low, close, period=10, multiplier=3)
+    # Calculate volume spike: current 1d volume > 2.0x 20-period average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_spike_1d = volume_1d > (vol_ma_1d * 2.0)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > (vol_ma * 1.5)
+    # Align 1d indicators to 4h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    volume_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_spike_1d.astype(float))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 30
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(direction_4h_aligned[i]) or 
-            np.isnan(supertrend_1h[i]) or 
-            np.isnan(volume_filter[i])):
+        if (np.isnan(r1_1d_aligned[i]) or 
+            np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or 
+            np.isnan(volume_spike_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -120,27 +95,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: 4h uptrend AND 1h Supertrend buy signal AND volume filter
-            if direction_4h_aligned[i] == 1 and direction_1h[i] == 1 and volume_filter[i]:
-                signals[i] = 0.20
+            # Long: Close > R1 AND Uptrend (close > EMA34) AND Volume spike
+            if close[i] > r1_1d_aligned[i] and close[i] > ema34_1d_aligned[i] and volume_spike_1d_aligned[i]:
+                signals[i] = 0.25
                 position = 1
-            # Short: 4h downtrend AND 1h Supertrend sell signal AND volume filter
-            elif direction_4h_aligned[i] == -1 and direction_1h[i] == -1 and volume_filter[i]:
-                signals[i] = -0.20
+            # Short: Close < S1 AND Downtrend (close < EMA34) AND Volume spike
+            elif close[i] < s1_1d_aligned[i] and close[i] < ema34_1d_aligned[i] and volume_spike_1d_aligned[i]:
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: 4h trend turns down OR 1h Supertrend sell signal
-            if direction_4h_aligned[i] == -1 or direction_1h[i] == -1:
+            # Long exit: Close < S1 OR trend turns down (close < EMA34)
+            if close[i] < s1_1d_aligned[i] or close[i] < ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: 4h trend turns up OR 1h Supertrend buy signal
-            if direction_4h_aligned[i] == 1 or direction_1h[i] == 1:
+            # Short exit: Close > R1 OR trend turns up (close > EMA34)
+            if close[i] > r1_1d_aligned[i] or close[i] > ema34_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
