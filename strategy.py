@@ -1,11 +1,14 @@
-# 6h_Camarilla_R3S3_Breakout_1dTrend_Volume
-# Hypothesis: 6h timeframe balances trade frequency and cost. Daily trend filter (EMA34) avoids counter-trend trades.
-# Breakouts at daily Camarilla R3/S3 levels with volume confirmation capture institutional moves.
-# Works in bull (breakouts above R3 in uptrend) and bear (breakdowns below S3 in downtrend).
-# Target: 15-30 trades/year (60-120 total over 4 years) to minimize fee drag.
+#!/usr/bin/env python3
+"""
+1H_Camarilla_R3S3_Breakout_4hTrend_Volume
+Hypothesis: 4h EMA50 defines trend, daily Camarilla R3/S3 levels act as strong support/resistance.
+In bull markets, buy breakouts above R3 with 4h uptrend. In bear markets, sell breakdowns below S3 with 4h downtrend.
+Volume spike confirms institutional interest. Uses 1h timeframe for entry timing with 4h trend filter to reduce false signals.
+Target: 15-37 trades/year (60-150 over 4 years) with session filter (08-20 UTC) to avoid low-volume periods.
+"""
 
-name = "6h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "6h"
+name = "1H_Camarilla_R3S3_Breakout_4hTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -22,31 +25,37 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Load daily data ONCE for trend filter and pivot levels
+    # Precompute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h data ONCE for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    
+    # Load daily data ONCE for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Daily EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Daily Camarilla R3/S3 levels
+    # Calculate Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
     hl_range = high_1d - low_1d
     r3 = close_1d + hl_range * 1.5000
     s3 = close_1d - hl_range * 1.5000
     
-    # Align Camarilla levels to 6h timeframe
+    # Align Camarilla levels to 1h timeframe
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # Volume filter: 20-period EMA for spike detection (using 6h volume)
-    vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 1.5
+    # Volume filter: 24-period EMA for spike detection (1h volume, ~1 day)
+    vol_ema24 = pd.Series(volume).ewm(span=24, min_periods=24, adjust=False).mean().values
+    volume_ok = volume > vol_ema24 * 2.0  # Require stronger spike for 1h
     
     # Fixed position size to minimize churn
-    position_size = 0.25
+    position_size = 0.20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -55,8 +64,9 @@ def generate_signals(prices):
     start_idx = 50
     
     for i in range(start_idx, n):
-        # Skip if any required data is invalid
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+        # Skip if outside trading session or any required data is invalid
+        if not in_session[i] or \
+           (np.isnan(ema50_4h_aligned[i]) or np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
@@ -67,32 +77,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema1d = close[i] > ema34_1d_aligned[i]
-        price_below_ema1d = close[i] < ema34_1d_aligned[i]
+        price_above_ema4h = close[i] > ema50_4h_aligned[i]
+        price_below_ema4h = close[i] < ema50_4h_aligned[i]
         breakout_long = close[i] > r3_aligned[i]
         breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above daily EMA34 + volume spike
-            if breakout_long and price_above_ema1d and volume_ok[i]:
+            # Long: Price breaks above R3 + above 4h EMA50 + volume spike + session
+            if breakout_long and price_above_ema4h and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below daily EMA34 + volume spike
-            elif breakout_short and price_below_ema1d and volume_ok[i]:
+            # Short: Price breaks below S3 + below 4h EMA50 + volume spike + session
+            elif breakout_short and price_below_ema4h and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit conditions - trend reversal or opposite breakout
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses (close below daily EMA)
-                if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+                # Exit: Price breaks below S3 OR trend reverses (close below 4h EMA)
+                if close[i] < s3_aligned[i] or close[i] < ema50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses (close above daily EMA)
-                if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+                # Exit: Price breaks above R3 OR trend reverses (close above 4h EMA)
+                if close[i] > r3_aligned[i] or close[i] > ema50_4h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
