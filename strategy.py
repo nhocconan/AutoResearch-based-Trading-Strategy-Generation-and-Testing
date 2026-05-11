@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1_S1_Breakout_1dEMA34_VolumeSpike"
-timeframe = "4h"
+name = "6h_Donchian_20_WeeklyTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 34:
+    if n < 100:
         return np.zeros(n)
     
     high = prices['high'].values
@@ -17,49 +17,51 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h price for breakout detection
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 2:
+    # Weekly trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    close_1w = df_1w['close'].values
+    sma_20_1w = pd.Series(close_1w).rolling(window=20, min_periods=20).mean().values
+    sma_20_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_20_1w)
     
-    # 4h Camarilla pivot levels (R1, S1)
-    pivot_4h = (high_4h + low_4h + close_4h) / 3
-    range_4h = high_4h - low_4h
-    r1_4h = close_4h + (range_4h * 1.0833)
-    s1_4h = close_4h - (range_4h * 1.0833)
-    
-    # Align levels to 4h timeframe (same timeframe, no shift needed for same-TF)
-    r1_4h_aligned = r1_4h
-    s1_4h_aligned = s1_4h
-    
-    # 1d EMA34 trend filter
+    # Daily ATR for stop loss and volatility filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 14:
         return np.zeros(n)
     
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Volume confirmation (4h volume > 1.8x 20-period average)
+    tr1 = np.abs(high_1d - low_1d)
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    atr_14_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_14_1d)
+    
+    # Donchian channels (20-period)
+    high_max_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume confirmation
     volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.8 * volume_ma20
     
-    # Session filter: 08-20 UTC
+    # Session filter: 00-08 UTC (Asian session breakout)
     hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    session_filter = (hours >= 0) & (hours < 8)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20)
+    start_idx = max(20, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_34_1d_aligned[i]) or np.isnan(volume_ma20[i]):
+        if np.isnan(sma_20_1w_aligned[i]) or np.isnan(atr_14_1d_aligned[i]) or np.isnan(high_max_20[i]) or np.isnan(low_min_20[i]) or np.isnan(volume_ma20[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -68,24 +70,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Close breaks above R1, above EMA34, volume confirmation, session
-            if close[i] > r1_4h_aligned[i] and close[i] > ema_34_1d_aligned[i] and volume_filter[i] and session_filter[i]:
+            # Long: Break above upper band, above weekly SMA, volume spike, Asian session
+            if (close[i] > high_max_20[i] and 
+                close[i] > sma_20_1w_aligned[i] and 
+                volume[i] > 1.5 * volume_ma20[i] and 
+                session_filter[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Close breaks below S1, below EMA34, volume confirmation, session
-            elif close[i] < s1_4h_aligned[i] and close[i] < ema_34_1d_aligned[i] and volume_filter[i] and session_filter[i]:
+            # Short: Break below lower band, below weekly SMA, volume spike, Asian session
+            elif (close[i] < low_min_20[i] and 
+                  close[i] < sma_20_1w_aligned[i] and 
+                  volume[i] > 1.5 * volume_ma20[i] and 
+                  session_filter[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: Close below S1 or below EMA34
-            if close[i] < s1_4h_aligned[i] or close[i] < ema_34_1d_aligned[i]:
+            # Exit long: Close below lower band or below weekly SMA
+            if close[i] < low_min_20[i] or close[i] < sma_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: Close above R1 or above EMA34
-            if close[i] > r1_4h_aligned[i] or close[i] > ema_34_1d_aligned[i]:
+            # Exit short: Close above upper band or above weekly SMA
+            if close[i] > high_max_20[i] or close[i] > sma_20_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
