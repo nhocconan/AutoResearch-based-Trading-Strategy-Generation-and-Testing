@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-1d_KAMA_Trend_Volume_Momentum
-Hypothesis: KAMA direction + RSI + volume momentum filter on daily chart. KAMA adapts to volatility, RSI identifies momentum, volume confirms strength. Works in both bull and bear markets by filtering with trend and momentum.
+4h_1d_Camarilla_Pivot_Refined
+Hypothesis: Refined version of Camarilla pivot breakout with stricter volume confirmation (3x average volume) and ATR-based position sizing to reduce trade frequency and improve risk-adjusted returns. Uses 1d EMA50 for trend filter to avoid counter-trend trades. Targets 25-40 trades/year to stay within optimal range for 4h timeframe.
 """
 
-name = "1d_KAMA_Trend_Volume_Momentum"
-timeframe = "1d"
+name = "4h_1d_Camarilla_Pivot_Refined"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,105 +17,127 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    # Get 1d data for pivot calculation and trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Daily close
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
-    # --- KAMA (Kaufman Adaptive Moving Average) ---
-    # Parameters: ER period=10, Fast EMA=2, Slow EMA=30
-    change = np.abs(np.diff(close, prepend=close[0]))
-    volatility = np.sum(np.abs(np.diff(close)), axis=0) if False else None  # placeholder, will compute properly
+    # --- 1d Trend Filter: EMA50 ---
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Proper ER calculation
-    close_series = pd.Series(close)
-    change = close_series.diff().abs()
-    volatility = change.rolling(window=10, min_periods=10).sum()
-    direction = np.abs(close_series - close_series.shift(10))
-    er = direction / volatility.replace(0, np.nan)
-    er = er.fillna(0).values
+    # --- ATR for position sizing and stop ---
+    high_low = high_4h - low_4h
+    high_close = np.abs(high_4h - np.roll(close_4h, 1))
+    low_close = np.abs(low_4h - np.roll(close_4h, 1))
+    true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+    true_range[0] = high_low[0]  # First value
+    atr = pd.Series(true_range).rolling(window=14, min_periods=14).mean().values
     
-    # Smoothing constants
-    fast_sc = 2 / (2 + 1)
-    slow_sc = 2 / (30 + 1)
-    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
+    # --- Camarilla Pivots from 1d (previous day) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    # Calculate pivots from previous day's data
+    camarilla_high = np.full_like(close_1d, np.nan)
+    camarilla_low = np.full_like(close_1d, np.nan)
+    camarilla_close = np.full_like(close_1d, np.nan)
     
-    # --- RSI (14) ---
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14, min_periods=14).mean()
-    avg_loss = loss.rolling(window=14, min_periods=14).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = (100 - (100 / (1 + rs))).fillna(50).values
+    for i in range(1, len(close_1d)):
+        # Use previous day's OHLC to calculate today's pivots
+        camarilla_high[i] = high_1d[i-1]
+        camarilla_low[i] = low_1d[i-1]
+        camarilla_close[i] = close_1d[i-1]
     
-    # --- Volume momentum: volume > 20-day average ---
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla levels
+    R4 = camarilla_close + ((camarilla_high - camarilla_low) * 1.5000)
+    R3 = camarilla_close + ((camarilla_high - camarilla_low) * 1.2500)
+    R2 = camarilla_close + ((camarilla_high - camarilla_low) * 1.1666)
+    R1 = camarilla_close + ((camarilla_high - camarilla_low) * 1.0833)
+    PP = camarilla_close
+    S1 = camarilla_close - ((camarilla_high - camarilla_low) * 1.0833)
+    S2 = camarilla_close - ((camarilla_high - camarilla_low) * 1.1666)
+    S3 = camarilla_close - ((camarilla_high - camarilla_low) * 1.2500)
+    S4 = camarilla_close - ((camarilla_high - camarilla_low) * 1.5000)
     
-    # --- Weekly trend filter: EMA50 ---
-    close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align pivots to 4h timeframe
+    R3_4h = align_htf_to_ltf(prices, df_1d, R3)
+    S3_4h = align_htf_to_ltf(prices, df_1d, S3)
+    R1_4h = align_htf_to_ltf(prices, df_1d, R1)
+    S1_4h = align_htf_to_ltf(prices, df_1d, S1)
+    
+    # --- Volume Confirmation: 4h volume > 3x 20-period average (stricter) ---
+    vol_ma_20 = pd.Series(volume_4h).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup period
-    start_idx = 50  # for KAMA, RSI, EMA, volume MA
+    start_idx = 50  # for EMA50 and volume MA
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(kama[i]) or np.isnan(rsi[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema50_1w_aligned[i])):
+        if (np.isnan(R3_4h[i]) or np.isnan(S3_4h[i]) or 
+            np.isnan(R1_4h[i]) or np.isnan(S1_4h[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma_20[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Determine weekly trend
-        trend_up = close[i] > ema50_1w_aligned[i]
-        trend_down = close[i] < ema50_1w_aligned[i]
+        # Determine 1d trend
+        trend_up = close_4h[i] > ema50_1d_aligned[i]
+        trend_down = close_4h[i] < ema50_1d_aligned[i]
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma_20[i]
+        # Volume confirmation: at least 3x average volume (much stricter)
+        vol_ok = volume_4h[i] > (vol_ma_20[i] * 3.0)
         
         if position == 0:
-            # Look for entries only in direction of weekly trend with volume and RSI momentum
-            if close[i] > kama[i] and rsi[i] > 55 and trend_up and vol_ok:
-                # Long: price above KAMA, RSI > 55, weekly uptrend, volume momentum
-                signals[i] = 0.25
+            # Look for entries only in direction of 1d trend with volume
+            if close_4h[i] > R3_4h[i] and trend_up and vol_ok:
+                # Long: price breaks above R3 + 1d uptrend + volume spike
+                # Size based on ATR volatility (inverse volatility scaling)
+                vol_factor = min(2.0, max(0.5, 1.0 / (atr[i] / close_4h[i] * 100)))
+                base_size = 0.25
+                signal_size = base_size * vol_factor
+                # Clamp to reasonable range
+                signal_size = max(0.15, min(0.35, signal_size))
+                signals[i] = signal_size
                 position = 1
-            elif close[i] < kama[i] and rsi[i] < 45 and trend_down and vol_ok:
-                # Short: price below KAMA, RSI < 45, weekly downtrend, volume momentum
-                signals[i] = -0.25
+            elif close_4h[i] < S3_4h[i] and trend_down and vol_ok:
+                # Short: price breaks below S3 + 1d downtrend + volume spike
+                vol_factor = min(2.0, max(0.5, 1.0 / (atr[i] / close_4h[i] * 100)))
+                base_size = 0.25
+                signal_size = base_size * vol_factor
+                signal_size = max(0.15, min(0.35, signal_size))
+                signals[i] = -signal_size
                 position = -1
         else:
-            # Exit conditions
+            # Exit conditions with volatility-adjusted bands
             if position == 1:
-                # Exit long: price crosses below KAMA or RSI < 40
-                if close[i] < kama[i] or rsi[i] < 40:
+                # Exit long: price returns to S1 (opposite side) or ATR-based stop
+                atr_stop = 1.5 * atr[i]
+                if close_4h[i] <= S1_4h[i] or close_4h[i] <= (np.maximum.accumulate(high_4h[:i+1])[-1] - atr_stop):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = signal_size if 'signal_size' in locals() else 0.25
             elif position == -1:
-                # Exit short: price crosses above KAMA or RSI > 60
-                if close[i] > kama[i] or rsi[i] > 60:
+                # Exit short: price returns to R1 (opposite side) or ATR-based stop
+                atr_stop = 1.5 * atr[i]
+                if close_4h[i] >= R1_4h[i] or close_4h[i] >= (np.minimum.accumulate(low_4h[:i+1])[-1] + atr_stop):
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -signal_size if 'signal_size' in locals() else -0.25
     
     return signals
