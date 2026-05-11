@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-12h_Donchian_Breakout_1dTrend_Volume
-Hypothesis: Price breaking above/below Donchian Channel (20) on 12h, filtered by 1d EMA34 trend and volume spike (2x median). Donchian captures breakouts in trending markets, while EMA34 ensures alignment with longer-term momentum. Volume confirms conviction. Designed to work in bull (uptrend breaks) and bear (downtrend breaks). Target: 12-37 trades/year to avoid fee drag.
+4h_Vortex_Trend_12hVol
+Hypothesis: The Vortex Indicator identifies strong trend direction (VI+ > VI- for uptrend, VI- > VI+ for downtrend). Combined with 12h volume confirmation (volume > 1.5x median) and ATR-based stoploss, this strategy captures sustained trends in both bull and bear markets. The Vortex Indicator is less prone to whipsaws than simple moving average crossovers. Target: 20-50 trades/year to avoid fee drag.
 """
 
-name = "12h_Donchian_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Vortex_Trend_12hVol"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -14,100 +14,118 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    # Get 12h data for volume filter
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 2:
         return np.zeros(n)
     
-    # 12h OHLCV
-    close_12h = prices['close'].values
-    high_12h = prices['high'].values
-    low_12h = prices['low'].values
-    volume_12h = prices['volume'].values
+    # 4h OHLCV
+    close_4h = prices['close'].values
+    high_4h = prices['high'].values
+    low_4h = prices['low'].values
+    volume_4h = prices['volume'].values
     
-    # --- 1d Trend Filter: EMA34 ---
-    close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    # --- Vortex Indicator (VI) on 4h ---
+    # True Range
+    tr1 = np.abs(high_4h - low_4h)
+    tr2 = np.abs(high_4h - np.roll(close_4h, 1))
+    tr3 = np.abs(low_4h - np.roll(close_4h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
     
-    # --- 12h Donchian Channel (20) ---
-    donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+    # VM+ and VM-
+    vm_plus = np.abs(high_4h - np.roll(low_4h, 1))
+    vm_minus = np.abs(low_4h - np.roll(high_4h, 1))
+    vm_plus[0] = np.abs(high_4h[0] - low_4h[0])  # first bar
+    vm_minus[0] = np.abs(low_4h[0] - high_4h[0])  # first bar
     
-    # --- Volume Filter: spike above 2x median of last 20 periods ---
-    vol_median = pd.Series(volume_12h).rolling(window=20, min_periods=10).median().values
-    vol_threshold = vol_median * 2.0
+    # Sum over 14 periods
+    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    vm_plus_sum = pd.Series(vm_plus).rolling(window=14, min_periods=14).sum().values
+    vm_minus_sum = pd.Series(vm_minus).rolling(window=14, min_periods=14).sum().values
+    
+    vi_plus = vm_plus_sum / tr_sum
+    vi_minus = vm_minus_sum / tr_sum
+    
+    # --- 12h Volume Filter: volume > 1.5x median of last 28 periods ---
+    vol_12h = df_12h['volume'].values
+    vol_median_12h = pd.Series(vol_12h).rolling(window=28, min_periods=14).median().values
+    vol_threshold_12h = vol_median_12h * 1.5
+    vol_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_12h)
+    vol_threshold_aligned = align_htf_to_ltf(prices, df_12h, vol_threshold_12h)
+    
+    # --- ATR for stoploss ---
+    atr_4h = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 50  # for EMA34 and Donchian
+    start_idx = 30  # for Vortex and ATR
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(vi_plus[i]) or np.isnan(vi_minus[i]) or 
+            np.isnan(vol_12h_aligned[i]) or np.isnan(vol_threshold_aligned[i]) or 
+            np.isnan(atr_4h[i])):
             if position != 0:
                 # Check stoploss
-                if position == 1 and close_12h[i] <= entry_price - 2.5 * (donchian_upper[i] - donchian_lower[i]) / 2:
+                if position == 1 and close_4h[i] <= entry_price - 2.5 * atr_4h[i]:
                     signals[i] = 0.0
                     position = 0
-                elif position == -1 and close_12h[i] >= entry_price + 2.5 * (donchian_upper[i] - donchian_lower[i]) / 2:
+                elif position == -1 and close_4h[i] >= entry_price + 2.5 * atr_4h[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25 if position == 1 else -0.25
+                    signals[i] = 0.30 if position == 1 else -0.30
             continue
         
-        # Determine 1d trend
-        trend_up = close_12h[i] > ema34_1d_aligned[i]
-        trend_down = close_12h[i] < ema34_1d_aligned[i]
+        # Determine trend direction from Vortex
+        bullish_trend = vi_plus[i] > vi_minus[i]
+        bearish_trend = vi_minus[i] > vi_plus[i]
         
-        # Volume filter: spike above 2x median
-        vol_ok = volume_12h[i] > vol_threshold[i]
+        # Volume filter: 12h volume above threshold
+        vol_ok = vol_12h_aligned[i] > vol_threshold_aligned[i]
         
         if position == 0:
-            # Look for entries only in direction of 1d trend with volume spike
-            if close_12h[i] > donchian_upper[i] and trend_up and vol_ok:
-                # Long: price breaks above Donchian upper + 1d uptrend + volume spike
-                signals[i] = 0.25
+            # Look for entries only with volume confirmation
+            if bullish_trend and vol_ok:
+                # Long: VI+ > VI- + volume confirmation
+                signals[i] = 0.30
                 position = 1
-                entry_price = close_12h[i]
-            elif close_12h[i] < donchian_lower[i] and trend_down and vol_ok:
-                # Short: price breaks below Donchian lower + 1d downtrend + volume spike
-                signals[i] = -0.25
+                entry_price = close_4h[i]
+            elif bearish_trend and vol_ok:
+                # Short: VI- > VI+ + volume confirmation
+                signals[i] = -0.30
                 position = -1
-                entry_price = close_12h[i]
+                entry_price = close_4h[i]
         else:
             # Update stoploss and check exits
             if position == 1:
-                # Stoploss: 2.5x ATR equivalent (using Donchian width as proxy)
-                atr_proxy = (donchian_upper[i] - donchian_lower[i]) / 2
-                if close_12h[i] <= entry_price - 2.5 * atr_proxy:
+                # Stoploss
+                if close_4h[i] <= entry_price - 2.5 * atr_4h[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses below Donchian lower
-                elif close_12h[i] <= donchian_lower[i]:
+                # Exit: trend reversal (VI- > VI+)
+                elif vi_minus[i] > vi_plus[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.30
             elif position == -1:
-                # Stoploss: 2.5x ATR equivalent
-                atr_proxy = (donchian_upper[i] - donchian_lower[i]) / 2
-                if close_12h[i] >= entry_price + 2.5 * atr_proxy:
+                # Stoploss
+                if close_4h[i] >= entry_price + 2.5 * atr_4h[i]:
                     signals[i] = 0.0
                     position = 0
-                # Exit: price touches or crosses above Donchian upper
-                elif close_12h[i] >= donchian_upper[i]:
+                # Exit: trend reversal (VI+ > VI-)
+                elif vi_plus[i] > vi_minus[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.30
     
     return signals
