@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 12h_Camarilla_R1_S1_Breakout_1dTrend_Volume
-Hypothesis: Price breaking above/below R1/S1 Camarilla levels on 12h, filtered by 1d EMA34 trend and volume above 1.5x median.
-Focus on tight entries (R1/S1 tighter than R3/S3) to reduce trade count and improve win rate. Works in bull via uptrend breaks,
-in bear via downtrend breaks. Volume confirms conviction. Target: 12-37 trades/year.
+Hypothesis: On 12h timeframe, price breaking above/below R1/S1 Camarilla levels with 1d EMA34 trend confirmation and volume > 1.5x median.
+Target: 50-150 total trades over 4 years (12-37/year). Uses tight R1/S1 levels to reduce trade count.
+Works in bull via uptrend breaks above R1, in bear via downtrend breaks below S1. Volume confirms conviction.
 """
 
 name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
