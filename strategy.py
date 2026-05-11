@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_TRIX_Volume_Spike_4hTrend_Filter"
-timeframe = "1h"
+name = "6h_Ichimoku_TK_Cross_Cloud_Filter_1w"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,54 +9,68 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 100:
         return np.zeros(n)
     
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 12:
+    # Get weekly data for Ichimoku cloud and trend
+    df_1w = get_htf_data(prices, '1w')
+    
+    if len(df_1w) < 52:
         return np.zeros(n)
     
-    # Calculate TRIX (12-period) on 4h close
-    close_4h = df_4h['close'].values
-    # EMA1
-    ema1 = pd.Series(close_4h).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA2
-    ema2 = pd.Series(ema1).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # EMA3
-    ema3 = pd.Series(ema2).ewm(span=12, adjust=False, min_periods=12).mean().values
-    # TRIX = (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix_raw = np.zeros_like(ema3)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
-    trix_4h = trix_raw
-    trix_4h_aligned = align_htf_to_ltf(prices, df_4h, trix_4h)
+    # Calculate Ichimoku components on weekly
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Get 1d data for volume spike filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+    period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Calculate 1d average volume (20-period)
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+    period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+    kijun_sen = (period26_high + period26_low) / 2
     
-    # Volume spike: current volume > 2.0 x 1d average volume
-    volume_spike = volume > (vol_ma_1d_aligned * 2.0)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+    period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
+    
+    # Align Ichimoku components to 6h timeframe (using previous week's values)
+    tenkan_6h = align_htf_to_ltf(prices, df_1w, tenkan_sen)
+    kijun_6h = align_htf_to_ltf(prices, df_1w, kijun_sen)
+    span_a_6h = align_htf_to_ltf(prices, df_1w, senkou_span_a)
+    span_b_6h = align_htf_to_ltf(prices, df_1w, senkou_span_b)
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(span_a_6h, span_b_6h)
+    cloud_bottom = np.minimum(span_a_6h, span_b_6h)
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > (vol_ma * 1.5)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 30
+    start_idx = 60
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(trix_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(volume_spike[i])):
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(volume_filter[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -65,27 +79,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: TRIX turns positive (> 0) AND volume spike
-            if trix_4h_aligned[i] > 0 and volume_spike[i]:
-                signals[i] = 0.20
+            # Long: TK cross bullish AND price above cloud AND volume surge
+            if (tenkan_6h[i] > kijun_6h[i] and 
+                close[i] > cloud_top[i] and 
+                volume_filter[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: TRIX turns negative (< 0) AND volume spike
-            elif trix_4h_aligned[i] < 0 and volume_spike[i]:
-                signals[i] = -0.20
+            # Short: TK cross bearish AND price below cloud AND volume surge
+            elif (tenkan_6h[i] < kijun_6h[i] and 
+                  close[i] < cloud_bottom[i] and 
+                  volume_filter[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: TRIX turns negative (< 0)
-            if trix_4h_aligned[i] < 0:
+            # Long exit: TK cross bearish OR price drops below cloud
+            if (tenkan_6h[i] < kijun_6h[i] or 
+                close[i] < cloud_bottom[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20  # maintain position
+                signals[i] = 0.25  # maintain position
         elif position == -1:
-            # Short exit: TRIX turns positive (> 0)
-            if trix_4h_aligned[i] > 0:
+            # Short exit: TK cross bullish OR price rises above cloud
+            if (tenkan_6h[i] > kijun_6h[i] or 
+                close[i] > cloud_top[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20  # maintain position
+                signals[i] = -0.25  # maintain position
     
     return signals
