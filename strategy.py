@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_ChoppinessIndex_Regime_Adaptive"
-timeframe = "6h"
+name = "4h_Camarilla_R1_S1_Breakout_12hTrend_VolumeS"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,68 +17,59 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for trend filter (EMA34)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get 12h data for trend filter (EMA50)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up_12h = close_12h > ema50_12h
+    trend_up_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_up_12h)
+    
+    # Get 1d data for Camarilla pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 1:
+        return np.zeros(n)
+    
+    # Calculate Camarilla pivot levels for R1 and S1 (based on previous day)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
     
-    # Choppiness Index on 6h (14-period)
-    # Calculate True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Previous day's OHLC for pivot calculation
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
     
-    # Sum of TR over 14 periods
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    # Set first day values to NaN (no previous day)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Max(high) - min(low) over 14 periods
-    max_h = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_l = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    range_hl = max_h - min_l
+    # Calculate pivot and Camarilla levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
+    r1 = pivot + (range_hl * 1.1 / 12)
+    s1 = pivot - (range_hl * 1.1 / 12)
     
-    # Choppiness Index
-    chop = np.zeros_like(close)
-    chop[:] = np.nan
-    valid = (tr_sum > 0) & (range_hl > 0)
-    chop[valid] = 100 * np.log10(tr_sum[valid] / range_hl[valid]) / np.log10(14)
+    # Align Camarilla levels to 4h timeframe
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Choppiness regime thresholds
-    chop_high = 61.8  # > 61.8 = ranging (mean revert)
-    chop_low = 38.2   # < 38.2 = trending (trend follow)
-    
-    # Mean reversion signals (in ranging markets)
-    # RSI(14) for mean reversion
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Trend following signals (in trending markets)
-    # EMA crossover (8,21)
-    ema8 = pd.Series(close).ewm(span=8, adjust=False, min_periods=8).mean().values
-    ema21 = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_cross_up = ema8 > ema21
-    ema_cross_down = ema8 < ema21
+    # Volume confirmation: current volume > 1.8x 20-period average
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.8 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(21, 14)  # Need enough data for EMA21 and chop
+    start_idx = 20  # Need enough data for volume MA
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(chop[i]) or np.isnan(rsi[i]) or np.isnan(ema8[i]) or 
-            np.isnan(ema21[i]) or np.isnan(trend_up_1d_aligned[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(trend_up_12h_aligned[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -86,71 +77,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        chop_val = chop[i]
-        rsi_val = rsi[i]
-        ema8_val = ema8[i]
-        ema21_val = ema21[i]
-        trend_up = trend_up_1d_aligned[i]
-        
         if position == 0:
-            # In ranging market (chop > 61.8): mean reversion at RSI extremes
-            if chop_val > chop_high:
-                if rsi_val < 30:  # Oversold
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi_val > 70:  # Overbought
-                    signals[i] = -0.25
-                    position = -1
-            # In trending market (chop < 38.2): trend following with daily filter
-            elif chop_val < chop_low:
-                if ema8_val > ema21_val and trend_up:  # Uptrend + daily up
-                    signals[i] = 0.25
-                    position = 1
-                elif ema8_val < ema21_val and not trend_up:  # Downtrend + daily down
-                    signals[i] = -0.25
-                    position = -1
-            # In transition zone (38.2 <= chop <= 61.8): no trade
-        
+            # Long: Price breaks above R1 + 12h uptrend + volume confirmation
+            if close[i] > r1_aligned[i] and trend_up_12h_aligned[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: Price breaks below S1 + 12h downtrend + volume confirmation
+            elif close[i] < s1_aligned[i] and not trend_up_12h_aligned[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
         elif position == 1:
-            # Long exit conditions
-            if chop_val > chop_high:  # Went to ranging: exit on RSI > 50
-                if rsi_val > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            elif chop_val < chop_low:  # Still trending: exit on EMA cross down
-                if ema8_val < ema21_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-            else:  # Transition zone: exit on RSI > 50
-                if rsi_val > 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = 0.25
-        
+            # Long exit: Price breaks below S1 OR 12h trend turns down
+            if close[i] < s1_aligned[i] or not trend_up_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit conditions
-            if chop_val > chop_high:  # Went to ranging: exit on RSI < 50
-                if rsi_val < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            elif chop_val < chop_low:  # Still trending: exit on EMA cross up
-                if ema8_val > ema21_val:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
-            else:  # Transition zone: exit on RSI < 50
-                if rsi_val < 50:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -0.25
+            # Short exit: Price breaks above R1 OR 12h trend turns up
+            if close[i] > r1_aligned[i] or trend_up_12h_aligned[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
