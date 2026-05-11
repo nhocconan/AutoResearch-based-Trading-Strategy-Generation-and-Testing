@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol
-Hypothesis: Use 4h trend (EMA50) and 1d volume spike for signal direction, 1h for entry timing at Camarilla R1/S1 levels.
-Breakouts only in direction of 4h trend with 1d volume confirmation. Avoids counter-trend trades to reduce whipsaw.
-Designed for low trade frequency (15-30/year) to avoid fee drag while capturing high-probability momentum moves.
-Works in bull markets via trend-following breakouts and in bear markets via short breakdowns with volume confirmation.
+6h_RSI_Momentum_Divergence_1wTrend_v1
+Hypothesis: Uses weekly EMA for trend filter and RSI divergence signals on 6h timeframe.
+Trades counter-trend in strong weekly trends (avoiding whipsaws) and with-trend momentum on weekly pullbacks.
+Designed for low trade frequency (15-25/year) to avoid fee drag while capturing high-probability reversals and continuations.
 """
 
-name = "1h_Camarilla_R1_S1_Breakout_4hTrend_1dVol"
-timeframe = "1h"
+name = "6h_RSI_Momentum_Divergence_1wTrend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,106 +19,142 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 50:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 30:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla pivots and volume filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
-    
-    # 1h OHLCV
+    # 6h OHLCV
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- 4h EMA50 for trend filter ---
-    close_4h = df_4h['close']
-    ema_50_4h = close_4h.ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # --- Weekly EMA30 for trend filter ---
+    close_1w = df_1w['close']
+    ema_30_1w = close_1w.ewm(span=30, adjust=False, min_periods=30).mean().values
+    ema_30_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_30_1w)
     
-    # --- Daily Camarilla Pivot Levels (R1, S1) ---
-    # Based on previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # --- RSI(14) on 6h ---
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values  # neutral when undefined
     
-    # Calculate pivot and levels
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r1 = pivot + (range_1d * 1.1 / 12)  # R1
-    s1 = pivot - (range_1d * 1.1 / 12)  # S1
+    # --- RSI divergence detection (bearish: price HH, RSI LH; bullish: price LL, RSI HL) ---
+    # Look for peaks/troughs over 5-period window
+    lookback = 5
+    rsi_peak = np.zeros(n, dtype=bool)
+    rsi_trough = np.zeros(n, dtype=bool)
+    price_peak = np.zeros(n, dtype=bool)
+    price_trough = np.zeros(n, dtype=bool)
     
-    # Align to 1h (Camarilla levels are valid for the entire day)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    for i in range(lookback, n - lookback):
+        # RSI peak: higher than neighbors
+        if rsi[i] == np.max(rsi[i-lookback:i+lookback+1]):
+            rsi_peak[i] = True
+        # RSI trough: lower than neighbors
+        if rsi[i] == np.min(rsi[i-lookback:i+lookback+1]):
+            rsi_trough[i] = True
+        # Price peak
+        if close[i] == np.max(close[i-lookback:i+lookback+1]):
+            price_peak[i] = True
+        # Price trough
+        if close[i] == np.min(close[i-lookback:i+lookback+1]):
+            price_trough[i] = True
     
-    # --- 1d Volume Spike (2x 20-period EMA) ---
-    vol_ema_1d = df_1d['volume'].ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike_1d = df_1d['volume'].values > (2.0 * vol_ema_1d)
-    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    # Bearish divergence: price makes new high, RSI makes lower high
+    bearish_div = np.zeros(n, dtype=bool)
+    # Bullish divergence: price makes new low, RSI makes higher low
+    bullish_div = np.zeros(n, dtype=bool)
+    
+    # Track recent peaks/troughs for divergence
+    last_price_peak = -1
+    last_rsi_peak = -1
+    last_price_trough = -1
+    last_rsi_trough = -1
+    
+    for i in range(n):
+        if price_peak[i]:
+            last_price_peak = i
+        if rsi_peak[i]:
+            last_rsi_peak = i
+        if price_trough[i]:
+            last_price_trough = i
+        if rsi_trough[i]:
+            last_rsi_trough = i
+        
+        # Bearish divergence: price HH but RSI LH
+        if (last_price_peak > 0 and last_rsi_peak > 0 and 
+            close[last_price_peak] > close[last_price_peak - lookback] and  # price HH
+            rsi[last_rsi_peak] < rsi[last_rsi_peak - lookback]):          # RSI LH
+            bearish_div[i] = True
+        
+        # Bullish divergence: price LL but RSI HL
+        if (last_price_trough > 0 and last_rsi_trough > 0 and 
+            close[last_price_trough] < close[last_price_trough - lookback] and  # price LL
+            rsi[last_rsi_trough] > rsi[last_rsi_trough - lookback]):          # RSI HL
+            bullish_div[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 60
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_50_4h_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or
-            np.isnan(vol_spike_1d_aligned[i])):
-            # Maintain position if valid, otherwise flat
+        if np.isnan(ema_30_1w_aligned[i]) or np.isnan(rsi[i]):
             if position == 1:
-                signals[i] = 0.20
+                signals[i] = 0.25
             elif position == -1:
-                signals[i] = -0.20
+                signals[i] = -0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine 4h trend based on price vs EMA50
-        price_above_ema = close[i] > ema_50_4h_aligned[i]
-        price_below_ema = close[i] < ema_50_4h_aligned[i]
-        
-        # Breakout signals (price crosses R1/S1 with 1d volume spike)
-        long_breakout = (high[i] > r1_aligned[i]) and vol_spike_1d_aligned[i]
-        short_breakout = (low[i] < s1_aligned[i]) and vol_spike_1d_aligned[i]
+        # Determine weekly trend
+        price_above_weekly_ema = close[i] > ema_30_1w_aligned[i]
+        price_below_weekly_ema = close[i] < ema_30_1w_aligned[i]
         
         if position == 0:
-            if price_above_ema:
-                # Uptrend: only long breakouts
-                if long_breakout:
-                    signals[i] = 0.20
+            # In strong weekly uptrend: look for bullish divergence (long)
+            if price_above_weekly_ema and bullish_div[i]:
+                signals[i] = 0.25
+                position = 1
+            # In strong weekly downtrend: look for bearish divergence (short)
+            elif price_below_weekly_ema and bearish_div[i]:
+                signals[i] = -0.25
+                position = -1
+            # In weak/no trend (near weekly EMA): look for momentum continuations
+            elif abs(close[i] - ema_30_1w_aligned[i]) < (0.005 * ema_30_1w_aligned[i]):  # Within 0.5% of weekly EMA
+                # Bullish momentum: RSI rising from oversold
+                if rsi[i] > rsi[i-1] and rsi[i-1] < 30:
+                    signals[i] = 0.25
                     position = 1
-            elif price_below_ema:
-                # Downtrend: only short breakouts
-                if short_breakout:
-                    signals[i] = -0.20
+                # Bearish momentum: RSI falling from overbought
+                elif rsi[i] < rsi[i-1] and rsi[i-1] > 70:
+                    signals[i] = -0.25
                     position = -1
-            # No counter-trend trades to reduce whipsaw
         else:
-            # Exit conditions: reverse signal or trend change
+            # Exit conditions
             if position == 1:
-                # Exit long: short breakdown or trend turns down
-                exit_signal = short_breakout or (close[i] < ema_50_4h_aligned[i])
-                if exit_signal:
+                # Exit long: bearish divergence or RSI overbought
+                if bearish_div[i] or rsi[i] > 70:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.20
+                    signals[i] = 0.25
             elif position == -1:
-                # Exit short: long breakout or trend turns up
-                exit_signal = long_breakout or (close[i] > ema_50_4h_aligned[i])
-                if exit_signal:
+                # Exit short: bullish divergence or RSI oversold
+                if bullish_div[i] or rsi[i] < 30:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.20
+                    signals[i] = -0.25
     
     return signals
