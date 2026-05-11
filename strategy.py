@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R3S3_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "6h_RSI_MeanReversion_1wTrend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,42 +17,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla pivot levels and trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 34:
+    # Get weekly data for trend filter (EMA200)
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
         return np.zeros(n)
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_up_1w = close_1w > ema200_1w
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
     
-    # Camarilla levels: R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
+    # RSI(14) for mean reversion
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Trend filter: 1d EMA34
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    
-    # Align all 1d indicators to 12h timeframe
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    
-    # Volume confirmation: current volume > 2.0x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 2.0 * vol_ma20
+    volume_filter = volume > 1.5 * vol_ma20
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 34  # Need enough data for EMA34
+    start_idx = 30  # Need enough data for RSI and volume
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or np.isnan(vol_ma20[i])):
+        if (np.isnan(rsi[i]) or np.isnan(trend_up_1w_aligned[i]) or 
+            np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -61,24 +58,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: Price above R3 + 1d uptrend + volume confirmation
-            if close[i] > camarilla_r3_aligned[i] and trend_up_1d_aligned[i] and volume_filter[i]:
+            # Long: RSI oversold (<30) + weekly uptrend + volume confirmation
+            if rsi[i] < 30 and trend_up_1w_aligned[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price below S3 + 1d downtrend + volume confirmation
-            elif close[i] < camarilla_s3_aligned[i] and not trend_up_1d_aligned[i] and volume_filter[i]:
+            # Short: RSI overbought (>70) + weekly downtrend + volume confirmation
+            elif rsi[i] > 70 and not trend_up_1w_aligned[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: Price below S3 OR 1d trend turns down
-            if close[i] < camarilla_s3_aligned[i] or not trend_up_1d_aligned[i]:
+            # Long exit: RSI overbought (>70) OR weekly trend turns down
+            if rsi[i] > 70 or not trend_up_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: Price above R3 OR 1d trend turns up
-            if close[i] > camarilla_r3_aligned[i] or trend_up_1d_aligned[i]:
+            # Short exit: RSI oversold (<30) OR weekly trend turns up
+            if rsi[i] < 30 or trend_up_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
