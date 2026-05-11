@@ -1,79 +1,90 @@
 #!/usr/bin/env python3
 """
-4h_DailyPivot_Breakout_TrendVolume_v6
-Hypothesis: Price breaking above daily R1 or below daily S1 with 12h trend confirmation (EMA50) and volume spike. Uses daily pivot levels as strong support/resistance. In uptrend (price > EMA50), buy breakouts above R1; in downtrend (price < EMA50), sell breakdowns below S1. Volume confirms institutional interest. Designed for 4h timeframe with 12h trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
+4h_KAMA_Trend_RSI_Pullback_v1
+Hypothesis: In trending markets (price > KAMA for long, price < KAMA for short), buy pullbacks to RSI(40) or sell rallies to RSI(60). KAMA adapts to market noise, reducing whipsaws in sideways markets. RSI thresholds avoid extreme overbought/oversold, capturing momentum continuations. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend). Uses 4h timeframe with minimal conditions to limit trades (<50/year) and reduce fee drag.
 """
 
-name = "4h_DailyPivot_Breakout_TrendVolume_v6"
+name = "4h_KAMA_Trend_RSI_Pullback_v1"
 timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Price and volume
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for pivot points
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 5:
-        return np.zeros(n)
+    # Efficiency Ratio for KAMA (10-period)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)
+    # Calculate ER using expanding window for efficiency
+    er = np.zeros(n)
+    for i in range(n):
+        if i < 10:
+            er[i] = 0
+        else:
+            dir_move = np.abs(close[i] - close[i-10])
+            vol_sum = np.sum(np.abs(np.diff(close[i-9:i+1])))
+            er[i] = dir_move / vol_sum if vol_sum != 0 else 0
     
-    # Calculate daily pivot points (standard formula)
-    # Using previous period's OHLC
-    d_high = df_1d['high'].values
-    d_low = df_1d['low'].values
-    d_close = df_1d['close'].values
+    # Smoothing constants
+    fast_sc = 2 / (2 + 1)   # EMA(2)
+    slow_sc = 2 / (30 + 1)  # EMA(30)
+    sc = (er * (fast_sc - slow_sc) + slow_sc) ** 2
     
-    # Shift to use previous period's data (avoid look-ahead)
-    d_high_prev = np.roll(d_high, 1)
-    d_low_prev = np.roll(d_low, 1)
-    d_close_prev = np.roll(d_close, 1)
-    # First period: use current values to avoid NaN
-    d_high_prev[0] = d_high[0]
-    d_low_prev[0] = d_low[0]
-    d_close_prev[0] = d_close[0]
+    # KAMA calculation
+    kama = np.zeros(n)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Pivot point calculation
-    pivot = (d_high_prev + d_low_prev + d_close_prev) / 3.0
-    # R1 and S1 levels
-    r1 = pivot + 1 * (d_high_prev - d_low_prev)
-    s1 = pivot - 1 * (d_high_prev - d_low_prev)
+    # RSI(14) with proper initialization
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Align daily R1/S1 to 4h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    for i in range(n):
+        if i < 14:
+            if i == 0:
+                avg_gain[i] = gain[i]
+                avg_loss[i] = loss[i]
+            else:
+                avg_gain[i] = (avg_gain[i-1] * i + gain[i]) / (i + 1)
+                avg_loss[i] = (avg_loss[i-1] * i + loss[i]) / (i + 1)
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
     
-    # 12h trend filter (EMA 50)
-    ema_50_12h = pd.Series(d_close).ewm(
-        span=50, adjust=False, min_periods=50
-    ).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_1d, ema_50_12h)
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Volume confirmation (20-period average on 4h)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume average (20-period)
+    vol_ma = np.zeros(n)
+    for i in range(n):
+        if i < 20:
+            vol_ma[i] = np.mean(volume[:i+1]) if i > 0 else volume[i]
+        else:
+            vol_ma[i] = np.mean(volume[i-19:i+1])
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 60
+    start_idx = 30  # After warmup for KAMA/RSI
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or 
-            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        # Volume confirmation: avoid low-volume noise
+        if vol_ratio[i] < 0.5:
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -82,40 +93,29 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume threshold
-        volume_spike = vol_ratio[i] > 2.0
-        
         if position == 0:
-            # Long: break above daily R1 + above 12h EMA50 + volume spike
-            if (close[i] > r1_aligned[i] and 
-                close[i] > ema_50_12h_aligned[i] and 
-                volume_spike):
+            # Long: price > KAMA (uptrend) + RSI pullback to 40-50 + volume
+            if (close[i] > kama[i] and 
+                40 <= rsi[i] <= 50 and 
+                vol_ratio[i] > 1.5):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below daily S1 + below 12h EMA50 + volume spike
-            elif (close[i] < s1_aligned[i] and 
-                  close[i] < ema_50_12h_aligned[i] and 
-                  volume_spike):
+            # Short: price < KAMA (downtrend) + RSI rally to 50-60 + volume
+            elif (close[i] < kama[i] and 
+                  50 <= rsi[i] <= 60 and 
+                  vol_ratio[i] > 1.5):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to pivot or trend reversal
-            # Calculate pivot for exit (use previous period's data)
-            pivot_val = (d_high_prev + d_low_prev + d_close_prev) / 3.0
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_val)
-            
+            # Exit: trend reversal (price crosses KAMA) or RSI extreme
             if position == 1:
-                # Exit long: price returns to daily pivot OR trend turns down
-                if (close[i] <= pivot_aligned[i]) or \
-                   (close[i] < ema_50_12h_aligned[i]):
+                if close[i] < kama[i] or rsi[i] >= 70:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to daily pivot OR trend turns up
-                if (close[i] >= pivot_aligned[i]) or \
-                   (close[i] > ema_50_12h_aligned[i]):
+                if close[i] > kama[i] or rsi[i] <= 30:
                     signals[i] = 0.0
                     position = 0
                 else:
