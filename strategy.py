@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike_v1
-Hypothesis: Camarilla R3/S3 levels act as strong intraday support/resistance.
-Breakouts above R3 or below S3 with volume spike and 1d EMA34 trend filter capture
-institutional moves. Works in bull/bear by following 1d trend direction.
-Target: 20-40 trades/year on 4h with volume confirmation reducing false breakouts.
+12h_KAMA_Direction_RSI_Filter_v1
+Hypothesis: Uses KAMA (Kaufman Adaptive Moving Average) on 12h to determine trend direction,
+filtered by RSI on 1d for overbought/oversold conditions. In bull/bear markets, we follow
+the KAMA trend when RSI is not extreme. In ranging markets (when RSI is between 40-60),
+we avoid trades to prevent whipsaw. Designed for low trade frequency (~15-25 trades/year)
+by requiring alignment between 12h trend and 1d RSI conditions.
 """
 
-name = "4h_Camarilla_R3S3_Breakout_1dTrend_Volume_Spike_v1"
-timeframe = "4h"
+name = "12h_KAMA_Direction_RSI_Filter_v1"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -20,50 +21,65 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Camarilla calculation and trend filter
+    # Get 1d data for RSI
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 12h OHLCV
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # --- KAMA (10-period ER, 2/30 smoothing) on 12h close ---
+    # Efficiency Ratio
+    change = np.abs(np.diff(close, k=10))  # 10-period net change
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # 10-period sum of absolute changes
+    # Vectorized volatility calculation
+    volatility = np.array([np.sum(np.abs(np.diff(close[i:i+10]))) if i+10 <= len(close) else 0 for i in range(len(close))])
+    volatility[:9] = 0  # Pad beginning
+    er = np.where(volatility != 0, change / volatility, 0)
     
-    # Calculate Camarilla levels (R3, S3) for each day
-    # R3 = close + 1.1 * (high - low) / 1.25
-    # S3 = close - 1.1 * (high - low) / 1.25
-    camarilla_range = prev_high - prev_low
-    r3 = prev_close + 1.1 * camarilla_range / 1.25
-    s3 = prev_close - 1.1 * camarilla_range / 1.25
+    # Smoothing constants
+    sc = (er * (2/2 - 2/30) + 2/30) ** 2  # (ER*(fastest-slowest) + slowest)^2
     
-    # Align Camarilla levels to 4h (wait for previous day's close)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # KAMA calculation
+    kama = np.full_like(close, np.nan, dtype=float)
+    kama[9] = close[9]  # Start after 10 periods
+    for i in range(10, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # 1d EMA34 for trend filter
-    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    # --- RSI (14-period) on 1d close ---
+    close_1d = df_1d['close'].values
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Volume spike detector (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (vol_ma * 2.0)  # Volume at least 2x average
+    # Wilder's smoothing (alpha = 1/14)
+    avg_gain = np.full_like(close_1d, np.nan, dtype=float)
+    avg_loss = np.full_like(close_1d, np.nan, dtype=float)
+    avg_gain[13] = np.mean(gain[1:14])  # First average
+    avg_loss[13] = np.mean(loss[1:14])
+    
+    for i in range(14, len(close_1d)):
+        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)  # Avoid division by zero
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = np.where(np.isnan(rsi_1d), 50, rsi_1d)  # Neutral when undefined
+    
+    # Align RSI to 12h
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup (need enough data for EMA and volume)
-    start_idx = 40
+    # Start after warmup
+    start_idx = 20
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama[i]) or np.isnan(rsi_1d_aligned[i]):
+            # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -72,34 +88,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Trend filter: only trade in direction of 1d EMA34
-        uptrend = close[i] > ema_34_aligned[i]
-        downtrend = close[i] < ema_34_aligned[i]
+        # Determine trend from KAMA
+        bullish = close[i] > kama[i]
+        bearish = close[i] < kama[i]
+        
+        # RSI conditions
+        rsi_overbought = rsi_1d_aligned[i] > 60
+        rsi_oversold = rsi_1d_aligned[i] < 40
+        rsi_neutral = (rsi_1d_aligned[i] >= 40) & (rsi_1d_aligned[i] <= 60)
         
         if position == 0:
-            # Look for breakouts with volume spike
-            if uptrend and vol_spike[i] and close[i] > r3_aligned[i]:
-                # Break above R3 in uptrend -> long
+            # Enter long: bullish KAMA and not overbought RSI
+            if bullish and not rsi_overbought:
                 signals[i] = 0.25
                 position = 1
-            elif downtrend and vol_spike[i] and close[i] < s3_aligned[i]:
-                # Break below S3 in downtrend -> short
+            # Enter short: bearish KAMA and not oversold RSI
+            elif bearish and not rsi_oversold:
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: price returns to Camarilla body or trend reversal
+            # Exit conditions
             if position == 1:
-                # Exit long: price back below R3 or trend turns down
-                exit_signal = (close[i] < r3_aligned[i]) or (not uptrend)
-                if exit_signal:
+                # Exit long: bearish KAMA or overbought RSI
+                if bearish or rsi_overbought:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price back above S3 or trend turns up
-                exit_signal = (close[i] > s3_aligned[i]) or (not downtrend)
-                if exit_signal:
+                # Exit short: bullish KAMA or oversold RSI
+                if bullish or rsi_oversold:
                     signals[i] = 0.0
                     position = 0
                 else:
