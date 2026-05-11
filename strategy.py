@@ -1,17 +1,6 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-"""
-Hypothesis: 4h Donchian breakout with volume confirmation and trend filter.
-- Long when price breaks above Donchian(20) high + volume > 1.5x 20-period average + price > 50-period EMA (trend)
-- Short when price breaks below Donchian(20) low + volume > 1.5x 20-period average + price < 50-period EMA
-- Exit on opposite Donchian break (lower for long, upper for short)
-- Uses 12h EMA50 as higher timeframe trend filter (aligned) to avoid counter-trend trades
-- Discrete position sizing (0.25) to minimize fee churn
-- Target: 20-40 trades/year (~80-160 total over 4 years) to stay within fee limits
-"""
-
-name = "4h_Donchian20_VolumeTrend_12hEMA50"
-timeframe = "4h"
+name = "6h_Camarilla_R3S3_Breakout_1wTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -20,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,32 +17,49 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 12h EMA50 trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Weekly trend: close above/below 1w EMA20
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
-    trend_up = close > ema_12h_50_aligned  # price above 12h EMA50 = uptrend
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    trend_up = close > ema_1w_aligned
     
-    # Volume filter: volume > 1.5x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.5 * vol_ma20
+    # Daily volume filter: volume > 1.5x 20-day average
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
+        return np.zeros(n)
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
+    volume_filter = volume > 1.5 * vol_ma20_1d_aligned
     
-    # Donchian channels (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Camarilla pivot levels from previous day
+    # Calculate from previous day's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
+    range_ = prev_high - prev_low
+    # Camarilla levels
+    r3 = prev_close + range_ * 1.1 / 4
+    s3 = prev_close - range_ * 1.1 / 4
+    r4 = prev_close + range_ * 1.1 / 2
+    s4 = prev_close - range_ * 1.1 / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = 50  # Need enough data for EMA and Donchian
+    start_idx = 20  # Need enough data for calculations
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(ema_12h_50_aligned[i]) or np.isnan(vol_ma20[i]) or
-            np.isnan(donch_high[i]) or np.isnan(donch_low[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma20_1d_aligned[i]) or
+            np.isnan(r3[i]) or np.isnan(s3[i]) or np.isnan(r4[i]) or np.isnan(s4[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,24 +68,24 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above Donchian high + uptrend + volume
-            if close[i] > donch_high[i] and trend_up[i] and volume_filter[i]:
+            # Long: Break above R3 with weekly uptrend + volume filter
+            if close[i] > r3[i] and trend_up[i] and volume_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + downtrend + volume
-            elif close[i] < donch_low[i] and not trend_up[i] and volume_filter[i]:
+            # Short: Break below S3 with weekly downtrend + volume filter
+            elif close[i] < s3[i] and not trend_up[i] and volume_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: break below Donchian low
-            if close[i] < donch_low[i]:
+            # Long exit: Close below S3 or weekly trend down
+            if close[i] < s3[i] or not trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Short exit: break above Donchian high
-            if close[i] > donch_high[i]:
+            # Short exit: Close above R3 or weekly trend up
+            if close[i] > r3[i] or trend_up[i]:
                 signals[i] = 0.0
                 position = 0
             else:
