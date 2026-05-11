@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Filtered"
+name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume_Refined"
 timeframe = "4h"
 leverage = 1.0
 
@@ -48,18 +48,10 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > vol_ma
     
-    # Additional filter: avoid ranging markets using ADX-like condition
-    # Use 14-period high-low range vs ATR as proxy for trend strength
-    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    avg_range = pd.Series(high - low).rolling(window=14, min_periods=14).mean().values
-    trend_filter = avg_range > (atr * 1.5)  # Trending when average range > 1.5*ATR
-    
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(34, 20, 14)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
         if np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or np.isnan(ema_1d_aligned[i]):
@@ -71,12 +63,12 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R1 + above 1d EMA + volume + trend
-            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i] and trend_filter[i]:
+            # Long: break above R1 + above 1d EMA + volume
+            if close[i] > camarilla_r1_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S1 + below 1d EMA + volume + trend
-            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i] and trend_filter[i]:
+            # Short: break below S1 + below 1d EMA + volume
+            elif close[i] < camarilla_s1_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
