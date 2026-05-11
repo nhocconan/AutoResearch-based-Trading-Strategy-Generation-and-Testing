@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-4H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeS
-Hypothesis: Daily EMA50 defines medium-term trend, daily Camarilla R3/S3 levels act as strong support/resistance.
+4H_Camarilla_R3S3_Breakout_1dEMA100_Trend_Volume
+Hypothesis: Daily EMA100 defines long-term trend, daily Camarilla R3/S3 levels act as strong support/resistance.
 In bull markets, buy breakouts above R3 with daily uptrend. In bear markets, sell breakdowns below S3 with daily downtrend.
 Volume spike confirms institutional interest. Uses 4h timeframe for better trade frequency and lower fee drag vs 1d.
 Target: 20-50 trades/year, low turnover to minimize fee drag in ranging 2025 market.
 """
 
-name = "4H_Camarilla_R3S3_Breakout_1dEMA50_Trend_VolumeS"
+name = "4H_Camarilla_R3S3_Breakout_1dEMA100_Trend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -28,8 +28,8 @@ def generate_signals(prices):
     # Load daily data ONCE for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema100_1d = pd.Series(close_1d).ewm(span=100, min_periods=100, adjust=False).mean().values
+    ema100_1d_aligned = align_htf_to_ltf(prices, df_1d, ema100_1d)
     
     # Load daily data ONCE for Camarilla levels
     high_1d = df_1d['high'].values
@@ -56,11 +56,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
+        if (np.isnan(ema100_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
             np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
@@ -71,17 +71,17 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema1d = close[i] > ema50_1d_aligned[i]
-        price_below_ema1d = close[i] < ema50_1d_aligned[i]
+        price_above_ema1d = close[i] > ema100_1d_aligned[i]
+        price_below_ema1d = close[i] < ema100_1d_aligned[i]
         breakout_long = close[i] > r3_aligned[i]
         breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above daily EMA50 + volume spike
+            # Long: Price breaks above R3 + above daily EMA100 + volume spike
             if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below daily EMA50 + volume spike
+            # Short: Price breaks below S3 + below daily EMA100 + volume spike
             elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
@@ -89,14 +89,14 @@ def generate_signals(prices):
             # Exit conditions - simplified to reduce churn
             if position == 1:
                 # Exit: Price crosses below S3 OR trend reverses (close below daily EMA)
-                if close[i] < s3_aligned[i] or close[i] < ema50_1d_aligned[i]:
+                if close[i] < s3_aligned[i] or close[i] < ema100_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
                 # Exit: Price crosses above R3 OR trend reverses (close above daily EMA)
-                if close[i] > r3_aligned[i] or close[i] > ema50_1d_aligned[i]:
+                if close[i] > r3_aligned[i] or close[i] > ema100_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
