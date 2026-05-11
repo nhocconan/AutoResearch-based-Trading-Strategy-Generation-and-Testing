@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-name = "12h_1D_Keltner_BandBreak_Trend_Volume"
+name = "12h_1W_1D_Camarilla_R3S3_Breakout_Trend_Volume"
 timeframe = "12h"
 leverage = 1.0
 
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # 12h data
@@ -23,29 +23,39 @@ def generate_signals(prices):
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate Keltner Channel from 1D data
-    # Keltner Channel: EMA ± (ATR * multiplier)
-    ema_20_1d = pd.Series(df_1d['close']).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # True Range for ATR
+    # Calculate Camarilla pivot levels from previous day
+    # H, L, C from previous day
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first day
-    atr_10_1d = pd.Series(tr).ewm(span=10, adjust=False, min_periods=10).mean().values
     
-    multiplier = 1.5
-    upper_keltner = ema_20_1d + (atr_10_1d * multiplier)
-    lower_keltner = ema_20_1d - (atr_10_1d * multiplier)
+    # Previous day's values (shift by 1)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = high_1d[0]  # first day uses same day
+    prev_low[0] = low_1d[0]
+    prev_close[0] = close_1d[0]
+    
+    # Calculate pivot and levels
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_val = prev_high - prev_low
+    
+    # Camarilla levels - only R3 and S3 for breakout
+    R3 = pivot + (range_val * 1.1 / 2.0)
+    S3 = pivot - (range_val * 1.1 / 2.0)
     
     # Align to 12h timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20_1d)
-    upper_keltner_aligned = align_htf_to_ltf(prices, df_1d, upper_keltner)
-    lower_keltner_aligned = align_htf_to_ltf(prices, df_1d, lower_keltner)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
+    
+    # 1W EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # Volume ratio (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,12 +66,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(upper_keltner_aligned[i]) or 
-            np.isnan(lower_keltner_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -74,26 +84,30 @@ def generate_signals(prices):
         volume_surge = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: Price breaks above upper Keltner band with volume surge
-            if (close[i] > upper_keltner_aligned[i] and volume_surge):
+            # Long: Price breaks above R3 with volume surge and above weekly EMA50 (bullish trend)
+            if (close[i] > R3_aligned[i] and 
+                volume_surge and 
+                close[i] > ema_50_1w_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below lower Keltner band with volume surge
-            elif (close[i] < lower_keltner_aligned[i] and volume_surge):
+            # Short: Price breaks below S3 with volume surge and below weekly EMA50 (bearish trend)
+            elif (close[i] < S3_aligned[i] and 
+                  volume_surge and 
+                  close[i] < ema_50_1w_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: Price returns below EMA (middle of Keltner channel)
-                if close[i] < ema_20_aligned[i]:
+                # Exit long: Price returns below R3 or trend turns bearish
+                if (close[i] < R3_aligned[i]) or (close[i] < ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: Price returns above EMA (middle of Keltner channel)
-                if close[i] > ema_20_aligned[i]:
+                # Exit short: Price returns above S3 or trend turns bullish
+                if (close[i] > S3_aligned[i]) or (close[i] > ema_50_1w_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
