@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_12hDonchian_Breakout_Volume_Trend"
-timeframe = "4h"
+name = "1h_4hDonchian_1dTrend_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -13,33 +13,50 @@ def generate_signals(prices):
         return np.zeros(n)
     
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # 12h EMA trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 30:
+    # 4h Donchian channel for trend direction
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) < 20:
         return np.zeros(n)
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    lookback = 20
+    donchian_high = np.full(len(high_4h), np.nan)
+    donchian_low = np.full(len(low_4h), np.nan)
+    for i in range(lookback, len(high_4h)):
+        donchian_high[i] = np.max(high_4h[i-lookback:i])
+        donchian_low[i] = np.min(low_4h[i-lookback:i])
+    donchian_high = np.roll(donchian_high, 1)
+    donchian_low = np.roll(donchian_low, 1)
+    donchian_high[0] = np.nan
+    donchian_low[0] = np.nan
+    donchian_high_aligned = align_htf_to_ltf(prices, df_4h, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_4h, donchian_low)
     
-    # Volume filter (20-period average)
+    # 1d trend filter (EMA34)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
+        return np.zeros(n)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > vol_ma
+    
+    # Session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = max(50, 20)
+    start_idx = max(34, 20)
     
     for i in range(start_idx, n):
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(high_max[i]) or np.isnan(low_min[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -48,27 +65,27 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: breakout above upper band + above 12h EMA + volume
-            if close[i] > high_max[i] and close[i] > ema_12h_aligned[i] and vol_filter[i]:
-                signals[i] = 0.25
+            # Long: break above 4h Donchian high + above 1d EMA + volume + session
+            if close[i] > donchian_high_aligned[i] and close[i] > ema_1d_aligned[i] and vol_filter[i] and session_filter[i]:
+                signals[i] = 0.20
                 position = 1
-            # Short: breakout below lower band + below 12h EMA + volume
-            elif close[i] < low_min[i] and close[i] < ema_12h_aligned[i] and vol_filter[i]:
-                signals[i] = -0.25
+            # Short: break below 4h Donchian low + below 1d EMA + volume + session
+            elif close[i] < donchian_low_aligned[i] and close[i] < ema_1d_aligned[i] and vol_filter[i] and session_filter[i]:
+                signals[i] = -0.20
                 position = -1
         elif position == 1:
-            # Exit long: close below lower band or below 12h EMA
-            if close[i] < low_min[i] or close[i] < ema_12h_aligned[i]:
+            # Exit long: break below 4h Donchian low or below 1d EMA
+            if close[i] < donchian_low_aligned[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short: close above upper band or above 12h EMA
-            if close[i] > high_max[i] or close[i] > ema_12h_aligned[i]:
+            # Exit short: break above 4h Donchian high or above 1d EMA
+            if close[i] > donchian_high_aligned[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
