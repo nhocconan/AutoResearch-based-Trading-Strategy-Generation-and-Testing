@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Relative_Volume_Imbalance_Signal"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -17,7 +17,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for volume profile and trend filter
+    # Get daily data once before loop
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
@@ -27,33 +27,36 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     volume_1d = df_1d['volume'].values
     
-    # Calculate daily EMA50 for trend filter
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily EMA34 for trend filter
+    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Calculate 1-day average volume
-    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Calculate Camarilla pivot levels from previous day
+    # Pivot = (H + L + C) / 3
+    # R1 = C + (H - L) * 1.1 / 12
+    # S1 = C - (H - L) * 1.1 / 12
+    pivot_1d = (high_1d + low_1d + close_1d) / 3
+    r1_1d = close_1d + (high_1d - low_1d) * 1.1 / 12
+    s1_1d = close_1d - (high_1d - low_1d) * 1.1 / 12
     
-    # Align 1d indicators to 6h
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d)
+    # Align 1d indicators to 12h
+    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Calculate 6h volume ratio (current volume / 20-period average)
+    # Calculate 12h volume ratio (current volume / 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma  # Current volume relative to recent average
-    
-    # Calculate price position within 6h range (0 = low, 1 = high)
-    range_width = high - low
-    range_width = np.where(range_width == 0, 1, range_width)  # Avoid division by zero
-    price_position = (close - low) / range_width
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure EMA50 and volume MA are ready
+    start_idx = 34  # Ensure EMA34 and volume MA are ready
     
     for i in range(start_idx, n):
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(avg_vol_1d_aligned[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(price_position[i])):
+        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -62,29 +65,29 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: strong buying pressure (high close in range) + high volume + above daily EMA50
-            if (price_position[i] > 0.7 and 
-                vol_ratio[i] > 2.0 and 
-                close[i] > ema50_1d_aligned[i]):
+            # Long: price breaks above R1 with volume + above daily EMA34
+            if (close[i] > r1_1d_aligned[i] and 
+                vol_ratio[i] > 1.5 and 
+                close[i] > ema34_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: strong selling pressure (low close in range) + high volume + below daily EMA50
-            elif (price_position[i] < 0.3 and 
-                  vol_ratio[i] > 2.0 and 
-                  close[i] < ema50_1d_aligned[i]):
+            # Short: price breaks below S1 with volume + below daily EMA34
+            elif (close[i] < s1_1d_aligned[i] and 
+                  vol_ratio[i] > 1.5 and 
+                  close[i] < ema34_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: loss of buying pressure or volume drops
-            if (price_position[i] < 0.4 or 
+            # Exit long: price returns below pivot or volume drops
+            if (close[i] < pivot_1d_aligned[i] or 
                 vol_ratio[i] < 1.2):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: loss of selling pressure or volume drops
-            if (price_position[i] > 0.6 or 
+            # Exit short: price returns above pivot or volume drops
+            if (close[i] > pivot_1d_aligned[i] or 
                 vol_ratio[i] < 1.2):
                 signals[i] = 0.0
                 position = 0
