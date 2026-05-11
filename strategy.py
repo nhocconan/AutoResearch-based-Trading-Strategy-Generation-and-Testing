@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_Keltner_Breakout_Slope_Trend_v1
-Hypothesis: Uses Keltner Channel breakout with slope confirmation from weekly EMA20 to capture strong trends.
-Breakouts occur when price closes outside the Keltner Channel (ATR-based) with volume confirmation.
-Trend filter uses weekly EMA20 slope (rising/falling) to avoid counter-trend trades.
-Designed for low trade frequency (<25/year) to minimize fee decay while capturing explosive moves.
+12h_1d_Camarilla_R1_S1_Breakout_Trend
+Hypothesis: Uses daily Camarilla pivot levels (R1/S1) with breakout confirmation and 1-day EMA trend filter on 12h timeframe.
+Trades breakouts in trending markets (EMA34) and avoids mean-reversion to reduce trade frequency.
+Designed for low trade frequency (<30/year) to avoid fee drag while capturing high-probability moves.
+Works in both bull and bear markets by following trend direction via EMA filter.
 """
 
-name = "12h_Keltner_Breakout_Slope_Trend_v1"
+name = "12h_1d_Camarilla_R1_S1_Breakout_Trend"
 timeframe = "12h"
 leverage = 1.0
 
@@ -20,9 +20,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get weekly data for EMA20 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 20:
+    # Get 1d data for Camarilla pivots and EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 34:
         return np.zeros(n)
     
     # 12h OHLCV
@@ -31,45 +31,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # --- Weekly EMA20 for trend filter ---
-    close_1w = df_1w['close']
-    ema_20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # --- 1d EMA34 for trend filter ---
+    close_1d = df_1d['close']
+    ema_34_1d = close_1d.ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
     
-    # Calculate slope of weekly EMA (rising/falling)
-    ema_slope = np.diff(ema_20_1w_aligned, prepend=ema_20_1w_aligned[0])
-    ema_slope = np.where(ema_slope > 0, 1, np.where(ema_slope < 0, -1, 0))
+    # --- Daily Camarilla Pivot Levels (R1, S1) ---
+    # Based on previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # --- Keltner Channel (20-period, 2.0 ATR multiplier) ---
-    # Calculate ATR
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate pivot and levels
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    r1 = pivot + (range_1d * 1.1 / 12)  # R1
+    s1 = pivot - (range_1d * 1.1 / 12)  # S1
     
-    # Calculate EMA of close for center line
-    ema_close = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Align to 12h (Camarilla levels are valid for the entire day)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
-    # Upper and lower Keltner bands
-    keltner_upper = ema_close + (2.0 * atr)
-    keltner_lower = ema_close - (2.0 * atr)
-    
-    # --- Volume Spike Detection (1.5x 20-period EMA) ---
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_spike = volume > (1.5 * vol_ema)
+    # --- Volume Spike Detection (2x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean()
+    vol_spike = volume > (2.0 * vol_ema.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 40
+    start_idx = 50
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(ema_20_1w_aligned[i]) or 
-            np.isnan(keltner_upper[i]) or
-            np.isnan(keltner_lower[i]) or
+        if (np.isnan(ema_34_1d_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
             np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
@@ -80,35 +77,39 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Determine trend from weekly EMA slope
-        trend_up = ema_slope[i] > 0
-        trend_down = ema_slope[i] < 0
+        # Determine trend based on price vs EMA34
+        price_above_ema = close[i] > ema_34_1d_aligned[i]
+        price_below_ema = close[i] < ema_34_1d_aligned[i]
         
-        # Breakout signals (price closes outside Keltner Channel with volume spike)
-        long_breakout = (close[i] > keltner_upper[i]) and vol_spike[i]
-        short_breakout = (close[i] < keltner_lower[i]) and vol_spike[i]
+        # Breakout signals (price crosses R1/S1 with volume spike)
+        long_breakout = (high[i] > r1_aligned[i]) and vol_spike[i]
+        short_breakout = (low[i] < s1_aligned[i]) and vol_spike[i]
         
         if position == 0:
-            # Only take trades in direction of weekly trend
-            if trend_up and long_breakout:
-                signals[i] = 0.25
-                position = 1
-            elif trend_down and short_breakout:
-                signals[i] = -0.25
-                position = -1
+            if price_above_ema:
+                # Uptrend: favor long breakouts, avoid shorts
+                if long_breakout:
+                    signals[i] = 0.25
+                    position = 1
+            elif price_below_ema:
+                # Downtrend: favor short breakouts, avoid longs
+                if short_breakout:
+                    signals[i] = -0.25
+                    position = -1
+            # No mean reversion to reduce trade frequency
         else:
-            # Exit conditions: price returns to center line or opposite band touch
+            # Exit conditions
             if position == 1:
-                # Exit long: price closes below EMA (center) or touches lower band
-                exit_signal = (close[i] < ema_close[i]) or (low[i] <= keltner_lower[i])
+                # Exit long: price breaks below EMA or touches S1 (stop/reversal)
+                exit_signal = (close[i] < ema_34_1d_aligned[i]) or (low[i] <= s1_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price closes above EMA (center) or touches upper band
-                exit_signal = (close[i] > ema_close[i]) or (high[i] >= keltner_upper[i])
+                # Exit short: price breaks above EMA or touches R1 (stop/reversal)
+                exit_signal = (close[i] > ema_34_1d_aligned[i]) or (high[i] >= r1_aligned[i])
                 if exit_signal:
                     signals[i] = 0.0
                     position = 0
