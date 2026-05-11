@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12h_KAMA_Direction_RSI_Chop_Filter
-Hypothesis: Uses KAMA on 12h for trend direction, RSI(14) for momentum, and Choppiness Index for regime filtering.
-Trades only in trending markets (CHOP < 38.2) in the direction of KAMA when RSI confirms momentum.
-Avoids choppy markets to reduce whipsaw. Designed for low trade frequency (<20/year) to avoid fee drag.
+12h_Keltner_Breakout_Slope_Trend_v1
+Hypothesis: Uses Keltner Channel breakout with slope confirmation from weekly EMA20 to capture strong trends.
+Breakouts occur when price closes outside the Keltner Channel (ATR-based) with volume confirmation.
+Trend filter uses weekly EMA20 slope (rising/falling) to avoid counter-trend trades.
+Designed for low trade frequency (<25/year) to minimize fee decay while capturing explosive moves.
 """
 
-name = "12h_KAMA_Direction_RSI_Chop_Filter"
+name = "12h_Keltner_Breakout_Slope_Trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -16,71 +17,60 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1d data for Choppiness Index (needs daily high/low/close)
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 14:
+    # Get weekly data for EMA20 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 20:
         return np.zeros(n)
     
     # 12h OHLCV
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # --- KAMA on 12h for trend direction ---
-    # Calculate Efficiency Ratio (ER) over 10 periods
-    change = np.abs(np.diff(close, n=10))  # |close[i] - close[i-10]|
-    volatility = np.sum(np.abs(np.diff(close)), axis=1)  # Sum of |close[i] - close[i-1]| over 10 periods
-    # Avoid division by zero
-    er = np.where(volatility != 0, change / volatility, 0)
-    # Smoothing constants
-    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
-    # Initialize KAMA
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    kama = kama  # already aligned to 12h
+    # --- Weekly EMA20 for trend filter ---
+    close_1w = df_1w['close']
+    ema_20_1w = close_1w.ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
     
-    # --- Choppiness Index on 1d ---
-    # True Range
-    tr1 = df_1d['high'] - df_1d['low']
-    tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-    tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    # ATR(14)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    # Sum of TR over 14 periods
-    sum_tr = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    # Chop = 100 * log10(sumTR / (ATR * 14)) / log10(14)
-    chop = 100 * np.log10(sum_tr / (atr * 14)) / np.log10(14)
-    chop = chop  # already aligned to 1d
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # Calculate slope of weekly EMA (rising/falling)
+    ema_slope = np.diff(ema_20_1w_aligned, prepend=ema_20_1w_aligned[0])
+    ema_slope = np.where(ema_slope > 0, 1, np.where(ema_slope < 0, -1, 0))
     
-    # --- RSI(14) on 12h ---
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    # Prepend first 14 values as NaN to match length
-    rsi = np.concatenate([np.full(14, np.nan), rsi])
+    # --- Keltner Channel (20-period, 2.0 ATR multiplier) ---
+    # Calculate ATR
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Calculate EMA of close for center line
+    ema_close = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
+    
+    # Upper and lower Keltner bands
+    keltner_upper = ema_close + (2.0 * atr)
+    keltner_lower = ema_close - (2.0 * atr)
+    
+    # --- Volume Spike Detection (1.5x 20-period EMA) ---
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    vol_spike = volume > (1.5 * vol_ema)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = 40
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(kama[i]) or 
-            np.isnan(chop_aligned[i]) or
-            np.isnan(rsi[i])):
+        if (np.isnan(ema_20_1w_aligned[i]) or 
+            np.isnan(keltner_upper[i]) or
+            np.isnan(keltner_lower[i]) or
+            np.isnan(vol_spike[i])):
             # Maintain position if valid, otherwise flat
             if position == 1:
                 signals[i] = 0.25
@@ -90,39 +80,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Regime filter: only trade in trending markets (CHOP < 38.2)
-        trending = chop_aligned[i] < 38.2
+        # Determine trend from weekly EMA slope
+        trend_up = ema_slope[i] > 0
+        trend_down = ema_slope[i] < 0
         
-        # Trend direction: price vs KAMA
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
-        
-        # RSI momentum confirmation
-        rsi_overbought = rsi[i] > 70
-        rsi_oversold = rsi[i] < 30
-        rsi_bullish = 50 < rsi[i] < 70  # rising momentum
-        rsi_bearish = 30 < rsi[i] < 50  # falling momentum
+        # Breakout signals (price closes outside Keltner Channel with volume spike)
+        long_breakout = (close[i] > keltner_upper[i]) and vol_spike[i]
+        short_breakout = (close[i] < keltner_lower[i]) and vol_spike[i]
         
         if position == 0:
-            if trending:
-                if price_above_kama and rsi_bullish:
-                    signals[i] = 0.25
-                    position = 1
-                elif price_below_kama and rsi_bearish:
-                    signals[i] = -0.25
-                    position = -1
+            # Only take trades in direction of weekly trend
+            if trend_up and long_breakout:
+                signals[i] = 0.25
+                position = 1
+            elif trend_down and short_breakout:
+                signals[i] = -0.25
+                position = -1
         else:
-            # Exit conditions
+            # Exit conditions: price returns to center line or opposite band touch
             if position == 1:
-                # Exit long: price crosses below KAMA or RSI overbought
-                if close[i] < kama[i] or rsi[i] > 70:
+                # Exit long: price closes below EMA (center) or touches lower band
+                exit_signal = (close[i] < ema_close[i]) or (low[i] <= keltner_lower[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price crosses above KAMA or RSI oversold
-                if close[i] > kama[i] or rsi[i] < 30:
+                # Exit short: price closes above EMA (center) or touches upper band
+                exit_signal = (close[i] > ema_close[i]) or (high[i] >= keltner_upper[i])
+                if exit_signal:
                     signals[i] = 0.0
                     position = 0
                 else:
