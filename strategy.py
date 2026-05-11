@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-6h_Stochastic_Divergence_1wTrend
-Hypothesis: The 6h stochastic oscillator (K% crossing D%) provides early momentum signals, while the 1-week trend (price > SMA50) filters for higher-probability trades. Divergence between price and stochastic adds confluence for reversals in both bull and bear markets. Volume confirmation ensures conviction. Designed for low trade frequency (target: 15-30 trades/year) to minimize fee drag on 6h timeframe.
+6h_RSI_Divergence_1dTrend_Volume
+Hypothesis: RSI(14) divergence (bullish/bearish) on 6h, filtered by 1d EMA50 trend and volume spike (1.5x median). Works in bull (bullish divergence + uptrend) and bear (bearish divergence + downtrend). Target: 20-40 trades/year to avoid fee drag. Uses divergence for early reversal signals in ranging/weak trends, with trend filter ensuring alignment with higher timeframe momentum.
 """
 
-name = "6h_Stochastic_Divergence_1wTrend"
+name = "6h_RSI_Divergence_1dTrend_Volume"
 timeframe = "6h"
 leverage = 1.0
 
@@ -12,108 +12,150 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
+def calculate_rsi(prices, period=14):
+    """Calculate RSI with given period."""
+    delta = np.diff(prices, prepend=prices[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def find_divergences(price, rsi, lookback=10):
+    """Find bullish and bearish divergences."""
+    n = len(price)
+    bullish_div = np.zeros(n, dtype=bool)
+    bearish_div = np.zeros(n, dtype=bool)
+    
+    for i in range(lookback, n):
+        # Look for bullish divergence: price makes lower low, RSI makes higher low
+        if i >= lookback:
+            price_slice = price[i-lookback:i+1]
+            rsi_slice = rsi[i-lookback:i+1]
+            
+            # Find local minima in price and RSI
+            price_min_idx = np.argmin(price_slice)
+            rsi_min_idx = np.argmin(rsi_slice)
+            
+            # Bullish divergence: price lower low, RSI higher low
+            if (price_min_idx == lookback and  # most recent point is price low
+                price[i] < price[i-lookback] and  # current price < price lookback periods ago
+                rsi[i] > rsi[i-lookback]):        # current RSI > RSI lookback periods ago
+                bullish_div[i] = True
+                
+            # Bearish divergence: price higher high, RSI lower high
+            price_max_idx = np.argmax(price_slice)
+            rsi_max_idx = np.argmax(rsi_slice)
+            if (price_max_idx == lookback and  # most recent point is price high
+                price[i] > price[i-lookback] and  # current price > price lookback periods ago
+                rsi[i] < rsi[i-lookback]):        # current RSI < RSI lookback periods ago
+                bearish_div[i] = True
+                
+    return bullish_div, bearish_div
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Get 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     # 6h OHLCV
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    close_6h = prices['close'].values
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    volume_6h = prices['volume'].values
     
-    # --- 1w Trend Filter: SMA50 ---
-    close_1w = df_1w['close'].values
-    sma50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    # --- 1d Trend Filter: EMA50 ---
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # --- 6h Stochastic Oscillator (14,3,3) ---
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    # Avoid division by zero
-    denom = highest_high - lowest_low
-    denom = np.where(denom == 0, 1, denom)
-    k_percent = 100 * ((close - lowest_low) / denom)
-    d_percent = pd.Series(k_percent).rolling(window=3, min_periods=3).mean().values
+    # --- RSI(14) on 6h ---
+    rsi = calculate_rsi(close_6h, 14)
     
-    # --- 6h RSI(14) for divergence detection ---
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs = np.where(avg_loss == 0, 0, avg_gain / avg_loss)
-    rsi = 100 - (100 / (1 + rs))
+    # --- Divergence detection ---
+    bullish_div, bearish_div = find_divergences(close_6h, rsi, lookback=10)
     
     # --- Volume Filter: spike above 1.5x median of last 20 periods ---
-    vol_median = pd.Series(volume).rolling(window=20, min_periods=10).median().values
+    vol_median = pd.Series(volume_6h).rolling(window=20, min_periods=10).median().values
     vol_threshold = vol_median * 1.5
+    
+    # --- ATR for stoploss (14-period) ---
+    tr1 = np.abs(high_6h - low_6h)
+    tr2 = np.abs(high_6h - np.roll(close_6h, 1))
+    tr3 = np.abs(low_6h - np.roll(close_6h, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # first bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start after warmup period
-    start_idx = 60  # for stochastic and SMA50
+    start_idx = 60  # for EMA50 and RSI stability
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(sma50_1w_aligned[i]) or np.isnan(k_percent[i]) or 
-            np.isnan(d_percent[i]) or np.isnan(rsi[i]) or np.isnan(vol_threshold[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_threshold[i]) or 
+            np.isnan(atr[i]) or np.isnan(rsi[i])):
             if position != 0:
-                # Hold position until exit signal
-                signals[i] = 0.25 if position == 1 else -0.25
+                # Check stoploss
+                if position == 1 and close_6h[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                elif position == -1 and close_6h[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.25 if position == 1 else -0.25
             continue
         
-        # Determine 1w trend
-        trend_up = close[i] > sma50_1w_aligned[i]
-        trend_down = close[i] < sma50_1w_aligned[i]
+        # Determine 1d trend
+        trend_up = close_6h[i] > ema50_1d_aligned[i]
+        trend_down = close_6h[i] < ema50_1d_aligned[i]
         
-        # Volume filter
-        vol_ok = volume[i] > vol_threshold[i]
-        
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        bull_div = False
-        if i >= 2:
-            bull_div = (low[i] < low[i-1] and low[i-1] < low[i-2]) and \
-                       (rsi[i] > rsi[i-1] and rsi[i-1] > rsi[i-2])
-        
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        bear_div = False
-        if i >= 2:
-            bear_div = (high[i] > high[i-1] and high[i-1] > high[i-2]) and \
-                       (rsi[i] < rsi[i-1] and rsi[i-1] < rsi[i-2])
+        # Volume filter: spike above 1.5x median
+        vol_ok = volume_6h[i] > vol_threshold[i]
         
         if position == 0:
-            # Long: stochastic bullish crossover + uptrend + volume + bullish divergence
-            if (k_percent[i] > d_percent[i] and k_percent[i-1] <= d_percent[i-1] and
-                trend_up and vol_ok and bull_div):
+            # Look for entries only in direction of 1d trend with volume spike
+            if bullish_div[i] and trend_up and vol_ok:
+                # Long: bullish divergence + 1d uptrend + volume spike
                 signals[i] = 0.25
                 position = 1
-            # Short: stochastic bearish crossover + downtrend + volume + bearish divergence
-            elif (k_percent[i] < d_percent[i] and k_percent[i-1] >= d_percent[i-1] and
-                  trend_down and vol_ok and bear_div):
+                entry_price = close_6h[i]
+            elif bearish_div[i] and trend_down and vol_ok:
+                # Short: bearish divergence + 1d downtrend + volume spike
                 signals[i] = -0.25
                 position = -1
+                entry_price = close_6h[i]
         else:
-            # Exit conditions
+            # Update stoploss and check exits
             if position == 1:
-                # Exit: stochastic bearish crossover OR trend reversal
-                if (k_percent[i] < d_percent[i] and k_percent[i-1] >= d_percent[i-1]) or \
-                   not trend_up:
+                # Stoploss
+                if close_6h[i] <= entry_price - 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: RSI becomes overbought (>70) or opposite divergence
+                elif rsi[i] > 70 or bearish_div[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit: stochastic bullish crossover OR trend reversal
-                if (k_percent[i] > d_percent[i] and k_percent[i-1] <= d_percent[i-1]) or \
-                   not trend_down:
+                # Stoploss
+                if close_6h[i] >= entry_price + 2.0 * atr[i]:
+                    signals[i] = 0.0
+                    position = 0
+                # Exit: RSI becomes oversold (<30) or opposite divergence
+                elif rsi[i] < 30 or bullish_div[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
