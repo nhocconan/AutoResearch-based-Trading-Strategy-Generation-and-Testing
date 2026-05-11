@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
-timeframe = "12h"
+name = "4h_Camarilla_R1_S1_Breakout_1dTrend_Volume_Spike_v2"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -27,6 +27,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla levels from previous 1d candle
+    # R1 = close + (high - low) * 1.1/12
+    # S1 = close - (high - low) * 1.1/12
     hl_range = high_1d - low_1d
     camarilla_r1 = close_1d + hl_range * 1.1 / 12
     camarilla_s1 = close_1d - hl_range * 1.1 / 12
@@ -34,11 +36,11 @@ def generate_signals(prices):
     # EMA34 for 1d trend filter
     ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
     
-    # Volume spike detection (24-period average for 12h)
-    vol_ma_12h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma_12h * 2.0)
+    # Volume spike detection (24-period average for 4h)
+    vol_ma_4h = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    vol_spike = volume > (vol_ma_4h * 2.0)
     
-    # Align all indicators to 12h timeframe
+    # Align all indicators to 4h timeframe
     camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
     camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
@@ -51,7 +53,7 @@ def generate_signals(prices):
     for i in range(start_idx, n):
         # Skip if any required data is NaN
         if (np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or 
-            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_12h[i])):
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(vol_ma_4h[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
