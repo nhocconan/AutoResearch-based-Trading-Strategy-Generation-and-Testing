@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_Camarilla_R1S1_Breakout_1dTrend_Volume"
-timeframe = "4h"
+name = "6h_Weekly_Pivot_Breakout_Trend_Volume"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,57 +17,63 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 1d data for Camarilla levels (R1, S1) and trend filter
+    # Get weekly data for pivot levels and trend
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 10:
+        return np.zeros(n)
+    
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Calculate weekly pivot points (standard formula)
+    pivot = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
+    
+    # Weekly trend: close above/below 20-period EMA
+    ema20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    trend_up_1w = close_1w > ema20_1w
+    
+    # Get daily data for volume confirmation
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 20:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
+    vol_ma20_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
     
-    # Calculate Camarilla levels (R1, S1) from previous day
-    R1 = np.full(len(high_1d), np.nan)
-    S1 = np.full(len(high_1d), np.nan)
-    
-    for i in range(1, len(high_1d)):
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_val = prev_high - prev_low
-        if range_val > 0:
-            R1[i] = prev_close + range_val * 1.1 / 12
-            S1[i] = prev_close - range_val * 1.1 / 12
-    
-    # 1d EMA34 for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    trend_up_1d = close_1d > ema34_1d
-    
-    # Align indicators to 4h timeframe
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
-    
-    # Volume moving average (20-period) for confirmation
-    vol_ma20 = np.full(n, np.nan)
-    for i in range(n):
-        if i < 20:
-            if i > 0:
-                vol_ma20[i] = np.mean(volume[:i+1])
-        else:
-            vol_ma20[i] = np.mean(volume[i-19:i+1])
+    # Align all weekly indicators to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    vol_ma20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma20_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(30, 34)  # Need enough data for indicators
+    start_idx = max(30, 20)  # Need enough data for indicators
     
     for i in range(start_idx, n):
         # Skip if any data is NaN
-        if (np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or
-            np.isnan(trend_up_1d_aligned[i]) or
-            np.isnan(vol_ma20[i])):
+        if (np.isnan(pivot_aligned[i]) or 
+            np.isnan(r1_aligned[i]) or
+            np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or
+            np.isnan(s2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or
+            np.isnan(trend_up_1w_aligned[i]) or
+            np.isnan(vol_ma20_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -76,30 +82,30 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R1 + uptrend + volume confirmation
-            if (close[i] > R1_aligned[i] and 
-                trend_up_1d_aligned[i] and 
-                volume[i] > 1.3 * vol_ma20[i]):
+            # Long: price breaks above R2 with weekly uptrend and volume confirmation
+            if (close[i] > r2_aligned[i] and 
+                trend_up_1w_aligned[i] and 
+                volume[i] > 1.5 * vol_ma20_1d_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + downtrend + volume confirmation
-            elif (close[i] < S1_aligned[i] and 
-                  not trend_up_1d_aligned[i] and 
-                  volume[i] > 1.3 * vol_ma20[i]):
+            # Short: price breaks below S2 with weekly downtrend and volume confirmation
+            elif (close[i] < s2_aligned[i] and 
+                  not trend_up_1w_aligned[i] and 
+                  volume[i] > 1.5 * vol_ma20_1d_aligned[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
             # Long exit: price breaks below S1 or trend changes
-            if (close[i] < S1_aligned[i] or 
-                not trend_up_1d_aligned[i]):
+            if (close[i] < s1_aligned[i] or 
+                not trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Short exit: price breaks above R1 or trend changes
-            if (close[i] > R1_aligned[i] or 
-                trend_up_1d_aligned[i]):
+            if (close[i] > r1_aligned[i] or 
+                trend_up_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
