@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_4h_1d_Camarilla_Breakout_Trend_Volume"
-timeframe = "1h"
+name = "6h_EMA_RSI_Reversal"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 150:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,37 +17,48 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get 4h and 1d data for trend and pivot levels
-    df_4h = get_htf_data(prices, '4h')
+    # Get daily and weekly data
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    if len(df_4h) < 50 or len(df_1d) < 50:
+    if len(df_1d) < 60 or len(df_1w) < 10:
         return np.zeros(n)
     
-    # Calculate 4h trend: EMA50 > EMA200 for uptrend
-    close_4h = df_4h['close'].values
-    ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema200_4h = pd.Series(close_4h).ewm(span=200, adjust=False, min_periods=200).mean().values
-    trend_up_4h = ema50_4h > ema200_4h
-    trend_down_4h = ema50_4h < ema200_4h
+    # Daily EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Calculate 1d Camarilla pivot points (using previous day)
-    high_1d = df_1d['high'].shift(1).values
-    low_1d = df_1d['low'].shift(1).values
-    close_1d = df_1d['close'].shift(1).values
-    range_1d = high_1d - low_1d
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r3 = close_1d + range_1d * 1.1 / 2
-    s3 = close_1d - range_1d * 1.1 / 2
+    # Daily RSI(14) for momentum/divergence
+    delta = pd.Series(close_1d).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi_1d = 100 - (100 / (1 + rs))
+    rsi_1d = rsi_1d.values
     
-    # Align 4h trend and 1d Camarilla levels to 1h
-    trend_up_aligned = align_htf_to_ltf(prices, df_4h, trend_up_4h)
-    trend_down_aligned = align_htf_to_ltf(prices, df_4h, trend_down_4h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Weekly high/low for range context
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Volume filter: current volume > 2.0 x 20-period average (more selective)
+    # Align all to 6h
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    rsi_1d_aligned = align_htf_to_ltf(prices, df_1d, rsi_1d)
+    high_1w_aligned = align_htf_to_ltf(prices, df_1w, high_1w)
+    low_1w_aligned = align_htf_to_ltf(prices, df_1w, low_1w)
+    
+    # 60-period RSI on 6c for overbought/oversold
+    delta_6h = pd.Series(close).diff()
+    gain_6h = delta_6h.clip(lower=0)
+    loss_6h = -delta_6h.clip(upper=0)
+    avg_gain_6h = gain_6h.ewm(alpha=1/60, adjust=False, min_periods=60).mean()
+    avg_loss_6h = loss_6h.ewm(alpha=1/60, adjust=False, min_periods=60).mean()
+    rs_6h = avg_gain_6h / avg_loss_6h
+    rsi_6h = 100 - (100 / (1 + rs_6h))
+    rsi_6h = rsi_6h.values
+    
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma20 = np.zeros(n)
     for i in range(n):
         if i < 20:
@@ -55,20 +66,16 @@ def generate_signals(prices):
         else:
             vol_ma20[i] = np.mean(volume[i-19:i+1])
     
-    # Session filter: 08:00-20:00 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    start_idx = max(200, 50)
+    start_idx = max(150, 60)
     
     for i in range(start_idx, n):
-        # Skip if any data is NaN or outside session
-        if (np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(vol_ma20[i]) or not in_session[i]):
+        # Skip if any data is NaN
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(rsi_1d_aligned[i]) or
+            np.isnan(high_1w_aligned[i]) or np.isnan(low_1w_aligned[i]) or
+            np.isnan(rsi_6h[i]) or np.isnan(vol_ma20[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -77,31 +84,33 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: price breaks above R3 in 4h uptrend with volume spike
-            if (close[i] > r3_aligned[i] and 
-                trend_up_aligned[i] and 
-                volume[i] > 2.0 * vol_ma20[i]):
-                signals[i] = 0.20
+            # Long: oversold RSI on 6h + price above daily EMA50 + weekly support
+            if (rsi_6h[i] < 30 and 
+                close[i] > ema50_1d_aligned[i] and
+                close[i] > low_1w_aligned[i] and  # above weekly low
+                volume[i] > 1.5 * vol_ma20[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S3 in 4h downtrend with volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  trend_down_aligned[i] and 
-                  volume[i] > 2.0 * vol_ma20[i]):
-                signals[i] = -0.20
+            # Short: overbought RSI on 6h + price below daily EMA50 + weekly resistance
+            elif (rsi_6h[i] > 70 and 
+                  close[i] < ema50_1d_aligned[i] and
+                  close[i] < high_1w_aligned[i] and  # below weekly high
+                  volume[i] > 1.5 * vol_ma20[i]):
+                signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Long exit: price falls below pivot or 4h trend changes
-            if (close[i] < pivot_aligned[i] or not trend_up_aligned[i]):
+            # Long exit: RSI overbought or price breaks below daily EMA50
+            if (rsi_6h[i] > 70 or close[i] < ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Short exit: price rises above pivot or 4h trend changes
-            if (close[i] > pivot_aligned[i] or not trend_down_aligned[i]):
+            # Short exit: RSI oversold or price breaks above daily EMA50
+            if (rsi_6h[i] < 30 or close[i] > ema50_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
