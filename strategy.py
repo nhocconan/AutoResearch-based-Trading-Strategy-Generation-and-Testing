@@ -1,6 +1,7 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
-name = "4h_Camarilla_R3_S3_Breakout_1dEMA34_VolumeSpike_RSIFilter"
-timeframe = "4h"
+name = "6h_WeeklyPivot_Breakout_1dTrend_VolumeSpike"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,50 +18,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
+    # Calculate weekly OHLC for pivot points (HTF)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly high/low/close for weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot points (standard formula)
+    pivot = (high_1w + low_1w + close_1w) / 3
+    r1 = 2 * pivot - low_1w
+    s1 = 2 * pivot - high_1w
+    r2 = pivot + (high_1w - low_1w)
+    s2 = pivot - (high_1w - low_1w)
+    r3 = high_1w + 2 * (pivot - low_1w)
+    s3 = low_1w - 2 * (high_1w - pivot)
+    
+    # Align weekly pivot levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
     # Calculate 1d EMA34 for trend filter (HTF)
     df_1d = get_htf_data(prices, '1d')
     ema34_1d = pd.Series(df_1d['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
     ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
     
-    # Calculate daily high/low/close for Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: R3, R2, R1, PP, S1, S2, S3
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.25
-    s3 = close_1d - hl_range * 1.25
-    
-    # Align Camarilla levels to 4h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
     # Volume filter: 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
-    # RSI filter: 14-period RSI (avoid extremes)
-    close_series = pd.Series(close)
-    delta = close_series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values  # neutral for warmup
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start after warmup
-    start_idx = 60
+    # Start after warmup (ensure weekly data is available)
+    start_idx = 100
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(rsi[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema34_1d_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -74,29 +71,27 @@ def generate_signals(prices):
         price_below_ema1d = close[i] < ema34_1d_aligned[i]
         breakout_long = close[i] > r3_aligned[i]
         breakout_short = close[i] < s3_aligned[i]
-        rsi_not_overbought = rsi[i] < 70
-        rsi_not_oversold = rsi[i] > 30
         
         if position == 0:
-            # Long: Price breaks above R3 + above 1d EMA34 + volume spike + RSI not overbought
-            if breakout_long and price_above_ema1d and volume_ok[i] and rsi_not_overbought:
+            # Long: Price breaks above weekly R3 + above 1d EMA34 + volume spike
+            if breakout_long and price_above_ema1d and volume_ok[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Price breaks below S3 + below 1d EMA34 + volume spike + RSI not oversold
-            elif breakout_short and price_below_ema1d and volume_ok[i] and rsi_not_oversold:
+            # Short: Price breaks below weekly S3 + below 1d EMA34 + volume spike
+            elif breakout_short and price_below_ema1d and volume_ok[i]:
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses
+                # Exit: Price crosses below weekly S3 OR trend reverses
                 if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses
+                # Exit: Price crosses above weekly R3 OR trend reverses
                 if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
                     signals[i] = 0.0
                     position = 0
