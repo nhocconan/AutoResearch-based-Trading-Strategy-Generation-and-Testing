@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "12h_Camarilla_R2_S2_Breakout_1dEMA200_Trend"
-timeframe = "12h"
+name = "4h_Camarilla_R3_S3_Breakout_12hEMA50_Trend_Volume"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,32 +17,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 1d data ONCE for trend and pivot levels
+    # 1. Load 12h data ONCE for EMA trend filter
+    df_12h = get_htf_data(prices, '12h')
+    ema50_12h = pd.Series(df_12h['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    
+    # 2. Load 1d data ONCE for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
-    
-    # 2. 1d EMA200 for trend filter
-    ema200_1d = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
-    
-    # 3. Calculate daily high/low/close for Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 4. Camarilla levels: R2, S2 (outer levels for fewer, stronger signals)
+    # 3. Camarilla levels: R3, S3 (outer levels for fewer, stronger signals)
     hl_range = high_1d - low_1d
-    r2 = close_1d + hl_range * 1.1666
-    s2 = close_1d - hl_range * 1.1666
+    r3 = close_1d + hl_range * 1.5000
+    s3 = close_1d - hl_range * 1.5000
     
-    # 5. Align Camarilla levels to 12h timeframe
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    # 4. Align Camarilla levels to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 6. Volume filter: 20-period EMA for spike detection
+    # 5. Volume filter: 20-period EMA for spike detection
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
     volume_ok = volume > vol_ema20 * 1.5
     
-    # 7. Fixed position size to avoid churn
+    # 6. Fixed position size to avoid churn
     position_size = 0.25
     
     signals = np.zeros(n)
@@ -53,8 +52,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema200_1d_aligned[i]) or np.isnan(r2_aligned[i]) or 
-            np.isnan(s2_aligned[i]) or np.isnan(volume_ok[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -64,32 +63,32 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema200 = close[i] > ema200_1d_aligned[i]
-        price_below_ema200 = close[i] < ema200_1d_aligned[i]
-        breakout_long = close[i] > r2_aligned[i]
-        breakout_short = close[i] < s2_aligned[i]
+        price_above_ema12h = close[i] > ema50_12h_aligned[i]
+        price_below_ema12h = close[i] < ema50_12h_aligned[i]
+        breakout_long = close[i] > r3_aligned[i]
+        breakout_short = close[i] < s3_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R2 + above 1d EMA200 + volume spike
-            if breakout_long and price_above_ema200 and volume_ok[i]:
+            # Long: Price breaks above R3 + above 12h EMA50 + volume spike
+            if breakout_long and price_above_ema12h and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S2 + below 1d EMA200 + volume spike
-            elif breakout_short and price_below_ema200 and volume_ok[i]:
+            # Short: Price breaks below S3 + below 12h EMA50 + volume spike
+            elif breakout_short and price_below_ema12h and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
             # Exit conditions - simplified to reduce churn
             if position == 1:
-                # Exit: Price crosses below S2 OR trend reverses
-                if close[i] < s2_aligned[i] or close[i] < ema200_1d_aligned[i]:
+                # Exit: Price crosses below S3 OR trend reverses
+                if close[i] < s3_aligned[i] or close[i] < ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R2 OR trend reverses
-                if close[i] > r2_aligned[i] or close[i] > ema200_1d_aligned[i]:
+                # Exit: Price crosses above R3 OR trend reverses
+                if close[i] > r3_aligned[i] or close[i] > ema50_12h_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
