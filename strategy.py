@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "6h_Premium_Discount_Order_Block_v2"
-timeframe = "6h"
+name = "12h_Camarilla_R1_S1_Breakout_1dTrend_Volume"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,113 +17,79 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Premium/Discount zones from 12h timeframe (not 1d to avoid overlap with HTF)
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Daily Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 12h mid-price (average of high and low)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    mid_12h = (high_12h + low_12h) / 2
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
     
-    # Align 12h mid-price to 6h timeframe
-    mid_12h_aligned = align_htf_to_ltf(prices, df_12h, mid_12h)
+    # Calculate pivot and levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_hl = prev_high - prev_low
     
-    # Calculate 12h ATR for zone width
-    tr_12h = np.maximum(
-        high_12h - low_12h,
-        np.maximum(
-            np.abs(high_12h - np.roll(close_12h, 1)),
-            np.abs(low_12h - np.roll(close_12h, 1))
-        )
-    )
-    # Need close_12h for TR calculation
-    close_12h = df_12h['close'].values
-    tr_12h = np.maximum(
-        high_12h - low_12h,
-        np.maximum(
-            np.abs(high_12h - np.roll(close_12h, 1)),
-            np.abs(low_12h - np.roll(close_12h, 1))
-        )
-    )
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Camarilla levels
+    R1 = pivot + range_hl * 1.1 / 12
+    S1 = pivot - range_hl * 1.1 / 12
+    R3 = pivot + range_hl * 1.1 / 4
+    S3 = pivot - range_hl * 1.1 / 4
     
-    # Premium/Discount zones: ±0.5 * ATR from mid
-    upper_zone = mid_12h_aligned + 0.5 * atr_12h_aligned
-    lower_zone = mid_12h_aligned - 0.5 * atr_12h_aligned
+    # Align to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
+    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
+    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
+    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     
-    # Order blocks: significant price levels with volume imbalance
-    # Identify swing points on 6h timeframe
-    lookback = 5
-    swing_high = np.zeros(n, dtype=bool)
-    swing_low = np.zeros(n, dtype=bool)
+    # Daily trend filter (EMA34)
+    ema_34_1d = pd.Series(df_1d['close']).ewm(span=34, adjust=False, min_periods=34).mean().values
+    ema_34_aligned = align_htf_to_ltf(prices, df_1d, ema_34_1d)
+    daily_uptrend = close > ema_34_aligned
     
-    for i in range(lookback, n - lookback):
-        if high[i] == np.max(high[i-lookback:i+lookback+1]):
-            swing_high[i] = True
-        if low[i] == np.min(low[i-lookback:i+lookback+1]):
-            swing_low[i] = True
-    
-    # Volume at swing points
-    vol_swing_high = np.where(swing_high, volume, 0)
-    vol_swing_low = np.where(swing_low, volume, 0)
-    
-    # Average volume at swing points for threshold
-    avg_vol_swing_high = pd.Series(vol_swing_high).rolling(window=20, min_periods=5).mean().values
-    avg_vol_swing_low = pd.Series(vol_swing_low).rolling(window=20, min_periods=5).mean().values
-    
-    # Significant order blocks: volume > 1.5x average at swing points
-    ob_high = swing_high & (volume > 1.5 * avg_vol_swing_high)
-    ob_low = swing_low & (volume > 1.5 * avg_vol_swing_low)
-    
-    # Store OB levels (most recent)
-    ob_levels_high = np.full(n, np.nan)
-    ob_levels_low = np.full(n, np.nan)
-    
-    last_ob_high = np.nan
-    last_ob_low = np.nan
-    
-    for i in range(n):
-        if ob_high[i]:
-            last_ob_high = high[i]
-        if ob_low[i]:
-            last_ob_low = low[i]
-        ob_levels_high[i] = last_ob_high
-        ob_levels_low[i] = last_ob_low
-    
-    # Trend filter: 6h EMA 20
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False, min_periods=20).mean().values
-    
-    # Volume filter: current volume > 1.3x 20-period average
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_filter = volume > 1.3 * vol_ma20
+    # Volume confirmation (20-period MA)
+    volume_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_filter = volume > 1.5 * volume_ma20
     
     signals = np.zeros(n)
+    position = 0
     
-    start_idx = max(20, 20)  # EMA and volume MA
+    start_idx = 40  # ensure all indicators ready
     
     for i in range(start_idx, n):
-        if np.isnan(mid_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]) or np.isnan(ema_20[i]) or np.isnan(vol_ma20[i]):
-            signals[i] = 0.0
+        if np.isnan(pivot_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or \
+           np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(daily_uptrend[i]) or \
+           np.isnan(volume_ma20[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
         
-        # Long conditions: price in discount zone, above EMA, at/below OB low, volume
-        in_discount = close[i] <= lower_zone[i]
-        above_ema = close[i] > ema_20[i]
-        at_ob_low = ob_levels_low[i] > 0 and close[i] <= ob_levels_low[i] * 1.001  # within 0.1% of OB low
-        
-        # Short conditions: price in premium zone, below EMA, at/above OB high, volume
-        in_premium = close[i] >= upper_zone[i]
-        below_ema = close[i] < ema_20[i]
-        at_ob_high = ob_levels_high[i] > 0 and close[i] >= ob_levels_high[i] * 0.999  # within 0.1% of OB high
-        
-        if in_discount and above_ema and (at_ob_low or not np.isnan(ob_levels_low[i])) and volume_filter[i]:
-            signals[i] = 0.25
-        elif in_premium and below_ema and (at_ob_high or not np.isnan(ob_levels_high[i])) and volume_filter[i]:
-            signals[i] = -0.25
-        else:
-            signals[i] = 0.0
+        if position == 0:
+            # Long: price crosses above R1 with daily uptrend and volume
+            if close[i] > R1_aligned[i] and daily_uptrend[i] and volume_filter[i]:
+                signals[i] = 0.25
+                position = 1
+            # Short: price crosses below S1 with daily downtrend and volume
+            elif close[i] < S1_aligned[i] and not daily_uptrend[i] and volume_filter[i]:
+                signals[i] = -0.25
+                position = -1
+        elif position == 1:
+            # Exit long: price crosses below S1 or trend reversal
+            if close[i] < S1_aligned[i] or not daily_uptrend[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:
+            # Exit short: price crosses above R1 or trend reversal
+            if close[i] > R1_aligned[i] or daily_uptrend[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
     
     return signals
