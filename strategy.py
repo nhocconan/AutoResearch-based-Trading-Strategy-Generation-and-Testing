@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "4h_382Pivot_LongOnly_v1"
-timeframe = "4h"
+name = "1D_Aggressive_Volume_Momentum"
+timeframe = "1d"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 10:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,74 +17,71 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Get daily data for 38.2% retracement pivot
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    # Daily high, low, close
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Weekly EMA 21 for trend
+    weekly_close = df_1w['close'].values
+    ema_21_w = pd.Series(weekly_close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_21_w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_w)
     
-    # Previous day's range (avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = high_1d[0]
-    prev_low[0] = low_1d[0]
-    prev_close[0] = close_1d[0]
-    
-    # Daily range and 38.2% Fibonacci level from prior close
-    daily_range = prev_high - prev_low
-    fib_382 = prev_close - 0.382 * daily_range  # 38.2% retracement level
-    
-    # Align 38.2% level to 4h timeframe
-    fib_382_aligned = align_htf_to_ltf(prices, df_1d, fib_382)
-    
-    # Daily EMA50 for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter: 20-period average on 4h
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Daily volume ratio
+    vol_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
     
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long
+    # Daily price momentum (3-day ROC)
+    roc = np.zeros_like(close)
+    roc[3:] = (close[3:] - close[:-3]) / close[:-3]
     
-    # Start after warmup
-    start_idx = 30
+    signals = np.zeros(n)
+    position = 0
+    
+    start_idx = 10
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(fib_382_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(ema_21_w_aligned[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(roc[i])):
             if position == 1:
-                signals[i] = 0.25
+                signals[i] = 0.30
+            elif position == -1:
+                signals[i] = -0.30
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume threshold - avoid low-volume false breakouts
-        volume_surge = vol_ratio[i] > 1.5
+        # Volume surge filter
+        volume_surge = vol_ratio[i] > 2.0
         
         if position == 0:
-            # Long: Price breaks above 38.2% retracement level with volume
-            # AND price is above daily EMA50 (bullish bias)
-            if (close[i] > fib_382_aligned[i] and 
+            # Long: Strong upward momentum with volume surge AND above weekly EMA
+            if (roc[i] > 0.03 and 
                 volume_surge and 
-                close[i] > ema_50_aligned[i]):
-                signals[i] = 0.25
+                close[i] > ema_21_w_aligned[i]):
+                signals[i] = 0.30
                 position = 1
+            # Short: Strong downward momentum with volume surge AND below weekly EMA
+            elif (roc[i] < -0.03 and 
+                  volume_surge and 
+                  close[i] < ema_21_w_aligned[i]):
+                signals[i] = -0.30
+                position = -1
         else:
-            # Exit: price returns below 38.2% level or trend turns bearish
-            if (close[i] < fib_382_aligned[i]) or (close[i] < ema_50_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
+            # Exit: momentum reverses or volume dries up
+            if position == 1:
+                if (roc[i] < -0.01) or (vol_ratio[i] < 0.8):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.30
+            elif position == -1:
+                if (roc[i] > 0.01) or (vol_ratio[i] < 0.8):
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.30
     
     return signals
