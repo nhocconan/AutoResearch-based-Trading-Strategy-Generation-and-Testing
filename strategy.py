@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# 4h_MultiTF_Trend_Follow
-# Hypothesis: Follows strong trends using 12h EMA50 direction with 4h price action confirmation.
-# Long when 12h EMA50 rising and 4h closes above 4h EMA21; short when 12h EMA50 falling and 4h closes below 4h EMA21.
-# Works in bull markets (riding uptrends) and bear markets (riding downtrends) by following the higher timeframe trend.
-# Uses volume confirmation to avoid false breakouts and ATR-based stop to manage risk.
+# 1h_1d_Range_Breakout_Volume
+# Hypothesis: In 1h timeframe, use 1d range (high-low) to detect breakouts with volume confirmation.
+# Long when price breaks above 1d high + volume surge, short when breaks below 1d low + volume surge.
+# Works in ranging markets (captures breakouts) and trending markets (follows momentum).
+# Uses 1d range as volatility filter to avoid false breakouts in low volatility.
+# Target: 15-30 trades/year by requiring both price breakout and volume surge.
 
-name = "4h_MultiTF_Trend_Follow"
-timeframe = "4h"
+name = "1h_1d_Range_Breakout_Volume"
+timeframe = "1h"
 leverage = 1.0
 
 import numpy as np
@@ -18,78 +19,72 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Get 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) < 50:
+    # Get 1d data for range calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    # 4h OHLCV
+    # 1h OHLCV
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # --- 12h EMA50 for trend direction ---
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_12h_slope = ema_50_12h - np.roll(ema_50_12h, 1)
-    ema_50_12h_slope[0] = 0
-    ema_50_12h_slope = pd.Series(ema_50_12h_slope).ewm(span=3, adjust=False, min_periods=1).mean().values  # smooth slope
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
-    ema_50_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h_slope)
+    # --- 1d range (high-low) ---
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    range_1d = high_1d - low_1d
     
-    # --- 4h EMA21 for entry timing ---
-    ema_21_4h = pd.Series(close).ewm(span=21, adjust=False, min_periods=21).mean().values
+    # --- 1d high and low levels ---
+    high_1d_level = high_1d
+    low_1d_level = low_1d
     
-    # --- Volume confirmation (volume > 20-period average) ---
-    vol_ma = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
-    vol_surge = volume > vol_ma
+    # Align 1d levels to 1h timeframe (wait for 1d bar to close)
+    high_1d_aligned = align_htf_to_ltf(prices, df_1d, high_1d_level)
+    low_1d_aligned = align_htf_to_ltf(prices, df_1d, low_1d_level)
+    
+    # --- Volume confirmation (volume > 24-period average) ---
+    vol_ma = pd.Series(volume).ewm(span=24, adjust=False, min_periods=24).mean().values
+    vol_surge = volume > vol_ma * 1.5  # 50% above average
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Warmup: enough for EMA21 (21) and EMA50 slope (50+3)
-    start_idx = 50
+    # Warmup: enough for 1d data (need at least 1 day)
+    start_idx = 24
     
     for i in range(start_idx, n):
         # Skip if any critical values are NaN
-        if (np.isnan(ema_50_12h_aligned[i]) or
-            np.isnan(ema_50_12h_slope_aligned[i]) or
-            np.isnan(ema_21_4h[i])):
+        if (np.isnan(high_1d_aligned[i]) or
+            np.isnan(low_1d_aligned[i])):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
         
-        # Trend direction from 12h EMA50 slope
-        uptrend = ema_50_12h_slope_aligned[i] > 0
-        downtrend = ema_50_12h_slope_aligned[i] < 0
-        
         if position == 0:
-            if uptrend and vol_surge[i]:
-                # Long: 12h uptrend + volume surge + price above 4h EMA21
-                if close[i] > ema_21_4h[i]:
-                    signals[i] = 0.25
-                    position = 1
-            elif downtrend and vol_surge[i]:
-                # Short: 12h downtrend + volume surge + price below 4h EMA21
-                if close[i] < ema_21_4h[i]:
-                    signals[i] = -0.25
-                    position = -1
+            # Long: price breaks above 1d high + volume surge
+            if close[i] > high_1d_aligned[i] and vol_surge[i]:
+                signals[i] = 0.20
+                position = 1
+            # Short: price breaks below 1d low + volume surge
+            elif close[i] < low_1d_aligned[i] and vol_surge[i]:
+                signals[i] = -0.20
+                position = -1
         else:
             if position == 1:
-                # Exit long: 12h trend turns down OR price crosses below EMA21
-                if downtrend or close[i] < ema_21_4h[i]:
+                # Exit long: price returns below 1d high OR volatility drops
+                if close[i] < high_1d_aligned[i] or not vol_surge[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = 0.25
+                    signals[i] = 0.20
             elif position == -1:
-                # Exit short: 12h trend turns up OR price crosses above EMA21
-                if uptrend or close[i] > ema_21_4h[i]:
+                # Exit short: price returns above 1d low OR volatility drops
+                if close[i] > low_1d_aligned[i] or not vol_surge[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
-                    signals[i] = -0.25
+                    signals[i] = -0.20
     
     return signals
