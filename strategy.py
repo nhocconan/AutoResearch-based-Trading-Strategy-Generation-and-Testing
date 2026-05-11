@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-name = "1h_Camarilla_R3S3_Breakout_4hTrend_VolumeSpike"
-timeframe = "1h"
+name = "6h_Supertrend_ADX_Pullback"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
@@ -17,40 +17,95 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1. Load 4h data ONCE for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    
-    # 2. 4h EMA34 for trend filter
-    ema34_4h = pd.Series(df_4h['close']).ewm(span=34, min_periods=34, adjust=False).mean().values
-    ema34_4h_aligned = align_htf_to_ltf(prices, df_4h, ema34_4h)
-    
-    # 3. Load 1d data ONCE for Camarilla levels
+    # Load 1w and 1d data ONCE
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # 4. Calculate daily high/low/close for Camarilla levels
+    # 1w Supertrend for long-term trend (ATR=10, mult=3)
+    atr_period = 10
+    mult = 3
+    tr1 = np.maximum(df_1w['high'], np.roll(df_1w['close'], 1)) - np.minimum(df_1w['low'], np.roll(df_1w['close'], 1))
+    tr2 = np.abs(np.roll(df_1w['close'], 1) - df_1w['high'])
+    tr3 = np.abs(np.roll(df_1w['close'], 1) - df_1w['low'])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    atr = np.zeros_like(tr)
+    atr[0] = tr[0]
+    for i in range(1, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
+    up = ((df_1w['high'] + df_1w['low']) / 2) - (mult * atr)
+    down = ((df_1w['high'] + df_1w['low']) / 2) + (mult * atr)
+    up = np.where(np.isnan(up), 0, up)
+    down = np.where(np.isnan(down), 0, down)
+    st = np.zeros_like(df_1w['close'])
+    dir = np.ones_like(df_1w['close'])  # 1 for uptrend, -1 for downtrend
+    for i in range(1, len(df_1w)):
+        if df_1w['close'][i-1] > st[i-1]:
+            st[i] = max(up[i], st[i-1])
+        else:
+            st[i] = min(down[i], st[i-1])
+        if df_1w['close'][i] > st[i]:
+            dir[i] = 1
+        else:
+            dir[i] = -1
+    st_1w = st
+    dir_1w = dir
+    
+    # 1d ADX for trend strength
+    period = 14
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    tr1 = np.maximum(high_1d, np.roll(close_1d, 1)) - np.minimum(low_1d, np.roll(close_1d, 1))
+    tr2 = np.abs(np.roll(close_1d, 1) - high_1d)
+    tr3 = np.abs(np.roll(close_1d, 1) - low_1d)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    dx = np.zeros_like(close_1d)
+    dmplus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dmminus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dmplus[0] = 0
+    dmminus[0] = 0
+    tr_sum = np.zeros_like(tr)
+    dmplus_sum = np.zeros_like(dmplus)
+    dmminus_sum = np.zeros_like(dmminus)
+    for i in range(len(tr)):
+        if i == 0:
+            tr_sum[i] = tr[i]
+            dmplus_sum[i] = dmplus[i]
+            dmminus_sum[i] = dmminus[i]
+        else:
+            tr_sum[i] = tr_sum[i-1] + tr[i] - tr_sum[i-1] / period
+            dmplus_sum[i] = dmplus_sum[i-1] + dmplus[i] - dmplus_sum[i-1] / period
+            dmminus_sum[i] = dmminus_sum[i-1] + dmminus[i] - dmminus_sum[i-1] / period
+    plus_di = 100 * dmplus_sum / tr_sum
+    minus_di = 100 * dmminus_sum / tr_sum
+    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = np.zeros_like(dx)
+    for i in range(len(dx)):
+        if i < period:
+            adx[i] = 0
+        else:
+            if i == period:
+                adx[i] = np.mean(dx[:period])
+            else:
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    adx_1d = adx
     
-    # 5. Camarilla levels: R3, S3
-    hl_range = high_1d - low_1d
-    r3 = close_1d + hl_range * 1.25
-    s3 = close_1d - hl_range * 1.25
+    # Align HTF indicators to 6h
+    st_1w_aligned = align_htf_to_ltf(prices, df_1w, st_1w)
+    dir_1w_aligned = align_htf_to_ltf(prices, df_1w, dir_1w)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # 6. Align Camarilla levels to 1h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # 60-period EMA for pullback entry
+    ema60 = pd.Series(close).ewm(span=60, min_periods=60, adjust=False).mean().values
     
-    # 7. Volume filter: 20-period EMA for higher threshold
+    # Volume filter: 20-period EMA
     vol_ema20 = pd.Series(volume).ewm(span=20, min_periods=20, adjust=False).mean().values
-    volume_ok = volume > vol_ema20 * 2.0
+    volume_ok = volume > vol_ema20 * 1.5
     
-    # 8. Session filter: 08-20 UTC
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    session_ok = (hours >= 8) & (hours <= 20)
-    
-    # 9. Fixed position size to avoid churn
-    position_size = 0.20
+    # Position size
+    position_size = 0.25
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -60,8 +115,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is invalid
-        if (np.isnan(ema34_4h_aligned[i]) or np.isnan(r3_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(volume_ok[i]) or np.isnan(session_ok[i])):
+        if (np.isnan(st_1w_aligned[i]) or np.isnan(dir_1w_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i]) or np.isnan(ema60[i]) or np.isnan(volume_ok[i])):
             if position == 1:
                 signals[i] = 0.0
             elif position == -1:
@@ -71,32 +126,31 @@ def generate_signals(prices):
             continue
         
         # Conditions
-        price_above_ema4h = close[i] > ema34_4h_aligned[i]
-        price_below_ema4h = close[i] < ema34_4h_aligned[i]
-        breakout_long = close[i] > r3_aligned[i]
-        breakout_short = close[i] < s3_aligned[i]
+        uptrend_1w = dir_1w_aligned[i] == 1
+        downtrend_1w = dir_1w_aligned[i] == -1
+        strong_trend = adx_1d_aligned[i] > 25
+        pullback_long = close[i] < ema60[i] and close[i] > st_1w_aligned[i]
+        pullback_short = close[i] > ema60[i] and close[i] < st_1w_aligned[i]
         
         if position == 0:
-            # Long: Price breaks above R3 + above 4h EMA34 + volume spike + session
-            if breakout_long and price_above_ema4h and volume_ok[i] and session_ok[i]:
+            # Long: 1w uptrend + strong trend + pullback to EMA60 above Supertrend
+            if uptrend_1w and strong_trend and pullback_long and volume_ok[i]:
                 signals[i] = position_size
                 position = 1
-            # Short: Price breaks below S3 + below 4h EMA34 + volume spike + session
-            elif breakout_short and price_below_ema4h and volume_ok[i] and session_ok[i]:
+            # Short: 1w downtrend + strong trend + pullback to EMA60 below Supertrend
+            elif downtrend_1w and strong_trend and pullback_short and volume_ok[i]:
                 signals[i] = -position_size
                 position = -1
         else:
-            # Exit conditions - simplified to reduce churn
+            # Exit: trend weakens or price crosses Supertrend
             if position == 1:
-                # Exit: Price crosses below S3 OR trend reverses
-                if close[i] < s3_aligned[i] or close[i] < ema34_4h_aligned[i]:
+                if adx_1d_aligned[i] < 20 or close[i] < st_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = position_size
             elif position == -1:
-                # Exit: Price crosses above R3 OR trend reverses
-                if close[i] > r3_aligned[i] or close[i] > ema34_4h_aligned[i]:
+                if adx_1d_aligned[i] < 20 or close[i] > st_1w_aligned[i]:
                     signals[i] = 0.0
                     position = 0
                 else:
