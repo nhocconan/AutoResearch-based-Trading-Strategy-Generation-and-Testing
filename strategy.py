@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-name = "6h_Camarilla_R3_S3_Breakout_1dTrend_VolumeSpike"
-timeframe = "6h"
+# Hypothesis: 12h timeframe with weekly trend filter (EMA200) and daily Bollinger Band squeeze breakout.
+# Uses weekly EMA200 for trend direction, daily Bollinger Bands for volatility squeeze detection,
+# and 12h price action for breakout confirmation. Designed to work in both bull and bear markets
+# by capturing volatility expansions after low-volatility periods, with trend filter preventing
+# counter-trend trades. Targets 15-30 trades/year to avoid fee drag.
+
+name = "12h_WeeklyEMA200_Trend_DailyBBSqueeze_Breakout"
+timeframe = "12h"
 leverage = 1.0
 
 import numpy as np
@@ -9,7 +15,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     close = prices['close'].values
@@ -17,39 +23,51 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter and Camarilla pivots
+    # Get weekly data for EMA200 trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 200:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    
+    # Get daily data for Bollinger Bands
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 20:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    
-    # EMA34 on 1d for trend filter
-    ema34_1d = pd.Series(close_1d).ewm(span=34, adjust=False, min_periods=34).mean().values
-    ema34_1d_aligned = align_htf_to_ltf(prices, df_1d, ema34_1d)
-    
-    # Camarilla R3, S3 from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    camarilla_r3 = close_1d + 1.1 * (high_1d - low_1d) / 4
-    camarilla_s3 = close_1d - 1.1 * (high_1d - low_1d) / 4
+    # Calculate weekly EMA200 for trend
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
     
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    # Calculate daily Bollinger Bands (20, 2.0)
+    sma20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    std20_1d = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    upper_bb = sma20_1d + 2 * std20_1d
+    lower_bb = sma20_1d - 2 * std20_1d
+    bb_width = (upper_bb - lower_bb) / sma20_1d  # Normalized width
     
-    # Volume spike (24-period average on 6h)
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
-    vol_spike = volume > (vol_ma * 2.0)
+    # Align weekly EMA200 to 12h
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    
+    # Align daily Bollinger Bands and width to 12h
+    upper_bb_aligned = align_htf_to_ltf(prices, df_1d, upper_bb)
+    lower_bb_aligned = align_htf_to_ltf(prices, df_1d, lower_bb)
+    bb_width_aligned = align_htf_to_ltf(prices, df_1d, bb_width)
+    
+    # Bollinger Band squeeze detection: width below 20-period percentile
+    bb_width_ma = pd.Series(bb_width_aligned).rolling(window=20, min_periods=20).mean().values
+    squeeze_condition = bb_width_aligned < (bb_width_ma * 0.8)  # 20% below average width
     
     signals = np.zeros(n)
     position = 0
     
-    start_idx = 50  # Ensure EMA34 is ready
+    start_idx = 100  # Ensure indicators are ready
     
     for i in range(start_idx, n):
-        if np.isnan(ema34_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema200_1w_aligned[i]) or np.isnan(upper_bb_aligned[i]) or np.isnan(lower_bb_aligned[i]) or np.isnan(squeeze_condition[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
@@ -58,28 +76,28 @@ def generate_signals(prices):
             continue
         
         if position == 0:
-            # Long: break above R3, above 1d EMA34, volume spike
-            if (close[i] > r3_aligned[i] and 
-                close[i] > ema34_1d_aligned[i] and 
-                vol_spike[i]):
+            # Long: bullish weekly trend, BB squeeze breakout above upper band
+            if (close[i] > ema200_1w_aligned[i] and 
+                close[i] > upper_bb_aligned[i] and 
+                squeeze_condition[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below S3, below 1d EMA34, volume spike
-            elif (close[i] < s3_aligned[i] and 
-                  close[i] < ema34_1d_aligned[i] and 
-                  vol_spike[i]):
+            # Short: bearish weekly trend, BB squeeze breakout below lower band
+            elif (close[i] < ema200_1w_aligned[i] and 
+                  close[i] < lower_bb_aligned[i] and 
+                  squeeze_condition[i]):
                 signals[i] = -0.25
                 position = -1
         elif position == 1:
-            # Exit long: break below S3 or below 1d EMA34
-            if close[i] < s3_aligned[i] or close[i] < ema34_1d_aligned[i]:
+            # Exit long: price closes below weekly EMA200 or below lower BB
+            if close[i] < ema200_1w_aligned[i] or close[i] < lower_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short: break above R3 or above 1d EMA34
-            if close[i] > r3_aligned[i] or close[i] > ema34_1d_aligned[i]:
+            # Exit short: price closes above weekly EMA200 or above upper BB
+            if close[i] > ema200_1w_aligned[i] or close[i] > upper_bb_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
