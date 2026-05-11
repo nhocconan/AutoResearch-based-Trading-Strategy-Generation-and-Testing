@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h_Donchian_Breakout_20_Volume_Confirmation_Trend_Filter
-Hypothesis: Price breaking above 4-hour Donchian high (20-period) or below Donchian low with volume confirmation and 1-day EMA trend filter. Works in bull markets via breakouts and in bear markets via breakdowns. Designed for low frequency (20-50 trades/year) with high win rate by requiring volume spike and trend alignment.
+4h_12h_Camarilla_Pivot_Breakout_1dTrend_Volume
+Hypothesis: Price breaking above daily R3 or below daily S3 with 12h trend confirmation and volume spike. Uses daily pivot levels as strong support/resistance. In uptrend, buy breakouts above R3; in downtrend, sell breakdowns below S3. Volume confirms institutional interest. Designed for 4h timeframe with 12h trend filter and daily pivots to reduce trades and increase win rate. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
-name = "4h_Donchian_Breakout_20_Volume_Confirmation_Trend_Filter"
+name = "4h_12h_Camarilla_Pivot_Breakout_1dTrend_Volume"
 timeframe = "4h"
 leverage = 1.0
 
@@ -14,7 +14,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume
@@ -23,22 +23,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channels (20-period)
-    lookback = 20
-    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # 1-day trend filter (EMA 50)
+    # Daily data for pivot points
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
+    if len(df_1d) < 5:
         return np.zeros(n)
     
-    ema_50_1d = pd.Series(df_1d['close'].values).ewm(
-        span=50, adjust=False, min_periods=50
-    ).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Calculate daily pivot points (standard formula)
+    # Using previous day's OHLC
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Volume confirmation (20-period average)
+    # Shift to use previous day's data (avoid look-ahead)
+    d_high_prev = np.roll(d_high, 1)
+    d_low_prev = np.roll(d_low, 1)
+    d_close_prev = np.roll(d_close, 1)
+    # First day: use current values to avoid NaN
+    d_high_prev[0] = d_high[0]
+    d_low_prev[0] = d_low[0]
+    d_close_prev[0] = d_close[0]
+    
+    # Pivot point calculation
+    pivot = (d_high_prev + d_low_prev + d_close_prev) / 3.0
+    # R3 and S3 levels
+    r3 = pivot + 2 * (d_high_prev - d_low_prev)
+    s3 = pivot - 2 * (d_high_prev - d_low_prev)
+    
+    # Align daily R3/S3 to 4h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # 12h trend filter (EMA 34)
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 5:
+        return np.zeros(n)
+    ema_34_12h = pd.Series(df_12h['close'].values).ewm(
+        span=34, adjust=False, min_periods=34
+    ).mean().values
+    ema_34_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_34_12h)
+    
+    # Volume confirmation (20-period average on 4h)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / vol_ma
     vol_ratio = np.nan_to_num(vol_ratio, nan=1.0)
@@ -51,8 +75,8 @@ def generate_signals(prices):
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(ema_34_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -62,35 +86,39 @@ def generate_signals(prices):
             continue
         
         # Volume threshold
-        volume_spike = vol_ratio[i] > 1.5
+        volume_spike = vol_ratio[i] > 2.0
         
         if position == 0:
-            # Long: break above Donchian high + above 1d EMA50 + volume spike
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_1d_aligned[i] and 
+            # Long: break above daily R3 + above 12h EMA34 + volume spike
+            if (close[i] > r3_aligned[i] and 
+                close[i] > ema_34_12h_aligned[i] and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + below 1d EMA50 + volume spike
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_1d_aligned[i] and 
+            # Short: break below daily S3 + below 12h EMA34 + volume spike
+            elif (close[i] < s3_aligned[i] and 
+                  close[i] < ema_34_12h_aligned[i] and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
-            # Exit conditions: return to opposite Donchian band or trend reversal
+            # Exit conditions: return to pivot or trend reversal
+            # Calculate aligned pivot for exit
+            pivot_val = (d_high_prev + d_low_prev + d_close_prev) / 3.0
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+            
             if position == 1:
-                # Exit long: price returns to Donchian low OR trend turns down
-                if (close[i] <= donchian_low[i]) or \
-                   (close[i] < ema_50_1d_aligned[i]):
+                # Exit long: price returns to daily pivot OR trend turns down
+                if (close[i] <= pivot_aligned[i]) or \
+                   (close[i] < ema_34_12h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to Donchian high OR trend turns up
-                if (close[i] >= donchian_high[i]) or \
-                   (close[i] > ema_50_1d_aligned[i]):
+                # Exit short: price returns to daily pivot OR trend turns up
+                if (close[i] >= pivot_aligned[i]) or \
+                   (close[i] > ema_34_12h_aligned[i]):
                     signals[i] = 0.0
                     position = 0
                 else:
