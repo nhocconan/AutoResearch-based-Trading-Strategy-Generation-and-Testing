@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """
-12h_Camarilla_R1_S1_Breakout_1wTrend_Volume
-Hypothesis: Price breaking above Camarilla R1 or below S1 (from previous day) with weekly trend filter (1w EMA50) and volume spike. Designed for low trade frequency (<30/year) by requiring confluence of price level break, trend alignment, and volume confirmation. Works in bull markets via breakouts above R1 in uptrend, and in bear markets via breakdowns below S1 in downtrend.
+4h_SuperTrend_RSI_Filter
+Hypothesis: Uses SuperTrend(10,3) for trend direction and RSI(14) for overbought/oversold conditions. 
+Enters long in uptrend when RSI < 40, exits when RSI > 60. Enters short in downtrend when RSI > 60, 
+exits when RSI < 40. Includes volume confirmation (volume > 1.5x 20-period average) to filter false signals.
+Designed for low trade frequency with clear signals in both bull and bear markets by following the higher 
+timeframe trend and avoiding choppy markets.
 """
 
-name = "12h_Camarilla_R1_S1_Breakout_1wTrend_Volume"
-timeframe = "12h"
+name = "4h_SuperTrend_RSI_Filter"
+timeframe = "4h"
 leverage = 1.0
 
 import numpy as np
@@ -17,64 +21,74 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # 12h price data
-    close = prices['close'].values
+    # Price data
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Previous day's OHLC for Camarilla calculation (need daily data)
-    # Since we're on 12h timeframe, we need to get daily OHLC
-    # We'll use the most recent complete day's data
-    # For simplicity, we'll use rolling window to get daily high/low/close
-    # but this is approximate - in reality we'd need actual daily data
-    # Instead, we'll use the previous 12h bar's high/low as proxy for daily
-    # Better approach: since 12h bars, two bars make one day
-    # We'll use the previous day's close (2 bars ago) and high/low of that day
+    # SuperTrend calculation (ATR=10, multiplier=3)
+    atr_period = 10
+    multiplier = 3
     
-    # Get daily high, low, close from 12h data (approximate)
-    # Each day = 2 bars of 12h
-    # We'll use the high/low/close from 2 bars ago as previous day's
-    prev_day_high = np.maximum.reduce([high[::2], np.roll(high, 2)[::2]])[::2]  # This is complex
-    # Simpler: use the previous bar's high/low as approximation for intraday levels
-    # Actually, for Camarilla we need previous day's daily OHLC
-    # Let's compute daily OHLC from 12h data by grouping
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], 
+                         np.maximum(tr1, np.maximum(tr2, tr3))])
     
-    # Create daily index: every 2 bars
-    # For now, use simplified approach: previous 12h bar's high/low
-    prev_high = np.roll(high, 1)
-    prev_low = np.roll(low, 1)
-    prev_close = np.roll(close, 1)
-    # First bar has no previous - set to current values
-    prev_high[0] = high[0]
-    prev_low[0] = low[0]
-    prev_close[0] = close[0]
+    # ATR
+    atr = np.zeros_like(close)
+    atr[atr_period] = np.mean(tr[:atr_period+1])
+    for i in range(atr_period+1, len(tr)):
+        atr[i] = (atr[i-1] * (atr_period-1) + tr[i]) / atr_period
     
-    # Calculate Camarilla levels from previous day's OHLC
-    # Camarilla: 
-    # R4 = close + (high-low)*1.5/2
-    # R3 = close + (high-low)*1.25/2
-    # R2 = close + (high-low)*1.1/2
-    # R1 = close + (high-low)*0.5/2
-    # S1 = close - (high-low)*0.5/2
-    # S2 = close - (high-low)*1.1/2
-    # S3 = close - (high-low)*1.25/2
-    # S4 = close - (high-low)*1.5/2
-    # We only need R1 and S1 for breakout
+    # Basic Upper and Lower Bands
+    hl2 = (high + low) / 2
+    upper_band = hl2 + multiplier * atr
+    lower_band = hl2 - multiplier * atr
     
-    range_hl = prev_high - prev_low
-    R1 = prev_close + range_hl * 0.25  # 0.5/2 = 0.25
-    S1 = prev_close - range_hl * 0.25  # 0.5/2 = 0.25
+    # SuperTrend
+    super_trend = np.zeros_like(close)
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
     
-    # Weekly trend filter (1w EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
-        return np.zeros(n)
+    super_trend[0] = upper_band[0]
+    direction[0] = 1
     
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(
-        span=50, adjust=False, min_periods=50
-    ).mean().values
-    ema_50_12h = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    for i in range(1, len(close)):
+        if close[i] > super_trend[i-1]:
+            direction[i] = 1
+        elif close[i] < super_trend[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            super_trend[i] = max(lower_band[i], super_trend[i-1])
+        else:
+            super_trend[i] = min(upper_band[i], super_trend[i-1])
+    
+    # RSI calculation
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = np.zeros_like(close)
+    avg_loss = np.zeros_like(close)
+    
+    avg_gain[rsi_period] = np.mean(gain[1:rsi_period+1])
+    avg_loss[rsi_period] = np.mean(loss[1:rsi_period+1])
+    
+    for i in range(rsi_period+1, len(close)):
+        avg_gain[i] = (avg_gain[i-1] * (rsi_period-1) + gain[i]) / rsi_period
+        avg_loss[i] = (avg_loss[i-1] * (rsi_period-1) + loss[i]) / rsi_period
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.where(avg_loss == 0, 100, rsi)
+    rsi = np.where(avg_gain == 0, 0, rsi)
     
     # Volume confirmation (20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,12 +99,12 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start after warmup
-    start_idx = 50
+    start_idx = max(atr_period, rsi_period, 20) + 5
     
     for i in range(start_idx, n):
         # Skip if any required data is NaN
-        if (np.isnan(R1[i]) or np.isnan(S1[i]) or 
-            np.isnan(ema_50_12h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(super_trend[i]) or np.isnan(rsi[i]) or 
+            np.isnan(vol_ratio[i])):
             if position == 1:
                 signals[i] = 0.25
             elif position == -1:
@@ -103,32 +117,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if position == 0:
-            # Long: price breaks above R1 + above weekly EMA50 + volume
-            if (close[i] > R1[i] and 
-                close[i] > ema_50_12h[i] and 
+            # Long: uptrend + RSI oversold + volume confirmation
+            if (direction[i] == 1 and 
+                rsi[i] < 40 and 
                 volume_spike):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below S1 + below weekly EMA50 + volume
-            elif (close[i] < S1[i] and 
-                  close[i] < ema_50_12h[i] and 
+            # Short: downtrend + RSI overbought + volume confirmation
+            elif (direction[i] == -1 and 
+                  rsi[i] > 60 and 
                   volume_spike):
                 signals[i] = -0.25
                 position = -1
         else:
             # Exit conditions
             if position == 1:
-                # Exit long: price returns to S1 OR trend turns down
-                if (close[i] <= S1[i]) or \
-                   (close[i] < ema_50_12h[i]):
+                # Exit long: RSI overbought OR trend reversal
+                if (rsi[i] > 60) or (direction[i] == -1):
                     signals[i] = 0.0
                     position = 0
                 else:
                     signals[i] = 0.25
             elif position == -1:
-                # Exit short: price returns to R1 OR trend turns up
-                if (close[i] >= R1[i]) or \
-                   (close[i] > ema_50_12h[i]):
+                # Exit short: RSI oversold OR trend reversal
+                if (rsi[i] < 40) or (direction[i] == 1):
                     signals[i] = 0.0
                     position = 0
                 else:
